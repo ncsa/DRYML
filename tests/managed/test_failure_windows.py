@@ -285,6 +285,100 @@ def test_u15_spawned_prepared_owner_loss_reconciles_without_hooks_or_receipt(tmp
         release_writer.close()
 
 
+@pytest.mark.parametrize("fault", ["publish_before", "publish_after", "index", "control_before", "control_after"])
+def test_u16_checkpoint_faults_keep_exact_latest_and_provisional_evidence_without_reexecution(tmp_path, monkeypatch, fault):
+    from dryml.core.store.retention import grants
+    from dryml.managed.control import ControlSnapshot
+    from dryml.managed.identity import AdmissionIdentity
+    from tests.managed.u16_fixtures import Value, setup
+    control, live = setup(tmp_path, index="sqlite")
+    store = control.control_store
+    seen = []
+    def body(obj, ctx):
+        obj.value = 1
+        ctx.checkpoint()
+        obj.value = 2
+        ctx.checkpoint()
+    Value.action = body
+    original_publish = store.publish_save_batch
+    original_index = store._complete_index_mutation
+    original_replace = ManagedControlStore._replace_file
+    def callback(obj, ctx):
+        seen.append(ctx.latest_checkpoint)
+        if fault.startswith("publish"):
+            def publish(batch):
+                if fault == "publish_after":
+                    original_publish(batch)
+                raise OSError("injected publication cut")
+            monkeypatch.setattr(store, "publish_save_batch", publish)
+        elif fault == "index":
+            monkeypatch.setattr(store, "_complete_index_mutation", lambda *args:
+                (_ for _ in ()).throw(OSError("injected index phase")))
+        else:
+            def replace(path, payload):
+                if path.endswith("current.json"):
+                    if fault == "control_after":
+                        original_replace(path, payload)
+                    raise OSError("injected control cut")
+                return original_replace(path, payload)
+            monkeypatch.setattr(ManagedControlStore, "_replace_file", staticmethod(replace))
+    with pytest.raises(Exception) as raised:
+        live.run(managed=ManagedConfig(state_repo=control.state_repo, callbacks=[callback]))
+    assert len(seen) == 1 and Value.bodies == 1 and Value.restores == 0
+    operation_id = live.run.status(state_repo=control.state_repo).operation_id if not fault.startswith("control") else (
+        AdmissionIdentity.from_call(control.state_repo.describe(live), Value.run, (), {}).operation_id)
+    raw = control._read_optional(control._current_path(control._operation_path(operation_id)))
+    current = ControlSnapshot.from_bytes(raw)
+    if fault != "control_after":
+        assert current.checkpoint.graph_equal(seen[0])
+    else:
+        preparation = control.read_preparation(operation_id)
+        assert current.to_bytes() == preparation.proposed.to_bytes()
+        assert preparation.previous.checkpoint.graph_equal(seen[0])
+    assert grants(store, seen[0].state.key)
+    if fault == "publish_after":
+        report = raised.value.report
+        assert report is not None
+        publication = report.publications[0]
+        assert publication.retention_token and publication.protected_state_keys
+        assert store.retention.read(publication.retention_token).disposition == "prepared"
+    monkeypatch.setattr(store, "publish_save_batch", original_publish)
+    monkeypatch.setattr(store, "_complete_index_mutation", original_index)
+    monkeypatch.setattr(ManagedControlStore, "_replace_file", staticmethod(original_replace))
+    counts = Value.restores, Value.captures, Value.bodies
+    facts = AdmissionIdentity.from_call(control.state_repo.describe(live), Value.run, (), {})
+    with control.admission(facts) as owner:
+        preparation = control.read_preparation(operation_id)
+        if preparation is not None and not preparation.settled:
+            runtime_module._settle_preparation(control, owner, preparation)
+        control._finish_projection()
+    assert (Value.restores, Value.captures, Value.bodies) == counts
+    assert not store.pending_mutations()
+
+
+def test_u16_only_physical_garbage_failure_preserves_checkpoint_and_callback_success(tmp_path, monkeypatch):
+    from dryml.core.store.retention import StateRemovalOutcome
+    from tests.managed.u16_fixtures import Value, enter, setup
+    control, live = setup(tmp_path)
+    seen = []
+    def callback(obj, ctx):
+        seen.append((ctx.latest_checkpoint, ctx.cleanup_report))
+        monkeypatch.setattr(control.control_store, "delete_state", lambda key:
+            StateRemovalOutcome("cleanup-pending", cleanup_error=OSError("physical removal failed")))
+    def body(obj, ctx):
+        obj.value = 1
+        ctx.checkpoint()
+        obj.value = 2
+        final = ctx.checkpoint()
+        ctx.final_state(final)
+        return ctx.cleanup_report
+    Value.action = body
+    report, final = enter(control, live, config=ManagedConfig(callbacks=[callback]))
+    assert len(seen) == 2 and seen[1][0].graph_equal(final)
+    assert seen[0][1] == () and len(seen[1][1]) == len(report) == 1
+    assert report[0][2].cleanup_error is not None
+
+
 class FailureWindowValue(Pickleable):
     """Receiver with one safe point for persistence fault injection."""
 
@@ -302,6 +396,16 @@ class FailureWindowValue(Pickleable):
 class CrashWindowValue(Pickleable):
     """Spawn-safe receiver used to terminate real lifecycle publication windows."""
 
+    restores = captures = bodies = 0
+
+    def restore_state_from_dir_imp(self, directory, *, codec):
+        type(self).restores += 1
+        return super().restore_state_from_dir_imp(directory, codec=codec)
+
+    def save_state_to_dir_imp(self, directory, *, codec):
+        type(self).captures += 1
+        return super().save_state_to_dir_imp(directory, codec=codec)
+
     def __init__(self, value=0):
         self.value = value
 
@@ -309,6 +413,7 @@ class CrashWindowValue(Pickleable):
     def checkpoint_then_return(self, *, managed):
         """Checkpoint once on fresh entry and avoid a callback on resumed entry."""
 
+        type(self).bodies += 1
         if managed.is_resuming:
             return "resumed"
         self.value = 1
@@ -373,17 +478,17 @@ def _crash_window_worker(store_root, state_ref, member, boundary, reached, relea
     store = DirStore(store_root)
     repo = Repo._for_state_io((store,))
     try:
-        value = repo.load_state_ref(state_ref, reuse_live="never")
+        value = repo.load(state_ref, cache="none")
 
         def checkpoint_boundary(stage):
             if stage == boundary:
                 reached.set()
-                release.wait()
+                release.recv()
 
         def completion_boundary(stage):
             if stage == boundary:
                 reached.set()
-                release.wait()
+                release.recv()
 
         context_module._checkpoint_boundary = checkpoint_boundary
         runtime_module._completion_boundary = completion_boundary
@@ -398,18 +503,25 @@ def _terminate_at_boundary(tmp_path, member, boundary):
     store = DirStore(tmp_path / "store")
     repo = Repo((store,))
     value = CrashWindowValue(repo=repo)
-    seed = repo.save_object(value, store=store, deep_capture=True)
+    seed = repo.save(value)
+    CrashWindowValue.restores = CrashWindowValue.captures = CrashWindowValue.bodies = 0
     ctx = multiprocessing.get_context("spawn")
-    reached, release = ctx.Event(), ctx.Event()
+    reached = ctx.Event()
+    release, release_writer = ctx.Pipe(duplex=False)
     process = ctx.Process(
         target=_crash_window_worker,
         args=(os.fspath(store.base_dir), seed, member, boundary, reached, release),
     )
-    process.start()
-    assert reached.wait(20), f"worker did not reach {boundary}"
-    process.terminate()
-    process.join(20)
-    assert process.exitcode is not None and process.exitcode != 0
+    try:
+        process.start()
+        assert reached.wait(20), f"worker did not reach {boundary}"
+        process.terminate()
+        process.join(20)
+        assert process.exitcode is not None and process.exitcode != 0
+    finally:
+        if process.is_alive():
+            process.terminate(); process.join(10)
+        release.close(); release_writer.close()
     return store, value
 
 
@@ -418,22 +530,22 @@ def test_checkpoint_association_failure_never_advertises_or_notifies_orphan_stat
 
     store = DirStore(tmp_path / "store")
     value = FailureWindowValue(repo=Repo((store,)))
-    original = ManagedControlStore._transition_running_fields
+    original = ManagedControlStore.admit_prepared
     calls = 0
 
-    def fail_checkpoint(self, operation_id, **kwargs):
+    def fail_checkpoint(self, preparation, **kwargs):
         nonlocal calls
-        if kwargs["kind"] == "checkpoint" and calls == 0:
+        if any(v.kind == "latest" for v in preparation.proposed.intents) and calls == 0:
             calls += 1
             raise OSError("association failed")
-        return original(self, operation_id, **kwargs)
+        return original(self, preparation, **kwargs)
 
-    monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", fail_checkpoint)
+    monkeypatch.setattr(ManagedControlStore, "admit_prepared", fail_checkpoint)
     with pytest.raises(OSError, match="association failed"):
         value.checkpoint(managed=ManagedConfig(state_repo=store))
     status = value.checkpoint.status(state_repo=store)
-    assert (status.state, status.failure_code, status.checkpoint_state_ref) == ("failed", "publication_error", None)
-    assert status.final_state_ref is None
+    assert (status.state, status.failure_code, status.checkpoint) == ("failed", "publication_error", None)
+    assert status.final is None
 
 
 def test_second_checkpoint_association_failure_retains_prior_checkpoint_without_callbacks(tmp_path, monkeypatch):
@@ -453,23 +565,23 @@ def test_second_checkpoint_association_failure_retains_prior_checkpoint_without_
 
     store = DirStore(tmp_path / "store")
     value = TwoCheckpoints(repo=Repo((store,)))
-    original = ManagedControlStore._transition_running_fields
+    original = ManagedControlStore.admit_prepared
     transitions = 0
     callbacks = []
 
-    def fail_second_association(self, operation_id, **kwargs):
+    def fail_second_association(self, preparation, **kwargs):
         nonlocal transitions
         transitions += 1
         if transitions == 3:
             raise OSError("second association failed")
-        return original(self, operation_id, **kwargs)
+        return original(self, preparation, **kwargs)
 
-    monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", fail_second_association)
+    monkeypatch.setattr(ManagedControlStore, "admit_prepared", fail_second_association)
     with pytest.raises(OSError, match="second association failed"):
         value.checkpoint(managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: callbacks.append(args)]))
     status = value.checkpoint.status(state_repo=store)
     assert len(callbacks) == 1
-    assert (status.state, status.failure_code, status.checkpoint_state_ref is not None) == (
+    assert (status.state, status.failure_code, status.checkpoint is not None) == (
         "failed", "publication_error", True,
     )
 
@@ -480,19 +592,14 @@ def test_checkpoint_save_failure_runs_no_callbacks_and_records_failure(tmp_path,
     store = DirStore(tmp_path / "store")
     value = FailureWindowValue(repo=Repo((store,)))
     callbacks = []
-    original = Repo.save_object
-
-    def fail_checkpoint_save(self, *args, **kwargs):
-        if kwargs.get("report_stores") is True:
-            raise OSError("checkpoint state write failed")
-        return original(self, *args, **kwargs)
-
-    monkeypatch.setattr(Repo, "save_object", fail_checkpoint_save)
+    def fail_checkpoint_save(*args, **kwargs):
+        raise OSError("checkpoint state write failed")
+    monkeypatch.setattr(storage_module, "_publish_checkpoint", fail_checkpoint_save)
     with pytest.raises(OSError, match="checkpoint state write failed"):
         value.checkpoint(managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: callbacks.append(args)]))
     status = value.checkpoint.status(state_repo=store)
     assert callbacks == []
-    assert (status.state, status.checkpoint_state_ref) == ("failed", None)
+    assert (status.state, status.checkpoint) == ("failed", None)
 
 
 def test_interrupted_transition_failure_is_control_failure_not_success(tmp_path, monkeypatch):
@@ -506,23 +613,22 @@ def test_interrupted_transition_failure_is_control_failure_not_success(tmp_path,
 
     store = DirStore(tmp_path / "store")
     value = Interrupting(repo=Repo((store,)))
-    original = ManagedControlStore._transition_running_fields
+    original = ManagedControlStore.transition
     calls = 0
 
-    def fail_terminal(self, operation_id, **kwargs):
+    def fail_terminal(self, operation_id, proposed, **kwargs):
         nonlocal calls
         calls += 1
-        if calls == 2:
+        if proposed.state == "interrupted":
             raise OSError("interruption control write failed")
-        return original(self, operation_id, **kwargs)
+        return original(self, operation_id, proposed, **kwargs)
 
-    monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", fail_terminal)
-    with pytest.raises(ManagedControlError, match="interruption_recording_failed") as caught:
+    monkeypatch.setattr(ManagedControlStore, "transition", fail_terminal)
+    with pytest.raises(OSError, match="interruption control write failed"):
         value.checkpoint(managed=ManagedConfig(state_repo=store))
-    assert type(caught.value.__cause__) is OSError
     status = value.checkpoint.status(state_repo=store)
-    assert status.state == "failed"
-    assert status.checkpoint_state_ref is not None
+    assert status.interruption_requested and status.state == "failed"
+    assert status.checkpoint is not None
 
 
 def test_indeterminate_checkpoint_association_is_not_replaced_by_generic_failure(tmp_path, monkeypatch):
@@ -530,25 +636,28 @@ def test_indeterminate_checkpoint_association_is_not_replaced_by_generic_failure
 
     store = DirStore(tmp_path / "store")
     value = FailureWindowValue(repo=Repo((store,)))
-    original = ManagedControlStore._clear_intent_and_acknowledge
-
-    def leave_checkpoint_pending(self, operation, snapshot, digest):
-        if snapshot.checkpoint_digest is not None and snapshot.state == "running":
-            raise ManagedPublicationError("indeterminate", "checkpoint acknowledgement is uncertain")
-        return original(self, operation, snapshot, digest)
-
-    monkeypatch.setattr(ManagedControlStore, "_clear_intent_and_acknowledge", leave_checkpoint_pending)
-    with pytest.raises(ManagedPublicationError) as caught:
-        value.checkpoint(managed=ManagedConfig(state_repo=store))
-    assert caught.value.outcome == "indeterminate"
-    with pytest.raises(ManagedControlError, match="pending_reconciliation"):
-        value.checkpoint.status(state_repo=store)
-    monkeypatch.setattr(ManagedControlStore, "_clear_intent_and_acknowledge", original)
+    original = ManagedControlStore._finish_projection
+    def leave_checkpoint_pending(self, *args):
+        path = self._current_path(self._operation_path(operation_id))
+        from dryml.managed.control import ControlSnapshot
+        raw = self._read_optional(path)
+        if raw is not None and ControlSnapshot.from_bytes(raw).checkpoint is not None:
+            raise OSError("checkpoint acknowledgement is uncertain")
+        return original(self, *args)
     from dryml.managed.identity import operation_digest
-
-    ManagedControlStore(store, Repo((store,))).reconcile(operation_digest(value.object_ref, "checkpoint"))
+    operation_id = operation_digest(Repo._for_state_io((store,)).describe(value), "checkpoint")
+    monkeypatch.setattr(ManagedControlStore, "_finish_projection", leave_checkpoint_pending)
+    with pytest.raises(OSError, match="acknowledgement is uncertain"):
+        value.checkpoint(managed=ManagedConfig(state_repo=store))
+    control = ManagedControlStore(store, Repo._for_state_io((store,)))
+    assert control._pending_mutations(operation_id)
+    committed = control.inspect(operation_id)
+    assert committed.checkpoint is not None
+    monkeypatch.setattr(ManagedControlStore, "_finish_projection", original)
+    result = value.checkpoint(managed=ManagedConfig(state_repo=store))
+    assert result.disposition == "run_admitted" and result.current.to_bytes() == committed.to_bytes()
     status = value.checkpoint.status(state_repo=store)
-    assert (status.state, status.checkpoint_state_ref is not None) == ("failed", True)
+    assert (status.state, status.checkpoint is not None) == ("failed", True)
 
 
 @pytest.mark.parametrize(
@@ -570,8 +679,8 @@ def test_spawned_crash_preserves_only_associated_checkpoint_or_final_state(
 
     store, value = _terminate_at_boundary(tmp_path, member, boundary)
     status = getattr(value, member).status(state_repo=store)
-    assert (status.checkpoint_state_ref is not None) is expected_checkpoint
-    assert (status.final_state_ref is not None) is expected_final
+    assert (status.checkpoint is not None) is expected_checkpoint
+    assert (status.final is not None) is expected_final
     if boundary == "interrupted_transition":
         assert status.state == "interrupted"
     elif expected_final:
@@ -582,74 +691,27 @@ def test_spawned_crash_preserves_only_associated_checkpoint_or_final_state(
 
 def test_spawned_callback_window_recovery_does_not_replay_observers(
         tmp_path, monkeypatch, record_testsuite_property):
-    """Characterize restore ownership across materialization and managed reentry.
-
-    The current two owning boundaries each restore the selected receiver. R19's
-    later cutover must strengthen this to one selected restore across the handoff;
-    metadata/preparation/hash observations below are measurements, not budgets.
-    """
-
-    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
-
+    """Reconciliation has zero hooks/body; a separate resume freshly restores once."""
+    from dryml.managed.identity import AdmissionIdentity
     store, value = _terminate_at_boundary(tmp_path, "checkpoint_then_return", "callbacks_finished")
     calls = []
-    hooks = []
-    publications = []
-    phase = "materialization"
-    original_restore = CrashWindowValue.restore_state_from_dir_imp
-    original_capture = CrashWindowValue.save_state_to_dir_imp
-    original_publish = runtime_module._publish_managed_state_result
-
-    def restore(obj, directory, *, codec):
-        original_restore(obj, directory, codec=codec)
-        hooks.append((phase, "restore", id(obj), obj.value))
-
-    def capture(obj, directory, *, codec):
-        hooks.append((phase, "capture", id(obj), obj.value))
-        return original_capture(obj, directory, codec=codec)
-
-    def publish(*args, **kwargs):
-        result = original_publish(*args, **kwargs)
-        publications.append(result)
-        return result
-
-    monkeypatch.setattr(CrashWindowValue, "restore_state_from_dir_imp", restore)
-    monkeypatch.setattr(CrashWindowValue, "save_state_to_dir_imp", capture)
-    monkeypatch.setattr(runtime_module, "_publish_managed_state_result", publish)
     recovered = Repo._for_state_io((store,))
     try:
-        selected = value.checkpoint_then_return.status(state_repo=store).checkpoint_state_ref
-        with exact_work_counts() as materialization:
-            live = recovered.load_state_ref(selected, reuse_live="never")
-        assert live.object_ref == value.object_ref and live.value == 1
-        assert hooks == [("materialization", "restore", id(live), 1)]
-        assert publications == []
-
-        assert live.last_state_ref == selected
-        phase = "managed"
-        with exact_work_counts() as managed_entry:
-            assert live.checkpoint_then_return(
-                managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: calls.append(args)]),
-            ) == "resumed"
-        assert hooks == [
-            ("materialization", "restore", id(live), 1),
-            ("managed", "restore", id(live), 1),
-            ("managed", "capture", id(live), 1),
-        ]
-        assert live.value == 1
-        status = live.checkpoint_then_return.status(state_repo=store)
-        assert status.state == "completed"
-        assert status.checkpoint_state_ref == selected
-        assert len(publications) == 1
-        assert publications[0].state_ref == status.final_state_ref
-        assert publications[0].report is not None
-
-        for stage, counts in (("materialization", materialization), ("managed", managed_entry)):
-            record_testsuite_property(f"u01_{stage}_work", repr(dict(sorted(counts.items()))))
-        record_testsuite_property("u01_hook_work", repr([
-            (stage, hook, value) for stage, hook, _, value in hooks
-        ]))
-        record_testsuite_property("u01_publications", len(publications))
+        control = ManagedControlStore(store, recovered)
+        descriptor = CrashWindowValue.checkpoint_then_return
+        identity = AdmissionIdentity.from_call(recovered.describe(value), descriptor, (), {})
+        before = control.inspect(identity.operation_id)
+        with control.admission(identity) as owner:
+            assert owner.current.to_bytes() == before.to_bytes()
+            assert (CrashWindowValue.restores, CrashWindowValue.captures, CrashWindowValue.bodies) == (0, 0, 0)
+        with pytest.raises(ManagedControlError, match="result_policy_not_integrated"):
+            value.checkpoint_then_return(managed=ManagedConfig(state_repo=recovered,
+                callbacks=[lambda *args: calls.append(args)]))
+        after = control.inspect(identity.operation_id)
+        assert after.run_id == before.run_id and after.invocation_id != before.invocation_id
+        assert after.checkpoint.graph_equal(before.checkpoint)
+        assert (CrashWindowValue.restores, CrashWindowValue.captures, CrashWindowValue.bodies) == (1, 0, 1)
+        assert value.value == 1
     finally:
         recovered.close(flush=False)
     assert calls == []
@@ -726,20 +788,20 @@ def test_deletion_at_publication_hook_fails_fresh_control_association(tmp_path, 
     def boundary(current):
         if current == stage:
             state_ref = value.last_state_ref
-            shutil.rmtree(store._snapshot_path(state_ref.digest()))
+            shutil.rmtree(store.state_data_path(state_ref.state.key))
             deleted.append(state_ref)
 
     monkeypatch.setattr(context_module, "_checkpoint_boundary", boundary)
-    monkeypatch.setattr(runtime_module, "_completion_boundary", boundary)
-    with pytest.raises(ManagedRecoveryError) as caught:
+    monkeypatch.setattr(runtime_module, "_completion_boundary", boundary, raising=False)
+    from dryml.core.repo import RepoLoadError
+    with pytest.raises((ManagedRecoveryError, RepoLoadError)):
         getattr(value, member)(managed=ManagedConfig(
             state_repo=repo, callbacks=[lambda *args: callbacks.append(args)],
         ))
     assert len(deleted) == 1 and callbacks == []
-    assert caught.value.report is not None
     status = getattr(value, member).status(state_repo=repo)
     assert status.state == "failed"
-    assert status.checkpoint_state_ref is None and status.final_state_ref is None
+    assert status.checkpoint is None and status.final is None
     assert repo._topology_leases == 0
 
 

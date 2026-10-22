@@ -1,7 +1,8 @@
 # Managed Operations
 
-`dryml.managed` owns the lifecycle of state-mutating Object methods. Its **U15
-admission foundation** supports detached replay selection, deterministic starts,
+`dryml.managed` owns the lifecycle of state-mutating Object methods. Its **U16
+author lifecycle** supports explicit checkpoints, optional immutable initial state,
+exact final selection, detached replay selection, deterministic starts,
 two-phase rerun, resume, operation-scoped ownership, fenced control CAS, metadata
 history, and independent status/interruption control. Importing Core does not
 import managed, Execute, Dispatch, or optional frameworks.
@@ -9,18 +10,19 @@ import managed, Execute, Dispatch, or optional frameworks.
 ## Integration status
 
 The previous StateRef/current-v2 execution path is retired. A decorated direct call
-now validates ordinary arguments, selects admission, and can prepare/restore a
-saved start and publish running authority. **The authored body is still not
-entered.** Execution admission raises
-`ManagedControlError("completion_policy_not_integrated", ...)` and records failure
-with latest recovery preserved. Compatible completed calls select replay without
+now validates ordinary arguments once, selects admission, prepares/restores a
+selected saved start and executes the authored body with `ManagedContext`.
+**Ordinary result delivery is not integrated yet.** A normal body return raises
+`ManagedControlError("result_policy_not_integrated", ...)` before automatic final
+capture and records failure with latest recovery preserved. Compatible completed
+calls select replay without
 receiver payload IO, then raise `result_policy_not_integrated` with detached
 `.admission` metadata until durable-result delivery is integrated. A pending-repair
 call returns an explicit `AdmissionOutcome`; that is reconciliation, not ordinary
 method success. Declarations retain their checked synchronous signature rules.
 
-This foundation is not the completed managed runtime. U16 owns author checkpoint/
-initial/final policy; U17 owns durable ordinary results and replay delivery; U18
+This is not the completed managed runtime. U17 owns ordinary return normalization,
+durable result encoding, completion and replay delivery; U18
 owns model/artifact caller integration; U19 integrates the detached target into
 Core Execute transport. The new `start_from` policy is currently local admission
 policy, not a qualified model-wrapper or Core Execute transport capability.
@@ -42,8 +44,8 @@ config = ManagedConfig(
     rerun=True,
     start_from=checkpoint_b,
 )
-# This is the delivered admission configuration. Body/final/result delivery awaits
-# U16/U17; a direct call currently raises the integration error described above.
+# Authored execution/checkpoints work; normal result delivery still raises the
+# U17 integration error described above.
 ```
 
 Supplying `start_from` without `rerun=True` fails with `start_requires_rerun`
@@ -82,6 +84,85 @@ recorded completion is inspected without final payload reads. No receiver restor
 capture, callback or body is replayed. A separate invocation must freshly prepare
 or restore for later work. There is no cross-invocation restore receipt. Complete
 result/final evidence acknowledgement belongs to U17's future result format.
+
+## Author checkpoint and selection controls
+
+The injected context exposes read-only `initial_state_ref`, `latest_checkpoint`,
+`final_state_ref`, `is_resuming`, operation/run/invocation IDs and generation.
+`cleanup_report` exposes accumulated physical-garbage-only removal outcomes.
+References are immutable SavedNode metadata; they are not cached availability
+proofs. Context mutation is limited to its original active process/thread/task.
+Retired or foreign use raises `inactive_context`, recursive callback mutation
+raises `recursive_checkpoint`, and stale generation/ownership fails before capture.
+
+```python
+@managed_operation(resumable=True)
+def train(self, epochs, *, managed):
+    if managed.initial_state_ref is None:
+        managed.checkpoint(initial=True)
+    for epoch in range(epochs):
+        self.train_epoch()
+        best = managed.checkpoint(durable=True)
+    managed.final_state(best)
+    return {"epochs": epochs}
+```
+
+The body above can publish checkpoints and select final state now. Its normal
+return still raises the documented result-integration error; it does not currently
+deliver an InvocationResult or claim completed authority.
+
+`checkpoint(states=None, durable=False, initial=False)` uses Core's routed save
+batches. `states` accepts a partial StateSpec or rooted LocalState map: explicitly
+selected compatible states skip capture, and each remaining distinct live stateful
+node captures once. The returned SavedNode is complete, including for an empty or
+entirely stateless graph. No checkpoint is implicitly initial. `initial=True`
+designates it explicitly; `initial_state(saved)` can instead select an existing
+complete graph, including the first designation during resumed execution. Exact
+repeat designation is idempotent; another initial raises `initial_conflict`.
+Equality preserves facets, sharing, roles, quotations **and retained construction
+evidence**, and does not use packet placement or hashes as sufficient proof.
+
+`final_state(saved)` checks the receiver projection against the original supplied
+graph, current live codec compatibility and fresh state availability, then protects
+that unchanged selection with an independent final root. It neither saves nor
+restores the live receiver. Earlier or mixed-point states are allowed when
+compatible; the live object may remain later than final. Selecting a final protects
+it even if a subsequent checkpoint supersedes latest. Designation does not record
+completion, and a later exception or accepted interruption still prevents success.
+
+Each explicit checkpoint associates complete latest recovery and required grants/
+index acknowledgements **before** running its configured callbacks in list order.
+A callback exception reaches the author, stops later callbacks in that event and
+leaves the associated checkpoint latest. An uncaught exception fails the invocation;
+a caught ordinary checkpoint/callback error can continue to valid state finalization.
+Confirmed uncommitted association preparations settle without hooks before later
+work. Uncertain control/index work remains explicit recovery, not a success guess.
+Callbacks run outside capture reservations, Store writer and short control locks.
+
+The private result-owner handoff executes the authored body under the same owner,
+then lets U17 normalize/encode the ordinary value **before** requesting state
+finalization. It uses the explicit final unchanged, or captures once if no final
+was selected. Automatic final capture invokes zero checkpoint callbacks. An explicit
+terminal checkpoint selected as final therefore has one capture/one callback, with
+no second capture or callback at finalization. This internal seam is qualified by
+focused tests; public completion/result delivery remains U17 work.
+
+Managed publication uses provisional internal Core grants, not a permanent user-save
+root for each checkpoint. Root association reuses the two-phase preparation journal:
+prepare/protect new physical grants, confirm adoption, CAS current, acknowledge the
+owning control mutation, then retire only superseded non-durable start/latest/final
+tokens. Initial, durable, independent user and active-reader protection are separate.
+Partial Core publications preserve their exact provisional resource ledger/report;
+they never become latest just because bytes exist. Pending recovery performs no
+capture, restore, body or callbacks. Later resumable execution freshly restores.
+
+`interrupt(cause=None)` validates the optional BaseException cause, makes one explicit
+checkpoint, then requests and records interruption; the resulting ManagedInterrupted
+chains that cause. External requests need not capture unsaved live state. Safe points
+check fresh run/invocation/generation/request authority before state association and
+after callbacks/body return. Catching an Exception cannot turn an accepted request
+into success, including after final selection. KeyboardInterrupt preserves latest
+without an extra capture and is surfaced as ManagedInterrupted with its cause.
 
 ## Identity and metadata-first admission
 
@@ -177,6 +258,12 @@ control is released. Pending journal evidence invalidates coverage through that
 gap. Projection failure preserves committed control and mutation/cut evidence;
 it is an actionable partial outcome, not permission to overwrite completion.
 
+Control publication never waits for short control while retaining a Store writer
+fence. Its registered mutation remains protected through a nonblocking short-lock
+acquisition; contention refuses with `control_busy` and retained cancelled-cut
+evidence for reconciliation after Store fences end. This avoids a gap in which an
+independent Store recovery could acknowledge an uncommitted cut before its CAS.
+
 `inspect(operation_id)` reads current detached metadata. `status(operation_id)`
 additionally observes ownership without taking or waiting for the lifetime lock.
 Owner loss requires a successful nonblocking operation-lock probe **before** the
@@ -201,11 +288,13 @@ The selected control DirStore owns:
 - Version-1 named managed Node and history records.
 - Version-2 root intents with explicit kind and SavedNode selection evidence;
   version-1 root intents are rejected without conversion.
-- Version-1 start-preparation sidecars under
+- Version-1 start/root-association preparation sidecars under
   `managed/operations/v2/starts/v1/<shard>/<operation>/current.json`, containing exact
   previous/proposed current metadata, the physical retention token, disposition
   and reconciliation acknowledgement. These are intents, not current authority
-  or serialized process-local restoration capabilities.
+  or serialized process-local restoration capabilities. The same bounded sidecar
+  now also journals checkpoint/initial/final root replacements, with no second
+  operation-current state machine.
 - Nested `dryml-node-graph/v1` / identity-3 graph, reference and StateKey codecs.
 
 Area format 2 does **not** admit old current-record version 2. Every owning reader

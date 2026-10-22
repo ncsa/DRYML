@@ -6,6 +6,7 @@ Store acquisition, SQL, projection maintenance or acknowledgement.
 """
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 import hashlib
 import json
@@ -104,7 +105,23 @@ def _node(data, *, saved=False):
 
 
 def _node_equal(left, right):
-    return left is right or left is not None and right is not None and left.graph_equal(right)
+    if left is right:
+        return True
+    if left is None or right is None or not left.graph_equal(right):
+        return False
+    # Retained construction is separate from realized exact Node facets. Root
+    # selections must keep both, including ties across unordered occurrences.
+    from dryml.core import Definition
+    def evidence(node):
+        # This is a comparison projection, not author composition: realization
+        # and retained construction may be conflicting views of one occurrence.
+        # The prepared constructor preserves both instead of coalescing facets.
+        pair = Definition._from_prepared_parameters
+        nodes = NodePreparation((node,)).nodes
+        pairs = frozenset(pair(None, {"node": n, "construction": getattr(n, "construction_view", n)})
+                          for n in nodes)
+        return pair(None, {"selection": node, "evidence": pairs})
+    return evidence(left).graph_equal(evidence(right))
 
 
 def _same_snapshot_bytes(left, right):
@@ -120,7 +137,8 @@ class ControlHistory:
     lifecycle string, and checkpoint/final are optional SavedNodes. Invalid fields
     raise ManagedControlError. This immutable value performs no payload IO, grants
     no retention and never recursively embeds earlier history. Equality compares
-    exact logical Node graphs, independent of newly allocated handles/packet labels.
+    exact logical Node graphs and retained construction, independent of newly
+    allocated handles/packet labels.
     """
     run_id: str
     invocation_id: str
@@ -179,6 +197,7 @@ class ControlIntent:
     final/durable; typed reasons require selection SavedNode metadata. Root intent
     v2 explicitly rejects v1 nested input. Validation raises ManagedControlError.
     Equality compares full resource values and exact logical selection graphs,
+    including retained construction evidence,
     not packet labels or digests alone. This ledger authorizes no physical release
     on its own and performs no IO.
     """
@@ -257,7 +276,8 @@ class ControlSnapshot:
     interrupt_request is an exact (run, invocation) pair. history/intents are bounded
     immutable tuples. Invalid schemas/cross-fields raise ManagedControlError.
     Construction validates and retains the immutable operation digest; replacement
-    recomputes it. Equality compares exact logical Node graphs, not packet labels
+    recomputes it. Equality compares exact logical Node graphs and their retained
+    construction evidence, not packet labels
     or digest-only evidence. Decoding retains bounded immutable source bytes as a
     private, nonserialized fact, not proof of external authority. Replacement drops
     that fact; every CAS still checks fresh persisted bytes and ownership/fences.
@@ -448,7 +468,7 @@ class _PendingIntent:
 
 @dataclass(frozen=True, slots=True)
 class StartPreparation:
-    """Durable two-phase admission intent, never a transferable restore receipt.
+    """Durable two-phase run/root association, never a transferable restore receipt.
 
     previous/proposed are exact current-record fingerprints encoded as snapshots;
     token names the Core affected-resource ledger. phase is prepared, ready,
@@ -642,13 +662,14 @@ class ManagedControlStore:
         return proposed
 
     def admit_prepared(self, preparation, *, owner):
-        """Admit exactly a ready start under the original invocation and byte CAS.
+        """Admit a ready run/root association under its invocation and exact byte CAS.
 
-        preparation is persisted StartPreparation. Required grant/restore work is
-        performed by the managed caller outside fences before phase ready. The
+        preparation is persisted StartPreparation. Required grant work and any
+        selected-start restoration run outside fences before phase ready. The
         exact previous current (including interrupt generation) must still match.
         Returns committed ControlSnapshot; uncertain writes retain both sides for
-        reconciliation. This is the only new-run replacement policy primitive.
+        reconciliation. Checkpoint/initial/final roots reuse this same two-phase
+        primitive without restoring or allocating a new run.
         """
         proposed = preparation.proposed
         self._require_owner(owner, proposed.operation_id)
@@ -1010,7 +1031,25 @@ class ManagedControlStore:
     @staticmethod
     def _pending_path(operation): return os.path.join(operation, "pending.json")
 
-    def _control_lock(self): return interprocess_lock(os.path.join(self.root, "control.lock"))
+    @contextmanager
+    def _control_lock(self):
+        # Store recovery must not classify a still-live registered mutation in
+        # the writer-to-CAS gap. Keep that writer through a *nonblocking* short
+        # acquisition; contention fails with retained journal evidence, never
+        # waits for control while holding an earlier-order fence.
+        from dryml.core.store.retention import _writers
+        path = os.path.join(self.root, "control.lock")
+        if not _writers():
+            with interprocess_lock(path):
+                yield
+            return
+        lock = FileLock(path)
+        if not lock.acquire(blocking=False):
+            raise ManagedConflictError("control_busy", "short control is busy; release Store fences and reconcile before retry")
+        try:
+            yield
+        finally:
+            lock.release()
 
     @staticmethod
     def _read_optional(path):

@@ -31,6 +31,93 @@ def transition(control, owner, old, proposed):
         expected_invocation_id=old.invocation_id)
 
 
+def test_publisher_never_waits_for_short_control_while_holding_store_writer(tmp_path, monkeypatch):
+    """A contended short CAS refuses; its cancelled cut is recovered after fences end."""
+    from dryml.core.store.retention import _writers
+    control, identity = adapter(tmp_path), facts(receiver())
+    registered, held, release = Event(), Event(), Event()
+    store = control.control_store
+    with control.admission(identity) as owner:
+        initial = control.create_initial(running(identity, owner), owner=owner)
+        original = store._atomic_write
+        injected = []
+        def write(path, payload):
+            result = original(path, payload)
+            if str(path).endswith("authority.record") and not injected:
+                injected.append(True)
+                registered.set()
+                assert held.wait(10)
+            return result
+        def block_control():
+            assert registered.wait(10)
+            with control._control_lock():
+                held.set()
+                assert release.wait(15)
+        worker = Thread(target=block_control)
+        worker.start()
+        monkeypatch.setattr(store, "_atomic_write", write)
+        try:
+            with pytest.raises(StoreMutationError) as raised:
+                transition(control, owner, initial, replace(initial, generation=2))
+            assert isinstance(raised.value.__cause__, ManagedConflictError)
+            assert raised.value.__cause__.reason == "control_busy"
+            assert not _writers() and not release.is_set()
+            # The caller has already released its Store fence while the other
+            # caller still holds control; no timed delay establishes this proof.
+            with store.writer_lock():
+                assert _writers()
+        finally:
+            release.set(); worker.join(15)
+        assert not worker.is_alive()
+        monkeypatch.setattr(store, "_atomic_write", original)
+        assert control.reconcile(identity.operation_id, owner=owner).to_bytes() == initial.to_bytes()
+        assert not store.pending_mutations()
+
+
+@pytest.mark.parametrize("after", [False, True])
+def test_cancelled_replacement_preserves_cut_and_recovers_fresh_current(tmp_path, monkeypatch, after):
+    control, identity = adapter(tmp_path), facts(receiver())
+    with control.admission(identity) as owner:
+        initial = control.create_initial(running(identity, owner), owner=owner)
+        proposed = replace(initial, generation=2)
+        original = control._replace_file
+        def cancel(path, payload):
+            if path.endswith("current.json"):
+                if after:
+                    original(path, payload)
+                raise KeyboardInterrupt()
+            return original(path, payload)
+        monkeypatch.setattr(control, "_replace_file", cancel)
+        with pytest.raises(KeyboardInterrupt) as raised:
+            transition(control, owner, initial, proposed)
+        assert raised.value.mutation_id and raised.value.cut.pending
+        monkeypatch.setattr(control, "_replace_file", original)
+        expected = proposed if after else initial
+        assert control.reconcile(identity.operation_id, owner=owner).to_bytes() == expected.to_bytes()
+        assert not control.control_store.pending_mutations()
+
+
+def test_overridden_current_reader_is_fresh_and_original_errors_are_not_bypassed(tmp_path, monkeypatch):
+    control, identity = adapter(tmp_path), facts(receiver())
+    with control.admission(identity) as owner:
+        current = control.create_initial(running(identity, owner), owner=owner)
+        original = control._read_optional
+        error, calls = ValueError("overridden current reader"), []
+        def read(path):
+            if path.endswith("current.json"):
+                calls.append(path)
+                raise error
+            return original(path)
+        monkeypatch.setattr(control, "_read_optional", read)
+        for _ in range(2):
+            with pytest.raises(ValueError) as raised:
+                control.inspect(identity.operation_id)
+            assert raised.value is error
+        assert len(calls) == 2
+        monkeypatch.setattr(control, "_read_optional", original)
+        assert control.inspect(identity.operation_id).to_bytes() == current.to_bytes()
+
+
 def test_initial_operation_and_expected_transition_are_atomic(tmp_path):
     control, identity = adapter(tmp_path), facts(receiver())
     with control.admission(identity) as owner:

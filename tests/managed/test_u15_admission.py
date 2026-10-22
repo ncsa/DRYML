@@ -97,14 +97,14 @@ def test_direct_call_normalizes_arguments_before_any_control_or_restore(tmp_path
     assert (Value.restores, Value.captures, Value.bodies) == (0, 0, 0)
 
 
-def test_public_call_exposes_explicit_unfinished_policy_boundary_without_body(tmp_path):
-    from dryml.managed.errors import ManagedControlError
+def test_public_call_now_enters_authored_body_and_preserves_failure(tmp_path):
+    """U16 replaces U15's pre-body stop; this admission fixture raises in its body."""
     control, live, saved = setup(tmp_path)
-    with pytest.raises(ManagedControlError, match="completion_policy_not_integrated"):
+    with pytest.raises(AssertionError, match="U15 must not execute an authored body"):
         live.run(managed=ManagedConfig(state_repo=control.state_repo))
     current = control.inspect(identity(control, live).operation_id)
     assert current.state == "failed" and current.checkpoint is None
-    assert (Value.restores, Value.captures, Value.bodies) == (0, 0, 0)
+    assert (Value.restores, Value.captures, Value.bodies) == (0, 0, 1)
 
 
 def test_reclaimed_receiver_checkpoint_does_not_block_detached_replay(tmp_path):

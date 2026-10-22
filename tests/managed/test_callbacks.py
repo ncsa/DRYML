@@ -1,310 +1,127 @@
-"""U7 checkpoint callback ordering and retained-receipt coverage."""
-
-from __future__ import annotations
+"""Explicit checkpoint callback ordering and caught-error policy (U16)."""
 
 import pytest
-import shutil
 
-pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-
-from dryml.core import Repo
-from dryml.core.object import Pickleable
-from dryml.core.reference_values import StateRef
-from dryml.core.signatures import Ref
-from dryml.core.store.dir import DirStore
-from dryml.managed import (
-    ManagedConfig,
-    ManagedConflictError,
-    ManagedContextError,
-    ManagedInterrupted,
-    managed_operation,
-)
-from dryml.managed import context as context_module
+from dryml.core.store.retention import _writers
+from dryml.managed import ManagedConfig, ManagedContextError, ManagedInterrupted
+from tests.managed.u16_fixtures import Value, enter, setup
 
 
-class CallbackValue(Pickleable):
-    """Receiver that publishes one checkpoint before final mutation."""
-
-    def __init__(self, value=0):
-        self.value = value
-
-    @managed_operation()
-    def run(self, *, managed) -> Ref[StateRef]:
-        """Save a callback-visible intermediate state then complete normally."""
-
-        self.value = 4
-        checkpoint = managed.checkpoint()
-        self.value = 5
+def test_callbacks_receive_committed_latest_in_order_outside_state_reservations(tmp_path):
+    control, live = setup(tmp_path, index="sqlite")
+    observed = []
+    def first(obj, ctx):
+        current = control.inspect(ctx.operation_id)
+        assert current.checkpoint.graph_equal(ctx.latest_checkpoint)
+        assert not _writers() and not control.control_store.pending_mutations()
+        assert control.state_repo._topology_leases == 0
+        observed.append(("first", obj is live, obj.value, ctx.latest_checkpoint))
+    def second(obj, ctx):
+        observed.append(("second", obj is live, obj.value, ctx.latest_checkpoint))
+    def body(obj, ctx):
+        obj.value = 4
+        checkpoint = ctx.checkpoint()
+        obj.value = 5
+        ctx.final_state(checkpoint)
         return checkpoint
-
-    @managed_operation()
-    def no_checkpoint(self, *, managed):
-        """Complete without creating a callback safe point."""
-
-        self.value += 1
-
-    @managed_operation()
-    def twice(self, *, managed):
-        """Publish two safe points so a late request has a later service boundary."""
-
-        self.value = 1
-        managed.checkpoint()
-        self.value = 2
-        managed.checkpoint()
-
-    @managed_operation()
-    def catch_terminal_interrupt(self, *, managed):
-        """Catch a local interruption to prove runtime terminality remains enforced."""
-
-        try:
-            managed.interrupt()
-        except ManagedInterrupted:
-            for safe_point in (managed.checkpoint, managed.interrupt):
-                try:
-                    safe_point()
-                except ManagedContextError as error:
-                    self.rejected_safe_points.append(error.reason)
-
-    @managed_operation()
-    def catch_callback_error(self, *, managed):
-        """Catch an observer error that must still fail the managed attempt."""
-
-        self.value = 4
-        try:
-            managed.checkpoint()
-        except RuntimeError as error:
-            self.caught_callback_error = error
-        self.value = 5
-        try:
-            managed.checkpoint()
-        except RuntimeError as error:
-            self.second_callback_error = error
-        return "caught"
+    Value.action = body
+    raw, final = enter(control, live, config=ManagedConfig(callbacks=[first, second]))
+    assert [v[:3] for v in observed] == [("first", True, 4), ("second", True, 4)]
+    assert all(v[3].graph_equal(raw) for v in observed) and final is raw
 
 
-class DerivedValue(Pickleable):
-    """Independent object used to prove callback work can hold disjoint ownership."""
-
-    def __init__(self, value=0):
-        self.value = value
-
-    @managed_operation()
-    def bump(self, *, managed):
-        """Persist a disjoint object through a nested managed invocation."""
-
-        self.value += 1
-
-
-def test_callbacks_receive_exact_committed_receipt_in_list_order(tmp_path):
-    """Observers run after association and see the same live object and StateRef."""
-
-    store = DirStore(tmp_path / "store")
-    value = CallbackValue(repo=Repo((store,)))
-    observed = []
-
-    def first(obj, context):
-        observed.append(("first", obj is value, context.checkpoint_state_ref, context.state_repo))
-
-    def second(obj, context):
-        observed.append(("second", obj.value, context.checkpoint_state_ref))
-
-    checkpoint = value.run(managed=ManagedConfig(state_repo=store, callbacks=[first, second]))
-
-    assert observed[0][:3] == ("first", True, checkpoint)
-    assert isinstance(observed[0][3], Repo)
-    assert tuple(observed[0][3].stores) == (store,)
-    assert observed[1] == ("second", 4, checkpoint)
-
-
-def test_callback_error_stops_later_callbacks_retains_checkpoint_and_fails(tmp_path):
-    """Observer failure preserves the associated payload across a fresh Store/Repo."""
-
-    store = DirStore(tmp_path / "store")
-    value = CallbackValue(repo=Repo((store,)))
+@pytest.mark.parametrize("caught", [False, True])
+def test_callback_error_preserves_C_and_caught_error_permits_finalization(tmp_path, caught):
+    control, live = setup(tmp_path)
     calls = []
-
-    def fail(obj, context):
-        calls.append(context.checkpoint_state_ref)
-        obj.value = 99
-        raise RuntimeError("observer failed")
-
-    def never(obj, context):
-        calls.append("late")
-
-    with pytest.raises(RuntimeError, match="observer failed"):
-        value.run(managed=ManagedConfig(state_repo=store, callbacks=[fail, never]))
-    status = value.run.status(state_repo=store)
-    assert (status.state, status.failure_code) == ("failed", "callback_error")
-    assert calls == [status.checkpoint_state_ref]
-    assert status.final_state_ref is None
-    assert value.value == 99
-
-    reopened = DirStore.open_existing(store.base_dir, query_index="none")
-    reader = Repo._for_state_io((reopened,))
-    try:
-        restored = reader.load_state_ref(status.checkpoint_state_ref, reuse_live="never")
-        assert restored.object_ref == value.object_ref
-        assert restored.value == 4
-        persisted = restored.run.status(state_repo=reader)
-        assert (persisted.state, persisted.failure_code) == ("failed", "callback_error")
-        assert persisted.checkpoint_state_ref == status.checkpoint_state_ref
-        assert persisted.final_state_ref is None
-        assert calls == [status.checkpoint_state_ref]
-    finally:
-        reader.close(flush=False)
-        reopened.close()
-
-
-def test_caught_callback_error_remains_terminal_without_final_state(tmp_path):
-    """Method code cannot convert a checkpoint observer failure into completion."""
-
-    store = DirStore(tmp_path / "store")
-    value = CallbackValue(repo=Repo((store,)))
     error = RuntimeError("observer failed")
-    calls = []
-
-    def fail(obj, context):
-        calls.append(context.checkpoint_state_ref)
+    def fail(obj, ctx):
+        calls.append(ctx.latest_checkpoint)
+        obj.value = 99
         raise error
+    def body(obj, ctx):
+        obj.value = 4
+        if not caught:
+            ctx.checkpoint()
+        else:
+            with pytest.raises(RuntimeError) as raised:
+                ctx.checkpoint()
+            assert raised.value is error
+            ctx.final_state(ctx.latest_checkpoint)
+            return "handled"
+    Value.action = body
+    config = ManagedConfig(callbacks=[fail, lambda *args: pytest.fail("later callback")])
+    if caught:
+        raw, final = enter(control, live, config=config)
+        assert raw == "handled" and final.graph_equal(calls[0])
+    else:
+        with pytest.raises(RuntimeError) as raised:
+            enter(control, live, config=config)
+        assert raised.value is error
+        status = live.run.status(state_repo=control.state_repo)
+        assert (status.state, status.failure_code) == ("failed", "callback_error")
+        assert status.checkpoint.graph_equal(calls[0]) and status.final is None
+    assert len(calls) == 1 and Value.captures == 1 and live.value == 99
+    assert control.state_repo.load(calls[0], cache="none").value == 4
 
-    with pytest.raises(RuntimeError) as caught:
-        value.catch_callback_error(managed=ManagedConfig(state_repo=store, callbacks=[fail]))
-    status = value.catch_callback_error.status(state_repo=store)
-    assert caught.value is error
-    assert value.caught_callback_error is error
-    assert value.second_callback_error is error
-    assert len(calls) == 1
-    assert (status.state, status.failure_code) == ("failed", "callback_error")
-    assert status.checkpoint_state_ref is not None
-    assert status.final_state_ref is None
+
+def test_recursive_checkpoint_is_rejected_but_association_survives(tmp_path):
+    control, live = setup(tmp_path)
+    Value.action = lambda obj, ctx: ctx.checkpoint()
+    with pytest.raises(ManagedContextError, match="recursive_checkpoint"):
+        enter(control, live, config=ManagedConfig(callbacks=[lambda obj, ctx: ctx.checkpoint()]))
+    assert live.run.status(state_repo=control.state_repo).checkpoint is not None
 
 
-def test_final_save_never_notifies_checkpoint_callbacks(tmp_path):
-    """Completion is not an implicit checkpoint or interruption service point."""
-
-    store = DirStore(tmp_path / "store")
-    value = CallbackValue(repo=Repo((store,)))
+def test_callback_can_run_distinct_operation_sharing_same_live_object(tmp_path):
+    control, live = setup(tmp_path)
+    from dryml.managed import managed_operation
+    class Shared(Value):
+        @managed_operation()
+        def other(self, *, managed):
+            managed.final_state(managed.checkpoint())
+    live = Shared(repo=control.state_repo)
+    Shared.action = lambda obj, ctx: ctx.checkpoint()
     calls = []
-
-    assert value.no_checkpoint(managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: calls.append(args)])) is None
-    assert calls == []
-
-
-def test_callback_can_save_and_manage_a_disjoint_derived_object(tmp_path):
-    """Callbacks run outside short control locks while lifetime ownership remains safe."""
-
-    store = DirStore(tmp_path / "store")
-    repo = Repo((store,))
-    value = CallbackValue(repo=repo)
-    derived = DerivedValue(repo=repo)
-    callback_reads = []
-    from dryml.core.materialization import build_exact_state_load_plan
-    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
-
-    def save_derived(obj, context):
-        assert context.state_repo._topology_leases == 1
-        assert context._publication_event is None
-        with exact_work_counts() as counts:
-            build_exact_state_load_plan(context.state_repo, context.checkpoint_state_ref)
-        callback_reads.append(counts)
-        assert counts["_read_snapshot"] == counts["validate_payload"] == 1
-        assert derived.bump(managed=ManagedConfig(state_repo=context.state_repo)) is None
-        assert context.state_repo._topology_leases == 1
-
-    value.run(managed=ManagedConfig(state_repo=store, callbacks=[save_derived]))
-    assert derived.value == 1
-    assert derived.bump.status(state_repo=store).state == "completed"
-    assert len(callback_reads) == 1
+    def callback(obj, ctx):
+        # Distinct logical operations may share a read-only live graph. Their
+        # state IO reservations do not last through the callback or body.
+        enter(control, obj, descriptor=Shared.other)
+        calls.append(True)
+    enter(control, live, config=ManagedConfig(callbacks=[callback]))
+    assert calls == [True]
 
 
-def test_callback_cannot_begin_an_overlapping_managed_operation(tmp_path):
-    """Nested work sharing the active object's graph fails immediately, not by waiting."""
-
-    store = DirStore(tmp_path / "store")
-    value = CallbackValue(repo=Repo((store,)))
-    errors = []
-
-    def overlap(obj, context):
-        with pytest.raises(ManagedConflictError) as caught:
-            value.no_checkpoint(managed=ManagedConfig(state_repo=context.state_repo))
-        errors.append(caught.value.reason)
-
-    value.run(managed=ManagedConfig(state_repo=store, callbacks=[overlap]))
-    assert errors == ["state_graph_conflict"]
-
-
-def test_request_arriving_during_callbacks_is_honored_at_that_checkpoint(tmp_path):
-    """A callback-time request precedes the post-callback safe-point decision."""
-
-    store = DirStore(tmp_path / "store")
-    value = CallbackValue(repo=Repo((store,)))
+def test_request_during_callbacks_is_honored_at_same_checkpoint(tmp_path):
+    control, live = setup(tmp_path)
+    Value.action = lambda obj, ctx: ctx.checkpoint()
     outcomes = []
-
-    def request(obj, context):
-        outcomes.append(obj.run.request_interrupt(state_repo=context.state_repo).outcome)
-
+    def callback(obj, ctx):
+        outcomes.append(control.request_interrupt_if_running(ctx.operation_id)[0])
     with pytest.raises(ManagedInterrupted):
-        value.run(managed=ManagedConfig(state_repo=store, callbacks=[request]))
-    assert outcomes == ["requested"]
-    assert value.run.status(state_repo=store).state == "interrupted"
+        enter(control, live, config=ManagedConfig(callbacks=[callback]))
+    status = live.run.status(state_repo=control.state_repo)
+    assert outcomes == ["requested"] and status.state == "interrupted" and status.checkpoint is not None
 
 
-def test_request_after_callback_decision_waits_for_the_next_checkpoint(tmp_path, monkeypatch):
-    """A request after a no-interrupt decision cannot retroactively stop that save."""
-
-    store = DirStore(tmp_path / "store")
-    value = CallbackValue(repo=Repo((store,)))
-    outcomes = []
-
-    def request_after_decision(stage):
-        if stage == "interruption_decided" and not outcomes:
-            outcomes.append(value.twice.request_interrupt(state_repo=store).outcome)
-
-    monkeypatch.setattr(context_module, "_checkpoint_boundary", request_after_decision)
-    with pytest.raises(ManagedInterrupted):
-        value.twice(managed=ManagedConfig(state_repo=store))
-    status = value.twice.status(state_repo=store)
-    assert outcomes == ["requested"]
-    assert (status.state, status.checkpoint_state_ref is not None) == ("interrupted", True)
-
-
-def test_caught_local_interruption_remains_terminal_and_rejects_safe_points(tmp_path):
-    """User code cannot catch a committed interruption and resume context mutation."""
-
-    store = DirStore(tmp_path / "store")
-    value = CallbackValue(repo=Repo((store,)))
-    value.rejected_safe_points = []
-    callbacks = []
-
-    with pytest.raises(ManagedInterrupted):
-        value.catch_terminal_interrupt(
-            managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: callbacks.append(args)]),
-        )
-    status = value.catch_terminal_interrupt.status(state_repo=store)
-    assert value.rejected_safe_points == ["inactive_context", "inactive_context"]
-    assert len(callbacks) == 1
-    assert (status.state, status.final_state_ref) == ("interrupted", None)
-
-
-def test_post_callback_decision_revalidates_deleted_checkpoint(tmp_path):
-    """No association cut survives a callback or authorizes its later safe-point read."""
-
-    from dryml.managed.errors import ManagedControlError, ManagedRecoveryError
-
-    store = DirStore(tmp_path / "store")
-    repo = Repo(store)
-    value = CallbackValue(repo=repo)
-    observed = []
-
-    def delete(obj, context):
-        assert repo._topology_leases == 1
-        observed.append(context.checkpoint_state_ref)
-        shutil.rmtree(store._snapshot_path(context.checkpoint_state_ref.digest()))
-
-    with pytest.raises(ManagedControlError, match="failure_recording_failed") as caught:
-        value.run(managed=ManagedConfig(state_repo=repo, callbacks=[delete]))
-    assert isinstance(caught.value.__cause__, ManagedRecoveryError)
-    assert len(observed) == 1
-    with pytest.raises(ManagedRecoveryError):
-        value.run.status(state_repo=repo)
-    assert repo._topology_leases == 0
+def test_caught_confirmed_checkpoint_association_error_can_select_prior_final(tmp_path, monkeypatch):
+    control, live = setup(tmp_path)
+    original = control.admit_prepared
+    previous = []
+    def body(obj, ctx):
+        first = ctx.checkpoint()
+        previous.append(first)
+        def fail(*args, **kwargs):
+            raise OSError("association refused before CAS")
+        monkeypatch.setattr(control, "admit_prepared", fail)
+        obj.value = 7
+        with pytest.raises(OSError):
+            ctx.checkpoint()
+        monkeypatch.setattr(control, "admit_prepared", original)
+        ctx.final_state(first)
+        return "handled"
+    Value.action = body
+    raw, final = enter(control, live)
+    assert raw == "handled" and final is previous[0]
+    current = control.inspect(live.run.status(state_repo=control.state_repo).operation_id)
+    assert current.checkpoint.graph_equal(final) and Value.captures == 2

@@ -1,87 +1,50 @@
-"""Declared managed Store publication-control tests."""
-
-from __future__ import annotations
+"""Declared Store controls reach the authored checkpoint publisher (U16)."""
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-
-from dryml.core import Repo, StateRef
-from dryml.core.object import Pickleable
+from dryml.core import Repo
 from dryml.core.store.dir import DirStore
 from dryml.core.store.store import Store
-from dryml.managed import ManagedConfig, ManagedDeclarationError, managed_operation
+from dryml.managed import ManagedConfig, ManagedControlError, ManagedDeclarationError, managed_operation
+from tests.managed.u16_fixtures import Value
 
 
-class OverrideValue(Pickleable):
-    """Resumable receiver that records the declared borrowed Store handle."""
-
-    def __init__(self, value=0):
-        self.value = value
-
-    @managed_operation(
-        resumable=True, return_state_ref=True, store_parameter="store",
-    )
-    def advance(self, amount, *, store: Store | None = None, managed) -> None:
-        """Save via the supplied Store while retaining ordinary managed controls."""
-
+class OverrideValue(Value):
+    @managed_operation(store_parameter="store")
+    def advance(self, amount, *, store: Store | None = None, managed):
         self.value += amount if store is not None else amount + 1
+        managed.final_state(managed.checkpoint())
 
 
-def test_store_parameter_requires_an_optional_keyword_only_declared_slot():
-    """Invalid declared Store controls fail during declaration rather than invocation."""
-
-    def positional(self, store, *, managed) -> None:
-        return None
-
-    def non_none_default(self, *, store=object(), managed) -> None:
-        return None
-
-    def missing(self, *, managed) -> None:
-        return None
-
-    def reserved(self, *, managed) -> None:
-        return None
-
-    for target, parameter in (
-            (positional, "store"), (non_none_default, "store"),
-            (missing, "store"), (reserved, "managed"),
-    ):
+def test_store_parameter_requires_optional_keyword_only_slot():
+    def positional(self, store, *, managed): pass
+    def default(self, *, store=object(), managed): pass
+    def missing(self, *, managed): pass
+    for target, parameter in ((positional, "store"), (default, "store"), (missing, "store"), (missing, "managed")):
         with pytest.raises(ManagedDeclarationError, match="store_parameter"):
             managed_operation(store_parameter=parameter)(target)
 
 
-def test_declared_store_override_is_borrowed_and_returns_its_final_state(tmp_path):
-    """A non-None declared Store governs final publication without mutating routing."""
-
-    source = DirStore(tmp_path / "source")
-    override = DirStore(tmp_path / "override")
-    control = DirStore(tmp_path / "control")
-    repo = Repo((source,))
+@pytest.mark.parametrize("override", [False, True])
+def test_declared_store_override_is_borrowed_and_governs_checkpoint(tmp_path, override):
+    source = DirStore(tmp_path / "source", query_index="none")
+    other = DirStore(tmp_path / "override", query_index="none")
+    control = DirStore(tmp_path / "control", query_index="none")
+    repo = Repo(source)
     value = OverrideValue(repo=repo)
-
-    result = value.advance(
-        4, store=override,
-        managed=ManagedConfig(state_repo=repo, control_store=control),
-    )
-
-    assert type(result) is StateRef
-    assert value.value == 4
-    assert override.read_state_ref_record(result.digest()).state_ref == result
-    assert source.read_state_ref_record(result.digest()) is None
-    assert value.advance.status(
-        state_repo=override, control_store=control,
-    ).final_state_ref == result
-
-
-def test_none_store_parameter_preserves_current_repo_routing(tmp_path):
-    """The declared None control leaves ordinary current-Repo publication intact."""
-
-    source = DirStore(tmp_path / "source")
-    repo = Repo((source,))
-    value = OverrideValue(repo=repo)
-
-    result = value.advance(4, store=None, managed=ManagedConfig(state_repo=repo))
-
-    assert source.read_state_ref_record(result.digest()).state_ref == result
-    assert value.value == 5
+    with pytest.raises(ManagedControlError, match="result_policy_not_integrated"):
+        value.advance(4, store=other if override else None,
+            managed=ManagedConfig(state_repo=repo, control_store=control))
+    status = value.advance.status(state_repo=repo, control_store=control)
+    selected = other if override else source
+    assert status.checkpoint is not None
+    with selected.read_state(status.checkpoint.state.key) as state:
+        assert state is not None
+    if override:
+        from dryml.core.store.store import StoreAuthorityError
+        with pytest.raises(StoreAuthorityError, match="unavailable"):
+            with source.read_state(status.checkpoint.state.key):
+                pytest.fail("override checkpoint leaked into default Store")
+    assert value.value == (4 if override else 5) and repo.default_store is source
+    selected._assert_state_owner_open()
+    control._assert_state_owner_open()

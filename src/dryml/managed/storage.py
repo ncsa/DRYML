@@ -20,6 +20,42 @@ from dryml.locking import FileLock, LockError
 from .errors import ManagedConflictError, ManagedStoreError
 
 
+def _publish_checkpoint(repo, obj, *, states=None, store=None):
+    """Publish through Core's save batch with provisional, non-user retention.
+
+    The returned (SavedNode, StoreReport) names every provisional token, including
+    partial failures carried by Core exceptions. Reservations cover only state IO;
+    the caller must transfer protection before retiring these publication roots.
+    """
+    from dryml.core.state import reserve
+    from dryml.core.repo_plan import build_routed_save_plan, execute_routed_save_plan
+    store = repo._ensure_store(store)
+    plan, nodes, object_ids = repo._state_graph_evidence(obj)
+    with reserve(obj.object_ref, nodes, object_ids), repo._retain_save_context() as context:
+        routed = build_routed_save_plan(repo, plan, context, store=store)
+        return execute_routed_save_plan(repo, routed, states=states,
+            provisional=True, report_stores=True)
+
+
+def _validate_selection(repo, obj, original, selected):
+    """Freshly preflight original projection, live codecs, and selected availability.
+
+    Returns the Core exact load plan, with no hooks, capture or restoration. The
+    supplied graph itself remains the authority; no projected substitute is saved.
+    Reader overrides and validation exceptions propagate without cached proof.
+    """
+    from dryml.core.node import require_saved
+    from dryml.core.repo_plan import build_save_plan
+    from dryml.core.materialization import build_exact_state_load_plan
+    require_saved(selected)
+    live = build_save_plan(repo, obj)
+    if not original.object_projection_equal(selected) or not live.node.object_projection_equal(selected):
+        raise ManagedConflictError("incompatible_selection", "saved selection differs from original receiver projection")
+    for action in live.actions:
+        selected.at(action.path).state.validate_for(live.node.at(action.path), codec=action.obj.state_codec)
+    return build_exact_state_load_plan(repo, selected)
+
+
 def _caller():
     try:
         task = asyncio.current_task()

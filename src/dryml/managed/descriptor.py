@@ -521,21 +521,21 @@ class _BoundOperation:
             ManagedConfigError: If config or normalized ordinary arguments are
                 unsupported.
             ManagedError: If selected lifecycle authority cannot be used safely.
-            ManagedControlError: With ``completion_policy_not_integrated`` after
-                execution admission while U16/U17 checkpoint/final/result policy
-                awaits integration, or ``result_policy_not_integrated`` for a
-                compatible completed replay awaiting durable result delivery.
+            ManagedControlError: With ``result_policy_not_integrated`` after a
+                normal authored return or compatible replay while U17 durable
+                ordinary-result/completion delivery awaits integration.
 
         Side Effects:
-            U15 validates arguments, may prepare/restore a selected saved start,
-            and admits a run under the lifetime owner. The authored body is not
-            entered until checkpoint/final/result policy is integrated. Failed
-            preparation preserves previous current and exact recovery evidence.
+            Validates ordinary arguments once, prepares/restores a selected saved
+            start, admits a run and executes the authored body under the lifetime
+            owner. Explicit checkpoints and initial/final selections can publish
+            protected authority. Failed preparation preserves previous current;
+            callback failure preserves the associated latest checkpoint.
 
         Returns:
             A detached reconciliation disposition when pending authority required
             repair; it never falls through into body execution. Ordinary success
-            and lazy result values are not delivered by the U15 integration.
+            and lazy result values await the U17 integration.
         """
 
         if managed is not None and type(managed) is not ManagedConfig:

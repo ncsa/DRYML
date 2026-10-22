@@ -1,7 +1,6 @@
-"""Metadata-first managed admission and owned two-phase start preparation.
+"""Metadata-first admission, authored execution and fenced state finalization.
 
-Checkpoint/final policy and durable result delivery remain separate owning units.
-The execution callback is an internal integration seam, not a completion claim.
+Durable ordinary-result delivery remains the result owner's integration boundary.
 """
 
 from dataclasses import dataclass, replace
@@ -22,11 +21,11 @@ def invoke(descriptor, instance, args, managed, kwargs, *, on_raw_result=None):
 
     descriptor selects a checked declaration, instance a live Object, args/kwargs
     ordinary caller input, managed optional exact ManagedConfig. Arguments/defaults
-    normalize once before ownership or restore. Returns only a recovery disposition
-    when reconciliation was required. U16/U17 completion/result policy is not yet
-    integrated: execution branches raise completion_policy_not_integrated before
-    body entry; replay raises result_policy_not_integrated carrying detached
-    admission metadata. on_raw_result is reserved for that later delivery seam.
+    normalize once before ownership or restore. Execution injects ManagedContext
+    and enters the authored body. Until durable result integration, a normal return
+    raises result_policy_not_integrated before automatic final capture. Replay
+    raises the same error carrying detached admission metadata. Recovery returns a
+    detached disposition without execution. on_raw_result remains reserved for U17.
     Preparation errors preserve old current; hooks follow Core invalidation rules.
     """
     if managed is not None and type(managed) is not ManagedConfig:
@@ -34,18 +33,21 @@ def invoke(descriptor, instance, args, managed, kwargs, *, on_raw_result=None):
     config = (managed or ManagedConfig()).snapshot()
     _validate_start_control(config)
     selected_store = descriptor.bind_store_parameter(instance, args, kwargs)
-    stores = resolve_stores(state_repo=config.state_repo or selected_store, control_store=config.control_store)
+    stores = resolve_stores(state_repo=config.state_repo if config.state_repo is not None else selected_store,
+                            control_store=config.control_store)
     try:
         boundary = descriptor.signature_plan().prepare_bound(
             descriptor.bind_arguments(instance, args, kwargs), repo=stores.state_repo)
         digest = _argument_digest_bound(tuple(boundary.authority.items()))
         receiver = stores.state_repo.describe(instance)
         identity = AdmissionIdentity(receiver, descriptor.member, digest)
-        def unfinished(owner, snapshot, live, resuming):
-            raise ManagedControlError("completion_policy_not_integrated", "checkpoint/final/result policy is not integrated")
+        control = ManagedControlStore(stores.control_store, stores.state_repo)
+        def execute(owner, snapshot, live, resuming):
+            return _execute_authored(owner, snapshot, live, resuming, descriptor, boundary, config,
+                control=control, store=selected_store,
+                invocation_parameters=descriptor.bind_invocation_parameters(instance, args, kwargs))
         result = admit_execution(identity, descriptor, config,
-            ManagedControlStore(stores.control_store, stores.state_repo),
-            realize=lambda node: instance, execute=unfinished)
+            control, realize=lambda node: instance, execute=execute)
         if result.disposition == "replay":
             error = ManagedControlError("result_policy_not_integrated", "completed replay selected; durable result delivery is not integrated")
             error.admission = result
@@ -53,6 +55,36 @@ def invoke(descriptor, instance, args, managed, kwargs, *, on_raw_result=None):
         return result
     finally:
         stores.close()
+
+
+def _execute_authored(owner, current, live, resuming, descriptor, boundary, config, *,
+                      control, finish=None, store=None, invocation_parameters=None):
+    # finish is the single result-owner handoff: normalize/encode first, then call
+    # context._finalize_state(), confirm prerequisites and perform completion CAS.
+    from .context import _create_context
+    from .descriptor import _invoke_target
+    context = _create_context(admission=owner, control=control, generation=current.generation,
+        obj=live, snapshot=current, callbacks=config.callbacks, is_resuming=resuming, store=store)
+    try:
+        args, kwargs = boundary.deliver_args()
+        raw = _invoke_target(descriptor, live, args, context, kwargs, store=store,
+                             invocation_parameters=invocation_parameters)
+        context._safe_point()
+        if finish is None:
+            context._failure_code = "result_policy_not_integrated"
+            raise ManagedControlError("result_policy_not_integrated", "authored body returned; durable result delivery awaits U17")
+        result = finish(context, raw)
+        # Even a result-owner callback cannot turn an accepted request into success.
+        context._safe_point(allow_completed=True)
+        return result
+    except BaseException as error:
+        context._record_failure(error)
+        if isinstance(error, KeyboardInterrupt):
+            from .errors import ManagedInterrupted
+            raise ManagedInterrupted() from error
+        raise
+    finally:
+        context._deactivate()
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,10 +246,12 @@ def _settle_preparation(control, owner, preparation):
     retention = control.control_store.retention
     token = str(UUID(settled.token))
     ledger = retention.read(token)
+    selected = next((v.selection for v in preparation.proposed.intents if v.token == preparation.token),
+                    preparation.proposed.checkpoint)
     if ledger is not None:
-        _confirm_root(ledger, preparation.proposed.checkpoint)
+        _confirm_root(ledger, selected)
     if admitted:
-        if settled.proposed.checkpoint is not None:
+        if selected is not None:
             if ledger is None or ledger.disposition != "adopted":
                 raise ManagedRecoveryError("unconfirmed_start", "admitted saved start requires confirmed grants")
             retention.adopt(token, _stores(control))
@@ -244,6 +278,53 @@ def _settle_preparation(control, owner, preparation):
         _reclaim_resources(control, owner, ledger.resources)
     control.write_preparation(replace(settled, settled=True), owner=owner, expected=settled)
     return ("run_admitted" if admitted else "preparation_abandoned"), current
+
+
+def _associate_state(context, selected, kind, *, report=None, published=None):
+    """Use the existing two-phase preparation journal for one root replacement."""
+    from .storage import _validate_selection
+    current = context._safe_point()
+    plan = _validate_selection(context.state_repo, context._obj, current.receiver, selected)
+    targets = {}
+    for action in plan.actions:
+        targets.setdefault(action.store, set()).add(action.state.key)
+    retention = context.control_store.retention
+    token = uuid4().hex
+    ledger = retention.prepare(str(UUID(token)), selected.exact_digest(), targets.items())
+    intent = ControlIntent(token, current.run_id, current.invocation_id,
+        current.generation + 1, "prepared", ledger.resources, kind, selected)
+    replaced = {"latest", "start"} if kind == "latest" else {"final"} if kind == "final" else set()
+    keep = tuple(v for v in current.intents if v.kind not in replaced)
+    proposed = replace(current, generation=current.generation + 1,
+        checkpoint=selected if kind == "latest" else current.checkpoint, intents=keep + (intent,))
+    preparation = StartPreparation(token, current, proposed)
+    preparation = context._control.write_preparation(preparation, owner=context._admission,
+        expected=context._control.read_preparation(context.operation_id))
+    retention.protect(ledger.token, _stores(context._control))
+    ledger = retention.adopt(ledger.token, _stores(context._control))
+    if report is not None:
+        # Managed grants now protect all required keys; retire only these named
+        # Core provisional publishers, never an independent user save root.
+        for publication in report.publications:
+            authority = publication.store.retention
+            pending = authority.read(publication.retention_token)
+            if pending.disposition == "prepared":
+                authority.abandon(pending.token)
+            released = authority.release(pending.token, _stores(context._control))
+            if released.disposition != "released":
+                raise ManagedRecoveryError("release_pending", "provisional publisher cleanup remains pending")
+    if published is not None:
+        published()
+        # A boundary is not a live availability witness. In particular, a custom
+        # reader or a publication-phase failure must still refuse association.
+        _validate_selection(context.state_repo, context._obj, current.receiver, selected)
+    proposed = replace(proposed, intents=keep + (replace(intent, disposition="adopted"),))
+    ready = replace(preparation, proposed=proposed, phase="ready")
+    preparation = context._control.write_preparation(ready, owner=context._admission, expected=preparation)
+    context._control.admit_prepared(preparation, owner=context._admission)
+    _, committed = _settle_preparation(context._control, context._admission, preparation)
+    context._snapshot, context._generation = committed, committed.generation
+    return selected
 
 
 def _interrupted_successor(previous, current):
