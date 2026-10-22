@@ -28,11 +28,10 @@ The existing plain `ConcreteDefinition` construction-view API retains structural
 equality for existing consumers. Legacy `stable_hash()` and `graph_hash()` remain
 construction-view keys, not new facet-aware Node keys or saved-graph encodings.
 The versioned CDef construction codec likewise remains a construction-view codec.
-This authoring API does not change Store formats, Generator policies, signatures,
-or Repo realization of identity/state constraints.
-`Node.build()` retains ordinary unbound-recipe construction and rejects new
-identity/state-bearing Node graphs before entering the existing Repo boundary;
-it does not silently discard those facets.
+`Node.build(repo=..., identities=..., states=...)` composes optional constraints,
+concretizes once, and enters `Repo.build(ConcreteNode)`. Build allocates only missing
+ObjectIds, initializes unspecified stateful nodes, and restores selected compatible
+LocalStates once. Ref and quotation metadata are not materialized implicitly.
 
 ## Node Constraints And Navigation
 
@@ -145,9 +144,10 @@ the receiver's occurrence identities and sharing. Later creation inspection uses
 that adopted construction authority; authenticated Node transport retains it.
 The receiver and supplied graph are immutable and remain unchanged on failure.
 
-These are metadata validation/adoption APIs. Runtime Repo/Store restore, capture,
-and managed-operation integration still use their existing contracts. In
-particular, the V2 `object_projection()` query adapter and legacy call-surface
+The Node view APIs above are metadata-only. Repo build/load/apply/restore consume
+these views with fresh state validation as described below. Managed-operation
+integration remains a separate consumer boundary. The V2 `object_projection()`
+query adapter and legacy call-surface
 thaw/export refuse identity-3 facets or retained construction evidence rather
 than silently dropping them. Use the Node APIs above for the new views.
 
@@ -174,33 +174,59 @@ class Counter(Serializable):
 Hooks receive only a framework-provided payload directory and validated opaque
 codec. They must write and restore a complete semantic checkpoint; DRYML cannot
 detect arbitrary mutation outside that contract. `Object.save()` delegates to the
-Repo save contract and returns one immutable root `StateRef`, or `(StateRef,
+Repo save contract and returns one immutable root `SavedNode`, or `(SavedNode,
 StoreReport)` when `report_stores=True`. Its `store=` override selects one
 whole-graph closure; routing otherwise determines per-object or closure placement.
 See [Repos and Stores](repos.md) for mode precedence, replication, and partial
 publication evidence.
 
-`Object.last_state_ref` is a read-only runtime receipt for the last complete
-top-level StateRef publication, or `None`. It advances only after immutable root
-authority is complete and before a derived index, main reference, alias, or
-archive commit can fail. Thus a later failure can preserve a valid inspectable
-receipt without reporting overall save success. A successful exact top-level load
-also installs its requested receipt. Embedded descendants never receive projected
-or synthetic receipts, and later ordinary mutation does not change the receipt.
-For a managed declaration using `return_state_ref=True`, the call result is the
-exact final StateRef captured for that invocation after association; callers must
-not substitute a later mutable `last_state_ref` receipt. Interruption, warning
-failure, or late publication/association failure returns no successful reference.
+`Object.last_state_ref` is a read-only historical SavedNode receipt, or `None`.
+Complete protected save publication and successful top-level exact loading/full
+restoration install receipts. An incomplete save preserves the previous receipt.
+Ordinary mutation does not update it. It proves neither current live state nor
+current payload availability and never authorizes skipping a required restore.
 
 ## Restore And References
 
-`Repo.load(cdef)` and `load_object(cdef)` are structural operations; they do not
-infer a snapshot. `Repo.load_state_ref(state_ref)` restores the requested exact
-authority through connected Stores. `Repo.restore_state_ref_into()` restores only
-the supplied exact live graph after preflight and never searches for a substitute
-Object. A restore hook failure invalidates that supplied graph for later framework
-state IO. Load a fresh graph with `reuse_live="never"` from the preserved
-StateRef before continuing.
+`Repo.load(saved_node)` and `Repo.load_state_ref(saved_node)` require complete
+SavedNode metadata. Every required stateful materializing occurrence needs its
+identity and selected state. Missing, reclaimed, corrupt or incompatible selected
+state fails explicitly before constructors/hooks where possible; no sibling state,
+historical receipt or default initialization substitutes for it. Entirely stateless
+concrete graphs are saved-complete without fabricated captures or identities.
+
+`Repo.apply_state(obj, states)` accepts a rooted StateSpec or typed path/LocalState
+map. It restores only selected destinations and leaves unspecified state untouched.
+It neither assigns donor identities nor captures or publishes a complete checkpoint.
+Compatible foreign-origin state retains its original full StateKey. A later fresh
+capture uses the destination's retained construction view.
+
+`Repo.restore(obj, saved_node)` (also `restore_state_ref_into`) checks the live
+receiver's canonical object projection against the **original supplied graph**,
+before adopting its construction pins. Successful restoration preserves Python
+identities, ObjectIds and sharing. `Repo.describe(obj)` exposes adopted construction
+and realization metadata. A parent constructed with child S0 and saved with child
+S1 therefore retains S0 in its creation authority after load or full restore.
+
+Selected sources are opened by full StateKey, grouped once per distinct key/Store
+and once per creation bucket. Each destination independently validates creation
+compatibility and codec admission. Native shared key leases span validation and
+dependency-first constructors/hooks; hooks execute outside Store writer fences.
+Every independent use revalidates availability, including live-cache reuse.
+`reuse_live="matching"` and `"greedy"` retain unique-candidate identity rules;
+eligible reused nodes still run their selected restore hook. `"never"` builds fresh.
+
+For a handoff to another Core caller, `repo.prepare_restore(obj, saved_node)` returns
+an owner-thread, one-shot `PreparedRestoration`. Use it as a context manager and call
+`prepared.apply()` once, or close it without hooks. It retains the live reservation
+and current source leases until consumption/close; neither a detached plan nor a
+last-save receipt is a reusable authorization to skip restoration.
+
+Validation failure before any hook leaves a previously usable live graph usable.
+Failure after hook entry invalidates the affected retained live graph, evicts it
+from framework caches, and rejects later state IO. There is no automatic rollback.
+Recover with `repo.load_state_ref(saved_node, reuse_live="never")` from a valid
+available saved graph; its ObjectIds are preserved.
 
 Query V3 returns immutable identity values rather than live Objects. Select a CDef
 with `repo.query().sel(...).cdefs()` and pass the selected value to an explicit Repo
@@ -212,12 +238,10 @@ bindings and framework runtime metadata. A stateless Object root can own statefu
 descendants; its checkpoint state comes from those descendants, not unsaved
 root-only attributes.
 
-ObjectRef identifies the exact Object graph and ObjectIds but not a snapshot.
-StateRef identifies the corresponding immutable local-state hashes. Alias lookup
-therefore resolves an Object alias to ObjectRef authority and a state selector to
-StateRef authority; there is no generic object-returning alias load. Exact state
-identity, graph sharing, and reference-as-value semantics remain independent of
-Store placement or replication.
+ObjectRef/StateRef are legacy in-memory annotation/reference adapters. New public
+materialization and capture use Node-local facets; persisted V2 snapshots are not
+revived by format-4 loading. Exact state identity, sharing and reference-as-value
+semantics remain independent of Store placement or replication.
 
 Pre-V2 CDef records, raw tuple/dict records, missing identity versions, and mixed
 graphs are rejected before construction. There is no migration, converter, or dual

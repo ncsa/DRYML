@@ -594,14 +594,20 @@
           ]
         },
         "tests/core/test_state_ref_restore_into.py": {
-          "rationale": "Retain identity-preserving restore, hook-failure invalidation, sibling invalidation, preflight safety, reference closure ordering, and pickle binding behavior as the complete targeted-restore roster.",
+          "rationale": "Retain Node identity/sharing, original projection admission, one-shot leased handoff ownership, S0 construction/S1 capture adoption, foreign compatible state reuse, pre-hook safety and post-hook invalidation. Native backend products remain separately scoped.",
           "functions": [
             "test_targeted_restore_keeps_the_supplied_live_identity_and_forces_hook",
             "test_targeted_restore_preserves_alias_identity_and_invalidates_after_hook_failure",
             "test_restore_failure_invalidates_equal_definition_siblings",
             "test_targeted_restore_preflight_failure_leaves_target_valid_and_pickle_payload_replaces",
             "test_targeted_restore_walks_embedded_reference_closure_once_before_parent_hook",
-            "test_pickleable_targeted_restore_preserves_live_graph_bindings"
+            "test_pickleable_targeted_restore_preserves_live_graph_bindings",
+            "test_full_restore_checks_original_projection_before_hooks",
+            "test_prepared_restore_handoff_is_one_shot_and_never_a_history_shortcut",
+            "test_prepared_restore_is_owned_and_abandonment_releases_without_hooks",
+            "test_restore_adopts_s0_construction_after_s1_capture",
+            "test_foreign_compatible_apply_keeps_donor_key_and_destination_creation",
+            "test_missing_later_selection_preflights_before_earlier_hook"
           ]
         },
         "tests/core/test_state_ref_save.py": {

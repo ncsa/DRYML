@@ -6,6 +6,45 @@ from dryml.core.repo import Repo
 from dryml.core import save_object, load_object
 
 
+def test_partial_node_build_and_apply_have_distinct_unspecified_state_semantics(tmp_path):
+    from dryml.core import ObjectId
+    from dryml.core.store.dir import DirStore
+    from tests.core.test_state_ref_restore_into import RestoreIntoValue, RestoreIntoIndependentPair
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    donor = RestoreIntoValue(1, repo=repo)
+    donor.value = 7
+    selected = repo.save(donor).state
+    first = Definition(RestoreIntoValue, 1)
+    recipe = Definition(RestoreIntoIndependentPair, first=first, second=Definition(RestoreIntoValue, 2))
+    identity = ObjectId()
+    partial = recipe.bind(identities={"$.first": identity}, states={"$.first": selected})
+    import sys
+    allocated = []
+    previous = sys.getprofile()
+
+    def count_identity(frame, event, arg):
+        if event == "call" and frame.f_code is ObjectId.__init__.__code__ and frame.f_locals["namespace"] is None:
+            allocated.append(True)
+        if previous is not None:
+            previous(frame, event, arg)
+
+    sys.setprofile(count_identity)
+    try:
+        built = partial.build(repo=repo, cache="none")
+    finally:
+        sys.setprofile(previous)
+    assert len(allocated) == 1
+    assert built.first.value == 7 and built.second.value == 2
+    assert built.first.object_id == identity
+    assert built.second.object_id is not None
+    built.first.value, built.second.value = 90, 91
+    before = built.first.object_id, built.second.object_id
+    repo.apply_state(built, partial.concretize().state_spec())
+    assert built.first.value == 7 and built.second.value == 91
+    assert (built.first.object_id, built.second.object_id) == before
+
+
 def test_build_from_definition_repo_1():
     # Test we can build one object
     definition = Definition(
@@ -63,15 +102,16 @@ def test_object_args_passing_1():
     assert obj.definition.parameters["layers"] == 1
 
 
-@pytest.mark.usefixtures("create_name", "fixed_snapshot_environment")
-def test_object_args_passing_2(create_name):
+@pytest.mark.usefixtures("fixed_snapshot_environment")
+def test_object_args_passing_2(tmp_path):
     from tests.core import core_objects as objs
 
     obj = objs.TestClassB(1, base_msg="Test1")
 
-    save_object(obj, main=True, repo=create_name)
-
-    obj_loaded = load_object(repo=create_name)
+    from dryml.core.store.dir import DirStore
+    repo = Repo(DirStore(tmp_path / "store"))
+    saved = repo.save(obj)
+    obj_loaded = repo.load(saved)
 
     assert obj_loaded.definition.parameters["layers"] == 1
 
@@ -92,14 +132,14 @@ def test_object_args_passing_3():
 
     obj1_cpy = obj1_def.build(cache="none")
 
-    assert obj1.definition == obj1_cpy.definition
+    assert obj1.definition.graph_equal(obj1_cpy.definition)
     assert obj1 is not obj1_cpy
 
     obj2_def = obj2.definition
 
     obj2_cpy = obj2_def.build(cache="none")
 
-    assert obj2.definition == obj2_cpy.definition
+    assert obj2.definition.graph_equal(obj2_cpy.definition)
     assert obj2 is not obj2_cpy
     assert obj2.A is not obj2_cpy.A
     assert type(obj2.A) is type(obj1)
@@ -107,7 +147,7 @@ def test_object_args_passing_3():
 
     obj3_cpy = obj3.definition.build(cache="none")
 
-    assert obj3.definition == obj3_cpy.definition
+    assert obj3.definition.graph_equal(obj3_cpy.definition)
     assert obj3 is not obj3_cpy
     assert obj3.A is not obj3_cpy.A
     assert type(obj3.A) is type(obj2)
@@ -129,12 +169,12 @@ def test_object_args_passing_4():
 
     obj1_cpy = obj1.definition.build(cache="none")
 
-    assert obj1.definition == obj1_cpy.definition
+    assert obj1.definition.graph_equal(obj1_cpy.definition)
     assert obj1 is not obj1_cpy
 
     obj2_cpy = obj2.definition.build(cache="none")
 
-    assert obj2.definition == obj2_cpy.definition
+    assert obj2.definition.graph_equal(obj2_cpy.definition)
     assert obj2 is not obj2_cpy
     assert obj2.A is not obj2_cpy.A
     assert type(obj2.A[0]) is type(obj1)
@@ -153,12 +193,12 @@ def test_object_args_passing_5():
 
     obj1_cpy = obj1.definition.build(cache="none")
 
-    assert obj1.definition == obj1_cpy.definition
+    assert obj1.definition.graph_equal(obj1_cpy.definition)
     assert obj1 is not obj1_cpy
 
     obj2_cpy = obj2.definition.build(cache="none")
 
-    assert obj2.definition == obj2_cpy.definition
+    assert obj2.definition.graph_equal(obj2_cpy.definition)
     assert obj2 is not obj2_cpy
     assert obj2.A is not obj2_cpy.A
     assert type(obj2.A[0][0]) is type(obj1)
@@ -177,12 +217,12 @@ def test_object_args_passing_6():
 
     obj1_cpy = obj1.definition.build(cache="none")
 
-    assert obj1.definition == obj1_cpy.definition
+    assert obj1.definition.graph_equal(obj1_cpy.definition)
     assert obj1 is not obj1_cpy
 
     obj2_cpy = obj2.definition.build(cache="none")
 
-    assert obj2.definition == obj2_cpy.definition
+    assert obj2.definition.graph_equal(obj2_cpy.definition)
     assert obj2 is not obj2_cpy
     assert obj2.A is not obj2_cpy.A
     assert type(obj2.A['A']) is type(obj1)
@@ -201,12 +241,12 @@ def test_object_args_passing_7():
 
     obj1_cpy = obj1.definition.build(cache="none")
 
-    assert obj1.definition == obj1_cpy.definition
+    assert obj1.definition.graph_equal(obj1_cpy.definition)
     assert obj1 is not obj1_cpy
 
     obj2_cpy = obj2.definition.build(cache="none")
 
-    assert obj2.definition == obj2_cpy.definition
+    assert obj2.definition.graph_equal(obj2_cpy.definition)
     assert obj2 is not obj2_cpy
     assert obj2.A is not obj2_cpy.A
     assert type(obj2.A['A'][0][0]) is type(obj1)

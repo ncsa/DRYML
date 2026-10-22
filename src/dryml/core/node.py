@@ -125,27 +125,26 @@ class Node(Generic[T]):
         from .definition import ConcreteNode
         return self if isinstance(self, ConcreteNode) else concretize_node(self, repo=repo)
 
-    def build(self, *, repo=None, cache="weak"):
-        """Build an unbound recipe through the existing Repo construction API.
+    def build(self, *, repo=None, cache="weak", identities=None, states=None):
+        """Concretize and realize this graph with optional exact facet constraints.
 
         Args:
-            repo (Repo | None): Repository used for the existing construction call.
+            repo (Repo | None): Repository owning construction and state sources.
             cache (CachePolicy): Result cache policy, default ``weak``.
+            identities, states (Mapping | None): Rooted exact constraints composed
+                before concretization. Conflicting assignments raise ValueError.
         Returns:
             Object: Newly constructed or reused runtime result.
         Raises:
-            TypeError: If Node facets would be lost at the existing Repo boundary,
-                or the recipe cannot be concretized/materialized.
-            Exception: Propagates existing Repo construction failures.
+            TypeError: If the recipe cannot be concretized/materialized.
+            RepoLoadError: If selected state is unavailable or realization fails.
         Side Effects:
-            Unbound recipes retain existing construction/cache effects. New Node
-            identity/state realization needs the owning Repo cutover and is
-            rejected before construction rather than silently dropping constraints.
+            Allocates only missing identities, initializes unspecified nodes and
+            restores selected nodes once. All selections preflight before hooks.
         """
-        from .definition import DefInterface
-        if any(node.object_id is not None or node.state is not None for node in _all_nodes(self)):
-            raise TypeError("The existing Repo build boundary does not realize Node identity/state facets.")
-        return DefInterface.build(self, repo=repo, cache=cache)
+        from .repo import manage_repo
+        with manage_repo(repo=repo) as selected:
+            return selected.build(self.bind(identities=identities, states=states).concretize(repo=selected), cache=cache)
 
     @property
     def state(self):

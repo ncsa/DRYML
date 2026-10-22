@@ -1,6 +1,13 @@
+"""Node materialization and one-shot state restoration with fresh leased sources.
+
+Normalized construction and retained Node facets own selection semantics. Runtime
+binding projections and legacy in-memory adapters do not prove payload availability.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager, ExitStack
 from typing import Any, Literal, Mapping
 
 from .canonical import from_canonical
@@ -21,6 +28,524 @@ from .utils.graph.path import GraphPath
 
 MaterializationActionKind = Literal["reuse", "construct"]
 MaterializationReuseSource = Literal["memo", "cache", None]
+
+
+def _runtime_recipe(node):
+    """Project Node facets off the retained legacy runtime-binding adapter."""
+    from .node import _clone, _Facets, _rewrite
+
+    def strip(source, result):
+        if result.object_id is None and result.state is None and result._construction is None:
+            return result
+        concrete = isinstance(result, ConcreteDefinition)
+        return _clone(result, None if concrete else result.args,
+                      result.parameters if concrete else result.kwargs, _Facets(), reset_construction=True)
+
+    return _rewrite(node, enter_quoted=False, node_transform=strip)
+
+
+def _same_creation(candidate, node):
+    from .node_views import CREATION_VIEW, view_equal
+    return view_equal(getattr(candidate, "_construction_node", candidate.definition), node, CREATION_VIEW)
+
+
+@contextmanager
+def _selected_state_sources(repo, associations, *, source_store=None, source_stores=None):
+    """Preflight each destination; borrow each distinct full key once per Store."""
+    from .repo import RepoLoadError
+    from .repo_plan import state_use_leases, _unique_stores
+    from .state_values import StateKey
+    from .store.store import Store
+
+    associations = tuple(associations)
+    selections = {state.key for _, state, _, _ in associations}
+    if source_store is not None and not isinstance(source_store, Store):
+        raise TypeError("source_store must be a connected Store.")
+    if source_stores is not None and not isinstance(source_stores, Mapping):
+        raise TypeError("source_stores must map full StateKeys to connected Stores.")
+    overrides = {} if source_stores is None else dict(source_stores)
+    if any(not isinstance(key, StateKey) or not isinstance(store, Store) for key, store in overrides.items()):
+        raise TypeError("source_stores must map full StateKeys to connected Stores.")
+    if set(overrides) - selections:
+        raise ValueError("source_stores contains a key outside the selected state closure.")
+    with repo._retain_save_context() as context:
+        if any(store not in context.stores for store in (*overrides.values(), *((source_store,) if source_store is not None else ()))):
+            raise ValueError("State source Store must be connected.")
+        for path, state, destination, cls in associations:
+            try:
+                state.validate_for(destination, codec=cls.state_codec)
+            except (TypeError, ValueError) as error:
+                raise RepoLoadError(f"Selected state is incompatible at {path!s}: {error}") from error
+        candidates = {key: (overrides.get(key) or source_store,) if overrides.get(key) or source_store else context.stores
+                      for key in selections}
+        with ExitStack() as lifetime:
+            lifetime.enter_context(state_use_leases((store, key) for key, stores in candidates.items() for store in stores))
+            sources = {}
+            for store in _unique_stores(s for stores in candidates.values() for s in stores):
+                keys = [key for key, stores in candidates.items() if store in stores and key not in sources]
+                if keys:
+                    try:
+                        sources.update(lifetime.enter_context(store.read_states(keys)))
+                    except Exception as error:
+                        raise RepoLoadError("Selected state preflight is incomplete: invalid source authority or payload.") from error
+            for path, state, _, _ in associations:
+                source = sources.get(state.key)
+                if source is None:
+                    raise RepoLoadError(f"Selected state preflight is incomplete: unavailable state at {path!s}.")
+                if source.state != state or source.manifest.codec_version != 1:
+                    raise RepoLoadError(f"Selected state preflight is incomplete: incompatible source evidence at {path!s}.")
+            yield sources
+
+
+def _node_inputs(node, *, classes=None, preparation=None):
+    from .definition import ConcreteNode
+    from .node import _owned_nodes
+    from .cdef_codec import validate_cdef_stateful_role
+    from .node_prepare import NodePreparation
+
+    if not isinstance(node, ConcreteNode):
+        raise TypeError("Repo.build requires a ConcreteNode; concretize the recipe first.")
+    prepared = NodePreparation((node,)) if preparation is None else preparation
+    prepared._slot(node)
+    owned = tuple(_owned_nodes(node, strict=True))
+    classes = _NodeBindings() if classes is None else classes
+    identities = set()
+    for path, current in owned:
+        cls = classes.get(current)
+        if cls is None:
+            cls = _resolve_materialization_class(current)
+        _admit_materialization_class(cls)
+        validate_cdef_stateful_role(current, cls)
+        if (current.object_id is not None or current.state is not None) and not current._stateful_role:
+            raise ValueError("Stateless Nodes cannot select an ObjectId or private state.")
+        if current.object_id is not None:
+            if current.object_id in identities:
+                raise ValueError("Independent Nodes cannot share an ObjectId.")
+            identities.add(current.object_id)
+        classes[current] = cls
+    return prepared, owned, classes
+
+
+def realize_node(repo, node, *, cache="weak", reuse_live="matching", exact=False, source_store=None, source_stores=None,
+                 _memo=None, _sources=None, _hook_state=None, _effective=None, _inputs=None,
+                 _preparation=None, _identity_reservation=None):
+    """Realize a normalized Node graph with selected state exactly once.
+
+    node is a ConcreteNode; exact requires saved completeness. cache selects
+    weak/strong/none publication after success; reuse_live selects matching,
+    greedy or never candidates. Missing IDs alone are allocated. Every selected
+    association and current payload preflights before constructors/hooks. Returns
+    the live root. Raises TypeError/ValueError for invalid inputs or RepoLoadError
+    for unavailable state/construction/restore failure. Hooks run dependency-first
+    under full-key leases, outside Store fences. A post-hook failure invalidates
+    affected live nodes; no rollback is attempted or implied.
+    """
+    import inspect
+    from dryml.runtime import materialization_admission
+    from .node import require_saved
+    from .repo import RepoLoadError
+    from .repo_plan import apply_exact_reference_identity
+    from .reference_values import ObjectRef
+    from .state import construction_identity
+
+    if cache not in {"weak", "strong", "none"} or reuse_live not in {"matching", "greedy", "never"}:
+        raise ValueError("Invalid cache or reuse_live policy.")
+    if exact:
+        require_saved(node)
+    with materialization_admission(operation="repo_node_materialization"), realization_scope():
+        prepared, owned, classes = _node_inputs(node, preparation=_preparation) if _inputs is None else _inputs
+        if _memo is not None and node in _memo:
+            return _memo[node]
+        original = _NodeBindings((current._node_id, current) for _, current in owned)
+        runtime = _runtime_recipe(node)
+        graph = ConcreteDefinitionGraph.from_root(runtime)
+        selected = _NodeBindings() if _memo is None else _memo
+        constrained = [current if _effective is None else _effective[current] for _, current in owned]
+        if not exact and cache != "none" and all(current.object_id is None and current.state is None for current in constrained):
+            candidate = repo.get_cached(runtime)
+            if candidate is not None and _same_creation(candidate, node) and all(current not in selected or selected[current] is candidate.graph_at(path)
+                                             for path, current in owned):
+                for path, current in owned:
+                    selected[current] = candidate.graph_at(path)
+                _publish_cache(repo, candidate, cache)
+                return candidate
+        completed = []
+        associations = [(path, current.state, current, classes[current]) for path, current in owned if current.state is not None]
+        hooks_started = False
+        phase, active_path = "construction", GraphPath()
+        paths = {current._node_id: path for path, current in owned}
+        publish_structural = not exact and all(current.state is None for current in constrained)
+        from contextlib import nullcontext
+        source_context = (_selected_state_sources(repo, associations, source_store=source_store, source_stores=source_stores)
+                          if _sources is None else nullcontext(_sources))
+        with source_context as sources, ExitStack() as reservations:
+            try:
+                identity_reservation = _identity_reservation
+                if exact:
+                    from .state import reserve
+                    identities = tuple(current.object_id for _, current in owned if current._stateful_role)
+                    if identity_reservation is None:
+                        identity_reservation = reservations.enter_context(reserve(node, (), identities))
+                    else:
+                        identity_reservation._covers_object_ids(identities)
+                for cdef in graph.topological_order(dependencies_first=True):
+                    if cdef in selected:
+                        continue
+                    source = original.get(cdef) if _effective is None else _effective.get(cdef)
+                    if source is None:
+                        continue
+                    obj = None
+                    active_path, phase = paths[source._node_id], "construction"
+                    if exact and reuse_live != "never" and source.object_id is not None:
+                        candidates = [candidate for candidate in repo._all_live_candidates(reservation=identity_reservation)
+                                      if candidate.object_id == source.object_id
+                                      and candidate.definition.graph_equal(cdef)
+                                      and _same_creation(candidate, source)
+                                      and (reuse_live == "greedy" or candidate._last_state_hash == source.state.key.codec_hash)
+                                      and all(candidate.graph_at(edge.path) is selected[edge.child]
+                                              for edge in graph.outgoing(cdef) if edge.kind is EdgeKind.MATERIALIZE)]
+                        if len(candidates) == 1:
+                            obj = candidates[0]
+                    elif not exact and source.object_id is None and source.state is None and cache != "none":
+                        obj = repo.get_cached(cdef)
+                        if obj is not None and (not _same_creation(obj, source) or any(obj.graph_at(edge.path) is not selected[edge.child]
+                                                   for edge in graph.outgoing(cdef) if edge.kind is EdgeKind.MATERIALIZE)):
+                            obj = None
+                    if obj is None:
+                        cls = classes[source]
+                        args, kwargs = project_cdef_call(source, cls=cls)
+                        rt_args = from_canonical_local(args, repo=repo, resolve_cdef=lambda child: selected[child])
+                        rt_kwargs = from_canonical_local(kwargs, repo=repo, resolve_cdef=lambda child: selected[child])
+                        with construction_identity(source.object_id):
+                            obj = cls(*rt_args, repo=repo, __cdef__=cdef, **rt_kwargs)
+                        repo._num_constructions += 1
+                        bound = inspect.signature(cls.__init__).bind(obj, *rt_args, **rt_kwargs)
+                        bound.apply_defaults()
+                        parameters = dict(bound.arguments)
+                        parameters.pop("self", None)
+                        selected[cdef] = obj
+                        attach_runtime_binding(repo, cdef, obj, selected, parameters)
+                        from .repo_plan import _record_runtime_values
+                        from .utils.graph.path import Parameter
+                        for name, value in source.parameters.items():
+                            _record_runtime_values(value, parameters[name], GraphPath((Parameter(name),)), obj._runtime_projection)
+                    selected[cdef] = obj
+                    completed.append(obj)
+                    # Retain construction selections, not newly captured states.
+                    obj._construction_node = source
+                    if source.state is not None:
+                        from .state import reserve_node
+                        if identity_reservation is None:
+                            reservations.enter_context(reserve_node(obj))
+                        else:
+                            identity_reservation._covers_object_ids((obj.object_id,))
+                        lock = obj._save_load_reservation
+                        if not lock.acquire(blocking=False):
+                            raise RepoLoadError("Live selected node is already reserved by save or restore.")
+                        reservations.callback(lock.release)
+                        hooks_started = True
+                        phase = "restore"
+                        if _hook_state is not None:
+                            _hook_state[0] = True
+                        obj.restore_state_from_dir(sources[source.state.key].data_directory, codec=source.state.codec)
+                        obj._last_state_hash = source.state.key.codec_hash
+                    if publish_structural:
+                        _publish_cache(repo, obj, cache)
+                root = selected[runtime]
+                identities = {path: selected[current].object_id for path, current in owned if current._stateful_role}
+                apply_exact_reference_identity(root, ObjectRef(runtime, identities))
+                if not publish_structural:
+                    for obj in completed:
+                        _publish_cache(repo, obj, cache)
+                if exact:
+                    root._last_state_ref = node
+                return root
+            except BaseException as error:
+                if hooks_started:
+                    repo._invalidate_restoration_target(completed)
+                if not isinstance(error, Exception):
+                    raise
+                operation = "Exact restore" if phase == "restore" else "Error constructing"
+                recovery = "; affected live graph requires fresh materialization" if hooks_started else ""
+                raise RepoLoadError(f"{operation} at {active_path!s} failed: {error}{recovery}") from error
+
+
+def materialize_nodes(repo, roots, *, cache="weak", reuse_live="matching"):
+    """Admit one Node signature boundary before any selected constructor or hook.
+
+    roots is an ordered tuple of Nodes, live Objects or supported containers.
+    Ref/quotation values remain terminal. Returns runtime values in the same
+    container families with occurrence aliases retained across roots. All selected
+    LocalStates preflight together under fresh full-key leases; conflicting state
+    demands for one ObjectId raise RepoLoadError before effects. cache/reuse_live
+    follow realize_node. Failures after a hook invalidate completed affected live
+    graphs, including earlier roots. This owns no managed lifecycle policy.
+    """
+    from .canonical import node_kind, NodeKind, rebuild_sequence_kind, rebuild_dict_kind
+    from .node import Node
+    from .repo import RepoLoadError
+    from .links import DefLink
+    from .quoted import QuotedDef, SelectorSpec
+    from .node import _owned_nodes
+
+    normalization = {}
+    nodes = {}
+
+    def container(value, visit):
+        if type(value) is frozenset:
+            return frozenset(visit(child) for child in value)
+        kind = node_kind(value)
+        if isinstance(value, Mapping):
+            return rebuild_dict_kind(kind, {key: visit(child) for key, child in value.items()})
+        return rebuild_sequence_kind(kind, (visit(child) for child in value))
+
+    def normalize(value):
+        marker = id(value)
+        if marker in normalization:
+            return normalization[marker]
+        if isinstance(value, Definition):
+            result = value.concretize(repo=repo)
+            nodes.setdefault(result._view, result)
+        elif isinstance(value, ConcreteDefinition):
+            from .node import _as_node_view
+            result = _as_node_view(value)
+            nodes.setdefault(result._view, result)
+        elif isinstance(value, (Object, QuotedDef, SelectorSpec)):
+            if isinstance(value, Object):
+                from .repo import RepoSaveError
+                try:
+                    repo._state_graph_evidence(value)
+                except RepoSaveError as error:
+                    raise RepoLoadError("Live graph is unusable for materialization; use fresh materialization.") from error
+            result = value
+        elif isinstance(value, DefLink):
+            result = value if value.kind is EdgeKind.REF else normalize(value.target)
+        elif node_kind(value) in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET, NodeKind.DICT,
+                                  NodeKind.FROZEN_LIST, NodeKind.FROZEN_TUPLE, NodeKind.FROZEN_SET, NodeKind.FROZEN_DICT}:
+            result = container(value, normalize)
+        else:
+            result = value
+        normalization[marker] = result
+        return result
+
+    normalized = tuple(normalize(root) for root in roots)
+    associations, demands = [], {}
+    effective, paths, inputs = _NodeBindings(), {}, {}
+    shared_classes = _NodeBindings()
+    from .node import _semantic_equal
+    for root in nodes.values():
+        inputs[root._view] = _node_inputs(root, classes=shared_classes)
+        _, owned, classes = inputs[root._view]
+        for path, current in owned:
+            previous = effective.get(current)
+            paths.setdefault(current._node_id, path)
+            if previous is not None:
+                if not _semantic_equal(previous, current, topology=True, facets=False):
+                    raise RepoLoadError("Boundary has incompatible effective construction views for one occurrence.")
+                for left, right in ((previous.object_id, current.object_id), (previous.state, current.state)):
+                    if left is not None and right is not None and left != right:
+                        raise RepoLoadError("Boundary has incompatible effective identity/state demands for one occurrence.")
+                current = previous.with_realization(
+                    identities={GraphPath(): previous.object_id or current.object_id},
+                    states={GraphPath(): previous.state or current.state})
+            effective[current] = current
+    for current in effective.values():
+        if current.state is not None:
+            if current.object_id is not None:
+                previous = demands.setdefault(current.object_id, current.state)
+                if previous != current.state:
+                    raise RepoLoadError("Boundary has incompatible effective state demands for one ObjectId.")
+            associations.append((paths[current._node_id], current.state, current, shared_classes[current]))
+    for _, owned, _ in inputs.values():
+        identities = [effective[current].object_id for _, current in owned if effective[current].object_id is not None]
+        if len(set(identities)) != len(identities):
+            raise RepoLoadError("Independent boundary Nodes cannot share an ObjectId.")
+    memo = _NodeBindings()
+    hook_state = [False]
+    from .node import require_saved
+
+    def realize(value):
+        if isinstance(value, Node):
+            try:
+                require_saved(value)
+                exact = True
+            except ValueError:
+                exact = False
+            return realize_node(repo, value, cache=cache, reuse_live=reuse_live, exact=exact,
+                                _memo=memo, _sources=sources, _hook_state=hook_state,
+                                _effective=effective, _inputs=inputs[value._view])
+        if isinstance(value, (Object, QuotedDef, SelectorSpec)):
+            return value
+        if isinstance(value, DefLink):
+            return value.target if value.kind is EdgeKind.REF else realize(value.target)
+        if node_kind(value) in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET, NodeKind.DICT,
+                                NodeKind.FROZEN_LIST, NodeKind.FROZEN_TUPLE, NodeKind.FROZEN_SET, NodeKind.FROZEN_DICT}:
+            return container(value, realize)
+        return value
+
+    with _selected_state_sources(repo, associations) as sources:
+        try:
+            return tuple(realize(root) for root in normalized)
+        except BaseException:
+            # An earlier root may already have restored user state. There is no
+            # transaction across hooks; retire the retained boundary on failure.
+            if hook_state[0]:
+                repo._invalidate_restoration_target(tuple(memo.values()))
+            raise
+
+
+class PreparedRestoration:
+    """One-shot, owner-thread restoration handoff retaining sources and live ownership.
+
+    Create with prepare_restoration. apply() returns the requested SavedNode for
+    full restore, or None for partial apply; close() abandons unused preparation.
+    Both release leases/reservations. Reuse, foreign-thread use and closed use
+    raise RuntimeError. Preflight failure leaves the live graph usable; any failure
+    after hook entry invalidates its entire retained graph. No rollback is promised.
+
+    Args:
+        repo: Repo owning connected source handles and live binding evidence.
+        obj: Usable live root Object to restore without identity replacement.
+        states: Optional rooted StateSpec or exact path/LocalState mapping.
+        saved: Alternative complete SavedNode checked against the original live
+            object projection; its construction pins are adopted after success.
+        reservation: Optional active graph reservation covering this exact target.
+        source_store, source_stores: Optional connected full-key source overrides.
+
+    Raises:
+        TypeError, ValueError: For malformed constraints or projection mismatch.
+        RepoLoadError: For unavailable/incompatible state or unusable live targets.
+        RepoSaveError: For conflicting, foreign or inactive graph ownership.
+
+    Preparation retains leases and live reservations without running hooks. The
+    factory prepare_restoration validates mutually exclusive partial/full inputs.
+    """
+
+    def __init__(self, repo, obj, states=None, *, saved=None, reservation=None, source_store=None, source_stores=None):
+        import os
+        from threading import get_ident
+        from .node import _owned_nodes
+        from .node_views import adopt_saved_view
+        from .repo import RepoLoadError
+
+        self._owner = os.getpid(), get_ident()
+        self._closed = False
+        self._lifetime = ExitStack()
+        self.repo, self.obj, self.saved = repo, obj, saved
+        self.plan = None
+        try:
+            if getattr(obj, "_restore_failed", False):
+                raise RepoLoadError("Cannot restore an invalidated live graph; use fresh materialization.")
+            self.plan, self.nodes, ids = repo._state_graph_evidence(obj)
+            receiver = self.plan.node
+            self.adopted = None if saved is None else adopt_saved_view(receiver, saved)
+            if saved is None and states is not None:
+                from .state_values import LocalState
+                if not isinstance(states, Mapping) or any(not isinstance(state, LocalState) for state in states.values()):
+                    raise TypeError("Partial apply requires a rooted mapping of exact LocalStates.")
+                owned_occurrences = {current._occurrence for _, current in _owned_nodes(receiver)}
+                for path, state in states.items():
+                    destination = receiver.at(path)
+                    if destination._occurrence not in owned_occurrences or not destination._stateful_role:
+                        raise ValueError("Selected state is outside the live stateful ownership closure.")
+            self.partial_view = receiver.with_realization(states=states) if saved is None else None
+            selected = receiver.with_realization(states={p: None for p, _ in _owned_nodes(receiver)})
+            selected = selected.with_realization(states=saved.state_spec() if saved is not None else states)
+            _, owned, classes = _node_inputs(selected)
+            self.actions = [(path, current.state, obj.graph_at(path)) for path, current in owned if current.state is not None]
+            if any(not isinstance(target, Serializable) for _, _, target in self.actions):
+                raise RepoLoadError("Selected state has no retained stateful live destination.")
+            if reservation is None:
+                self._lifetime.enter_context(repo._reserve_state_graph_evidence(self.plan, self.nodes, ids))
+            else:
+                reservation._covers(self.nodes, ids)
+            associations = [(path, current.state, current, classes[current]) for path, current in owned if current.state is not None]
+            self.sources = self._lifetime.enter_context(_selected_state_sources(repo, associations, source_store=source_store, source_stores=source_stores))
+            for target in sorted((t for _, _, t in self.actions), key=id):
+                lock = target._save_load_reservation
+                if not lock.acquire(blocking=False):
+                    raise RepoLoadError("Live state is already reserved by save or restore.")
+                self._lifetime.callback(lock.release)
+        except BaseException:
+            self.close()
+            raise
+
+    def _check(self):
+        import os
+        from threading import get_ident
+        if self._closed or self._owner != (os.getpid(), get_ident()):
+            raise RuntimeError("Prepared restoration is closed, consumed or belongs to another process/thread.")
+
+    def __enter__(self):
+        """Return this active preparation; reject consumed or foreign ownership."""
+        self._check()
+        return self
+
+    def __exit__(self, *exc):
+        """Release unused preparation without suppressing exceptions."""
+        self.close()
+
+    def close(self):
+        """Release this owner's unused preparation idempotently; run no hooks."""
+        if not self._closed:
+            self._check()
+            self._closed = True
+            self._lifetime.close()
+
+    def apply(self):
+        """Consume prepared evidence once, restore dependency-first and release it.
+
+        Returns the supplied SavedNode for full restoration, otherwise None.
+        Raises RepoLoadError on hook failure with fresh-materialization guidance;
+        the entire live graph is then invalidated. No historical receipt bypasses
+        hooks. Source leases remain held until every hook and adoption completes.
+        """
+        from .repo import RepoLoadError
+        from .repo_plan import validate_retained_save_plan
+        from .node import _owned_nodes
+        hooks_started = False
+        self._check()
+        try:
+            validate_retained_save_plan(self.plan, self.obj)
+            order = {id(self.plan.binding.objects[current]): index
+                     for index, current in enumerate(self.plan.graph.topological_order(dependencies_first=True))
+                     if current in self.plan.binding.objects}
+            for path, state, target in sorted(self.actions, key=lambda item: order[id(item[2])]):
+                hooks_started = True
+                target.restore_state_from_dir(self.sources[state.key].data_directory, codec=state.codec)
+                target._last_state_hash = state.key.codec_hash
+            if self.adopted is not None:
+                for path, current in _owned_nodes(self.adopted):
+                    self.obj.graph_at(path)._construction_node = current
+                self.obj._last_state_ref = self.saved
+            elif self.partial_view is not None:
+                for path, current in _owned_nodes(self.partial_view):
+                    self.obj.graph_at(path)._construction_node = current
+            return self.saved
+        except BaseException as error:
+            if hooks_started:
+                self.repo._invalidate_restoration_target(self.nodes)
+            if not isinstance(error, Exception):
+                raise
+            raise RepoLoadError("Targeted exact restore failed; affected live graph requires fresh materialization.") from error
+        finally:
+            self.close()
+
+
+def prepare_restoration(repo, obj, states=None, *, saved=None, reservation=None, source_store=None, source_stores=None):
+    """Prepare a one-shot partial/full restore without entering any state hook.
+
+    repo/obj select the live ownership scope. states is a rooted LocalState map;
+    saved instead requires the original projection-compatible SavedNode and adopts
+    its construction pins on success. Optional reservation must already cover the
+    graph. Source overrides map full StateKeys to connected Stores. Returns an
+    owned PreparedRestoration that must be applied or closed. Validation failures
+    propagate before hooks and release every borrowed resource.
+    """
+    if saved is not None and states is not None:
+        raise ValueError("Select partial states or a full saved graph, not both.")
+    return PreparedRestoration(repo, obj, states, saved=saved, reservation=reservation,
+                               source_store=source_store, source_stores=source_stores)
 
 
 def preflight_symbolic_materialization(*roots: Any, repo: Any = None) -> None:
@@ -424,10 +949,53 @@ class _ExactSnapshotSelection:
     paths: Mapping[Any, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class NodeStateSelection:
+    """Detached selected association; path/state/store grant no payload validity.
+
+    path is a primary GraphPath, state a LocalState and store the selected connected
+    Store. This metadata carries no reader, bytes, lease or live Object. A later
+    consumer must acquire native leases and freshly validate the full StateKey.
+    """
+
+    path: GraphPath
+    state: Any
+    store: Any
+
+
+@dataclass(frozen=True, slots=True)
+class NodeLoadPlan:
+    """SavedNode metadata and pure preparation for a future exact realization.
+
+    state_ref is the original SavedNode; actions retain detached full-key source
+    choices. preparation owns immutable graph facts only. Current availability,
+    class admission and active-use protection are revalidated by execution; a plan
+    cannot authorize skipping restoration. source_store/source_stores retain the
+    explicit caller source scope, not a borrowed payload lifetime.
+    """
+
+    state_ref: Any
+    actions: tuple[NodeStateSelection, ...]
+    preparation: Any
+    source_store: Any = None
+    source_stores: Any = None
+
+
 def build_exact_state_load_plan(
         repo, state_ref, *, source_store=None, source_stores=None,
         _defer_payload: bool = False, _read_cut=None) -> ExactStateLoadPlan:
-    """Verify complete StateRef authority without constructing or reserving Objects.
+    """Preflight complete SavedNode state without constructing or restoring Objects.
+
+    Node inputs return a NodeLoadPlan retaining pure preparation and detached
+    selected associations. Fresh full-key leases cover this preflight only;
+    execute_exact_state_load_plan revalidates current sources and class admission.
+    source_stores maps StateKeys to connected Stores for Node inputs. Legacy
+    snapshot read cuts are rejected for Nodes, and no borrowed payload reader is
+    retained in their detached plan. Incomplete metadata raises TypeError/ValueError
+    and missing/incompatible selected state raises RepoLoadError before hooks.
+
+    The remaining arguments describe the legacy in-memory StateRef adapter;
+    format-4 Stores do not admit its retired persisted snapshot records.
 
     Args:
         repo (Repo): Repo containing every Store required by the exact closure.
@@ -470,6 +1038,18 @@ def build_exact_state_load_plan(
     from .reference_values import StateRef
     from .store.store import Store
 
+    from .node import Node, require_saved
+    if isinstance(state_ref, Node):
+        from types import MappingProxyType
+        if _read_cut is not None:
+            raise ValueError("Node state preflight owns fresh full-key readers, not legacy snapshot read cuts.")
+        require_saved(state_ref)
+        prepared, owned, classes = _node_inputs(state_ref)
+        associations = [(path, node.state, node, classes[node]) for path, node in owned if node.state is not None]
+        with _selected_state_sources(repo, associations, source_store=source_store, source_stores=source_stores) as sources:
+            actions = tuple(NodeStateSelection(path, state, sources[state.key].store) for path, state, _, _ in associations)
+        return NodeLoadPlan(state_ref, actions, prepared, source_store,
+                            None if source_stores is None else MappingProxyType(dict(source_stores)))
     if not isinstance(state_ref, StateRef):
         raise TypeError("Exact load requires a StateRef.")
     if source_stores is not None:
@@ -926,6 +1506,11 @@ def execute_exact_state_load_plan(
     from .repo import RepoLoadError
     from .repo_plan import _NodeBindings, apply_exact_reference_identity, attach_runtime_binding, realization_scope
 
+    if isinstance(plan, NodeLoadPlan):
+        return realize_node(repo, plan.state_ref, exact=True, reuse_live=reuse_live,
+                            cache=cache, source_store=plan.source_store,
+                            source_stores=plan.source_stores, _preparation=plan.preparation,
+                            _identity_reservation=_identity_reservation)
     if reuse_live not in {"matching", "greedy", "never"}:
         raise ValueError("reuse_live must be 'matching', 'greedy', or 'never'.")
     if class_manifest is None:

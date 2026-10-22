@@ -8,6 +8,8 @@ threads in one process from mutating the same retained live graph at once.
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
+from contextlib import contextmanager
+from contextvars import ContextVar
 import os
 from threading import RLock, get_ident
 from typing import Iterable
@@ -17,6 +19,22 @@ _REGISTRY_LOCK = RLock()
 _OBJECT_OWNERS: dict[object, "StateGraphReservation"] = {}
 _LIVE_OWNERS: dict[int, "StateGraphReservation"] = {}
 _AUTHORITY = object()
+_CONSTRUCTION_IDENTITY = ContextVar("dryml_construction_identity", default=None)
+
+
+@contextmanager
+def construction_identity(identity):
+    """Supply an exact ObjectId to one constructor without a user keyword.
+
+    identity is an ObjectId or None. Yields None and restores the previous
+    task-local selection on every exit. This allocates no identity and grants no
+    state ownership; the materializing caller owns validation and reservation.
+    """
+    token = _CONSTRUCTION_IDENTITY.set(identity)
+    try:
+        yield
+    finally:
+        _CONSTRUCTION_IDENTITY.reset(token)
 
 
 def _clear_inherited_reservations() -> None:

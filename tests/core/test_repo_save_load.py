@@ -86,30 +86,28 @@ def _run_main_script(tmp_path: Path, code: str) -> subprocess.CompletedProcess[s
     )
 
 
-@pytest.mark.parametrize("store_name", ("store", "store.zip"), ids=("dir", "zip"))
+@pytest.mark.parametrize("store_name", ("store",), ids=("dir",))
 def test_main_module_object_save_load_preserves_definition(tmp_path, store_name):
     """Issue #25: a main-defined Object reloads with its class, recipe, and data."""
 
     completed = _run_main_script(tmp_path, f"""
         from contextlib import closing
         from dryml.core import Object, Repo
+        from dryml.core.store.dir import DirStore
         from dryml.core.symbol import SourceSpec
-        from tests.conftest import _synthetic_environment_record
 
         class Data(Object):
             def __init__(self, data):
                 self.data = data
 
         assert Data.__module__ == "__main__"
-        with closing(Repo({str(tmp_path / store_name)!r})) as repo:
+        with closing(Repo(DirStore({str(tmp_path / store_name)!r}))) as repo:
             saved = Data([1, 2, 3, 4, 5], repo=repo)
             definition = saved.definition
             assert isinstance(definition.cls, SourceSpec)
-            repo.save_object(
-                saved, main=True, _snapshot_observer=_synthetic_environment_record,
-            )
+            repo.save_object(saved, main=True)
 
-        with closing(Repo({str(tmp_path / store_name)!r})) as reopened:
+        with closing(Repo(DirStore({str(tmp_path / store_name)!r}))) as reopened:
             assert reopened.main_def.graph_equal(definition)
             loaded = reopened.load_object(reopened.main_def)
             assert loaded is not saved
@@ -121,29 +119,28 @@ def test_main_module_object_save_load_preserves_definition(tmp_path, store_name)
     assert completed.returncode == 0, completed.stderr
 
 
-@pytest.mark.parametrize("store_name", ("store", "store.zip"), ids=("dir", "zip"))
+@pytest.mark.parametrize("store_name", ("store",), ids=("dir",))
 def test_main_module_state_load_without_live_class_preserves_identity(tmp_path, store_name):
     """A fresh reader restores a main-defined class, exact ObjectId, and payload."""
 
     saved = _run_main_script(tmp_path, f"""
         from contextlib import closing
         from dryml.core import Repo
+        from dryml.core.store.dir import DirStore
         from dryml.core.object import Pickleable
-        from tests.conftest import _synthetic_environment_record
+        from tests.core.test_repo_save_load import saved_digest
 
         class Data(Pickleable):
             def __init__(self, data):
                 self.data = data
 
         assert Data.__module__ == "__main__"
-        with closing(Repo({str(tmp_path / store_name)!r})) as repo:
+        with closing(Repo(DirStore({str(tmp_path / store_name)!r}))) as repo:
             obj = Data([1, 2, 3, 4, 5], repo=repo)
             obj.result = {{"answer": 42}}
-            state = repo.save_object(
-                obj, main=True, _snapshot_observer=_synthetic_environment_record,
-            )
-            assert state.object == obj.object_ref
-            print(state.digest())
+            state = repo.save_object(obj, main=True)
+            assert repo.describe(obj).object_projection_equal(state)
+            print(saved_digest(state))
     """)
     assert saved.returncode == 0, saved.stderr
 
@@ -152,16 +149,17 @@ import __main__
 from contextlib import closing
 from dryml.core import Repo
 from dryml.core.symbol import SourceSpec
+from dryml.core.store.dir import DirStore
 
 assert "Data" not in vars(__main__)
-with closing(Repo({str(tmp_path / store_name)!r})) as repo:
-    state = repo.default_store.read_state_ref_record({saved.stdout.strip()!r}).state_ref
-    assert isinstance(state.definition.cls, SourceSpec)
-    assert repo.main_def.graph_equal(state.definition)
+with closing(Repo(DirStore({str(tmp_path / store_name)!r}))) as repo:
+    state = repo.default_store.read_node({saved.stdout.strip()!r}, kind="saved")
+    assert isinstance(state.cls, SourceSpec)
+    assert repo.main_def.graph_equal(state.creation_view())
     restored = repo.load_state_ref(state, reuse_live="never")
     assert type(restored).__name__ == "Data"
-    assert restored.definition.graph_equal(state.definition)
-    assert restored.object_ref == state.object
+    assert restored.definition.graph_equal(state.creation_view())
+    assert repo.describe(restored).object_projection_equal(state)
     assert restored.last_state_ref == state
     assert restored.data == [1, 2, 3, 4, 5]
     assert restored.result == {{"answer": 42}}
@@ -287,7 +285,7 @@ try:
 finally:
     session.reset()
 
-assert not tuple(repo.default_store.iter_state_ref_records())
+assert not (store_path / "graphs").exists()
 """
     )
 
@@ -417,14 +415,14 @@ def test_direct_layout_has_no_retired_object_or_generation_paths(tmp_path):
     assert "generation" not in " ".join(str(path) for path in Path(store.base_dir).rglob("*"))
 
 
-def test_structural_load_without_state_restore_builds_from_definition_authority(tmp_path):
+def test_explicit_build_uses_construction_defaults_instead_of_saved_state(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     saved = RestoreValue(10, repo=repo)
     saved.value = 20
     repo.save_object(saved)
 
-    loaded = Repo(DirStore(store.base_dir)).load_object(saved.definition)
+    loaded = saved.definition.build(repo=Repo(DirStore(store.base_dir)), cache="none")
 
     assert isinstance(loaded, RestoreValue)
     assert loaded.value == 10

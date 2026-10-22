@@ -4246,6 +4246,62 @@ class Repo:
         from .repo_plan import build_save_plan
         return build_save_plan(self, obj).node
 
+    def build(self, node, *, cache="weak"):
+        """Build a ConcreteNode, allocating only missing IDs and selected state once.
+
+        node must already be concretized; cache is weak/strong/none. Returns the
+        live root. TypeError/ValueError reject invalid metadata and RepoLoadError
+        reports unavailable state or realization failures. Unspecified state is
+        initialized normally. Selected state preflights before effects; hooks run
+        under active key leases without Store fences. Post-hook failure requires
+        fresh materialization, never automatic rollback.
+        """
+        from .materialization import realize_node
+        return realize_node(self, node, cache=cache)
+
+    def apply_state(self, obj, states, *, source_store=None, source_stores=None):
+        """Apply rooted LocalState selections, leaving unspecified live state untouched.
+
+        obj is a usable live Object; states is a StateSpec or path/LocalState map.
+        Optional source overrides select connected Stores by full StateKey.
+        Returns None, changes no identities/sharing and captures/publishes nothing.
+        Validation errors before hooks leave the graph usable. Hook failure raises
+        RepoLoadError and invalidates the graph, requiring fresh materialization.
+        """
+        from .materialization import prepare_restoration
+        with prepare_restoration(self, obj, states, source_store=source_store,
+                                 source_stores=source_stores) as prepared:
+            prepared.apply()
+
+    def prepare_restore(self, obj, node, *, reservation=None, source_store=None, source_stores=None):
+        """Return an owned one-shot full restoration handoff without running hooks.
+
+        obj is a live graph; node must be SavedNode metadata matching its original
+        canonical object projection. Optional reservation covers this exact graph;
+        source overrides select full StateKeys in connected Stores. The returned
+        PreparedRestoration must be applied or closed on this thread. It retains
+        live ownership and source leases, validates before hooks and adopts supplied
+        construction pins only on success. Type/Value/RepoLoad errors reject invalid
+        preparation without invalidating a usable graph.
+        """
+        from .materialization import prepare_restoration
+        return prepare_restoration(self, obj, saved=node, reservation=reservation,
+                                   source_store=source_store, source_stores=source_stores)
+
+    def restore(self, obj, node, *, reservation=None, source_store=None, source_stores=None):
+        """Fully restore a projection-compatible SavedNode into an existing live graph.
+
+        Parameters follow prepare_restore. Returns the supplied node after hooks
+        succeed once dependency-first and construction pins are adopted. Live
+        identities, ObjectIds and sharing are preserved. Before-hook validation
+        failure leaves the graph usable; post-hook failure raises RepoLoadError,
+        invalidates the graph and requires fresh materialization. No rollback,
+        capture, publication or last-save receipt shortcut occurs.
+        """
+        with self.prepare_restore(obj, node, reservation=reservation, source_store=source_store,
+                                  source_stores=source_stores) as prepared:
+            return prepared.apply()
+
     def save(
             self,
             obj: Object,
@@ -4453,6 +4509,24 @@ class Repo:
         from .materialization import preflight_symbolic_materialization
 
         preflight_symbolic_materialization(*roots, repo=self)
+
+        from .quoted import QuotedDef, SelectorSpec
+
+        def has_legacy(value):
+            if isinstance(value, (Object, QuotedDef, SelectorSpec)):
+                return False
+            if isinstance(value, (ObjectRef, StateRef)):
+                return True
+            if isinstance(value, DefLink) and value.kind is EdgeKind.REF:
+                return False
+            return any(has_legacy(edge.value) for edge in iter_value_edges(value))
+
+        if reservation is None and not reserved_live and not declaration_stores and not any(has_legacy(root) for root in roots):
+            from dryml.runtime import materialization_admission
+            from .materialization import materialize_nodes
+            with materialization_admission(operation="repo_node_boundary"):
+                return materialize_nodes(self, roots, cache="weak" if cache is None else cache,
+                                         reuse_live="matching" if reuse_live is None else reuse_live)
 
         canonical_memo = {}
 
@@ -4875,8 +4949,16 @@ class Repo:
         from .node import Node, _owned_nodes
         from .store.store import StoreCapabilityError
 
-        if any(n.object_id is not None or n.state is not None for _, n in _owned_nodes(cdef)):
-            raise StoreCapabilityError("Node identity/state materialization is not integrated yet.")
+        if isinstance(cdef, Node):
+            from .materialization import realize_node
+            from .cdef_identity import cdef_node_key
+            key = cdef_node_key(cdef)
+            if memo is not None and key in memo:
+                return memo[key]
+            result = realize_node(self, cdef, cache=cache)
+            if memo is not None:
+                memo[key] = result
+            return result
 
         with materialization_admission(operation="repo_materialize_cdef"):
             if memo is None:
@@ -4996,31 +5078,30 @@ class Repo:
                 )
 
     def load_object(self, x: Definition | ConcreteDefinition | Object, *, cache: CachePolicy = "weak") -> Object:
-        """Load existing structural authority without restoring mutable state.
+        """Load SavedNode state, or use the legacy plain-CDef structural adapter.
 
         Args:
-            x: Definition, CDef, or Object projected to its structural CDef.
+            x: A complete SavedNode, or a legacy plain CDef/Object structural input.
             cache: Cache tier for the resulting realization.
 
         Returns:
-            A structural live Object.
+            A live Object. Node inputs restore their complete selected state.
 
         Raises:
-            StoreCapabilityError: Before construction if a Node has identity/state
-                facets requiring the later Node materialization cutover.
+            ValueError: If a Node lacks saved completeness.
             TypeError: If ``x`` is an exact reference or unsupported root type.
             RepoLoadError: If no connected Store has the structural authority.
 
         Side Effects:
-            May construct and cache live objects. Exact snapshots are loaded only
-            by :meth:`load_state_ref`.
+            May construct, restore and cache live objects. Each Node use freshly
+            validates selected full keys before hooks and holds active leases.
         """
         from .reference_values import ObjectRef, StateRef, StateSelectorRef
 
         from .node import Node, _all_nodes
         from .store.store import StoreCapabilityError
-        if isinstance(x, Node) and any(n.object_id is not None or n.state is not None for n in _all_nodes(x)):
-            raise StoreCapabilityError("Node identity/state materialization is not integrated yet.")
+        if isinstance(x, Node):
+            return self.load(x, cache=cache)
 
         if isinstance(x, (ObjectRef, StateRef, StateSelectorRef)):
             raise TypeError("Repo.load_object is structural; use build_object_ref or load_state_ref for exact references.")
@@ -5042,49 +5123,40 @@ class Repo:
             cache: CachePolicy = "weak",
             source_store=None,
             source_stores=None) -> Object:
-        """Exactly restore one authoritative StateRef after complete preflight.
+        """Restore complete SavedNode metadata with fresh selected-state preflight.
 
         Args:
-            state_ref: Immutable StateRef that must have byte-equivalent direct
-                snapshot authority or enclosing closure authority in a connected
-                Store.
+            state_ref: Immutable complete SavedNode with full LocalState selections.
             reuse_live: ``"matching"`` reuses one matching live checkpoint,
                 ``"greedy"`` restores one unique candidate in place, and
                 ``"never"`` always builds fresh.
             cache: Cache tier populated only after the complete realization has
                 succeeded.
-            source_store: Optional connected Store selecting complete direct or
-                enclosing root snapshot evidence.
-            source_stores: Optional exact StateRef-to-connected-Store mapping
-                selecting independently routed child snapshot evidence. Every key
-                must be a StateRef in the exact closure and cannot select a root
-                Store different from ``source_store``.
+            source_store: Optional connected Store for selected full keys.
+            source_stores: Optional full-StateKey-to-connected-Store overrides,
+                confined to the selected closure.
 
         Returns:
-            A fully restored root preserving the StateRef's ObjectIds and graph
+            A fully restored root preserving the SavedNode's ObjectIds and graph
             topology.
 
         Raises:
-            StoreCapabilityError: After metadata completeness validation, before
-                effects, for new SavedNode inputs awaiting materialization cutover.
+            ValueError: If saved completeness or source scope is invalid.
             RepoLoadError: If exact authority preflight, including selected
                 snapshot or local payload authority, construction, or restore
                 fails. No fresh partial cache entry is published.
-            MetadataConflictError: If unqualified replicas or a live cached
-                identity disagree with selected captured lineage evidence.
             TypeError: If ``source_store`` is not a Store, ``source_stores`` is
-                not a mapping, or a mapping key/value is not a StateRef/Store.
-            ValueError: If a selected Store is disconnected, root selectors
-                differ, or a mapping names a StateRef outside the exact closure.
+                not a mapping, or a mapping key/value is not a StateKey/Store.
 
         Side Effects:
-            May restore a uniquely eligible greedy live Object. A failed greedy
-            restore clears its state hash and evicts it from Repo caches.
+            Restores selected nodes once, including eligible reused live Objects.
+            A failed post-hook realization invalidates affected live nodes and
+            requires fresh materialization; no rollback is claimed.
             A successful top-level exact load installs ``state_ref`` as the
             returned root's last-state receipt; descendants receive no synthetic
-            receipt. Selected lineage facts are reconciled before construction,
-            payload loading, hooks, or live reuse, and are installed only on new
-            exact identities rather than retimestamping conflicting live objects.
+            receipt. Legacy persisted snapshot formats are not converted or
+            substituted for missing Node state. Annotation/lineage metadata feeds
+            remain a separate consumer boundary.
         """
         from dryml.runtime import materialization_admission
         from .materialization import build_exact_state_load_plan, execute_exact_state_load_plan
@@ -5093,8 +5165,10 @@ class Repo:
         from .node import Node, require_saved
         from .store.store import StoreCapabilityError
         if isinstance(state_ref, Node):
-            require_saved(state_ref)
-            raise StoreCapabilityError("SavedNode loading is not integrated yet.")
+            from .materialization import realize_node
+            return realize_node(self, require_saved(state_ref), exact=True,
+                                reuse_live=reuse_live, cache=cache,
+                                source_store=source_store, source_stores=source_stores)
         if not isinstance(state_ref, StateRef):
             raise TypeError("load_state_ref requires a StateRef.")
         with materialization_admission(operation="repo_load_state_ref"):
@@ -5116,6 +5190,9 @@ class Repo:
         from .reference_values import StateRef
         from .state import reserve
 
+        from .node import Node
+        if isinstance(state_ref, Node):
+            return self.load_state_ref(state_ref, reuse_live=reuse_live, cache=cache)
         if not isinstance(state_ref, StateRef):
             raise TypeError("exact identity reservation requires a StateRef.")
         with materialization_admission(operation="repo_load_state_ref"):
@@ -5139,19 +5216,15 @@ class Repo:
     def restore_state_ref_into(
             self, obj: Object, state_ref, *, reservation=None,
             source_store=None, source_stores=None):
-        """Restore an authoritative snapshot into the exact supplied live graph.
+        """Restore a SavedNode into the supplied projection-compatible live graph.
 
         Args:
-            obj: Existing live root whose ObjectRef and retained runtime bindings
-                must exactly match ``state_ref``.
-            state_ref: Complete authoritative StateRef to restore.
+            obj: Existing live root whose original object projection and retained
+                live bindings match the supplied saved graph.
+            state_ref: Complete SavedNode to restore without replacing identities.
             reservation: Optional active reservation returned for this exact graph.
-            source_store: Optional connected Store selecting complete root
-                snapshot evidence.
-            source_stores: Optional exact StateRef-to-connected-Store mapping
-                selecting independently routed child snapshot evidence. Every key
-                must be a StateRef in the exact closure and cannot select a root
-                Store different from ``source_store``.
+            source_store: Optional connected Store for selected full keys.
+            source_stores: Optional full-StateKey-to-connected-Store overrides.
 
         Returns:
             The requested ``state_ref`` after every local restore hook succeeds.
@@ -5172,16 +5245,20 @@ class Repo:
                 differ, or a mapping names a StateRef outside the exact closure.
 
         Side Effects:
-            Runs local hooks dependency-first without candidate search or object
-            replacement. Successful completion updates only ``obj.last_state_ref``.
-            Selected lineage facts are validated against every supplied live node
-            before hooks; a node without active evidence receives the selected
-            fact only after all conflicts and locks have been checked.
+            Runs local hooks once dependency-first under active key leases, without
+            writer fences, candidate search or Object replacement. On success,
+            adopts supplied construction pins and updates the root receipt. Failure
+            after hook entry invalidates the graph; recover by fresh materialization,
+            not rollback. Validation failure before hooks leaves it usable.
         """
 
         from .materialization import build_exact_state_load_plan
         from .reference_values import StateRef
 
+        from .node import Node
+        if isinstance(state_ref, Node):
+            return self.restore(obj, state_ref, reservation=reservation,
+                                source_store=source_store, source_stores=source_stores)
         if not isinstance(obj, Object):
             raise TypeError("restore_state_ref_into requires a live Object target.")
         if not isinstance(state_ref, StateRef):
@@ -5327,28 +5404,35 @@ class Repo:
     def _invalidate_restoration_target(self, nodes) -> None:
         """Conservatively retire live instances after an in-place hook failure."""
 
-        for node in nodes:
+        affected = {id(node): node for node in nodes}
+        candidates = _unique_objects(
+            obj for _, obj in (*self.strong_obj_cache.items(), *self.weak_obj_cache.items()))
+        for candidate in candidates:
+            if any(id(bound) in affected for bound in getattr(candidate, "_runtime_projection", {}).values()):
+                affected[id(candidate)] = candidate
+        for node in affected.values():
             node._restore_failed = True
             node._last_state_hash = None
             node._last_state_ref = None
             self._evict_live(node)
 
     def load(self, cdef: ConcreteDefinition, *, cache: CachePolicy = "weak") -> Object:
-        """Load legacy structural authority; validate/refuse SavedNode materialization.
+        """Load a complete SavedNode with fresh full-key state validation.
 
-        cdef is a structural CDef or a supplied Node; cache is the existing cache
-        policy. Returns a structural Object for supported legacy authority. A Node
-        must be saved-complete, then raises StoreCapabilityError until the owning
-        materialization cutover. Incomplete Nodes raise ValueError before Store
-        reads, construction or restore. Legacy load failures raise RepoLoadError.
+        cdef is the supplied SavedNode; cache is weak/strong/none. Returns a live
+        graph with the selected ObjectIds and alias partition. Incomplete Nodes
+        raise TypeError/ValueError before effects. Missing/incompatible/corrupt
+        selected state raises RepoLoadError without initialization or fallback.
+        Selected hooks run once dependency-first under active leases and outside
+        writer fences, even on eligible cache reuse. Plain legacy structural CDefs
+        retain their separate structural adapter and cannot select new state.
         """
         from dryml.runtime import materialization_admission
         from .node import Node, require_saved
         from .store.store import StoreCapabilityError
 
         if isinstance(cdef, Node):
-            require_saved(cdef)
-            raise StoreCapabilityError("SavedNode loading is not integrated yet.")
+            return self.load_state_ref(require_saved(cdef), cache=cache)
         with materialization_admission(operation="repo_load"):
             return self.load_object(cdef, cache=cache)
 
@@ -5356,6 +5440,9 @@ class Repo:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_load_or_build"):
+            from .node import Node
+            if isinstance(x, Node):
+                return self.build(x.concretize(repo=self), cache=cache)
             if isinstance(x, Object):
                 x = x.definition
             elif isinstance(x, Definition):
@@ -6139,19 +6226,24 @@ def save_object(
 def load_object(
         cdef: ConcreteDefinition | None = None, repo=None,
         *, cache: CachePolicy = "weak") -> Object:
-    """Load existing structural CDef authority through a managed Repo.
+    """Load SavedNode state or legacy plain-CDef authority through a Repo lifetime.
 
     Args:
-        cdef: CDef to construct, or ``None`` to select the Store main CDef.
+        cdef: Complete SavedNode, or ``None`` to select Store main metadata.
+            A legacy plain CDef uses the separate structural adapter.
         repo: Explicit Repo or Store-like source.
         cache: Cache tier for the resulting structural realization.
 
     Returns:
-        A live structural Object without exact state restoration.
+        A live Object; Node inputs restore complete selected state as in Repo.load.
 
     Raises:
-        ValueError: If neither ``cdef`` nor a Store main CDef is available.
+        ValueError: If no main metadata is available, or a Node is not saved-complete.
         RepoLoadError: If the selected CDef lacks current Store authority.
+
+    Node use freshly validates full-key sources under native leases before hooks;
+    hooks may mutate eligible live candidates. Post-hook failure requires fresh
+    materialization. This helper performs no capture or saved-state inference.
     """
     from dryml.runtime import materialization_admission
 
@@ -6167,39 +6259,33 @@ def load_object(
 def load_state_ref(
         state_ref, repo=None, *, reuse_live: LiveReusePolicy = "matching",
         cache: CachePolicy = "weak", source_store=None, source_stores=None) -> Object:
-    """Exactly load one immutable StateRef through a managed Repo.
+    """Exactly load a complete SavedNode through the selected Repo lifetime.
 
     Args:
-        state_ref: Exact immutable snapshot authority.
+        state_ref: Immutable complete SavedNode with full LocalState selections.
         repo: Explicit Repo or Store-like source containing the full closure.
         reuse_live: Policy for eligible already-live exact nodes.
         cache: Cache tier for the completed realization.
-        source_store: Optional connected Store selecting complete root snapshot
-            evidence.
-        source_stores: Optional exact StateRef-to-connected-Store mapping
-            selecting independently routed child snapshot evidence. Keys must be
-            StateRefs in the exact closure and cannot conflict with
-            ``source_store`` for the root.
+        source_store: Optional connected Store for selected full keys.
+        source_stores: Optional full-StateKey-to-connected-Store overrides.
 
     Returns:
-        A graph restored from the requested exact StateRef.
+        A graph restored from the requested saved selections.
 
     Raises:
         RepoLoadError: If exact authority, including selected snapshot/local
             payload authority, or its local-state closure is missing or corrupt.
-        MetadataConflictError: If unqualified replicas or a live cached identity
-            disagree with selected captured lineage evidence.
         TypeError: If ``source_store`` is not a Store, ``source_stores`` is not a
-            mapping, or a mapping key/value is not a StateRef/Store.
-        ValueError: If a selected Store is disconnected, root selectors differ,
-            or a mapping names a StateRef outside the exact closure.
+            mapping, or a mapping key/value is not a StateKey/Store.
+        ValueError: If metadata is incomplete, a selected Store is disconnected,
+            or a mapping names a StateKey outside the selected closure.
 
     Side Effects:
         May construct or reuse live Objects. On success, installs ``state_ref``
         as the returned top-level root's last-state receipt only; descendants do
-        not receive projected or synthetic receipts. Selected lineage facts are
-        resolved before materialization and never retimestamp a conflicting live
-        identity.
+        not receive projected or synthetic receipts. Every independent use freshly
+        validates state under native full-key leases. No receipt skips hooks, and
+        post-hook failure invalidates affected live nodes for fresh recovery.
     """
     with manage_repo(repo=repo) as sub_repo:
         return sub_repo.load_state_ref(

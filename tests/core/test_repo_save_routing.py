@@ -18,6 +18,7 @@ from dryml.core.repo import RepoLoadError, RepoSaveError
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord, StoredRootRecord
 from dryml.core.node_prepare import NodePreparation
+from dryml.core.utils.graph.path import GraphPath, Parameter
 
 
 def saved_digest(node):
@@ -317,9 +318,12 @@ def test_per_object_routing_projects_a_child_state_ref_without_copying_its_paylo
     child_snapshot = next(snapshot for snapshot in report.snapshots if snapshot.state_ref == child_state)
     assert child_store in child_snapshot.required_stores
 
-    from dryml.core.store.store import StoreCapabilityError
-    with pytest.raises(StoreCapabilityError, match="not integrated"):
+    from dryml.core.repo import RepoLoadError
+    with pytest.raises(RepoLoadError, match="unavailable"):
         Repo(parent_store).load(state)
+    loaded = Repo([parent_store, child_store]).load(state)
+    assert loaded.child.value == 3
+    assert loaded.child.object_id == root.child.object_id
 
 
 def test_routed_membership_readback_targets_one_root_in_a_growing_catalogue(tmp_path):
@@ -591,11 +595,13 @@ def test_seed_payload_routes_by_its_definition_not_the_stateful_root(tmp_path):
             ((Selector(SeedRoot), root_store), (Selector(RoutedLeaf), leaf_store)),
         ),
     )
-    from dryml.core.store.store import StoreCapabilityError
-    with pytest.raises((TypeError, StoreCapabilityError), match="Node|facet|boundary"):
-        SeedRoot(imported, repo=repo)
-    assert not Path(root_store.base_dir, "graphs").exists()
-    assert not Path(leaf_store.base_dir, "graphs").exists()
+    root = SeedRoot(imported, repo=repo)
+    saved = repo.save(root)
+    child_state = saved.at(GraphPath((Parameter("child"),)))
+    assert payload_value(leaf_store, child_state) == "11"
+    assert child_state.state.key == imported.state.key
+    assert_published(root_store, saved)
+    assert_published(leaf_store, child_state)
 
 
 def test_ref_only_import_does_not_create_a_routed_seed_payload(tmp_path):

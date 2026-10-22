@@ -31,12 +31,11 @@ def test_state_io_view_preserves_borrowed_store_handles(tmp_path, monkeypatch):
     obj = ViewValue(4, repo=view)
     state = view.save_object(obj)
     obj.value = 7
-    from dryml.core.store.store import StoreCapabilityError
-    with pytest.raises(StoreCapabilityError, match="not integrated"):
-        view.load(state)
+    loaded = view.load_state_ref(state, reuse_live="never")
     view.close()
 
     assert obj.value == 7
+    assert loaded.value == 4 and loaded.object_id == obj.object_id
     assert committed == []
     assert caller.default_store is store
 
@@ -72,12 +71,11 @@ def test_state_io_view_preserves_an_active_caller_sqlite_connection(tmp_path):
     obj = ViewValue(4, repo=view)
     state = view.save_object(obj)
     obj.value = 7
-    from dryml.core.store.store import StoreCapabilityError
-    with pytest.raises(StoreCapabilityError, match="not integrated"):
-        view.load(state)
+    loaded = view.load_state_ref(state, reuse_live="never")
     view.close()
 
     assert store.open_query_index() is index
     assert connection.execute("SELECT 1").fetchone() == (1,)
     assert obj.value == 7
+    assert loaded.value == 4 and loaded.object_id == obj.object_id
     assert caller.default_store is store

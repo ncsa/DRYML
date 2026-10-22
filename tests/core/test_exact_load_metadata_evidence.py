@@ -71,6 +71,110 @@ class StatelessSeedContainer(Object):
         self.seeds = seeds
 
 
+def test_node_load_groups_identical_bytes_and_rechecks_each_destination(tmp_path, monkeypatch):
+    """One full-key read/header, but independent compatible destination checks."""
+    from dryml.core import LocalState
+    from tests.core.test_state_ref_restore_into import RestoreIntoIndependentPair
+    store = DirStore(tmp_path / "store", query_index="none")
+    repo = Repo(store)
+    first, second = EvidenceValue(1, repo=repo), EvidenceValue(1, repo=repo)
+    saved = repo.save(RestoreIntoIndependentPair(first, second, repo=repo))
+    assert saved.at(GraphPath((Parameter("first"),))).state.key == saved.at(GraphPath((Parameter("second"),))).state.key
+    counts = Counter()
+    original_read = store.read_states
+    original_creation = store.read_creation
+    original_validate = LocalState.validate_for
+
+    @contextmanager
+    def read(keys):
+        counts["keys"] += len(keys)
+        with original_read(keys) as sources:
+            yield sources
+
+    def creation(digest):
+        counts["headers"] += 1
+        return original_creation(digest)
+
+    def validate(state, destination, **kwargs):
+        counts["destinations"] += 1
+        return original_validate(state, destination, **kwargs)
+
+    monkeypatch.setattr(store, "read_states", read)
+    monkeypatch.setattr(store, "read_creation", creation)
+    monkeypatch.setattr(LocalState, "validate_for", validate)
+    EvidenceValue.restores = 0
+    loaded = Repo(store).load_state_ref(saved, reuse_live="never")
+    assert loaded.first is not loaded.second
+    assert loaded.first.object_id != loaded.second.object_id
+    assert EvidenceValue.restores == 2
+    assert counts == {"keys": 1, "headers": 1, "destinations": 2}
+
+
+def test_node_restore_hooks_hold_native_key_leases_without_writer_fences(tmp_path, monkeypatch):
+    from dryml.core.store.retention import _held, _key_address
+    store = DirStore(tmp_path / "store", query_index="none")
+    repo = Repo(store)
+    obj = EvidenceValue(1, repo=repo)
+    saved = repo.save(obj)
+    original = EvidenceValue.restore_state_from_dir_imp
+    calls = []
+    writer_depth = [0]
+    original_writer = store.writer_lock
+
+    @contextmanager
+    def writer(*args, **kwargs):
+        writer_depth[0] += 1
+        try:
+            with original_writer(*args, **kwargs) as result:
+                yield result
+        finally:
+            writer_depth[0] -= 1
+
+    def restore(target, directory, *, codec):
+        assert _key_address(store, saved.state.key) in dict(_held())
+        assert writer_depth[0] == 0
+        with store.state_leases((saved.state.key,), exclusive=True, blocking=False) as acquired:
+            assert not acquired
+        calls.append(target)
+        return original(target, directory, codec=codec)
+
+    monkeypatch.setattr(store, "writer_lock", writer)
+    monkeypatch.setattr(EvidenceValue, "restore_state_from_dir_imp", restore)
+    repo.restore(obj, saved)
+    assert calls == [obj]
+    assert not _held()
+
+
+def test_node_load_plan_does_not_retain_availability_between_uses(tmp_path):
+    from dryml.core.materialization import build_exact_state_load_plan, execute_exact_state_load_plan
+    store = DirStore(tmp_path / "store", query_index="none")
+    repo = Repo(store)
+    saved = repo.save(EvidenceValue(1, repo=repo))
+    plan = build_exact_state_load_plan(repo, saved)
+    assert plan.state_ref is saved
+    assert plan.actions[0].state == saved.state
+    assert not hasattr(plan.actions[0], "payload")
+    Path(store.state_data_path(saved.state.key), "value").unlink()
+    EvidenceValue.constructions = EvidenceValue.restores = 0
+    with pytest.raises(RepoLoadError, match="preflight is incomplete"):
+        execute_exact_state_load_plan(repo, plan, reuse_live="never")
+    assert EvidenceValue.constructions == EvidenceValue.restores == 0
+
+
+def test_node_key_lookup_does_not_inspect_unselected_sibling_variants(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="none")
+    repo = Repo(store)
+    obj = EvidenceValue(1, repo=repo)
+    first = repo.save(obj)
+    obj.value = 2
+    second = repo.save(obj)
+    assert first.state.key.cdef_digest == second.state.key.cdef_digest
+    Path(store.state_data_path(second.state.key), "value").unlink()
+    monkeypatch.setattr(store, "inspect_states", lambda *a, **k: pytest.fail("sibling catalogue scanned"))
+    loaded = Repo(store).load(first)
+    assert loaded.value == 1
+
+
 @contextmanager
 def exact_work_counts():
     """Observe owning work without replacing acceleration-guarded callables."""

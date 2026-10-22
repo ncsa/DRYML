@@ -1061,7 +1061,8 @@ def build_save_plan(
         # materializing subtree still needs its selected StateRef projection.
         add_snapshot(action.path, action.definition, None)
     from .node import _as_node_view
-    node = _as_node_view(value.definition).with_realization(identities=reference.objects)
+    retained = getattr(value, "_construction_node", None)
+    node = (_as_node_view(value.definition) if retained is None else retained).with_realization(identities=reference.objects)
     return SavePlan(
         graph=binding.graph,
         binding=binding,

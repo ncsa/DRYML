@@ -278,6 +278,9 @@ class Dryml(ABCMeta):
 
                     from .materialization import project_cdef_call
 
+                    from .node import _owned_nodes, _as_node_view
+                    if any(n.object_id is not None or n.state is not None for _, n in _owned_nodes(cdef)):
+                        return sub_repo.build(_as_node_view(cdef))
                     canonical_args, canonical_kwargs = project_cdef_call(cdef, cls=dryml_cls)
                     rt_args = sub_repo._load_structural(canonical_args)
                     rt_kwargs = sub_repo._load_structural(canonical_kwargs)
@@ -308,6 +311,10 @@ class Dryml(ABCMeta):
                 # A failed in-place restore has no rollback boundary. The object
                 # must be replaced by a fresh exact load before further state IO.
                 obj._restore_failed = False
+                from .state import _CONSTRUCTION_IDENTITY
+                if __cdef__ is not None and _CONSTRUCTION_IDENTITY.get() is not None:
+                    obj._object_id = _CONSTRUCTION_IDENTITY.get()
+                    _CONSTRUCTION_IDENTITY.set(None)
 
                 # Attach the definition to the object.
                 obj.__cdef__ = cdef
@@ -685,6 +692,7 @@ class Pickleable(Serializable):
         "_restore_failed",
         "_store_affinity",
         "_realization_scope",
+        "_construction_node",
     }
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:

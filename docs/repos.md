@@ -47,8 +47,8 @@ Supported mutations are journaled under one Store authority cut and synchronousl
 maintain enabled SQLite schema-10/coverage-1 projections before complete success.
 DirStore also supplies physical grants and active-use leases as described below.
 Ordinary Repo saves now use the format-4 Node/state-bucket pipeline described
-below. Node materialization/load, managed lifecycle and Query V3 remain separate
-consumer boundaries; legacy snapshot/declaration writers and Query V3 coverage
+below. Node build/load/apply/restore use full-key state readers. Managed lifecycle
+and Query V3 remain separate consumer boundaries; legacy snapshot/declaration writers and Query V3 coverage
 are explicitly refused. `none`/`memory` have no persistent-maintenance obligation; `auto` uses
 usable SQLite and declares nonpersistent fallback only for optional-backend
 unavailability. Explicit `sqlite` never falls back. One persistent destination
@@ -130,9 +130,46 @@ Ordinary saves currently require the durable DirStore retained-batch seam.
 ZipStore still supports buffered low-level primitives, but its lack of durable
 owner grants makes ordinary retained save explicitly unsupported **before
 capture**. Requested annotation or lifecycle-observer feeds are likewise refused
-before capture; no empty metadata-coverage claim is made. New SavedNode load is
-validated and explicitly refused before construction/restore until the owning
-materialization cutover. These boundaries do not add Store-v3 migration.
+before capture; no empty metadata-coverage claim is made. These boundaries do not
+add Store-v3 migration.
+
+### Build, Load, Partial Apply And Full Restore
+
+`repo.build(concrete_node)` requires prior concretization. The convenience
+`recipe.build(repo=repo, identities=..., states=...)` composes constraints before
+the same concretization boundary. Build allocates missing ObjectIds only and
+initializes unspecified state. Selected LocalStates are restored once after all
+associations and current source payloads preflight.
+
+`repo.load(saved_node)` / `repo.load_state_ref(saved_node, reuse_live=...)` require
+saved completeness, then freshly validate full-key availability. They do not
+initialize omitted state or substitute another checkpoint. Stateless saved graphs
+are valid without captures. Reused eligible live nodes run their selected hooks;
+historical receipts never establish current private state.
+
+`repo.apply_state(obj, states)` applies only the supplied StateSpec/typed path map,
+preserving unspecified state, identities and sharing. It captures/publishes nothing.
+`repo.restore(obj, saved_node)` checks the **original supplied** canonical object
+projection, restores dependency-first, then adopts supplied construction pins with
+live ObjectIds unchanged. Subsequent captures use those adopted creation views.
+Foreign compatible state retains the donor full StateKey rather than being rehomed.
+
+Both operations accept `source_store` and `source_stores` full-StateKey overrides
+within the connected Store scope. Distinct selected keys are read in grouped Store
+batches, without scanning sibling payloads. Each destination independently checks
+creation-CDef and codec compatibility. Native shared full-key leases protect all
+borrowed data through hooks; no Store writer fence is held during user code.
+
+`repo.prepare_restore(obj, saved_node, reservation=...)` exposes a one-shot
+owner-thread handoff for another Core caller. Its context retains source leases
+and the supplied/new live reservation. `apply()` consumes it once and returns the
+supplied saved graph; `close()` releases unused preparation without hooks.
+
+Pre-hook validation failures leave usable live graphs usable. After any hook begins,
+a failure invalidates the affected graph for framework state IO and evicts it from
+caches. Recovery requires fresh materialization from a valid available SavedNode,
+for example `repo.load_state_ref(saved_node, reuse_live="never")`. No rollback is
+claimed. See [Objects and Definitions](objects_and_defs.md#restore-and-references).
 
 ### Retained User Roots And Partial Save Reports
 
