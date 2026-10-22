@@ -203,6 +203,135 @@ def test_origin_batch_decodes_once_and_never_authenticates_payload(tmp_path, mon
     assert len(result) == 10 and decodes == [1]
 
 
+def test_discovery_digest_domains_share_one_exact_preparation(tmp_path, monkeypatch):
+    import hashlib
+    from dryml.core.node_prepare import NodePreparation
+    from dryml.core.query.relationships import _discovery_rows
+
+    store, _, saved = saved_values(tmp_path, 1)
+    node = saved[0]
+    _, (record,), _ = store._prepare_node_roots((node,), "saved")
+    calls = []
+    original = NodePreparation.digest
+
+    def digest(owner, selected, *, domain="dryml-node-graph/v1"):
+        result = original(owner, selected, domain=domain)
+        if owner.view.name == "exact":
+            calls.append((owner, selected, domain, owner.counts["folds"]))
+        return result
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(NodePreparation, "digest", digest)
+        rows = list(_discovery_rows(node, record))
+    assert [row["kind"] for row in rows] == ["cdef", "object_ref", "state_ref"]
+    assert [domain for _, _, domain, _ in calls] == [
+        "dryml-node-graph/v1", "dryml-recipe-root/v1", "dryml-node-graph/v1",
+        "dryml-node-graph/v1", "dryml-saved-root/v1",
+    ]
+    assert len({id(owner) for owner, _, _, _ in calls}) == 3
+    assert calls[0][0] is calls[1][0] and calls[0][3] == calls[1][3]
+    assert calls[3][0] is calls[4][0] and calls[3][3] == calls[4][3]
+    for row, (_, selected, _, _) in zip(rows, (calls[0], calls[2], calls[3])):
+        key = selected.exact_key()
+        assert row["digest"] == hashlib.sha256(b"dryml-node-graph/v1\0" + key).hexdigest()
+        assert row["recipe_digest"] == (hashlib.sha256(b"dryml-recipe-root/v1\0" + key).hexdigest()
+                                         if row["kind"] == "cdef" else None)
+        assert row["saved_digest"] == (hashlib.sha256(b"dryml-saved-root/v1\0" + key).hexdigest()
+                                        if row["kind"] == "state_ref" else None)
+        assert row["object_digest"] == (selected.object_projection_digest()
+                                         if row["kind"] != "cdef" else None)
+    print("discovery: 3 selected views, 3 exact owners, 2 domain reuses, 0 repeat folds")
+
+
+def _identified_pair():
+    from dryml.core import ObjectId
+    children = [Definition(DiscoveryValue, name).concretize().with_identity(ObjectId())
+                for name in ("left", "right")]
+    return Definition(DiscoveryPair, *children).concretize()
+
+
+@pytest.mark.parametrize("page_size,replicas", [(2, 1), (64, 2)])
+def test_root_declarations_validate_once_per_captured_page(tmp_path, monkeypatch, page_size, replicas):
+    from collections import Counter
+    from dryml.core.query.source import _NodePage
+
+    stores = tuple(DirStore(tmp_path / str(i), query_index="sqlite") for i in range(replicas))
+    root = _identified_pair()
+    records = [store.publish_node(root) for store in stores]
+    pages, validations = [], []
+    expand = _NodePage.expand
+
+    def expanded(page, *args, **kwargs):
+        result = expand(page, *args, **kwargs)
+        pages.append(page)
+        return result
+
+    monkeypatch.setattr(_NodePage, "expand", expanded)
+    for store in stores:
+        original = store._publication_identities
+
+        def counted(node, _original=original, _store=store):
+            validations.append((id(pages[-1]), _store.authority_fence_key()))
+            return _original(node)
+
+        monkeypatch.setattr(store, "_publication_identities", counted)
+    query = Repo(stores).query().object_refs().page_size(page_size).refresh(False).require_indexed()
+    assert query.count() == 3
+    assert set(Counter(validations).values()) == {1}
+    expected = {(store.authority_fence_key(), record) for store, record in zip(stores, records)}
+    assert all(page.validated_declarations <= expected for page in pages)
+    assert sum(len(page.validated_declarations) for page in pages) == len(validations)
+    assert len(validations) == (2 if page_size == 2 else 1) * replicas
+    print(f"declarations: {3 * replicas} rows, {len(validations)} root/page validations, {replicas} domains")
+
+
+def test_root_declaration_success_does_not_hide_changed_anchor_bytes(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    root = _identified_pair()
+    store.publish_node(root)
+    query = store.query().object_refs().page_size(64).refresh(False).require_indexed()
+    stream = query.iter()
+    assert next(stream) is not None
+    identity = root.parameters["left"].object_id
+    path = Path(store._node_path("declarations/anchors", store._anchor_key(identity)))
+    raw = path.read_bytes()
+    path.unlink()
+    try:
+        with pytest.raises(QueryError, match="changed"):
+            next(stream)
+    finally:
+        stream.close()
+        path.write_bytes(raw)
+    assert query.count() == 3
+
+
+def test_root_declaration_contribution_failure_is_not_cached(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from dryml.core.query.source import _NodePage, InventoryCapabilityError
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    root = _identified_pair()
+    store.publish_node(root)
+    query = store.query().object_refs().page_size(64).refresh(False).require_indexed()
+    assert query.count() == 3
+    identity = root.parameters["left"].object_id
+    anchor = store.read_declaration_anchor(identity)
+    path = Path(store._node_path("declarations/anchors", store._anchor_key(identity)))
+    path.write_bytes(replace(anchor, sources=(("recipe", "0" * 64),)).to_bytes())
+    pages = []
+    original = _NodePage.expand
+
+    def expanded(page, *args, **kwargs):
+        result = original(page, *args, **kwargs)
+        pages.append(page)
+        return result
+
+    monkeypatch.setattr(_NodePage, "expand", expanded)
+    with pytest.raises(InventoryCapabilityError, match="required declaration contribution"):
+        query.count()
+    assert pages and all(not page.validated_declarations for page in pages)
+
+
 @pytest.mark.parametrize("damage", ["conflict", "missing"])
 def test_filtered_out_store_declaration_anchor_is_still_checked(tmp_path, damage):
     from dryml.core import ObjectId

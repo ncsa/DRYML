@@ -6,7 +6,7 @@ Store acquisition, SQL, projection maintenance or acknowledgement.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import os
@@ -209,7 +209,8 @@ class ControlSnapshot:
     producer_invocation_id identifies completion separately from later callers.
     interrupt_request is an exact (run, invocation) pair. history/intents are bounded
     immutable tuples. Invalid schemas/cross-fields raise ManagedControlError.
-    Construction/codec methods read no payloads and grant no retention.
+    Construction validates and retains the immutable operation digest; replacement
+    recomputes it. Codec methods read no payloads and grant no retention.
     """
     receiver: Node
     member: str
@@ -225,9 +226,10 @@ class ControlSnapshot:
     failure_code: str | None = None
     history: tuple[ControlHistory, ...] = ()
     intents: tuple[ControlIntent, ...] = ()
+    _operation_id: str = field(init=False, repr=False)
 
     def __post_init__(self):
-        try: operation_digest(self.receiver, self.member)
+        try: object.__setattr__(self, "_operation_id", operation_digest(self.receiver, self.member))
         except (ValueError, TypeError, ManagedConfigError) as error:
             raise ManagedControlError("invalid_current", "invalid operation projection/member") from error
         _digest(self.argument_digest, "argument_digest")
@@ -273,8 +275,8 @@ class ControlSnapshot:
 
     @property
     def operation_id(self):
-        """Return stable projection/member digest without Store or payload access."""
-        return operation_digest(self.receiver, self.member)
+        """Return the constructor-validated digest without preparation, Store or payload access."""
+        return self._operation_id
 
     def to_data(self):
         """Return the exact current v3 canonical-JSON projection, with nested versions."""

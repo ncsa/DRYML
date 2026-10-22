@@ -604,3 +604,32 @@ def test_node_pattern_alias_partition_roles_and_exact_quotation():
     assert QueryPredicate(Definition(value=AnyValue())).matches(Definition(value=a.quote()))
     assert not QueryPredicate(Definition(value=Definition(SKIP_ARGS).quote())).matches(
         Definition(value=Definition().quote()))
+
+
+def test_wide_ordered_node_pattern_preserves_matcher_order_and_failures():
+    from dryml.core import QueryPredicate, Satisfies
+
+    calls = []
+    mode = "accept"
+
+    def ordered(value):
+        calls.append(value)
+        if value == 129:
+            if mode == "raise":
+                raise ValueError("ordered matcher failure")
+            return mode != "reject"
+        return True
+
+    matcher = QueryPredicate(Definition(values=[Satisfies(ordered) for _ in range(256)])).compile()
+    target = Definition(values=list(range(256)))
+    assert matcher.matches(target)
+    assert calls == list(range(256))
+    calls.clear()
+    mode = "reject"
+    assert not matcher.matches(target)
+    assert calls == list(range(130))
+    calls.clear()
+    mode = "raise"
+    with pytest.raises(ValueError, match="ordered matcher failure"):
+        matcher.matches(target)
+    assert calls == list(range(130))

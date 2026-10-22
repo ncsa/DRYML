@@ -50,6 +50,42 @@ def test_closed_current_roundtrip_and_lifecycle_cross_fields(tmp_path):
         ControlSnapshot.from_bytes(snapshot.to_bytes(), operation_id="a" * 64)
 
 
+def test_operation_digest_is_computed_once_per_snapshot_constructor(monkeypatch):
+    from dryml.managed import control as module
+
+    identity = facts(receiver())
+    calls = []
+    original = module.operation_digest
+
+    def digest(node, member):
+        calls.append((node, member))
+        return original(node, member)
+
+    monkeypatch.setattr(module, "operation_digest", digest)
+    snapshot = ControlSnapshot(identity.receiver, identity.member, identity.argument_digest,
+                               uuid4().hex, uuid4().hex, 1, "running")
+    assert len(calls) == 1
+    assert snapshot.operation_id == identity.operation_id
+    payload = snapshot.to_bytes()
+    assert snapshot.to_bytes() == payload and len(calls) == 1
+    restored = ControlSnapshot.from_bytes(payload, operation_id=identity.operation_id)
+    assert len(calls) == 2
+    assert restored.to_bytes() == payload and restored == snapshot and len(calls) == 2
+    replacement = replace(snapshot, member="other")
+    assert len(calls) == 3
+    assert replacement.operation_id == original(identity.receiver, "other") != snapshot.operation_id
+    replacement.to_bytes()
+    assert len(calls) == 3
+    for record_mismatch in (False, True):
+        data = json.loads(payload)
+        if record_mismatch:
+            data["operation_id"] = replacement.operation_id
+        with pytest.raises(ManagedControlError, match="record/path identity"):
+            ControlSnapshot.from_bytes(module._bytes(data), operation_id=replacement.operation_id)
+    assert len(calls) == 5
+    print("control: 5 constructors (2 rejected mismatches), 5 digest computations, byte-identical roundtrip")
+
+
 @pytest.mark.parametrize("location", ["current", "receiver", "graph", "checkpoint", "history", "history_node", "intent", "resource"])
 def test_nested_versions_reject_intact_bytes(tmp_path, location):
     control = adapter(tmp_path)

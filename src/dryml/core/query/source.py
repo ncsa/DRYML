@@ -1114,8 +1114,9 @@ class _NodePage:
         self.records, self.blocks, self.anchors, self.roots, self.preparations = {}, {}, {}, {}, {}
         self.root_kinds = {}
         self.available, self.grants, self.presence = {}, {}, {}
-        self.metadata, self.names, self.memberships, self.scoped_roots = {}, {}, {}, {}
+        self.names, self.scoped_roots = {}, {}
         self.state_memberships = {}
+        self.validated_declarations = set()
 
     def read(self, store, path, reader, required=False):
         import os
@@ -1256,6 +1257,7 @@ def iter_node_query(query, capture, stores, *, admit=True):
     from contextlib import ExitStack
     from ..node import require_saved
     from ..state_values import LocalState
+    from ..utils.graph.path import GraphPath
     from ..store import records as r
     from .identity import identity_key, IdentityKey, IdentityEvidence
     from .model import QueryError, QueryDomainError, QueryIndexDirty, QueryIndexUnavailable, QueryStats
@@ -1284,8 +1286,6 @@ def iter_node_query(query, capture, stores, *, admit=True):
     direct = exact is not None or recipe is not None
     if not local and any(item.kind in {"origin", "compatible", "state_key", "available", "retained"} for item in query.restrictions):
         raise QueryDomainError("StateKey, origin, compatibility, availability and retention require the local-state domain.")
-    if exact is not None and not local:
-        raise QueryError("Full StateKey selection requires the local-state domain.")
     if exact is not None:
         capture.reserve_keys((IdentityKey("local_state", exact.cdef_digest + ":" + exact.codec_hash, exact),))
     if local and any(item.kind in {"object_id", "namespace", "contains", "alias", "metadata", "cached"} for item in query.restrictions):
@@ -1410,7 +1410,6 @@ def iter_node_query(query, capture, stores, *, admit=True):
                     member = page.read(selected, selected._relative(selected._node_path("membership/" + kind, digest)), r.NodeMembershipRecord)
                     if member is not None and (member.root_kind, member.root_digest) != (kind, digest):
                         raise InventoryCapabilityError("Scoped membership address disagrees with authority.")
-                    page.memberships[selected.authority_fence_key(), kind, digest] = member
                     if member is not None:
                         path = selected._relative(selected._node_path("graphs" if kind == "saved" else "definitions/roots", digest))
                         root = page.read(selected, path, r.NodeRootRecord, True)
@@ -1419,19 +1418,6 @@ def iter_node_query(query, capture, stores, *, admit=True):
                         page.root(selected, root)
                         page.scoped_roots[selected.authority_fence_key(), kind, digest] = root
                         page.declarations(member.identities)
-
-    def capture_metadata(page, row):
-        for scope in metadata_scopes:
-            digest = row["object_digest"] if scope in {"object", "lineage"} else row["saved_digest"]
-            if digest is None:
-                continue
-            area = {"object": "current_object", "state": "current_state", "lineage": "lineage", "snapshot": "capture"}[scope]
-            for selected in stores:
-                domain = selected.authority_fence_key()
-                record = page.read(selected, selected._relative(selected._node_metadata_path(area, digest)), r.NodeMetadataRecord)
-                if record is not None:
-                    selected._validate_node_metadata_record(record, area, digest)
-                page.metadata[domain, scope, digest] = record
 
     def object_holder(selected, value, page, item, owner):
         if value.object_id is not None:
@@ -1494,7 +1480,7 @@ def iter_node_query(query, capture, stores, *, admit=True):
                     if membership is not None and after is None:
                         root = page.read(store, store._relative(store._node_path("definitions/roots", digest)), r.NodeRootRecord, True)
                         row = {"kind": "cdef", "key_kind": "cdef", "digest": recipe.exact_digest(),
-                               "root": root.to_data(), "path": {"schema_version": 3, "segments": []},
+                               "root": root.to_data(), "path": GraphPath().to_data(),
                                "projection": "creation", "stored": True, "recipe_digest": digest,
                                "object_digest": None, "saved_digest": None}
                         rows = [(path, "", r._json_bytes(row))]
@@ -1567,8 +1553,6 @@ def iter_node_query(query, capture, stores, *, admit=True):
                         if page.read(store, actual_path, r.NodeRootRecord, True) != record:
                             raise InventoryCapabilityError("Derived candidate disagrees with current root authority.")
                         identities.extend(membership.identities)
-                        if not metadata_facts:
-                            capture_metadata(page, row)
                         capture_membership(page, row)
                         page.root(store, record)
                         candidates.append((row, record))
@@ -1579,14 +1563,16 @@ def iter_node_query(query, capture, stores, *, admit=True):
                 if local:
                     value = LocalState(item.key, node)
                 else:
-                    from ..utils.graph.path import GraphPath
                     from ..node_views import OBJECT_PROJECTION_VIEW, view_equal
-                    for declared in store._publication_identities(node):
-                        anchor = page.anchors.get((domain, declared.object_id))
-                        if anchor is None or (header.root_kind, header.digest) not in anchor.sources:
-                            raise InventoryCapabilityError("Candidate has no required declaration contribution.")
-                        if not view_equal(declared, page.value(store, anchor.projection), OBJECT_PROJECTION_VIEW):
-                            raise InventoryCapabilityError("Candidate conflicts with its declaration anchor.")
+                    declaration_key = domain, header
+                    if declaration_key not in page.validated_declarations:
+                        for declared in store._publication_identities(node):
+                            anchor = page.anchors.get((domain, declared.object_id))
+                            if anchor is None or (header.root_kind, header.digest) not in anchor.sources:
+                                raise InventoryCapabilityError("Candidate has no required declaration contribution.")
+                            if not view_equal(declared, page.value(store, anchor.projection), OBJECT_PROJECTION_VIEW):
+                                raise InventoryCapabilityError("Candidate conflicts with its declaration anchor.")
+                        page.validated_declarations.add(declaration_key)
                     value = node.at(GraphPath.from_data(item["path"]), traverse_refs=True)
                     view_record = header
                     if item["projection"] == "creation":

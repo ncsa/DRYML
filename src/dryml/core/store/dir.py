@@ -2667,7 +2667,7 @@ class DirStore(Store):
                 return None
             record = self._read_node_metadata(target, "capture")
             return None if record is None else (record, self._read_node_capture(target))
-        digest = hashlib.sha256(b"dryml-saved-root/v1\0" + target.exact_key(prepared=prepared)).hexdigest()
+        digest = prepared.digest(target, domain="dryml-saved-root/v1")
         with self._metadata_read():
             member = self._read_membership(digest, "saved")
             if member is None:

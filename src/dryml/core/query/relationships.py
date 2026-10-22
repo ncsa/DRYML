@@ -9,7 +9,6 @@ seam rather than treating transitive descendants as adjacency.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-import hashlib
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, ClassVar, Iterator
@@ -283,6 +282,7 @@ def _discovery_rows(root, record):
     Independent membership and each represented identity domain remain distinct.
     """
     from ..node import _as_node_view, require_saved
+    from ..node_prepare import NodePreparation
     for path, _, value in _node_occurrences(root):
         node = _as_node_view(value)
         choices = [("cdef", "creation", node.creation_view())] if isinstance(node, ConcreteDefinition) else [("cdef", "recipe", node)]
@@ -296,11 +296,12 @@ def _discovery_rows(root, record):
             else:
                 choices.append(("state_ref", "saved", node))
         for kind, projection, selected in choices:
-            yield {"kind": kind, "digest": selected.exact_digest(), "root": record.to_data(),
+            prepared = NodePreparation((selected,))
+            yield {"kind": kind, "digest": prepared.digest(selected), "root": record.to_data(),
                    "key_kind": kind,
                    "object_digest": selected.object_projection_digest() if kind in {"object_ref", "state_ref"} else None,
-                   "recipe_digest": hashlib.sha256(b"dryml-recipe-root/v1\0" + selected.exact_key()).hexdigest() if kind == "cdef" else None,
-                   "saved_digest": (hashlib.sha256(b"dryml-saved-root/v1\0" + selected.exact_key()).hexdigest()
+                   "recipe_digest": prepared.digest(selected, domain="dryml-recipe-root/v1") if kind == "cdef" else None,
+                   "saved_digest": (prepared.digest(selected, domain="dryml-saved-root/v1")
                                     if kind == "state_ref" else None),
                    "path": path.to_data(), "projection": projection,
                    "stored": (kind == "object_ref" or not path and

@@ -166,13 +166,13 @@ def _node_matches(pattern, target, pattern_parameters=None, target_parameters=No
                 cache[key] = bind_partial_arguments(peer.cls, node.args or (), node.kwargs).as_frozen_dict()
         return cache[key]
 
-    def sequence(pairs, forward, reverse):
-        if not pairs:
+    def sequence(pairs, forward, reverse, index=0):
+        if index == len(pairs):
             yield forward, reverse
             return
-        left, right, exact = pairs[0]
+        left, right, exact = pairs[index]
         for nf, nr in compare(left, right, forward, reverse, exact):
-            yield from sequence(pairs[1:], nf, nr)
+            yield from sequence(pairs, nf, nr, index + 1)
 
     def compare(left, right, forward, reverse, exact=0):
         # Strength 0 means supplied pattern constraints, 1 exact concrete recipe,
