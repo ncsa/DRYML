@@ -831,8 +831,9 @@ def _protect_prepared(function):
             if (change.path.startswith("retention/") or "/grants/" in change.path
                     or "/removals/" in change.path or change.path.endswith("/availability.record")):
                 raise StoreCapabilityError("Retention/availability transitions require their owning Store lifecycle primitive.")
-        keys = _transition_keys([change.to_data() for change in facts.changes])
-        with store._replay_staging([change.to_data() for change in facts.changes]):
+        changes = [change.to_data() for change in facts.changes]
+        keys = _transition_keys(changes)
+        with store._replay_staging(changes):
             with store.state_leases(keys):
                 return function(store, facts)
     return protected

@@ -589,13 +589,14 @@ class DirStore(Store):
             raise TypeError("Node publication requires NodeSaveBatch.")
         self.preflight_save_batch()
         keys = tuple(sorted((m.key for m, _ in batch.states), key=lambda k: (k.cdef_digest, k.codec_hash)))
-        if any(_key_address(self, key) not in dict(_held()) for key in keys):
+        held = dict(_held())
+        if any(_key_address(self, key) not in held for key in keys):
             raise StoreAuthorityError("Node save requires active ordered full-key leases.")
-        manifests = {}
+        seen_keys = set()
         for manifest, stage in batch.states:
-            if manifest.key in manifests:
+            if manifest.key in seen_keys:
                 raise StoreAuthorityError("Node batch repeats a full StateKey.")
-            manifests[manifest.key] = manifest
+            seen_keys.add(manifest.key)
             if stage is not None:
                 self._require_staging_owner(stage)
                 self._authenticate_state_data(manifest, os.path.join(stage, "data"))

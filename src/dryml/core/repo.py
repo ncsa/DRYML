@@ -1052,7 +1052,6 @@ class Repo:
             # Main remains a structural reference in current Store authority.
             if len(self.stores) > 0:
                 for store in self.stores:
-                    from .store.store import StoreCapabilityError
                     try:
                         node_main = store.read_node_name("main")
                     except StoreCapabilityError:
@@ -4150,8 +4149,8 @@ class Repo:
             support alternating Store routes without splitting the per-Store commit.
             Durable user retention is established before association; uncertain
             grants are preserved. Buffered/custom backends lacking this seam and
-            requested unimplemented metadata feeds fail before capture. Loading
-            these Node values belongs to the later materialization cutover.
+            requested unimplemented metadata feeds fail before capture. Load the
+            returned SavedNode through this Repo's fresh materialization boundary.
 
         Concurrency:
             Retains one routing/default/Store-order view, preserves declaration
@@ -4160,7 +4159,6 @@ class Repo:
             closure even when routed modes were supplied.
         """
         from dryml.runtime import materialization_admission
-        from .store.records import DefinitionRecord, MainRefRecord
 
         with materialization_admission(operation="repo_save_object"):
             if alias is not None:
@@ -4946,8 +4944,7 @@ class Repo:
         class_manifest=None,
     ):
         from dryml.runtime import materialization_admission
-        from .node import Node, _owned_nodes
-        from .store.store import StoreCapabilityError
+        from .node import Node
 
         if isinstance(cdef, Node):
             from .materialization import realize_node
@@ -5098,8 +5095,7 @@ class Repo:
         """
         from .reference_values import ObjectRef, StateRef, StateSelectorRef
 
-        from .node import Node, _all_nodes
-        from .store.store import StoreCapabilityError
+        from .node import Node
         if isinstance(x, Node):
             return self.load(x, cache=cache)
 
@@ -5163,7 +5159,6 @@ class Repo:
         from .reference_values import StateRef
 
         from .node import Node, require_saved
-        from .store.store import StoreCapabilityError
         if isinstance(state_ref, Node):
             from .materialization import realize_node
             return realize_node(self, require_saved(state_ref), exact=True,
@@ -5429,7 +5424,6 @@ class Repo:
         """
         from dryml.runtime import materialization_admission
         from .node import Node, require_saved
-        from .store.store import StoreCapabilityError
 
         if isinstance(cdef, Node):
             return self.load_state_ref(require_saved(cdef), cache=cache)

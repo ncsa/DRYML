@@ -26,7 +26,7 @@ from .utils.graph.path import Parameter
 from .cdef_identity import cdef_node_key
 
 if TYPE_CHECKING:
-    from .reference_values import ObjectId, StateRef
+    from .reference_values import ObjectId
 
 
 T = TypeVar("T")
@@ -1279,7 +1279,7 @@ class NodeSaveBatch:
 def _save_graph_records(saved, roots, origins, previous):
     from .node import _all_nodes
     from .node_prepare import NodePreparation
-    from .node_views import creation_cdef, object_projection
+    from .node_views import creation_cdef, object_projection, CREATION_VIEW, OBJECT_PROJECTION_VIEW
     from .node_codec import encode_node_graph
     from .store.records import NodeBlockRecord, NodeRootRecord, _json_bytes
 
@@ -1303,11 +1303,14 @@ def _save_graph_records(saved, roots, origins, previous):
     views = packet.pop("views")
     block = NodeBlockRecord(_json_bytes(packet))
     records = []
+    block_digest = None
     for (kind, node), view in zip(entries, views):
-        policy = {"construction": "dryml-creation-cdef/v1",
-                  "projection": "dryml-object-projection/v2"}.get(kind, "exact")
+        policy = {"construction": CREATION_VIEW.name,
+                  "projection": OBJECT_PROJECTION_VIEW.name}.get(kind, "exact")
         view.update(view=policy, expected_key=prepared.semantic_key(node, policy=policy).decode("ascii"))
-        records.append((NodeRootRecord(block.digest, kind, _json_bytes(view)), node))
+        if block_digest is None:
+            block_digest = block.digest
+        records.append((NodeRootRecord(block_digest, kind, _json_bytes(view)), node))
     return block, records, prepared
 
 
@@ -1388,7 +1391,7 @@ def execute_routed_save_plan(
     from contextlib import ExitStack
     import shutil
     from .node import require_saved
-    from .node_views import creation_cdef
+    from .node_views import creation_cdef, CREATION_VIEW
     from .state_values import LocalState, StateKey
     from .store.records import StateVariantManifest, NodeNameRecord, _json_bytes
     from .repo import RepoSaveError
@@ -1483,7 +1486,7 @@ def execute_routed_save_plan(
                     files = target._state_inventory(data)
                     interpretation = {"deferred_paths": list(action.obj.deferred_state_payload_paths(data, codec=action.obj.state_codec))}
                     codec_hash = StateVariantManifest.content_hash(action.obj.state_codec, 1, interpretation, files)
-                    creation_key = origin_preparation.semantic_key(origin, policy="dryml-creation-cdef/v1")
+                    creation_key = origin_preparation.semantic_key(origin, policy=CREATION_VIEW.name)
                     digest = hashlib.sha256(b"dryml-creation-cdef/v1\0" + creation_key).hexdigest()
                     key = StateKey(digest, codec_hash)
                     manifest = StateVariantManifest(key, 1, _json_bytes(interpretation), files)
@@ -1528,9 +1531,9 @@ def execute_routed_save_plan(
                         staged.append((target, stage))
                         shutil.copytree(data, os.path.join(stage, "data"), dirs_exist_ok=True)
                     installs.append((manifest, stage))
-                chosen = [(record, node) for record, node in saved_records
-                          if target in (routed.root_destinations if routed.graph_mode == "closure" else
-                                        routed.destinations[plan.snapshots[roots.index(node)].path])]
+                chosen = [(record, node) for index, (record, node) in enumerate(saved_records)
+                           if target in (routed.root_destinations if routed.graph_mode == "closure" else
+                                         routed.destinations[plan.snapshots[index].path])]
                 if target in routed.root_destinations:
                     chosen.append(recipe_record)
                 names = []

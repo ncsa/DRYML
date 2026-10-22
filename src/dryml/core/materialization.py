@@ -281,12 +281,11 @@ def materialize_nodes(repo, roots, *, cache="weak", reuse_live="matching"):
     follow realize_node. Failures after a hook invalidate completed affected live
     graphs, including earlier roots. This owns no managed lifecycle policy.
     """
-    from .canonical import node_kind, NodeKind, rebuild_sequence_kind, rebuild_dict_kind
+    from .canonical import node_kind, is_value_container_kind, rebuild_sequence_kind, rebuild_dict_kind
     from .node import Node
     from .repo import RepoLoadError
     from .links import DefLink
     from .quoted import QuotedDef, SelectorSpec
-    from .node import _owned_nodes
 
     normalization = {}
     nodes = {}
@@ -320,8 +319,7 @@ def materialize_nodes(repo, roots, *, cache="weak", reuse_live="matching"):
             result = value
         elif isinstance(value, DefLink):
             result = value if value.kind is EdgeKind.REF else normalize(value.target)
-        elif node_kind(value) in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET, NodeKind.DICT,
-                                  NodeKind.FROZEN_LIST, NodeKind.FROZEN_TUPLE, NodeKind.FROZEN_SET, NodeKind.FROZEN_DICT}:
+        elif is_value_container_kind(node_kind(value)):
             result = container(value, normalize)
         else:
             result = value
@@ -378,8 +376,7 @@ def materialize_nodes(repo, roots, *, cache="weak", reuse_live="matching"):
             return value
         if isinstance(value, DefLink):
             return value.target if value.kind is EdgeKind.REF else realize(value.target)
-        if node_kind(value) in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET, NodeKind.DICT,
-                                NodeKind.FROZEN_LIST, NodeKind.FROZEN_TUPLE, NodeKind.FROZEN_SET, NodeKind.FROZEN_DICT}:
+        if is_value_container_kind(node_kind(value)):
             return container(value, realize)
         return value
 
@@ -514,13 +511,12 @@ class PreparedRestoration:
                 hooks_started = True
                 target.restore_state_from_dir(self.sources[state.key].data_directory, codec=state.codec)
                 target._last_state_hash = state.key.codec_hash
+            construction = self.adopted if self.adopted is not None else self.partial_view
+            if construction is not None:
+                for path, current in _owned_nodes(construction):
+                    self.obj.graph_at(path)._construction_node = current
             if self.adopted is not None:
-                for path, current in _owned_nodes(self.adopted):
-                    self.obj.graph_at(path)._construction_node = current
                 self.obj._last_state_ref = self.saved
-            elif self.partial_view is not None:
-                for path, current in _owned_nodes(self.partial_view):
-                    self.obj.graph_at(path)._construction_node = current
             return self.saved
         except BaseException as error:
             if hooks_started:
@@ -792,7 +788,6 @@ def execute_materialization_plan(
         root: ConcreteDefinition,
         class_manifest: _NodeBindings | None = None):
     from dryml.runtime import materialization_admission
-    from .repo import RepoLoadError
 
     with materialization_admission(operation="execute_materialization_plan"):
         if class_manifest is None:
