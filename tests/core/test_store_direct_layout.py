@@ -19,7 +19,9 @@ def test_definition_records_use_direct_digest_paths_without_object_generations(t
 
     path = Path(store.base_dir) / "definitions" / record.digest[:2] / f"{record.digest}.record"
     assert path.is_file()
-    assert store.read_definition_record(record.digest) == record
+    decoded = store.read_definition_record(record.digest)
+    assert decoded.digest == record.digest
+    assert decoded.definition.graph_equal(record.definition)
     assert not list(Path(store.base_dir).rglob(".state-generations"))
     assert not list(Path(store.base_dir).rglob(".state-current.pkl"))
 
@@ -53,7 +55,9 @@ def test_definition_root_inventory_decodes_authority_once(tmp_path, monkeypatch,
         assert SourceCapture().capture_store(store).is_stored(records[0].definition)
     else:
         roots, _, _, _ = store.open_query_index()._capture_authority_cut()
-        assert set(roots) == {record.definition for record in records}
+        assert len(roots) == len(records)
+        assert all(sum(root.graph_equal(record.definition) for root in roots) == 1
+                   for record in records)
     assert decoded == [record.digest for record in records]
 
 
@@ -107,7 +111,10 @@ def test_missing_marker_does_not_promote_closure_definition_and_fallback_validat
     store = DirStore(tmp_path / "store", query_index="memory")
     record = DefinitionRecord(DirectLayoutObject().definition)
     store.write_definition_record(record, stored_root=False)
-    assert Store._validated_definition_root_inventory(store) == ((record,), ())
+    definitions, roots = Store._validated_definition_root_inventory(store)
+    assert roots == () and len(definitions) == 1
+    assert definitions[0].digest == record.digest
+    assert definitions[0].definition.graph_equal(record.definition)
     facts = SourceCapture().capture_store(store)
-    assert record.definition in facts.knowledge()
+    assert any(record.definition.graph_equal(known) for known in facts.knowledge())
     assert not facts.is_stored(record.definition)

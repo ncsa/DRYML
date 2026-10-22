@@ -91,7 +91,7 @@ def test_constructor_binding_never_invokes_retired_hooks() -> None:
     assert PreparedConsumer.preparations == 0
 
     restored = pickle.loads(pickle.dumps(cdef))
-    assert restored == cdef
+    assert restored.graph_equal(cdef)
     assert PreparedConsumer.preparations == 0
 
 
@@ -180,7 +180,7 @@ def test_constructor_exact_data_roles_round_trip_and_decode_without_recompilatio
     definition_owner = Repo().load_or_build(restored_definition)
     selector_owner = Repo().load_or_build(restored_selector)
     assert isinstance(definition_owner.value, Definition)
-    assert definition_owner.value == definition
+    assert definition_owner.value.graph_equal(definition)
     assert isinstance(selector_owner.value, Selector)
     assert selector_owner.value == selector
 

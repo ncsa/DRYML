@@ -71,11 +71,51 @@ class LocalState(Generic[T]):
         """Return the codec name carried by the content component, without IO."""
         return self.key.codec_hash.split("-", 1)[0]
 
-    def __eq__(self, other):
-        from .node import _semantic_equal
+    def validate_for(self, destination, *, codec):
+        """Validate origin evidence and destination compatibility before state hooks.
 
-        return (isinstance(other, LocalState) and self.key == other.key
-                and _semantic_equal(self.creation_cdef, other.creation_cdef, topology=True, facets=True))
+        Args:
+            destination (ConcreteNode | ConcreteDefinition): Normalized receiver
+                configuration; its ObjectIds and state selections are ignored.
+            codec (str): Codec admitted by the consuming destination implementation.
+                This must equal the selected state's opaque codec name.
+        Returns:
+            LocalState: This exact donor selection, without rehoming its StateKey
+            or changing either side's retained construction evidence.
+        Raises:
+            TypeError: For nonconcrete evidence/destination or an invalid codec type.
+            ValueError: For malformed creation authority/digest, incompatible graph
+                configuration, or a codec not admitted by the destination.
+        Side Effects:
+            None beyond owned pure preparation. No target resolution, arbitrary
+            compatibility callback, payload lookup/read, restore hook or publication.
+            Success is metadata admission, not payload availability/authentication.
+        """
+        from .node_views import (creation_cdef, CREATION_VIEW, COMPATIBILITY_VIEW,
+                                 view_digest, view_equal)
+        from .node_prepare import NodePreparation
+
+        if type(codec) is not str:
+            raise TypeError("The admitted codec must be a string.")
+        if self.codec != codec:
+            raise ValueError("Selected state codec is not admitted by the destination.")
+        normalized = creation_cdef(self.creation_cdef)
+        a, b = NodePreparation((self.creation_cdef,)), NodePreparation((normalized,))
+        if not a.exact_equal(self.creation_cdef, b, normalized):
+            raise ValueError("Selected state needs normalized creation evidence without own facets.")
+        if view_digest(normalized, CREATION_VIEW) != self.key.cdef_digest:
+            raise ValueError("Selected state creation evidence does not match its creation digest.")
+        if not view_equal(normalized, destination, COMPATIBILITY_VIEW):
+            raise ValueError("Selected state is incompatible with the destination configuration.")
+        return self
+
+    def __eq__(self, other):
+        from .node_prepare import NodePreparation
+
+        if not isinstance(other, LocalState) or self.key != other.key:
+            return False
+        a, b = NodePreparation((self.creation_cdef,)), NodePreparation((other.creation_cdef,))
+        return a.exact_equal(self.creation_cdef, b, other.creation_cdef)
 
     def __hash__(self):
         return hash(self.key)

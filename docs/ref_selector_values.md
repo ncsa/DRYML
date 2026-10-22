@@ -23,6 +23,25 @@ authenticate creation digests, validate compatibility, or open payloads; those
 are responsibilities of the consuming operation. Equal selections compare the
 compound key and semantic construction evidence, not evidence-handle identity.
 
+The explicit metadata boundary is `local_state.validate_for(destination,
+codec="pkl")`. It checks that origin evidence is normalized without root
+identity/state, matches its creation digest, is graph-compatible with the
+normalized destination, and uses the consumer-admitted codec. The compatibility
+fingerprint only narrows candidates; exact verification retains class,
+configuration, topology/sharing, roles and quoted data. No arbitrary user
+compatibility callback is accepted. Failure raises `TypeError` or `ValueError`
+without payload reads or hooks. Success returns the **same** LocalState: its full
+donor StateKey is not replaced by a destination-derived address, even when equal
+codec bytes came from different creation definitions. Availability and runtime
+application require their owning consumer's additional checks.
+
+Use `node.creation_view()` for origin evidence, `node.compatibility_view()` for
+destination comparison, and `node.object_view()` for identity-preserving,
+state-weakened operation metadata. Their independent hash domains and adoption
+semantics are documented in [Objects and Definitions](objects_and_defs.md#creation-compatibility-and-operation-views).
+Binding or generating metadata may retain an incompatible selected state;
+validation must reject it before application rather than silently removing it.
+
 `IdentitySpec(node)` and `StateSpec(node)` are rooted Mapping adapters over the
 same Node facets. They expose only present owned assignments, one primary path
 per occurrence, and may be passed to `Node.bind`. StateSpec never assigns donor
@@ -51,3 +70,9 @@ Use [Signatures](signatures.md) for `Ref`/`Mat` conversion, automatic selection,
 quotation data, and the distinction between metadata selection and Repo realization.
 Query V3 treats complete ObjectRef and StateRef values as identity members without
 dereferencing them; see [Graph Querying](graph_querying.md).
+
+The existing reference `object_projection()` and ObjectSelector APIs retain their
+V2 query semantics, including explicit inspection options. They do not define the
+new operation-projection hash domain. Legacy call-surface/query exports reject
+identity-3 Node facets and retained construction evidence when they cannot
+represent them; the authenticated Node codec carries those constraints losslessly.

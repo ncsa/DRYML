@@ -635,7 +635,7 @@ class DirStore(Store):
         if (
             isinstance(existing, DefinitionRecord)
             and isinstance(record, DefinitionRecord)
-            and existing.definition.graph_equal(record.definition)
+            and existing._matches_definition(record.definition)
         ):
             # Private CDef node allocations are runtime-local and do not
             # distinguish immutable graph authority.
@@ -813,14 +813,24 @@ class DirStore(Store):
         return record
 
     def read_definition(self, cdef):
-        """Return the direct DefinitionRecord definition matching ``cdef``, if present.
+        """Read direct definition authority using exact V2 value-scope matching.
 
-        This supports exact query-index activation without consulting retired
-        object roots. The deterministic DefinitionRecord digest gives the lookup
-        its direct authority path.
+        Args:
+            cdef (ConcreteDefinition): V2-representable candidate construction graph.
+        Returns:
+            ConcreteDefinition | None: Matching authority with fresh handles, or
+            None if the direct record is absent or has different exact evidence.
+        Raises:
+            StoreAuthorityError: If a present record is invalid.
+            CDefGraphCodecError: If Node facets or retained construction cannot be
+                represented by this legacy boundary.
+            OSError: If the direct authority file cannot be read.
+        Side Effects:
+            Reads the deterministic DefinitionRecord path without consulting
+            retired object roots, constructing Objects or changing Store contents.
         """
         record = self.read_definition_record(DefinitionRecord(cdef).digest)
-        if record is not None and record.definition.graph_equal(cdef):
+        if record is not None and record._matches_definition(cdef):
             return record.definition
         return None
 
@@ -832,11 +842,14 @@ class DirStore(Store):
 
         Returns:
             ``(record_digest, relative_path, size, mtime_ns)`` when a
-            graph-equivalent DefinitionRecord or declaration, complete snapshot,
-            or object-alias record supplies root authority, otherwise ``None``.
+            V2-scope graph-equivalent DefinitionRecord or declaration, complete
+            snapshot, or object-alias record supplies root authority, otherwise
+            ``None``.
 
         Raises:
             StoreAuthorityError: If a present authority record is invalid.
+            CDefGraphCodecError: If the candidate carries identity-3 evidence that
+                this V2 authority boundary cannot retain.
             OSError: If a selected authority file cannot be inspected.
 
         Side Effects:
@@ -844,7 +857,7 @@ class DirStore(Store):
             to reference enumeration only when the direct definition is absent.
         """
         record = self.read_definition_record(DefinitionRecord(cdef).digest)
-        if record is not None and record.definition.graph_equal(cdef):
+        if record is not None and record._matches_definition(cdef):
             path = self._definition_path(record.digest)
         else:
             candidates = (
@@ -858,7 +871,7 @@ class DirStore(Store):
             selected = next((
                 (item, record_path(item))
                 for records, definition, record_path in candidates
-                for item in records() if definition(item).graph_equal(cdef)
+                for item in records() if DefinitionRecord(definition(item))._matches_definition(cdef)
             ), None)
             if selected is None:
                 return None
@@ -1612,7 +1625,7 @@ class DirStore(Store):
             self._validate_local_state_dir(directory, manifest)
         expected = reference.object.at(path).definition
         definition = self._read_file(os.path.join(directory, "def.pkl"), DefinitionRecord)
-        if definition is None or not definition.definition.graph_equal(expected):
+        if definition is None or not definition._matches_definition(expected):
             raise StoreAuthorityError("snapshot payload definition does not match StateRef path.")
         return LocalStateSource(
             self, directory, manifest, eagerly_validated=not manifest.deferred_paths,
@@ -1647,6 +1660,9 @@ class DirStore(Store):
             annotations: Optional SaveAnnotations current-map replacements for root
                 ObjectRef and StateRef scopes.
             local_states: Mapping of locally owned paths to validated sources.
+                Source definitions must exactly match the target's V2 value
+                scopes, including sharing within each reference/quotation scope.
+                Identity-3 facets or retained construction are not representable.
             children: Optional mapping of child projection paths to StateRefs.
             _before_annotation_write: Internal phase callback invoked immediately
                 before each requested current-metadata write.
@@ -1658,6 +1674,8 @@ class DirStore(Store):
             TypeError: If publication inputs are unsupported.
             StoreAuthorityError: If records, sources, coverage, or immutable
                 existing snapshot evidence conflict.
+            CDefGraphCodecError: If a source or target definition carries Node
+                facets or retained construction unsupported by the V2 metadata.
             OSError: If staged content or durable activation fails.
             StoreCapabilityError: If direct publication guarantees are unavailable.
 
@@ -1705,7 +1723,7 @@ class DirStore(Store):
                 self._validate_local_state_source_for_publication(source)
                 target_definition = reference.object.at(path).definition
                 source_definition = self._read_file(os.path.join(os.fspath(source.handle), "def.pkl"), DefinitionRecord)
-                if source_definition is None or not source_definition.definition.graph_equal(target_definition):
+                if source_definition is None or not source_definition._matches_definition(target_definition):
                     raise StoreAuthorityError("snapshot source definition does not match StateRef path.")
                 relative = f"local-state/{source.manifest.graph_hash}/{source.manifest.state_hash}"
                 destination = os.path.join(stage, relative)

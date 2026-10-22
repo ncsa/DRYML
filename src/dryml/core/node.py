@@ -370,12 +370,95 @@ class Node(Generic[T]):
 
         Returns:
             Node: Same alias partition and roles; quoted configuration stays exact.
+        Raises:
+            TypeError, ValueError: For unsupported graph values or malformed metadata.
         Side Effects:
             None. This projection neither allocates identities nor asserts availability.
         """
-        changes = {node._occurrence: _Facets(node.object_id, None)
-                   for node in _all_nodes(self, quoted=False) if node.state is not None}
-        return _rewrite(self, facets=changes, enter_quoted=False)
+        from .node_views import object_projection
+        return object_projection(self)
+
+    def creation_view(self):
+        """Return normalized retained creation evidence without own identity/state.
+
+        Returns ConcreteNode; explicit dependency pins, topology, roles and quoted
+        data remain exact. Raises TypeError for a nonconcrete root. No IO, target
+        resolution, capture or allocation occurs.
+        """
+        from .node_views import creation_cdef
+        return creation_cdef(self)
+
+    def creation_digest(self):
+        """Return the creation-view SHA-256 in ``dryml-creation-cdef/v1``.
+
+        Returns str; nonconcrete roots raise TypeError. Updates only owned pure
+        preparation facts. This digest is an address, not an equality proof.
+        """
+        from .node_views import CREATION_VIEW, view_digest
+        return view_digest(self, CREATION_VIEW)
+
+    def compatibility_view(self):
+        """Return concrete configuration with graph identity/state removed recursively.
+
+        Returns ConcreteNode, preserving aliases, link roles and exact quotations.
+        Raises TypeError for a nonconcrete root. No imports of targets or IO occur;
+        compatibility still requires codec admission at the consuming boundary.
+        """
+        from .node_views import state_compatibility_view
+        return state_compatibility_view(self)
+
+    def compatibility_fingerprint(self):
+        """Return a necessary compatibility key, never sufficient admission evidence.
+
+        Returns str in ``dryml-state-compatibility/v1``. Nonconcrete roots raise
+        TypeError; only pure preparation facts are computed. Use LocalState's
+        ``validate_for`` for creation-evidence, exact-graph and codec checks.
+        """
+        from .node_views import COMPATIBILITY_VIEW, view_digest
+        return view_digest(self, COMPATIBILITY_VIEW)
+
+    def object_projection_digest(self):
+        """Return the state-weakened identity key in ``dryml-object-projection/v2``.
+
+        Returns str, retaining required identities and exact quoted data. Performs
+        no IO or resolution; unsupported values raise TypeError/ValueError. Digest
+        equality alone is not proof; use ``object_projection_equal`` for authority.
+        """
+        from .node_views import OBJECT_PROJECTION_VIEW, view_digest
+        return view_digest(self, OBJECT_PROJECTION_VIEW)
+
+    def object_projection_equal(self, other):
+        """Compare exact state-weakened graphs, including identities, roles and aliases.
+
+        Args:
+            other (Node | ConcreteDefinition): Original supplied candidate graph.
+        Returns:
+            bool: Prefilter plus exact normalized graph comparison, quotation exact.
+        Raises:
+            TypeError, ValueError: For unsupported graph values or cycles.
+        Side Effects:
+            Pure owned preparation only; never restores or consults a Store.
+        """
+        from .node_views import OBJECT_PROJECTION_VIEW, view_equal
+        return view_equal(self, other, OBJECT_PROJECTION_VIEW)
+
+    def adopt_saved_view(self, supplied):
+        """Validate original saved projection and adopt its construction pins as metadata.
+
+        Args:
+            supplied (ConcreteNode): Complete saved graph with retained construction.
+        Returns:
+            ConcreteNode: Supplied state/pins over receiver occurrence identities
+            and sharing. Later creation inspection uses the adopted construction.
+        Raises:
+            TypeError: For nonconcrete graphs or unsupported values.
+            ValueError: For incomplete saved facets or an original projection mismatch.
+        Side Effects:
+            None. This is not runtime restore or payload/codec admission. Consumers
+            must validate selected LocalStates before any hooks or live mutation.
+        """
+        from .node_views import adopt_saved_view
+        return adopt_saved_view(self, supplied)
 
     def quote(self):
         """Return this Node as exact inert constructor data in a QuotedDef.
@@ -548,13 +631,15 @@ def _clone(node, args, kwargs, facets, *, realization=False, reset_construction=
 
 
 def _rewrite(root, replacements=None, *, facets=None, realization=False, enter_quoted=True,
-             representatives=None, reset_construction=False, fresh=False):
+             representatives=None, reset_construction=False, fresh=False,
+             node_transform=None, value_transform=None, memo=None):
     from .definition import ConcreteDefinition
     from .links import DefLink
     from .quoted import QuotedDef
 
     replacements, facets = replacements or {}, facets or {}
-    memo = {}
+    if memo is None:
+        memo = {}
 
     def visit(value):
         if representatives is not None and isinstance(value, Node):
@@ -583,6 +668,10 @@ def _rewrite(root, replacements=None, *, facets=None, realization=False, enter_q
                 object.__setattr__(result, "_occurrence", token)
                 if isinstance(result, ConcreteDefinition):
                     object.__setattr__(result, "_node_id", token)
+            if node_transform is not None:
+                result = node_transform(value, result)
+        elif value_transform is not None and (mapped := value_transform(value, visit)) is not NotImplemented:
+            result = mapped
         elif isinstance(value, DefLink):
             target = visit(value.target)
             result = value if target is value.target else (DefLink.finalized(value.kind, target) if value.is_finalized else DefLink.assertion(value.kind, target))

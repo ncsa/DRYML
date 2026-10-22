@@ -23,6 +23,10 @@ class ObjectSelector:
     exposes their corresponding ObjectRef association when an API explicitly
     requires persistent authority; generated projections weaken nested states,
     while directly constructed selectors retain caller-supplied exact pins.
+    This existing V2 query value is distinct from Node's named operation view;
+    its legacy digest/export boundary rejects unrepresentable identity-3 facets
+    rather than discarding them. Use Node.object_projection_equal for exact
+    comparison of the new operation view without runtime or Store integration.
     """
 
     definition: Any

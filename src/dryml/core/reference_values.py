@@ -269,6 +269,12 @@ class ObjectRef:
     shared Node encoding. Context-local unordered path ordinals are not portable
     identity evidence; these associations let that codec rebase paths without
     changing pin meanings. The existing V2 data record remains unchanged.
+
+    Equality compares exact configuration, roles, bindings and sharing within
+    each V2 reference/quotation value scope, including across authored Node and
+    decoded CDef handles. Cross-value aliases are not transported by V2. Full
+    Node closure equality remains available through Node.graph_equal and the
+    identity-3 codec; it is not inferred from ObjectRef value equality.
     """
 
     definition: Any
@@ -351,6 +357,8 @@ class ObjectRef:
         Raises:
             TypeError: If ``traverse_refs`` is not a bool.
             ValueError: If the graph contains an unsupported cycle.
+            CDefGraphCodecError: If identity-3 Node facets or retained construction
+                cannot be represented by this V2 query adapter. Use Node.object_view.
 
         Side Effects:
             None. The source reference and its authoritative ObjectId mapping are
@@ -410,9 +418,11 @@ class ObjectRef:
         return stable_int_hash(self.digest())
 
     def __eq__(self, other: object) -> bool:
+        from .cdef_codec import _reference_cdef_graph_equal
+
         return (
             isinstance(other, ObjectRef)
-            and self.definition.graph_equal(other.definition)
+            and _reference_cdef_graph_equal(self.definition, other.definition)
             and self.objects == other.objects
         )
 
@@ -554,6 +564,8 @@ class StateRef:
         Raises:
             TypeError: If ``traverse_refs`` is not a bool.
             ValueError: If the graph contains an unsupported cycle.
+            CDefGraphCodecError: If identity-3 Node evidence requires Node.object_view
+                rather than this existing V2 query adapter.
 
         Side Effects:
             None. This does not read state, materialize an Object, or allocate an

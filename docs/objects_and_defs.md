@@ -102,6 +102,55 @@ consumers retain their separate APIs. `copy_graph()` preserves facets and the
 alias partition while creating fresh private Node handles, without ObjectId
 allocation or encoding.
 
+## Creation, Compatibility And Operation Views
+
+The metadata APIs distinguish three named transformations over the same immutable
+Node graph. They use `NodePreparation`'s topology-aware exact verifier; a digest
+or compatibility fingerprint is never sufficient equality evidence.
+
+| API | Identity/state handling | Domain |
+| --- | --- | --- |
+| `node.creation_view()` / `creation_digest()` | Use retained normalized construction authority; exclude only the captured root's own identity/state. Preserve explicit dependency selections. | `dryml-creation-cdef/v1` |
+| `node.compatibility_view()` / `compatibility_fingerprint()` | Remove realization identity/state recursively through graph links. Compare class, normalized configuration, sharing/topology and link roles. | `dryml-state-compatibility/v1` |
+| `node.object_view()` / `object_projection_digest()` | Keep identities; recursively remove graph-reference state selections. | `dryml-object-projection/v2` |
+
+All three preserve quoted constructor data exactly, including ordinary ObjectIds
+and checkpoint pins in future-model recipes. Query traversal options do not alter
+this rule. `object_projection_equal(original_candidate)` performs the necessary
+key check **and** exact normalized graph comparison, including unordered aliases.
+Creation and compatibility require concrete normalized roots. Object projection
+also accepts soft Nodes without resolving their targets.
+
+`dryml.core.node_views` exports `CREATION_VIEW`, `COMPATIBILITY_VIEW`, and
+`OBJECT_PROJECTION_VIEW` for explicit operation-owned preparation, for example
+`NodePreparation((node,), view=CREATION_VIEW)`. Requests use its transformed
+`prepared.roots`; eager and deferred preparation implement the same key contract.
+
+`local_state.validate_for(destination, codec="pkl")` validates the retained
+normalized origin evidence against its full StateKey, then verifies exact
+destination compatibility and the explicitly admitted codec. It returns the same
+LocalState or raises `TypeError`/`ValueError` before any payload hook. It does not
+resolve a class to guess codec support, invoke a custom compatibility callback,
+open payloads, or prove their availability. Applying compatible foreign-origin
+metadata preserves the donor's StateKey and creation evidence. A subsequent new
+capture's address must derive from the destination's retained construction view.
+
+A parent constructed with child S0 retains S0 in its creation view after a
+realization overlay selects child S1. Automatically allocated identities are not
+retroactive construction pins, and the root's own captured StateKey does not
+recur in its creation digest. `receiver.adopt_saved_view(original_saved_node)` is
+the metadata adoption step: it first matches the **original supplied graph's**
+object projection, then returns supplied saved facets and construction pins over
+the receiver's occurrence identities and sharing. Later creation inspection uses
+that adopted construction authority; authenticated Node transport retains it.
+The receiver and supplied graph are immutable and remain unchanged on failure.
+
+These are metadata validation/adoption APIs. Runtime Repo/Store restore, capture,
+and managed-operation integration still use their existing contracts. In
+particular, the V2 `object_projection()` query adapter and legacy call-surface
+thaw/export refuse identity-3 facets or retained construction evidence rather
+than silently dropping them. Use the Node APIs above for the new views.
+
 ## Live Objects And Exact State
 
 An `Object` is one live realization. `Serializable` marks nodes that receive an

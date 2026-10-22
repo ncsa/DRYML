@@ -168,16 +168,11 @@ def test_snapshot_json_cold_warm_characterization(tmp_path, monkeypatch, record_
         assert counts["decode_cdef_graph"] == (0 if phase == "warm" else 3)
         assert counts["encode_cdef_graph"] == (0 if phase == "warm" else 3)
         assert counts["store_record_id"] > 0 and counts["reference_identity_encode"] > 0
-        assert counts["_graph_and_labels"] > 0
         assert counts["_role_paths"] > 0
         assert counts["_build_graph_nodes"] == 3
         assert counts["_realize_prepared_graph"] == (3 if phase == "warm" else 0)
         assert counts["_check_graph_eligibility"] == 3
         assert (counts["_graph_content_size"] == 0) == (phase == "warm")
-        if phase != "warm":
-            assert counts["_graph_content_matches"] == 0
-        else:
-            assert counts["_graph_content_matches"] > 0
         assert plan.state_ref == state
     for key in ("json_reads", "decode_snapshot_metadata", "decode_record",
                 "canonical_json_bytes", "validate_payload",

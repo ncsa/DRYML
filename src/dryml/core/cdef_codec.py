@@ -457,6 +457,26 @@ def _scoped_cdef_equal(left, left_root, right, right_root):
                       {"tag": "node", "slot": right._slot(right_root)}, ({}, {})), None) is not None
 
 
+def _v2_cdef_graph_equal(left, right):
+    """Compare V2 boundary evidence without requiring cross-value Node aliases.
+
+    Both graphs must be V2-representable; facets and retained construction are
+    rejected rather than discarded. Within each transported value scope, exact
+    topology, roles, configuration and reference bindings remain authoritative.
+    """
+    _require_v2_evidence(left)
+    _require_v2_evidence(right)
+    return _reference_cdef_graph_equal(left, right)
+
+
+def _reference_cdef_graph_equal(left, right):
+    """Compare standalone reference values in their transported topology scopes."""
+    from .node_prepare import NodePreparation
+
+    a, b = NodePreparation((left,)), NodePreparation((right,))
+    return _scoped_cdef_equal(a, left, b, right)
+
+
 def cdef_graph_hash(root: ConcreteDefinition) -> str:
     """Return the legacy V2 graph digest for existing consumers awaiting cutover.
 
@@ -499,6 +519,8 @@ def object_projection_cdef(
     Raises:
         TypeError: If ``root`` is not a CDef or ``traverse_refs`` is not bool.
         ValueError: If an unsupported cyclic construction graph is encountered.
+        CDefGraphCodecError: If identity-3 facets/construction would be lost at
+            this legacy query boundary. Use Node.object_view for those graphs.
 
     Side Effects:
         None. The projection does not resolve imports, materialize objects, read
@@ -526,6 +548,7 @@ def _object_projection_cdef(
         raise TypeError(f"Expected ConcreteDefinition, got {type(root).__name__}.")
     if type(traverse_refs) is not bool:
         raise TypeError("traverse_refs must be a bool.")
+    _require_v2_evidence(root)
 
     from .cdef_graph import EdgeKind
     from .definition import Definition
@@ -869,6 +892,10 @@ def _require_v2_evidence(root):
             visit(value.target)
         elif isinstance(value, QuotedDef):
             visit(value.value)
+        elif isinstance(value, SelectorSpec):
+            visit(value.selector.root)
+        elif isinstance(value, (ObjectRef, StateRef)):
+            visit(value.definition)
         elif isinstance(value, FactorySpec):
             visit(value.args)
             visit(value.kwargs)

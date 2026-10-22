@@ -118,6 +118,17 @@ index semantics; final selector matching still requires exact graph evidence for
 fixed CDef anchors, including their sharing topology. The adapter introduces no
 new persisted identity or fallback scan.
 
+Current `ObjectRef`/`StateRef` values and Store `DefinitionRecord` matching use
+V2 reference/quotation value scopes, including when the supplied unbound recipe
+is a Node. V2 serializes those values independently: sharing within each scope,
+roles, configuration, ObjectIds and state selections remain exact, but aliases
+crossing independently transported values are not V2 authority. Publication,
+read-back and restore preflight compare that exact scoped evidence rather than
+handle equality or digest equality alone. DefinitionRecord matching rejects
+Node facets and retained construction, including inside embedded references;
+the captured metadata format remains V2. Full `Node.graph_equal` and identity-3
+keys still compare the complete closure and its cross-value alias partition.
+
 Every CDef constructor field is addressed by `Parameter(name)`. Typed container segments preserve deterministic traversal and primary paths. `Arg` and `Kwarg` are available only when working with soft `Definition` syntax; they are invalid CDef edges.
 
 Raw nested CDefs and `Mat(...)` are materializing edges. `Ref(...)` is non-materializing and remains an unchanged lightweight target at runtime. CDef graph encoding uses deterministic graph-local labels, rejects duplicate or dangling declarations, and recreates private tokens on decode. Inspection, graph hashing, and reference projection do not resolve classes.

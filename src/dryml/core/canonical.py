@@ -1126,6 +1126,15 @@ def thaw_definition_surface_value(value: Any, *, memo: dict | None = None) -> An
     Returns:
         A mutable Definition surface whose shared CDef nodes remain shared
         Definition instances.
+
+    Raises:
+        CDefGraphCodecError: If projecting a normalized construction record would
+            discard identity-3 Node facets or retained construction evidence.
+        Exception: Propagates existing signature projection failures.
+
+    Side Effects:
+        May resolve constructor symbols for the legacy call surface. Does not
+        construct Objects or read state; Node views retain their own metadata API.
     """
 
     from .definition import Definition
@@ -1152,8 +1161,10 @@ def thaw_definition_surface_value(value: Any, *, memo: dict | None = None) -> An
             target="runtime",
         )
     if kind is NodeKind.CONCRETE_DEFINITION:
+        from .cdef_codec import _require_v2_evidence
         from .cdef_identity import cdef_node_key
 
+        _require_v2_evidence(value)
         key = cdef_node_key(value)
         cached = memo.get(key)
         if cached is not None:

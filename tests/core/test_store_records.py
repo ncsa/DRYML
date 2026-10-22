@@ -41,7 +41,7 @@ def test_definition_record_round_trip_preserves_mapping_identity():
 
     decoded = DefinitionRecord.from_bytes(DefinitionRecord(definition).to_bytes())
 
-    assert decoded.definition == definition
+    assert decoded.definition.graph_equal(definition)
     assert decoded.definition.stable_hash() == definition.stable_hash()
 
 

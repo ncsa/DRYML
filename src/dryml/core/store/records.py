@@ -318,6 +318,9 @@ class DefinitionRecord(_Record):
         None at construction. Public decoding fully validates graph/record
         identity. Internal exact-matched preparation realizes fresh graph tokens,
         symbols, containers and arrays; role results are always detached.
+        Matching uses exact V2 reference/quotation value scopes even for authored
+        Node handles. New Node facets and retained construction are rejected by
+        this boundary rather than silently projected into the legacy format.
     """
 
     schema: ClassVar[str] = "definition"
@@ -329,10 +332,9 @@ class DefinitionRecord(_Record):
             raise StoreRecordError("DefinitionRecord definition must be a ConcreteDefinition.")
 
     def _matches_definition(self, definition):
-        if self._prepared is None:
-            return self.definition.graph_equal(definition)
-        from ..cdef_codec import _topology_projection, _graph_content_matches
-        return _graph_content_matches(_topology_projection(definition), self._prepared.topology)
+        from ..cdef_codec import _v2_cdef_graph_equal
+
+        return _v2_cdef_graph_equal(self.definition, definition)
 
     @property
     def graph_hash(self) -> str:
