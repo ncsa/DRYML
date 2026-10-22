@@ -194,8 +194,8 @@ def _outcome(success: bool, *, result: bytes | None = None,
         rows = []
         for item in value[name]:
             state = item["state"]
-            require_saved(state)
             if id(state) not in root_slots:
+                require_saved(state)
                 root_slots[id(state)] = len(roots)
                 roots.append(state)
             defaults = {"source": None} if name == "publications" else {}
@@ -273,13 +273,16 @@ def decode_outcome(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LIMIT
         value["failure"], _ = _load_result_graph(value["failure"], repo=repo, limit_bytes=limit_bytes)
     views = () if value["graphs"] is None else _decode_node_graph_views(value["graphs"])
     value = dict(value)
+    validated_views = set()
     for name in ("updates", "publications"):
         rows = []
         for item in value[name]:
             if not isinstance(item, dict) or type(item.get("state")) is not int or not 0 <= item["state"] < len(views):
                 _fail("malformed outcome Node view", "$.outcome")
             state = views[item["state"]]
-            require_saved(state)
+            if item["state"] not in validated_views:
+                require_saved(state)
+                validated_views.add(item["state"])
             rows.append({**item, "state": state})
         value[name] = rows
     if value["reason"] is not None and not isinstance(value["reason"], str):

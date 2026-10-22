@@ -27,7 +27,7 @@ class ReportTransportValue(Serializable):
 
 
 @pytest.mark.usefixtures("fixed_snapshot_environment")
-def test_report_transport_accepts_every_closed_v3_phase(tmp_path):
+def test_report_transport_accepts_every_closed_v3_phase(tmp_path, monkeypatch):
     """Detached worker evidence preserves every StoreReport phase without handles."""
 
     store = DirStore(tmp_path / "store")
@@ -41,12 +41,23 @@ def test_report_transport_accepts_every_closed_v3_phase(tmp_path):
         ),
     )
 
-    outcome = decode_core_outcome(_outcome(
+    from dryml.core import execute_codec
+    checked = []
+    require_saved = execute_codec.require_saved
+    def count_saved(node):
+        checked.append(node)
+        return require_saved(node)
+    monkeypatch.setattr(execute_codec, "require_saved", count_saved)
+    payload = _outcome(
         False,
         publications=_report_data(report, repo, state),
         reason="result outcome exceeds configured bound after publication",
         limit_bytes=1_000_000,
-    ), repo=repo)
+    )
+    assert len(checked) == 1
+    checked.clear()
+    outcome = decode_core_outcome(payload, repo=repo)
+    assert len(checked) == 1
 
     assert tuple(item.phase for item in outcome.evidence.publications) == phases
     assert all(item.status == "unattempted" for item in outcome.evidence.publications)

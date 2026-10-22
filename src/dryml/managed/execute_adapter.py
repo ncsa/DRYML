@@ -22,7 +22,7 @@ from dryml.core.store.store import Store
 from dryml.core.symbol import ImportRef
 
 from .config import ManagedConfig
-from .descriptor import ManagedOperation, _ManagedComposite, _BoundOperation, _BoundComposite
+from .descriptor import ManagedOperation, _ManagedComposite, _BoundOperation, _BoundComposite, _unique_sources
 from .model import InvocationResult, ManagedStatus, ExecutionIdentity, FailedInvocationResult
 from .errors import ManagedError
 from .results import ResultReference, ResultSource
@@ -292,15 +292,16 @@ class ManagedExecuteAdapter:
             require("status", {"tuple"})
             require("execution", {"tuple"})
             require("final", {"node"})
-            for field, count in (("status", 10), ("execution", 4)):
+            for field, metadata_type in (("status", ManagedStatus), ("execution", ExecutionIdentity)):
                 sequence = decoder.nodes[node[field]]["items"]
-                if type(sequence) is not list or len(sequence) != count:
+                metadata_fields = fields(metadata_type)
+                if type(sequence) is not list or len(sequence) != len(metadata_fields):
                     _fail("malformed managed result", path)
-                for position, index in enumerate(sequence):
+                for metadata_field, index in zip(metadata_fields, sequence):
                     if type(index) is not int or not 0 <= index < len(decoder.nodes):
                         _fail("malformed graph reference", path)
                     candidate = decoder.nodes[index]
-                    tags = {"atom", "node"} if field == "status" and position in {5, 6} else {"atom"}
+                    tags = {"atom", "node"} if metadata_field.name in {"checkpoint", "final"} else {"atom"}
                     if not isinstance(candidate, Mapping) or type(candidate.get("tag")) is not str or candidate.get("tag") not in tags:
                         _fail("malformed managed result", path)
             try:
@@ -502,7 +503,7 @@ def _restore_wrapper_chain(executable, target):
         if current.__closure__:
             values.extend(cell.cell_contents for cell in current.__closure__)
         candidates = [value for value in values if reaches(value, active | {id(current)})]
-        candidates = list({id(value): value for value in candidates}.values())
+        candidates = _unique_sources(*candidates)
         if len(candidates) != 1:
             return False
         current.__wrapped__ = candidates[0]

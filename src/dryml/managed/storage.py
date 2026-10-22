@@ -60,6 +60,7 @@ def _cleanup_checkpoints(control, owner, operation_id, *, tokens=None):
     from uuid import UUID
     from dryml.core.store.retention import StateCleanupOutcome, _held
     from .errors import ManagedRecoveryError
+    from .runtime import _stores
     owner.require_owner()
     current = control.inspect(operation_id)
     preparation = control.read_preparation(operation_id)
@@ -86,13 +87,13 @@ def _cleanup_checkpoints(control, owner, operation_id, *, tokens=None):
     except BaseException as error:
         error.cleanup_outcomes = unattempted(selected)
         raise
-    stores = tuple(dict.fromkeys((*control.state_repo.stores, control.control_store)))
+    stores = _stores(control)
     repo = Repo._for_state_io(stores)
     outcomes, released, failures = [], set(), []
-    remaining = selected
+    remaining_start = 0
     try:
         for index, token in enumerate(selected):
-            remaining = selected[index:]
+            remaining_start = index
             owner.require_owner()
             root = roots[token]
             ledger = control.control_store.retention.read(str(UUID(token)))
@@ -105,7 +106,7 @@ def _cleanup_checkpoints(control, owner, operation_id, *, tokens=None):
             except Exception as error:
                 outcomes.extend(getattr(error, "cleanup_outcomes", ()))
                 failures.append(error)
-            remaining = selected[index + 1:]
+            remaining_start = index + 1
             if control.control_store.retention.read(ledger.token).disposition == "released":
                 released.add(token)
         changed = {token for token in released if roots[token].disposition != "released"}
@@ -113,7 +114,7 @@ def _cleanup_checkpoints(control, owner, operation_id, *, tokens=None):
             current = control._retire_checkpoint_roots(current, changed, "released", owner=owner)
     except BaseException as error:
         nested = getattr(error, "cleanup_outcomes", ())
-        error.cleanup_outcomes = tuple(outcomes) + nested + unattempted(remaining[1:] if nested else remaining)
+        error.cleanup_outcomes = tuple(outcomes) + nested + unattempted(selected[remaining_start + bool(nested):])
         raise
     finally:
         repo.close(flush=False)
