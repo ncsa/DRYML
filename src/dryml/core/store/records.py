@@ -1091,8 +1091,6 @@ class StateVariantManifest(_NodeRecord):
         if (type(self.interpretation_bytes) is not bytes or type(self.interpretation) is not dict
                 or self.interpretation_bytes != _json_bytes(self.interpretation)):
             raise StoreRecordError("Codec interpretation must be canonical JSON mapping bytes.")
-        # Reuse the established exhaustive inventory grammar, not its state identity.
-        LocalStateManifest(self.codec, "0" * 64, "0" * 64, "0" * 64, self.files)
         if self.key.codec_hash != self.content_hash(self.codec, self.codec_version, self.interpretation, self.files):
             raise StoreRecordError("Codec/content hash does not match manifest evidence.")
 
@@ -1111,6 +1109,7 @@ class StateVariantManifest(_NodeRecord):
         interpretation = json.loads(_json_bytes(interpretation))
         if type(interpretation) is not dict:
             raise StoreRecordError("Codec interpretation must be a JSON mapping.")
+        # Reuse the established exhaustive inventory grammar, not its state identity.
         LocalStateManifest(codec, "0" * 64, "0" * 64, "0" * 64, files)
         return codec + "-" + _digest("dryml-codec-content/v1", {
             "codec": codec, "codec_version": codec_version,
@@ -1386,7 +1385,8 @@ class MutationIntentRecord(_NodeRecord):
         if data["status"] != "pending" and (len(set(keys)) != len(keys)
                 or set(keys) != {(row["path"], row["kind"]) for row in data["transitions"]}):
             raise StoreRecordError("Classified projection must cover exactly the affected transitions.")
-        if any(type(ref) is not str or ref not in {t["path"] for t in data["transitions"]}
+        transition_paths = {t["path"] for t in data["transitions"]}
+        if any(type(ref) is not str or ref not in transition_paths
                for ref in data["confirmed"]):
             raise StoreRecordError("Invalid confirmed publication.")
         if self.content != _json_bytes(data):

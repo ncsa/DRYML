@@ -350,13 +350,13 @@ def test_zip_failed_commit_keeps_old_archive_and_pending_buffer(tmp_path, monkey
         store.close()
 
 
-def test_explicit_sqlite_policy_refuses_before_publication_effects(tmp_path):
+def test_explicit_sqlite_policy_completes_publication_and_exact_projection(tmp_path):
     store = DirStore(tmp_path / "store", query_index="sqlite")
     cut = store.authority_cut()
-    with pytest.raises(StoreCapabilityError, match="coverage"):
-        store.publish_node(creation())
-    assert store.authority_cut() == cut
-    assert not Path(store.base_dir, "mutations").exists()
+    store.publish_node(creation())
+    assert store.authority_cut().epoch == cut.epoch + 1
+    assert not store.authority_cut().pending
+    assert len(store.open_query_index().projection_rows("recipe_root", refresh=False)) == 1
 
 
 @pytest.mark.parametrize("boundary", ["header", "anchor", "rename"])

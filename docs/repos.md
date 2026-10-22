@@ -41,16 +41,17 @@ no automatic conversion. The Store-owned APIs currently available are:
   conflicts, malformed evidence and missing established anchors fail explicitly.
   Publishing saved metadata does not automatically publish a recipe root.
 
-Supported mutations are journaled under one Store authority cut. They do **not**
-claim integrated SQLite coverage, retention, active-use leases, or integrated
-Repo/managed save/load. Legacy Repo
-snapshot/declaration writers explicitly raise `StoreCapabilityError` on format 4;
-legacy Query V3 / SQLite coverage is likewise refused before inventory or index
-repair. Explicit `query_index="sqlite"` refuses mutation before effects until its
-new coverage is integrated. `none`/`memory` have no persistent-maintenance
-obligation; `auto` currently uses an explicitly nonpersistent publication policy
-(`store.mutation_index_disposition` reports the choice), with query coverage still
-refused. The remaining
+Supported mutations are journaled under one Store authority cut and synchronously
+maintain enabled SQLite schema-10/coverage-1 projections before complete success.
+They do **not** claim retention, active-use leases, or integrated Repo/managed
+save/load. Legacy Repo snapshot/declaration writers explicitly raise
+`StoreCapabilityError` on format 4; legacy Query V3 views/coverage are likewise
+refused. `none`/`memory` have no persistent-maintenance obligation; `auto` uses
+usable SQLite and declares nonpersistent fallback only for optional-backend
+unavailability. Explicit `sqlite` never falls back. One persistent destination
+and compatible settings are bound per Store authority domain before mutation;
+conflicting enabled handles are refused. `store.mutation_index_disposition`
+reports policy, not readiness. The remaining
 consumer documentation below describes the existing interfaces awaiting their
 owning cutover; its snapshot-based workflows are not currently supported against
 new built-in format-4 Stores.
@@ -86,15 +87,16 @@ Graph/codec validation happens outside writer-blocking fences. Short metadata sc
 capture/revalidate the cut and exact byte/directory witnesses. An unstable read
 raises `StoreCutChanged`; publication retries stale preparation within a bounded
 budget. Do not surround these high-level APIs with an externally retained
-`writer_lock()` or `authority_read_fence()`. Only prepared byte/association checks,
-installs and cuts belong inside those scopes. Shared use requires same-host native
+`writer_lock()` or `authority_read_fence()`. Prepared byte/association checks,
+installs, cuts, the short prepared SQL transaction and exact acknowledgement
+belong inside those scopes. Shared use requires same-host native
 advisory locks, atomic rename and the filesystem persistence guarantees documented
 in [Filesystem](filesystem.md); unsupported network/distributed filesystems are
 outside this contract.
 
 Intent and invalidation persist before query-visible effects. After a visible
 failure, `StoreMutationError` exposes `mutation_id`, `cut`, `confirmed_refs`, and
-`index_disposition="repair_pending"`, with the original cause. The epoch describes
+`index_disposition="repair_pending"`, and `recovery_attempt`, with the original cause. The epoch describes
 the honest classified result, not all-or-nothing completion. Cancellation retains
 the same evidence attributes. Preserve partial staging when recovery is needed.
 
@@ -111,11 +113,17 @@ authority or intent versions are errors, not permission to reset the Store.
 
 The Store-owned `PreparedMutation`/`apply_prepared_mutation` seam accepts detached
 immutable byte facts from the same handle, with cut/CAS witnesses and affected
-scopes. It returns `(mutation_uuid, cut)` and leaves exact replay work pending for
-the projection owner. `acknowledge_mutation(uuid, epoch)` is only valid after that
-work and its coverage are incorporated. The built-in nonpersistent policy performs
-its own synchronous exact acknowledgement; no SQLite delta/coverage implementation
-is claimed yet. Authoritative no-ops at a current cut do not churn epochs or intents.
+scopes. It returns `(mutation_uuid, cut)` after enabled persistent projection and
+exact acknowledgement complete. In nonpersistent mode this explicit low-level
+seam leaves work pending for its owner; ordinary public mutations acknowledge
+their nonpersistent disposition synchronously. `acknowledge_mutation(uuid, epoch)`
+is only valid after that exact work and its coverage are incorporated, and requires
+an exact SQLite receipt when enabled. Authoritative no-ops with a current index
+churn neither epochs/intents nor SQL rows. Missing/stale enabled sidecars still
+require visible metadata-only replay/rebuild or refusal. Repair changes no Store
+format or payload bytes and never repeats application capture. See
+[Query Index Backend Contracts](query_index_backend_contracts.md) for relation
+coverage, failure boundaries and the maintenance-free index-level read seam.
 
 ZipStore buffers these same cuts and intents in its extraction.
 `committed_archive_cut` records the last confirmed durable archive cut; it remains

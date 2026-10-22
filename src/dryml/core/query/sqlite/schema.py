@@ -2,6 +2,7 @@
 
 Version inspection never decodes Store or index rows. Valid foreign ownership
 refuses maintenance; known older owned formats can be rebuilt from authority.
+Schema 10 separates the closed format-4 coverage contract from legacy V3 rows.
 """
 
 from __future__ import annotations
@@ -18,7 +19,15 @@ from ..model import CANONICAL_QUERY_SEMANTICS_VERSION, FINGERPRINT_SCHEMA_VERSIO
 
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
-SQLITE_QUERY_INDEX_SCHEMA_VERSION = 9
+SQLITE_QUERY_INDEX_SCHEMA_VERSION = 10
+STORE_COVERAGE_VERSION = 1
+# Unimplemented owners are explicit capabilities, never certified empty relations.
+STORE_PROJECTION_FAMILIES = (
+    "record", "recipe_root", "saved_root", "declaration", "creation",
+    "manifest", "availability", "node", "edge", "facet", "name",
+    "requested_metadata", "retention", "lifecycle",
+)
+STORE_UNAVAILABLE_FAMILIES = frozenset({"requested_metadata", "retention", "lifecycle"})
 IndexCompatibilityDecision = Literal["compatible", "rebuild", "future-unsupported", "foreign-owned"]
 """Metadata disposition; foreign-owned destinations must never be repurposed."""
 
@@ -54,6 +63,59 @@ class IndexSemanticVersion:
 
 
 DDL = (
+    """
+    CREATE TABLE store_projection_cut (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        contract_version INTEGER NOT NULL,
+        store_uuid TEXT NOT NULL,
+        epoch INTEGER NOT NULL,
+        index_uuid TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE store_projection_rows (
+        family TEXT NOT NULL CHECK (family IN (%s)),
+        source TEXT NOT NULL,
+        row_key TEXT NOT NULL,
+        payload BLOB NOT NULL,
+        PRIMARY KEY (family, source, row_key)
+    ) WITHOUT ROWID
+    """ % ", ".join("'" + family.replace("'", "''") + "'" for family in STORE_PROJECTION_FAMILIES),
+    "CREATE INDEX store_projection_by_source ON store_projection_rows(source)",
+    """
+    CREATE TABLE store_projection_coverage (
+        family TEXT PRIMARY KEY,
+        supported INTEGER NOT NULL CHECK (supported IN (0, 1)),
+        row_count INTEGER NOT NULL CHECK (row_count >= 0),
+        row_digest BLOB NOT NULL,
+        dirty INTEGER NOT NULL CHECK (dirty IN (0, 1))
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE TABLE store_projection_receipts (
+        mutation_id TEXT PRIMARY KEY,
+        epoch INTEGER NOT NULL,
+        evidence BLOB NOT NULL
+    ) WITHOUT ROWID
+    """,
+    """
+    CREATE TRIGGER store_projection_insert AFTER INSERT ON store_projection_rows
+    BEGIN
+        UPDATE store_projection_coverage SET dirty = 1 WHERE family = NEW.family;
+    END
+    """,
+    """
+    CREATE TRIGGER store_projection_update AFTER UPDATE ON store_projection_rows
+    BEGIN
+        UPDATE store_projection_coverage SET dirty = 1 WHERE family IN (OLD.family, NEW.family);
+    END
+    """,
+    """
+    CREATE TRIGGER store_projection_delete AFTER DELETE ON store_projection_rows
+    BEGIN
+        UPDATE store_projection_coverage SET dirty = 1 WHERE family = OLD.family;
+    END
+    """,
     """
     CREATE TABLE IF NOT EXISTS catalog_state (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -365,19 +427,20 @@ def compatibility_decision(
     owner = actual.get("store_key")
     if isinstance(owner, str) and owner and owner != expected.store_key:
         return "foreign-owned"
+    older = False
     for key, value in expected.catalog_state().items():
         actual_value = actual.get(key)
         if key == "store_key":
             if actual_value != value:
-                return "rebuild"
+                older = True
             continue
         if type(actual_value) is not int:
             return "future-unsupported"
         if actual_value > value:
             return "future-unsupported"
         if actual_value < value:
-            return "rebuild"
-    return "compatible"
+            older = True
+    return "rebuild" if older else "compatible"
 
 
 def stored_compatibility_decision(
@@ -411,9 +474,16 @@ def stored_compatibility_decision(
         owner = con.execute("SELECT store_key FROM catalog_state WHERE singleton = 1").fetchone()
         if owner is not None and isinstance(owner[0], str) and owner[0] and owner[0] != store_key:
             return "foreign-owned"
-    if user_version < SQLITE_QUERY_INDEX_SCHEMA_VERSION:
-        return "rebuild"
     expected = expected_semantic_version(store_key=store_key, canonical_version=canonical_version)
+    if user_version < SQLITE_QUERY_INDEX_SCHEMA_VERSION:
+        if column_names:
+            row = con.execute("SELECT * FROM catalog_state WHERE singleton = 1").fetchone()
+            if row is not None:
+                state = dict(zip(column_names, row))
+                if any(type(state.get(key)) is int and state[key] > value
+                       for key, value in expected.catalog_state().items() if key != "store_key"):
+                    return "future-unsupported"
+        return "rebuild"
     if not set(expected.catalog_state()) <= set(column_names):
         return "future-unsupported"
     row = con.execute("SELECT * FROM catalog_state WHERE singleton = 1").fetchone()

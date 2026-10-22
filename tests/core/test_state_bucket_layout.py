@@ -349,10 +349,15 @@ def test_legacy_nested_store_writers_and_query_coverage_refuse_before_effects(tm
     store = DirStore(tmp_path / "store", query_index="sqlite")
     before = authority_files(store)
     for action in [lambda: store.write_definition_record(DefinitionRecord(creation())),
-                   store.query, store.open_query_index]:
+                   store.query]:
         with pytest.raises(StoreCapabilityError):
             action()
     assert authority_files(store) == before
+    index = store.open_query_index()
+    assert index.status().state == "missing"  # Binding alone is not coverage.
+    assert {path: data for path, data in authority_files(store).items()
+            if not path.startswith(".dryml/")} == before
+    assert store.authority_cut().epoch == 0 and not store.authority_cut().pending
 
 
 def test_state_key_record_is_closed_separate_version_one():

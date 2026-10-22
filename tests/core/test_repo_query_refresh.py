@@ -707,3 +707,26 @@ def test_u3_inherited_repo_refuses_before_parent_configuration_lock(tmp_path):
         parent.close()
         child.close()
     assert repo.query().cdefs().count() == 1
+
+
+# These preserved assertions belong to the later Repo/Query consumer units.
+# Narrow strict xfail records the explicit capability refusal, not a ready claim.
+from dryml.core.store.store import StoreCapabilityError
+
+for _name, _test in tuple(globals().items()):
+    if _name.startswith("test_"):
+        globals()[_name] = pytest.mark.xfail(
+            strict=True, raises=StoreCapabilityError,
+            reason="Legacy Repo/Query V3 consumer explicitly refused until U10/U13 cutover",
+        )(_test)
+
+
+@pytest.mark.parametrize("refresh", [False, "auto", True, "always"])
+def test_format4_repo_query_refresh_refuses_unintegrated_consumer(tmp_path, refresh):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.publish_node(Definition(RefreshLeaf, name="new").concretize())
+    before = store.authority_cut()
+    with pytest.raises(StoreCapabilityError, match="coverage contract"):
+        Repo(store).query().refresh(refresh).count()
+    assert store.authority_cut() == before
+    assert len(store.open_query_index().projection_rows("recipe_root", refresh=False)) == 1

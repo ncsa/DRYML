@@ -29,7 +29,8 @@ class StoreMutationError(StoreAuthorityError, OSError):
     """Failed mutation with inspectable confirmed references and repair evidence.
 
     mutation_id, cut, confirmed_refs and index_disposition describe actual
-    persisted evidence, not rollback or complete publication. The original IO or
+    persisted evidence, not rollback or complete publication. recovery_attempt
+    identifies the attempted classification/index-maintenance recovery. The original IO or
     classification failure is retained as the exception cause.
     """
 
@@ -39,6 +40,7 @@ class StoreMutationError(StoreAuthorityError, OSError):
         self.cut = cut
         self.confirmed_refs = tuple(confirmed_refs)
         self.index_disposition = "repair_pending"
+        self.recovery_attempt = "authority-classification"
 
 
 @dataclass(frozen=True)
@@ -352,14 +354,19 @@ def apply(store, batch, *, _acknowledge_nonpersistent=False):
                 raise StoreAuthorityError("Missing or mismatched pending mutation evidence.")
             if pending.intent["status"] == "pending" or pending.intent["epoch"] > batch.cut.epoch:
                 raise StoreCutChanged("Unclassified publication is pending; recover authority and reprepare.")
-        predicted = {}
+        predicted, initial = {}, {}
         for change in batch.changes:
             key = (change.path, change.kind)
             current = predicted[key] if key in predicted else _observed(store, change.to_data())
+            initial.setdefault(key, current)
             if current != change.before:
                 raise StoreCutChanged("Prepared mutable CAS changed; retry preparation.")
             predicted[key] = change.after
-        if not batch.changes:
+        # Recovery may deliberately repersist equal bytes after an ambiguous
+        # native barrier. Ordinary batches with no net effect need no journal or
+        # filesystem/SQL churn, even if they contain intermediate transitions.
+        recovery = any(scope.startswith("replay:") for scope in batch.scopes)
+        if not batch.changes or (predicted == initial and not recovery):
             return None, batch.cut
         cut = batch.cut
         try:

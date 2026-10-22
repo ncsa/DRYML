@@ -198,14 +198,17 @@ uses canonical base64 within closed JSON, not pickle or user callbacks. File
 projection rows carry exact record bytes; variant rows carry exact manifest,
 availability incarnation and data-presence evidence. Multiple transitions to one
 mutable record coalesce to one actual projection row. This is the batch seam for
-delta/coverage consumers; it neither implements nor certifies SQLite coverage.
+delta/coverage consumers; the journal alone does not certify SQLite coverage.
+Enabled persistent completion applies that work and coverage in one SQLite
+transaction, rereads committed receipts, then acknowledges exact captured work.
 
 Preparation, graph encode/decode/equality, compatibility validation and payload
 authentication run outside the Store writer fence. A detached batch carries the
 Store cut and exact byte/directory witnesses, revalidated under that fence before
 effects. Stale write preparation retries a bounded number of times, then explicitly
-refuses instability. The fence covers only bounded byte/association checks,
-prepared installs and cut publication. Key protection must precede it when added;
+refuses instability. The fence covers bounded byte/association checks, prepared
+installs, cut publication, the short prepared SQL transaction and exact
+acknowledgement. Key protection must precede it when added;
 callers must not retain an external writer/read fence around high-level graph APIs.
 
 Before effects, persist the bounded `mutation-prepare.record` bridge, the named
@@ -221,20 +224,23 @@ After effects, classify actual affected records and persist classification **bef
 the resulting authority cut. An interrupted cut publication can finish from that
 persisted epoch without incrementing twice. An error after visibility is a partial
 failure, never a rollback: `StoreMutationError` (also an `OSError`) exposes
-`mutation_id`, `cut`, `confirmed_refs`, `index_disposition="repair_pending"`, and
+`mutation_id`, `cut`, `confirmed_refs`, `index_disposition="repair_pending"`, `recovery_attempt`, and
 the original cause. Cancellation propagates with the same evidence attributes.
 Unconsumed staging and authoritative partial work are preserved.
 
 `recover_authority()` classifies exact persisted work only, without graph preparation,
 payload IO, capture, restore, body execution or deletion of authoritative files.
-It leaves work pending; it does not claim missing transitions happened.
+It leaves work pending; it does not claim missing transitions happened. This
+authority boundary remains usable independently of SQLite compatibility or
+availability.
 `replay_mutation(uuid)` can finish prepared transitions from their exact persisted
 evidence. It authenticates any required surviving staging outside the writer fence,
 re-persists already visible metadata/parent entries, journals repair, and refuses
 a later Store epoch, changed authority or missing staging rather than
 recapturing or overwriting a later writer. `pending_mutations()` exposes exact
 projection work; `acknowledge_mutation(uuid, epoch)` acknowledges only that captured
-classified mutation/cut. Later pending work remains pending even after an earlier
+classified mutation/cut, requiring its exact committed SQLite receipt when enabled.
+Later pending work remains pending even after an earlier
 repair. Missing/corrupt/future journal records are refused intact, not reset.
 
 Withdrawal removes only the withdrawing root's membership and anchor contributions;
@@ -250,19 +256,35 @@ authority record, preserving its UUID and bytes. A marked Store missing its cut 
 refused; the reader does not invent an empty replacement. Old Store formats and
 pre-journal format-4 roots without the required cut are not converted.
 
-Legacy Repo snapshot writers, Query V3 and persistent SQLite coverage still refuse
-format 4 before inventory/repair. `none`/`memory` have no persistent-maintenance
-obligation; `auto` currently declares a nonpersistent publication policy because
-new coverage is unavailable. An explicit `sqlite` policy refuses mutation before
-effects. `mutation_index_disposition` reports this selection. Successful
-nonpersistent mutations acknowledge their exact work synchronously under the same
-writer fence. The prepared-batch seam intentionally leaves work pending for its
-owning projection/coverage adapter; it never silently acknowledges an enabled
-sidecar. Repo consumers must use Store-owned APIs, not mutate bucket paths.
+Legacy Repo snapshot writers and Query V3 views/coverage remain explicit format-4
+refusals. The Store-owned persistent projection uses **SQLite schema 10 / coverage
+contract 1**. It keeps source records, independent recipe/saved memberships,
+declarations, creation compatibility prefilters, full-StateKey manifests and
+availability, typed block/table/overlay postings, and names distinct. Capability
+entries for requested metadata, retention and lifecycle remain explicitly
+unavailable until their owning adapters integrate their authority and guards.
+Neither old schema 9 nor incomplete coverage is ready. Owned derived state can be
+rebuilt from compatible metadata without payload reads or source-format changes;
+foreign/future sidecars are refused intact. A detected incomplete authority cut
+invalidates old derived coverage and fails rebuild rather than certify omissions.
+
+`none`/`memory` have no persistent-maintenance obligation; `auto` enables usable
+SQLite, with declared nonpersistent fallback only for optional-backend
+unavailability. Explicit `sqlite` never falls back. Derived
+`.dryml/query-index-destination.record` binds one normalized persistent
+destination/settings to the Store UUID, checked across handles/processes and on
+cached-backend reuse before effects. `mutation_index_disposition` reports policy,
+not a current certificate. Successful ordinary nonpersistent mutations acknowledge
+their exact work synchronously; their explicit prepared-batch seam leaves work
+pending for its owner. Enabled prepared batches complete projection and exact ack
+before return. Repo consumers must use Store-owned APIs, not mutate bucket paths.
+See [Query Index Backend Contracts](query_index_backend_contracts.md) for readiness,
+changed-record replay, failure recovery and maintenance-free index reads.
 
 ZipStore has the same logical tree in one buffered extraction. State installation
 receipts say `durability="buffered"`; durable archive completion requires a
-successful `commit()`. Archive conflicts/barrier failures propagate and retain
+successful `commit()`. The extraction retains nonpersistent indexing and makes no
+durable SQLite projection claim. Archive conflicts/barrier failures propagate and retain
 dirty/partial evidence. `committed_archive_cut` remains the last confirmed durable
 archive cut (or None before first commit). `ZipStoreCommitError` carries the stable
 commit mutation identity, buffered cut/confirmed references, previous confirmed

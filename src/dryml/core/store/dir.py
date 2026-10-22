@@ -60,8 +60,9 @@ class DirStore(Store):
     live temporary format file for old authority.
 
     Supported mutations use durable intents, byte CAS and one committed authority
-    cut. Graph validation runs outside writer-blocking fences. Legacy Repo writers
-    and query/index coverage still fail explicitly; active-use leases are separate.
+    cut. Graph validation runs outside writer-blocking fences. Legacy Repo/query
+    consumers still fail explicitly; enabled SQLite projection completes synchronously.
+    Active-use leases are separate.
 
     Args:
         base_dir (str or PathLike): Direct Store root to open or initialize.
@@ -101,6 +102,7 @@ class DirStore(Store):
             raise ValueError("DirStore query_index must be 'auto', 'sqlite', 'memory', 'none', or SQLiteQueryIndexConfig.")
         self.query_index = query_index
         self._query_index_instance: SQLiteStoreQueryIndex | None = None
+        self._query_index_unavailable = False
         self._initialize_format(existing_only=_existing_only)
         self._store_uuid = self._read_file(self.store_format_path, StoreFormatRecord).store_uuid
         self._state_owner_closed = False
@@ -128,6 +130,9 @@ class DirStore(Store):
         operation is a diagnostic name, local_state requests staging guarantees,
         and record_family must explicitly name dryml-node-graph/v1.
         Returns None or raises StoreCapabilityError before legacy writer effects.
+        QueryIndexError reports unavailable/conflicting persistent destinations
+        before authority effects. May bind derived index configuration under the
+        Store fence; no product publication or graph preparation occurs here.
         V2/V3 Repo/reference writers await their owning consumer cutover; changing
         the Store marker never admits their old nested records into format 4.
         """
@@ -136,8 +141,7 @@ class DirStore(Store):
         if record_family != "dryml-node-graph/v1":
             raise StoreCapabilityError(
                 f"{operation} uses a legacy Store consumer; format 4 requires Node/state-bucket APIs.")
-        if self._query_index_policy == "sqlite":
-            raise StoreCapabilityError("Explicit SQLite publication requires format-4 coverage, which is not integrated yet.")
+        self.open_query_index()
 
     def authority_cut(self):
         """Return a coherent AuthorityRecord (UUID/epoch/pending), without graph IO.
@@ -155,8 +159,12 @@ class DirStore(Store):
         Recovery is metadata-only, preserves authoritative files/staging, and
         never captures/restores Objects or completes unexecuted transitions.
         Missing/corrupt evidence or IO failure raises rather than claiming success.
+        Classification is independent of SQLite availability or compatibility.
         """
-        self.preflight_publication("recover authority", record_family="dryml-node-graph/v1")
+        # Authority classification must remain usable independently of a missing,
+        # unavailable or incompatible derived destination.
+        self._assert_state_owner_open()
+        super().preflight_publication("recover authority", record_family="dryml-node-graph/v1")
         return authority.recover(self)
 
     def acknowledge_mutation(self, mutation_id, epoch):
@@ -168,6 +176,9 @@ class DirStore(Store):
         """
         self.preflight_publication("acknowledge mutation", record_family="dryml-node-graph/v1")
         try:
+            index = self.open_query_index()
+            if index is not None:
+                return index.acknowledge_store_mutation(mutation_id, epoch)
             return authority.acknowledge(self, mutation_id, epoch)
         except (StoreAuthorityError, StoreRecordError, TypeError, ValueError):
             raise
@@ -292,12 +303,67 @@ class DirStore(Store):
         witnesses; no callbacks or live graph values. Stale facts raise
         StoreCutChanged before effects. Failed publication raises StoreMutationError
         with confirmed references/cut and repair disposition. New work remains
-        pending until acknowledge_mutation confirms the exact incorporated cut;
-        callers can obtain replay data with pending_mutations. This seam is owned
+        pending in nonpersistent mode until its owner acknowledges it. Enabled
+        persistent projection commits and acknowledges before return. Callers can
+        obtain replay data with pending_mutations. This seam is owned
         by this Store handle and refuses another handle's prepared facts.
         """
+        if type(facts) is not authority.PreparedMutation:
+            raise TypeError("Store mutations require PreparedMutation facts.")
+        if facts.owner is not self._prepared_fact_owner:
+            raise StoreAuthorityError("Prepared facts belong to a different Store owner.")
         self.preflight_publication("apply prepared mutation", record_family="dryml-node-graph/v1")
-        return authority.apply(self, facts)
+        index = self.open_query_index()
+        if index is not None:
+            self._validate_projection_changes(facts)
+            if not self.authority_cut().pending:
+                index.maintain_store()
+        identity, cut = authority.apply(self, facts)
+        if index is not None:
+            self._complete_index_mutation(index, identity, cut)
+            cut = self.authority_cut()
+        return identity, cut
+
+    @staticmethod
+    def _validate_projection_changes(facts):
+        from ..query.authority import projection_record_type
+        for change in facts.changes:
+            if change.kind == "data" and not change.path.endswith("/data"):
+                raise StoreAuthorityError("State data transition requires its exact data/ address.")
+            paths = (change.path,) if change.kind == "file" else (
+                (change.path[:-5] if change.kind == "data" else change.path) + "/manifest.record",
+                (change.path[:-5] if change.kind == "data" else change.path) + "/availability.record")
+            for path in paths:
+                reader = projection_record_type(path)
+                if change.kind == "file" and change.after is not None:
+                    try:
+                        reader.from_bytes(change.after)
+                    except StoreRecordError:
+                        if reader is not DeclarationAnchorRecord:
+                            raise
+                        RetiredDeclarationAnchorRecord.from_bytes(change.after)
+
+    def _complete_index_mutation(self, index, identity, cut):
+        try:
+            index.maintain_store()
+        except BaseException as error:
+            refs = ()
+            try:
+                if identity is not None:
+                    record = self._read_file(os.path.join(self.base_dir, "mutations", identity + ".record"), MutationIntentRecord)
+                    if record is not None:
+                        refs = record.intent["confirmed"]
+                cut = self.authority_cut()
+            except Exception:
+                pass
+            if not isinstance(error, Exception):
+                error.mutation_id, error.cut = identity, cut
+                error.confirmed_refs, error.index_disposition = tuple(refs), "repair_pending"
+                error.recovery_attempt = "journal-replay-or-metadata-rebuild"
+                raise
+            outcome = authority.StoreMutationError("SQLite projection completion failed: " + str(error), identity, cut, refs)
+            outcome.recovery_attempt = "journal-replay-or-metadata-rebuild"
+            raise outcome from error
 
     def pending_mutations(self):
         """Return exact intent records captured under one short authority cut.
@@ -328,7 +394,6 @@ class DirStore(Store):
 
     def _prepared_file(self, path, record, *, mutable=False):
         before = authority.raw(self, self._relative(path))
-        authority.observe(self, path, before)
         after = None if record is None else record.to_bytes()
         if before == after:
             return None
@@ -342,17 +407,18 @@ class DirStore(Store):
         for _ in range(8):
             try:
                 self.recover_authority()
+                index = self.open_query_index()
+                if index is not None and not self.authority_cut().pending:
+                    index.maintain_store()
                 with self._metadata_read() as captured:
                     changes, scopes, result = prepare()
-                    unique = []
-                    for change in changes:
-                        if change is not None and change not in unique:
-                            unique.append(change)
+                    unique = list(dict.fromkeys(change for change in changes if change is not None))
                     facts = captured.batch(unique, scopes)
-                # The current automatic policy is explicitly nonpersistent.
-                # Keep publication/cut/ack in one short byte-only writer scope;
-                # the public prepared-facts seam deliberately leaves work pending.
-                authority.apply(self, facts, _acknowledge_nonpersistent=True)
+                if index is not None:
+                    self._validate_projection_changes(facts)
+                identity, cut = authority.apply(self, facts, _acknowledge_nonpersistent=index is None)
+                if index is not None:
+                    self._complete_index_mutation(index, identity, cut)
                 return result
             except StoreCutChanged:
                 if not retry_stale:
@@ -407,7 +473,8 @@ class DirStore(Store):
         packet = encode_node_graph(prepared)
         views = packet.pop("views")
         block = NodeBlockRecord(_json_bytes(packet))
-        records = tuple(NodeRootRecord(block.digest, kind, _json_bytes(view)) for view in views)
+        block_digest = block.digest
+        records = tuple(NodeRootRecord(block_digest, kind, _json_bytes(view)) for view in views)
         block.to_bytes()
         for record in records:
             record.to_bytes()
@@ -462,6 +529,7 @@ class DirStore(Store):
             block, records, prepared = self._prepare_node_roots(tuple(roots), "construction")
         except (ValueError, TypeError) as error:
             raise StoreAuthorityError("Invalid creation authority.") from error
+        block_digest = block.digest
         def prepare():
             missing = {}
             for record, root in zip(records, prepared):
@@ -475,7 +543,7 @@ class DirStore(Store):
                     raise StoreAuthorityError("Creation bucket header collision.")
             changes = []
             if missing:
-                changes.append(self._prepared_file(self._node_path("definitions/blocks", block.digest), block))
+                changes.append(self._prepared_file(self._node_path("definitions/blocks", block_digest), block))
                 for record, _ in missing.values():
                     changes.append(self._prepared_file(os.path.join(self._bucket_path(record.digest), "def.pkl"), record))
             return changes, ("creation",), None
@@ -795,8 +863,8 @@ class DirStore(Store):
         outside the writer fence. All applicable declarations are checked before
         effects, using canonical projection evidence, not exact state-pinned graph
         equality. Journal intent precedes effects; partial IO errors carry confirmed
-        references and repair evidence. Enabled SQLite coverage is refused before
-        effects pending its separate integration.
+        references and repair evidence. Enabled SQLite projection and exact
+        acknowledgement complete synchronously before return.
         """
         from ..node_views import OBJECT_PROJECTION_VIEW, view_equal
         self.preflight_publication("publish Node metadata", record_family="dryml-node-graph/v1")
@@ -804,6 +872,7 @@ class DirStore(Store):
         source = (kind, record.digest)
         membership = NodeMembershipRecord(kind, record.digest, tuple(i for i, _, _ in projections))
         membership.to_bytes()
+        block_digest, pblock_digest = block.digest, pblock.digest
         def prepare():
             existing = self._read_membership(record.digest, kind)
             if existing is not None:
@@ -829,15 +898,15 @@ class DirStore(Store):
                 b = NodePreparation((root,))
                 if old_record.root_kind != kind or not NodePreparation((a,)).exact_equal(a, b, root):
                     raise StoreAuthorityError("Node root semantic collision.")
-            self._check_node_record(self._node_path("definitions/blocks", block.digest), block)
-            new_projections = any(anchor.projection.block_digest == pblock.digest for anchor in updates)
+            self._check_node_record(self._node_path("definitions/blocks", block_digest), block)
+            new_projections = any(anchor.projection.block_digest == pblock_digest for anchor in updates)
             if new_projections:
-                self._check_node_record(self._node_path("definitions/blocks", pblock.digest), pblock)
+                self._check_node_record(self._node_path("definitions/blocks", pblock_digest), pblock)
             changes = []
             if old_record is None:
-                changes.append(self._prepared_file(self._node_path("definitions/blocks", block.digest), block))
+                changes.append(self._prepared_file(self._node_path("definitions/blocks", block_digest), block))
             if new_projections and existing is None:
-                changes.append(self._prepared_file(self._node_path("definitions/blocks", pblock.digest), pblock))
+                changes.append(self._prepared_file(self._node_path("definitions/blocks", pblock_digest), pblock))
             if old_record is None:
                 changes.append(self._prepared_file(root_path, record))
             for anchor in updates:
@@ -1073,13 +1142,15 @@ class DirStore(Store):
     def mutation_index_disposition(self):
         """Return the explicit current publication/index policy (str), without IO.
 
-        none/memory have no persistent maintenance obligation. auto is currently
-        nonpersistent because new coverage is unavailable; explicit sqlite refuses
-        publication before effects. No disposition certifies legacy index rows.
+        none/memory have no persistent maintenance obligation. auto uses SQLite
+        when available, otherwise declares optional-backend fallback. Explicit
+        sqlite never falls back. This policy is not itself readiness evidence.
         """
-        return {"none": "disabled", "memory": "memory",
-                "auto": "nonpersistent:auto-coverage-unavailable",
-                "sqlite": "unsupported:sqlite-coverage-unavailable"}[self._query_index_policy]
+        if self._query_index_policy in {"none", "memory"}:
+            return {"none": "disabled", "memory": "memory"}[self._query_index_policy]
+        from ..query.sqlite import sqlite_available
+        return ("nonpersistent:auto-backend-unavailable" if self._query_index_policy == "auto"
+                and (self._query_index_unavailable or not sqlite_available()) else "persistent:sqlite-synchronous")
 
     @property
     def dryml_dir(self) -> str:
@@ -1097,16 +1168,61 @@ class DirStore(Store):
         return os.path.join(self.dryml_dir, "query-index.dirty")
 
     def open_query_index(self):
-        """Return None without a persistent policy; otherwise refuse old coverage.
+        """Bind one persistent destination per authority domain; return its backend.
 
-        Format-4 SQLite coverage belongs to U08. StoreCapabilityError is raised
-        before opening/rebuilding a legacy schema; no ready-index claim is made.
+        none/memory return None. auto may declare nonpersistent fallback only when
+        optional SQLite is unavailable; explicit sqlite propagates that failure.
+        Destination/configuration conflicts raise QueryIndexIncompatible before
+        mutation. Binding persists derived configuration under the Store fence;
+        it never initializes an empty ready index over nonempty authority.
         """
+        self._assert_state_owner_open()
         if self._query_index_instance is not None:
+            try:
+                self._query_index_instance.preflight_store()
+            except QueryIndexUnavailable:
+                if self._query_index_policy != "auto":
+                    raise
+                self._query_index_unavailable = True
+                return None
+            self._query_index_unavailable = False
             return self._query_index_instance
         if self._query_index_policy in {"memory", "none"}:
             return None
-        raise StoreCapabilityError("Store format 4 requires new index coverage; the legacy SQLite schema is unsupported.")
+        from ..query.sqlite import require_sqlite
+        try:
+            require_sqlite()
+        except QueryIndexUnavailable:
+            if self._query_index_policy == "auto":
+                self._query_index_unavailable = True
+                return None
+            raise
+        self._query_index_unavailable = False
+        config = self._query_index_config or SQLiteQueryIndexConfig()
+        path = local_path_key(config.path or self.query_index_path)
+        config = replace(config, path=path)
+        index = SQLiteStoreQueryIndex(source_key=self.catalog_key(), path=path, config=config,
+                                      store=self, dirty_path=self.query_index_dirty_path)
+        index.preflight_store()
+        self._query_index_instance = index
+        return index
+
+    def _query_index_binding(self, index):
+        config = index.config
+        return _json_bytes({"kind": "dryml-store-index-destination", "version": 1,
+                              "store_uuid": self.store_uuid, "path": local_path_key(index.path),
+                              "journal_mode": config.journal_mode, "durability": config.durability})
+
+    def _bind_query_index(self, index):
+        from ..query.model import QueryIndexIncompatible
+        binding = self._query_index_binding(index)
+        relative = ".dryml/query-index-destination.record"
+        with self.writer_lock():
+            previous = authority.raw(self, relative)
+            if previous is not None and previous != binding:
+                raise QueryIndexIncompatible("Conflicting persistent index destination/configuration for this Store authority domain.")
+            if previous is None:
+                self._atomic_write(os.path.join(self.base_dir, relative), binding)
 
     def mark_query_index_dirty(self, cdef=None, *, metadata_target=None) -> str | None:
         """Publish a durable marker for an authoritative queryable mutation.

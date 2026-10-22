@@ -4,7 +4,7 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import Repo, Serializable
+from dryml.core import Definition, Serializable
 from dryml.core.store.dir import DirStore
 
 
@@ -16,18 +16,19 @@ class ReferenceRebuildValue(Serializable):
         pass
 
 
-def test_v3_index_metadata_rebuilds_with_visible_progress(tmp_path, capsys):
+def test_owned_schema9_index_rebuilds_with_visible_progress(tmp_path, capsys):
     store = DirStore(tmp_path / "store", query_index="sqlite")
-    repo = Repo(store)
-    repo.save_object(ReferenceRebuildValue(1, repo=repo))
+    store.publish_node(Definition(ReferenceRebuildValue, value=1).concretize())
     index = store.open_query_index()
     index.rebuild()
     con = sqlite3.connect(index.path)
-    con.execute("UPDATE catalog_state SET canonical_version = canonical_version - 1")
+    con.execute("PRAGMA user_version=9")
     con.commit()
     con.close()
 
     index.rebuild(force=False)
     captured = capsys.readouterr()
     assert "older" in captured.err
-    assert "progress" in captured.err
+    assert "metadata-only rebuild" in captured.err
+    assert index.status().schema_version == 10
+    assert len(index.projection_rows("recipe_root", refresh=False)) == 1

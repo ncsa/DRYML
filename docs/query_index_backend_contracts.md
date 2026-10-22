@@ -1,5 +1,108 @@
 # Query Index Backend Contracts
 
+## Format-4 Store Projection (Schema 10, Coverage Contract 1)
+
+Every supported query-visible built-in DirStore mutation owns its derived work:
+persist intent and authority, classify the committed Store cut, apply the coalesced
+projection delta **and** coverage in one explicit SQLite transaction, reread its
+committed evidence, then acknowledge the exact captured mutations. Filesystem and
+SQLite publication are separate boundaries. A complete public mutation returns
+only after both finish. The Store-owned prepared-batch seam applies the same
+protocol once per logical Store commit; future Repo/managed owners supply prepared
+facts through that seam, rather than maintaining a second index themselves.
+
+`auto` enables usable SQLite. Only optional-backend unavailability admits its
+declared nonpersistent fallback. Explicit `sqlite` never falls back; detected
+unavailability, foreign/future ownership, and conflicting configuration fail before
+authority effects. `none`/`memory` have no persistent-maintenance obligation.
+`mutation_index_disposition` reports policy, not readiness. Each authority domain
+durably binds one normalized persistent destination/configuration in derived
+`.dryml/query-index-destination.record`, under its writer fence. Other enabled
+destinations/settings are refused across handles and processes. Removing this
+binding is not an API for maintaining independent sidecars over one domain.
+
+The closed relation families are `record`, `recipe_root`, `saved_root`,
+`declaration`, `creation`, `manifest`, `availability`, `node`, `edge`, `facet`,
+`name`, `requested_metadata`, `retention`, and `lifecycle`. Compact root membership
+joins to its authenticated block/table/overlay slot. Node, typed edge, and facet
+postings retain those correlations and typed value paths; they do not flatten
+different occurrences into one match. Manifests and availability retain the full
+creation-CDef/codec-content key. Creation rows also retain a domain-separated
+compatibility prefilter, computed through one shared preparation for the block's
+creation views; it is a candidate key, not an equality or payload-use proof.
+Creation headers and known graph blocks never
+imply independent root membership or available data. Withdrawal replaces only its
+source contributions and preserves immutable history.
+
+The last three families are **explicitly unavailable** until their owning
+metadata/retention/managed adapters supply their versioned authority through the
+Store protocol. Their closed coverage entries have `supported=0`; asking for one
+raises `QueryIndexUnavailable`, never a certified empty result. Unknown families
+and unknown prepared record paths are refused. Later adapters must add their
+closed record readers, journal transitions, source projections and publication
+guards together before enabling a capability. This is not implemented retention
+or managed lifecycle behavior.
+
+Readiness requires matching Store UUID/epoch, no pending authority work, index
+UUID/schema/coverage version, the exact closed capability set, and clean mutation
+guards. Projection row inserts/updates/deletes dirty their family automatically.
+Transactional count/XOR witnesses are updated only from changed source rows;
+`validate(thorough=True)` independently checks those witnesses. A missing family,
+guard, certificate, or incompatible cut cannot advertise readiness. Schema 9 and
+incomplete coverage require recovery. Valid foreign owners and future schema,
+semantic, or coverage versions remain intact and are refused.
+
+`index.projection_rows(family, refresh=False)` is the current **index-level** read
+seam. It returns detached `(source_path, correlation_key, canonical_json_bytes)`
+rows under a short certified Store/SQLite cut. False performs no initialization,
+replay or rebuild and refuses missing/stale/pending/incomplete coverage. True
+permits maintenance first. This collected seam is not the later bounded Repo
+query, continuation, or state-discovery API. Legacy Query V3 read views and
+coverage claims remain explicitly unavailable for format-4 authority.
+
+`maintain_store()`/enabled mutation completion replay classified pending records
+without inventory when the indexed epoch and pending journal form a continuous
+cut. Preparation and shared block validation happen outside writer-blocking
+fences. The short writer scope revalidates byte/cut witnesses before SQL and exact
+acknowledgement. Clean incremental work reads changed paths and their direct
+metadata dependencies; it never inventories unrelated Store growth. A current
+authoritative no-op changes no epoch, dirty token, generation or SQL row. A
+previous SQL commit awaiting acknowledgement is recognized by its exact receipt
+and does not repeat the delta transaction.
+
+Missing/stale/owned incompatible or corrupt sidecars use a visibly reported,
+explicit metadata-only inventory and staged replacement. The staged certificate,
+row witnesses and SQLite integrity are validated before activation; the Store
+cut is revalidated before replacement. Rebuild reads no `data/` bytes, runs no
+application capture/restore, and changes no product records. A ready explicit
+refresh uses its current certificate without a historical scan; `rebuild()` is
+the separate unconditional inventory/replacement operation. Legacy unscoped
+dirty tokens request rebuild and only captured tokens are removed.
+
+After ambiguous SQL commit, independently reread the exact mutation receipt and
+coverage before acknowledgement. Pending work blocks ordinary indexed reads even
+when SQL is already committed. A post-authority index/ack failure raises
+`StoreMutationError` with `confirmed_refs`, `mutation_id`, the actual `cut`,
+`index_disposition="repair_pending"`, and `recovery_attempt`; cancellation carries
+the same evidence. Repair uses persisted metadata, not another application
+capture. A stale detached repair fails rather than overwrite/acknowledge a later
+writer. Public `acknowledge_mutation` requires the exact SQLite receipt when
+persistent indexing is enabled. This never promises a filesystem-plus-SQL rollback.
+
+Connections and read leases are process/thread-local and also asyncio-task-local
+when called inside a task. Explicit transactions roll back on cancellation.
+Staged replacement preserves leased readers and uses the existing checkpoint,
+handle-retirement and native activation policy; contention fails actionably.
+ZipStore retains its extracted nonpersistent/buffered policy. Its journal cut
+becomes durable only after successful archive commit; no persistent SQLite claim
+is made for an uncommitted extraction.
+
+## Legacy Query V3 Consumer Contracts (Awaiting U10/U13 Cutover)
+
+The remaining sections describe the retained legacy consumer implementation.
+They do not advertise format-4 Repo/query support. Its tests retain strict expected
+capability refusals alongside live schema-10 Store and SQLite ownership proofs.
+
 Query indexes are derived acceleration for current Store authority. DefinitionRecords, explicit stored-root membership, declarations, complete v3 snapshots, aliases, lineage records, current annotation records, and verified snapshot-local directories remain authoritative. Closure-only DefinitionRecords hydrate graph nodes but do not become stored roots during rebuild. A backend must reject incompatible schema or semantic metadata before row decoding or ready activation, then rebuild only derived files from validated records.
 
 Indexes preserve V2 CDef graph topology, typed graph paths, ObjectRef IDs, StateRef hashes, reference occurrence paths, current object/state mappings, immutable snapshot fields, and lineage facts. Schema 9 also stores graph-exact V3 identity and direct-relationship candidate rows per root, plus a graph-complete `(root_graph_hash, root_blob)` stored-root projection and a mutation guard for keyset pages. The encoded-root tie key preserves structurally equal roots with different sharing topology and genuine digest collisions. Transactional count/XOR-of-row-hashes witnesses detect deleted or partial graph projection rows on explicit verification; incremental publication updates witnesses using only changed rows, without rescanning historical projections. The stored-root guard makes unmanaged mutation of either legacy or V3 root rows visible before a bounded page can claim completeness. The guarded `cdefs().stored().take(n)` plan may therefore satisfy `require_indexed()` only when every returned CDef has direct Store authority proof; candidates established solely by aliases, declarations, snapshots, or a main reference require complete authority fallback and are rejected by indexed-only or no-scan execution. A disabled refresh never initializes or rebuilds a missing, dirty, corrupt, or incompatible sidecar. Other witnesses prove sidecar integrity only, not full V3 authority coverage, so no broader V3 indexed-only capability is advertised. In particular, `DirStore.write_main_ref()` intentionally has no dirty token, so main membership is read under the authority fence when it matters. Indexes must not reduce exact references to definitions or reconstruct current mappings from captured snapshot annotations. Save publication appends advisory reference/metadata rows for its published StateRefs and replaces current mappings only for those targets, including stateless roots. It does not rescan historical snapshots on a clean incremental save. Rebuild replaces each projection from its proper Store authority. Candidate filtering outside the guarded stored-root plan may be approximate or incomplete, so authoritative Python verification always determines conflicts, predicate errors, and complete results.
@@ -85,6 +188,11 @@ changing the canonical index. Close the retained reader, then retry the rebuild.
 Discarded connection managers best-effort close their owned current-process
 handles. Unleased pools close in weak-reference finalization before SQLite's own
 connection finalizers, including cyclic owner graphs.
+Asyncio task completion also retires that task's cached handles and file-identity
+entries, including after failure or cancellation. Active read leases defer this
+cleanup until lease exit. Completion callbacks hold a weak manager reference and
+run cleanup under its process-local lock; they never close inherited parent handles.
+Task cleanup can therefore reduce live cached-handle counts before pool teardown.
 Explicit close remains the deterministic way to observe cleanup errors;
 collection in a forked child does not close an inherited parent pool.
 
@@ -106,7 +214,7 @@ SQLite connections are process-local. Rebuild and mutation use staged activation
 
 `dryml.core.query.sqlite.open_connection(config, *, readonly=False)` is the public standalone connection owner. `config` must be a `SQLiteQueryIndexConfig`, `readonly` must be exactly `bool`, and `config.path` must be present; validation occurs before importing SQLite or creating a parent/database. Invalid argument types raise `TypeError`, while an absent configured path raises actionable `QueryIndexError`. The connection applies the same foreign-key, timeout, trusted-schema, journal, and durability configuration as the query-index connection manager and always closes its connection. Writable opening creates missing parent directories; read-only opening requires an existing database and creates neither the target nor its parent. SQLite open/configuration errors remain SQLite errors, while a missing optional backend is reported as `QueryIndexUnavailable`.
 
-The outer `open_connection` context is a handle scope, not a commit scope. Its connection uses standard-library deferred transactions and creator-thread affinity; callers use an inner `with con:` block to commit on successful exit or roll back on exceptional exit. When the outer scope ends, any transaction still open is rolled back rather than committed, then the handle is closed on normal exit, exceptions, and cancellation. Manager-cached index connections retain autocommit mode because index read views and mutations issue explicit `BEGIN`, `BEGIN IMMEDIATE`, `COMMIT`, and `ROLLBACK` statements. Manager cache keys remain process/thread/access-mode local and handles are never returned across keys. Cached handles disable SQLite creator-thread enforcement only so manager teardown can close an inactive worker's handles from a coordinator thread; callers must not race handle use with teardown, and a failed close remains visible and retained for recovery.
+The outer `open_connection` context is a handle scope, not a commit scope. Its connection uses standard-library deferred transactions and creator-thread affinity; callers use an inner `with con:` block to commit on successful exit or roll back on exceptional exit. When the outer scope ends, any transaction still open is rolled back rather than committed, then the handle is closed on normal exit, exceptions, and cancellation. Manager-cached index connections retain autocommit mode because index read views and mutations issue explicit `BEGIN`, `BEGIN IMMEDIATE`, `COMMIT`, and `ROLLBACK` statements. Manager cache keys remain process/thread/task/access-mode local and handles are never returned across keys. Cached handles disable SQLite creator-thread enforcement only so manager teardown can close an inactive worker's handles from a coordinator thread; callers must not race handle use with teardown, and a failed close remains visible and retained for recovery.
 
 ## Explicit Backend Reconciliation
 

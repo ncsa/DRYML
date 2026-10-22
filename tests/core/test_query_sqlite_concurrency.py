@@ -943,33 +943,24 @@ def test_explicit_cycle_declined_claim_accepts_substantively_valid_candidate(tmp
     other.close()
 
 
-def test_explicit_cycle_detects_wal_generation_change_in_active_destination(tmp_path, monkeypatch):
-    """The retained transaction alone cannot prove continuity behind a WAL writer."""
+def test_format4_explicit_refresh_reuses_current_authority_certificate(tmp_path):
+    """Current Store coverage has no legacy whole-inventory validation obligation."""
     from dryml.core.query.model import QueryStats
     from dryml.core.query.sqlite.utils import wal_runtime_is_known_safe
 
     if not wal_runtime_is_known_safe(require_sqlite().sqlite_version_info):
         pytest.skip("installed SQLite is not qualified for WAL")
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="wal"))
-    store.rebuild_query_index()
+    store.publish_node(_cdef("current"))
     index = store.open_query_index()
-    original = index._validate_store_roots
-    mutations = []
-
-    def validate(con, issues, **kwargs):
-        original(con, issues, **kwargs)
-        if not mutations:
-            identity = index._connections._path_identity()
-            with closing(require_sqlite().connect(index.path)) as writer, writer:
-                writer.execute("UPDATE catalog_state SET generation = generation + 1")
-            assert index._connections._path_identity() == identity
-            mutations.append(1)
-
-    monkeypatch.setattr(index, "_validate_store_roots", validate)
+    before, identity = index.status(), index._connections._path_identity()
     stats = QueryStats()
     index.refresh(True, stats=stats)
-    assert mutations == [1]
-    assert stats.store_scan_count == 2 and stats.refresh_action == "sqlite-rebuild"
+    assert stats.store_scan_count == 0
+    assert index.current_generation() == before.generation
+    assert index._connections._path_identity() == identity
+    assert len(index.projection_rows("recipe_root", refresh=False)) == 1
+    assert stats.refresh_action == "none"
     assert not index._connections._leases
 
 
@@ -2275,3 +2266,72 @@ def _wait_for(path: Path, *, timeout: float = 5.0) -> None:
             return
         time.sleep(0.01)
     raise TimeoutError(f"Timed out waiting for {path}")
+
+
+# Keep all standalone SQLite concurrency/lease proofs live. Only the enumerated
+# old Store/Repo consumers await U10/U13, with a narrow strict refusal expectation.
+from dryml.core.store.store import StoreCapabilityError
+
+_LEGACY_STORE_TESTS = {
+    "test_u2_single_flight_waits_outside_resources_and_rejects_pending_admission",
+    "test_u2_old_waiter_observes_failed_attempt_after_fast_retry",
+    "test_u2_waiter_interruption_detaches_and_self_reentry_refuses",
+    "test_u2_multiple_flights_reversed_cohorts_and_late_request",
+    "test_u2_successful_joins_recheck_later_cohort_before_claiming_remainder",
+    "test_u2_owner_baseexception_notifies_all_blocked_waiters",
+    "test_u2_published_attempt_outcome_survives_later_owner_interruption",
+    "test_u2_fork_resets_held_request_lock_and_preserves_derivative_sharing",
+    "test_explicit_cycle_declined_live_claim_validates_actual_candidate",
+    "test_explicit_cycle_declined_claim_accepts_substantively_valid_candidate",
+    "test_explicit_cycle_destination_change_discards_validation_cut",
+    "test_explicit_validation_holds_authority_fence_through_comparison",
+    "test_overlapping_foreign_destination_owner_is_refused_after_claim",
+    "test_u7_readiness_waits_for_build_claim_before_authority_fence",
+    "test_u7_replacement_preserves_active_same_process_reader",
+    "test_u7_main_writer_waits_through_paging_and_direct_verification",
+    "test_u7_cancelled_retained_entry_releases_transaction_and_fence",
+    "test_rebuild_preserves_same_root_token_published_after_capture",
+    "test_rebuild_closes_managed_canonical_handles_before_checkpoint",
+    "test_wal_rebuild_waits_for_reader_before_replacing_canonical_sidecar",
+    "test_dirty_marker_recovers_object_committed_without_index_in_separate_process",
+    "test_crash_mid_rebuild_leaves_building_state_and_recovers",
+}
+for _name in _LEGACY_STORE_TESTS:
+    globals()[_name] = pytest.mark.xfail(
+        strict=True, raises=StoreCapabilityError,
+        run=_name != "test_u2_fork_resets_held_request_lock_and_preserves_derivative_sharing",
+        reason="Legacy Store/Query V3 consumer explicitly refused until U10/U13 cutover",
+    )(globals()[_name])
+
+
+def test_format4_store_reader_leases_are_thread_local(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store.publish_node(_cdef("node"))
+    index = store.open_query_index()
+    manager, entered, release = index._connections, threading.Event(), threading.Event()
+    observations = []
+    def reader():
+        try:
+            with manager._read_lease() as (con, _):
+                con.execute("BEGIN")
+                observations.append(con)
+                entered.set()
+                assert release.wait(10)
+                assert con.in_transaction
+                con.execute("ROLLBACK")
+        finally:
+            manager.close_current()
+    thread = threading.Thread(target=reader)
+    thread.start()
+    try:
+        assert entered.wait(10)
+        with manager._read_lease() as (con, _):
+            assert con is not observations[0] and not con.in_transaction
+            manager.close_all_current_process()
+            assert len(manager._leases) == 2
+            assert con.execute("SELECT COUNT(*) FROM store_projection_cut").fetchone() == (1,)
+    finally:
+        release.set()
+        thread.join(10)
+    assert not thread.is_alive() and not manager._leases
+    assert len(index.projection_rows("recipe_root", refresh=False)) == 1

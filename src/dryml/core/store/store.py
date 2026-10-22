@@ -362,8 +362,9 @@ class Store(ABC):
     def apply_prepared_mutation(self, facts):
         """Apply owned immutable PreparedMutation facts; return (mutation UUID, cut).
 
-        Stale witnesses fail before effects. Resulting projection work remains
-        pending exact acknowledgement. Unsupported backends raise
+        Stale witnesses fail before effects. Enabled persistent projection and
+        exact acknowledgement complete before return. Nonpersistent low-level
+        batches leave work pending for their owner. Unsupported backends raise
         StoreCapabilityError; partial IO failures retain actual cut/evidence.
         """
         raise StoreCapabilityError("Store does not support prepared mutation batches.")

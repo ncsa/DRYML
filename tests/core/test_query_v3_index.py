@@ -78,7 +78,7 @@ def _graph_variants():
     shared_leaf = ProjectionLeaf("same")
     shared = ProjectionPair(shared_leaf, shared_leaf).definition
     separate = ProjectionPair(ProjectionLeaf("same"), ProjectionLeaf("same")).definition
-    assert shared == separate
+    assert shared != separate  # Identity 3 includes sharing topology.
     assert not shared.graph_equal(separate)
     return shared, separate
 
@@ -152,57 +152,43 @@ def test_explicit_cycle_rejects_malformed_ready_store_authority(tmp_path, monkey
 
 
 @pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
-def test_memory_and_sqlite_retain_graph_distinct_projection_roots(tmp_path):
-    """Projection rows retain graph topology even when legacy CDefs compare equal."""
+def test_schema10_retains_distinct_root_sharing_topologies(tmp_path):
+    """Identity-3 memberships retain both sharing topologies; memory stays nonpersistent."""
 
     shared, separate = _graph_variants()
-    graph = ConcreteDefinitionGraph.from_roots((shared, separate))
     store = DirStore(tmp_path / "memory", query_index="memory")
-    memory = MemoryStoreQueryIndex(Repo(store)._query_catalog, store)
-    memory.register_stored_roots(graph, (shared, separate))
-
-    sqlite = _sqlite_index(tmp_path)
-    sqlite.register_stored_roots(graph, (shared, separate))
-
-    memory_coverage = memory.v3_projection_coverage()
-    sqlite_coverage = sqlite.v3_projection_coverage()
-    assert memory_coverage.source_roots == 2
-    assert sqlite_coverage.source_roots == 2
-    assert sqlite_coverage.identities >= memory_coverage.identities
-    assert memory_coverage.projection_complete
-    assert sqlite_coverage.projection_complete
-    assert not memory_coverage.indexed_only
-    assert not sqlite_coverage.indexed_only
-    with sqlite.read_view(include_cached=False) as view:
-        page = next(view.iter_stored_identity_cdef_batches(batch_size=3))
-    assert len(page.cdefs) == 2
-    assert any(value.graph_equal(shared) for value in page.cdefs)
-    assert any(value.graph_equal(separate) for value in page.cdefs)
+    records = tuple(store.publish_node(root) for root in (shared, separate))
+    assert records[0].digest != records[1].digest and store.open_query_index() is None
+    with pytest.raises(StoreCapabilityError):
+        store.query()
+    indexed = DirStore(tmp_path / "sqlite", query_index="sqlite")
+    for root in (shared, separate):
+        indexed.publish_node(root)
+    rows = indexed.open_query_index().projection_rows("recipe_root", refresh=False)
+    assert len(rows) == 2 and {row[1] for row in rows} == {record.digest for record in records}
 
 
 @pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
-@pytest.mark.parametrize("family", ("identity", "relationship"))
-def test_missing_v3_projection_row_disables_indexed_only_claim(tmp_path, family):
-    """A ready legacy sidecar cannot turn a deleted candidate row into absence."""
+@pytest.mark.parametrize("family", ("node", "edge"))
+def test_missing_schema10_projection_row_refuses_certified_reads(tmp_path, family):
+    """A missing node/relationship row cannot turn into certified negative coverage."""
 
     shared, separate = _graph_variants()
-    index = _sqlite_index(tmp_path)
-    index.register_stored_roots(
-        ConcreteDefinitionGraph.from_roots((shared, separate)), (shared, separate),
-    )
-    assert index.v3_projection_coverage().projection_complete
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    for root in (shared, separate):
+        store.publish_node(root)
+    index = store.open_query_index()
+    assert index.projection_rows(family, refresh=False)
 
     with closing(sqlite3.connect(index.path)) as con, con:
-        table = "v3_identity_projection" if family == "identity" else "v3_relationship_projection"
-        con.execute(
-            f"DELETE FROM {table} WHERE root_graph_hash = "
-            f"(SELECT root_graph_hash FROM {table} LIMIT 1)"
-        )
+        con.execute("DELETE FROM store_projection_rows WHERE family=?", (family,))
 
     coverage = index.v3_projection_coverage()
     assert not coverage.projection_complete
     assert not coverage.authority_complete
     assert not coverage.indexed_only
+    with pytest.raises(QueryIndexDirty):
+        index.projection_rows("recipe_root", refresh=False)
 
 
 @pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
@@ -1112,3 +1098,36 @@ def test_u7_main_completeness_policy_matrix(tmp_path, refresh, policy, empty):
         with pytest.raises(QueryIndexUnavailable):
             query.require_indexed().take(1)
     assert store.read_definition_record(record.digest).to_bytes() == before
+
+
+# Retain the legacy consumer assertions for U10/U13. These must fail specifically
+# at the format-4 capability boundary; other errors and unexpected success fail.
+from dryml.core.store.store import StoreCapabilityError
+
+for _name, _test in tuple(globals().items()):
+    if _name.startswith("test_") and _name not in {
+            "test_incremental_v3_publication_does_not_rescan_historical_projection_rows",
+            "test_stored_identity_cursor_rejects_a_later_generation",
+            "test_schema10_retains_distinct_root_sharing_topologies",
+            "test_missing_schema10_projection_row_refuses_certified_reads"}:
+        globals()[_name] = pytest.mark.xfail(
+            strict=True, raises=StoreCapabilityError,
+            reason="Legacy Store/Query V3 consumer explicitly refused until U10/U13 cutover",
+        )(_test)
+
+
+def test_schema10_store_coverage_never_certifies_legacy_v3_consumer(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.publish_node(Definition(ProjectionLeaf, name="new").concretize())
+    index = store.open_query_index()
+    coverage = index.v3_projection_coverage()
+    assert not coverage.projection_complete and not coverage.authority_complete
+    assert not coverage.indexed_only
+    before = store.authority_cut()
+    with pytest.raises(StoreCapabilityError, match="not integrated"):
+        store.query()
+    with pytest.raises(QueryIndexUnavailable, match="Legacy"):
+        with index.read_view():
+            pytest.fail("legacy view admitted format-4 authority")
+    assert store.authority_cut() == before
+    assert len(index.projection_rows("recipe_root", refresh=False)) == 1

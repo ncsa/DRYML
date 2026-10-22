@@ -2,6 +2,7 @@
 
 This is the identity-3 family, separate from the still-live CDef V2 Store codec.
 Values use explicit codecs; neither pickle nor repr is semantic authority.
+Detached projection owners can retain all validated views from one shared decode.
 """
 
 import base64
@@ -590,7 +591,18 @@ def decode_node_graph(packet, *, view=0, expected_view="exact"):
         raise NodeCodecError("Malformed Node graph metadata.") from error
 
 
-def _decode(packet, selected, expected_view):
+def _decode_node_graph_views(packet):
+    """Return all advertised roots using one validated shared-block decode."""
+    try:
+        return _decode(packet, 0, packet["views"][0]["view"], _all_views=True)
+    except NodeCodecError:
+        raise
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError, OverflowError,
+            RecursionError, struct.error) as error:
+        raise NodeCodecError("Malformed Node graph metadata.") from error
+
+
+def _decode(packet, selected, expected_view, *, _all_views=False):
     from .bound_args import BoundArguments
     from .definition import ConcreteNode, Definition
     from .freeze import FrozenDict
@@ -752,4 +764,6 @@ def _decode(packet, selected, expected_view):
         for root_view, root in selections:
             if prepared.exact_key(root).decode("ascii") != root_view["expected_key"]:
                 raise NodeCodecError("Root view semantic key mismatch.")
+    if _all_views:
+        return tuple(built_tables[item["table"]][item["slot"]] for item in packet["views"])
     return built_tables[chosen["table"]][chosen["slot"]]
