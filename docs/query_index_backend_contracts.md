@@ -34,14 +34,21 @@ Creation headers and known graph blocks never
 imply independent root membership or available data. Withdrawal replaces only its
 source contributions and preserves immutable history.
 
-The last three families are **explicitly unavailable** until their owning
-metadata/retention/managed adapters supply their versioned authority through the
+`retention` is implemented as authoritative per-full-key grant postings with
+owner UUID, root/intent token and graph reference. Owner affected-resource ledgers,
+pending heads and exact removal-incarnation records also feed the closed `record`
+relation through the same journal. They do not imply managed associations. Rebuild
+uses those records without trusting reverse counts or reading private bytes.
+
+`requested_metadata` and `lifecycle` are **explicitly unavailable** until their owning
+metadata/managed adapters supply their versioned authority through the
 Store protocol. Their closed coverage entries have `supported=0`; asking for one
 raises `QueryIndexUnavailable`, never a certified empty result. Unknown families
 and unknown prepared record paths are refused. Later adapters must add their
 closed record readers, journal transitions, source projections and publication
-guards together before enabling a capability. This is not implemented retention
-or managed lifecycle behavior.
+guards together before enabling a capability. Managed lifecycle integration remains
+separate from Core physical protection. Older schema-10 certificates marking
+retention unsupported require visible metadata-only coverage recovery.
 
 Readiness requires matching Store UUID/epoch, no pending authority work, index
 UUID/schema/coverage version, the exact closed capability set, and clean mutation

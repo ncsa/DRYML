@@ -262,7 +262,7 @@ def test_closed_coverage_families_are_guarded_or_explicitly_unavailable(tmp_path
     store = indexed_store(tmp_path / "store")
     store.publish_node(creation())
     index = store.open_query_index()
-    if family in {"requested_metadata", "retention", "lifecycle"}:
+    if family in {"requested_metadata", "lifecycle"}:
         with pytest.raises(QueryIndexUnavailable):
             values(index, family)
     else:

@@ -21,7 +21,7 @@ from ... import filesystem
 from .dir import DirStore, _REMOVED_ENTRY_PREFIX, _EXACT_READERS, _EXACT_READER_NAMES
 from .records import StoreFormatRecord, StoreRecordError, _MAX_RECORD_BYTES
 from ...locking import interprocess_lock
-from .store import StoreAuthorityError, StorePublicationCapabilities
+from .store import StoreAuthorityError, StoreCapabilityError, StorePublicationCapabilities
 from .authority import StoreMutationError
 
 
@@ -92,6 +92,7 @@ class ZipStore(DirStore):
         # dirty state while another same-handle mutation is still publishing.
         self._transaction_lock = RLock()
         self._writer_depth = 0
+        self._key_lease_depth = 0
         self._close_pending = False
         self._initializing = True
         self._file_like = _is_file_like(zip_dest)
@@ -145,6 +146,40 @@ class ZipStore(DirStore):
         if self._file_like:
             return StorePublicationCapabilities(False, False, False, False, False, "read-only")
         return StorePublicationCapabilities(True, True, True, True, True, "buffered")
+
+    @property
+    def retention_domain(self):
+        """Return this extraction's key-lease domain, never cross-archive authority.
+
+        Reads/deletion protect only this handle's buffered view. Different handles
+        have independent bytes and archive commit conflicts, not shared key leases.
+        No IO or durable grant claim occurs.
+        """
+        return super().retention_domain + ":transaction:" + self._tmp.name
+
+    @property
+    def retention(self):
+        """Refuse durable root/grant ownership for buffered/read-only archives.
+
+        Raises StoreCapabilityError before effects. Active read leases and cleanup
+        inherited from DirStore are transaction-local only; cleanup is buffered
+        until successful commit and is refused for read-only file-like views.
+        """
+        raise StoreCapabilityError("ZipStore has transaction-local leases/cleanup, not durable retention authority.")
+
+    @contextmanager
+    def _state_lease_lifetime(self):
+        with self.transaction_fence():
+            self._assert_open()
+            self._key_lease_depth += 1
+        try:
+            yield
+        finally:
+            with self.transaction_fence():
+                self._key_lease_depth -= 1
+                if not self._key_lease_depth and not self._writer_depth and self._close_pending:
+                    self._tmp.cleanup()
+                    self._close_pending = False
 
     @property
     def _archive_path(self) -> str:
@@ -391,7 +426,7 @@ class ZipStore(DirStore):
                         finally:
                             self._writer_depth -= 1
                 finally:
-                    if self._writer_depth == 0 and self._close_pending:
+                    if self._writer_depth == 0 and not self._key_lease_depth and self._close_pending:
                         self._tmp.cleanup()
                         self._close_pending = False
 
@@ -526,7 +561,10 @@ class ZipStore(DirStore):
                 os.close(fd)
                 with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
                     for root, dirs, files in os.walk(self.base_dir):
-                        dirs[:] = sorted(name for name in dirs if root != self.base_dir or name != ".staging")
+                        dirs[:] = sorted(name for name in dirs
+                                         if not name.startswith(".dryml-retired-")
+                                         and (root != self.base_dir or name not in {
+                                             ".staging", ".state-leases", ".retention-locks"}))
                         for name in sorted(files):
                             path = os.path.join(root, name)
                             relative_parts = Path(os.path.relpath(path, self.base_dir)).parts
@@ -815,12 +853,12 @@ class ZipStore(DirStore):
         """
         with self.transaction_fence():
             if self._closed_handle:
-                if self._close_pending and not self._writer_depth:
+                if self._close_pending and not self._writer_depth and not self._key_lease_depth:
                     self._tmp.cleanup()
                     self._close_pending = False
                 return
             super().close()
-            if self._writer_depth:
+            if self._writer_depth or self._key_lease_depth:
                 self._closed_handle = True
                 self._close_pending = True
                 return

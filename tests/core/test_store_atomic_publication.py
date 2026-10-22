@@ -151,7 +151,7 @@ def test_mutable_name_replacement_keeps_previous_complete_record(tmp_path, monke
     assert store.read_node_name("main") == previous
 
 
-@pytest.mark.parametrize("operation", ["definition", "main", "metadata", "delete-metadata", "snapshot", "Repo", "query", "index"])
+@pytest.mark.parametrize("operation", ["definition", "main", "metadata", "delete-metadata", "snapshot", "Repo", "query"])
 def test_legacy_publication_and_coverage_are_refused_without_effects(tmp_path, operation):
     store = DirStore(tmp_path / "store", query_index="none")
     before = store.authority_cut()
@@ -163,7 +163,6 @@ def test_legacy_publication_and_coverage_are_refused_without_effects(tmp_path, o
         "snapshot": lambda: store.publish_snapshot(StateRef(AtomicRecordObject().object_ref, {}), evidence=None, local_states={}),
         "Repo": lambda: Repo(store).save_object(AtomicRecordObject()),
         "query": store.query,
-        "index": lambda: DirStore(store.base_dir, query_index="sqlite").open_query_index(),
     }
     with pytest.raises(StoreCapabilityError):
         actions[operation]()

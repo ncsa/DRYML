@@ -1155,7 +1155,7 @@ class StateAvailabilityRecord(_NodeRecord):
     """Publication incarnation for one full StateKey; presence is checked separately.
 
     key is a StateKey and incarnation is a fresh canonical UUID per installation.
-    status is prepared or published; prepared reinstallation never advertises data.
+    status is prepared, published or withdrawn; only published advertises data.
     Invalid input raises StoreRecordError. This metadata alone promises neither
     data integrity nor active-use protection and has no side effects.
     """
@@ -1169,7 +1169,7 @@ class StateAvailabilityRecord(_NodeRecord):
     def __post_init__(self):
         StateKeyRecord(self.key)
         _uuid_value(self.incarnation)
-        if self.status not in {"prepared", "published"}:
+        if self.status not in {"prepared", "published", "withdrawn"}:
             raise StoreRecordError("Invalid state availability status.")
 
     def _payload(self):

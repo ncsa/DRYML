@@ -11,7 +11,8 @@ import os
 import shutil
 import stat
 import tempfile
-from contextlib import contextmanager
+import threading
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from collections.abc import Mapping
 from uuid import uuid4
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Iterable, Literal
 
 from ... import filesystem
-from ...locking import interprocess_lock, supports_advisory_locking
+from ...locking import FileLock, interprocess_lock, supports_advisory_locking
 from ...paths import local_path_key
 from .records import (
     ClaimRecord, DeclarationRecord, DefinitionRecord, LocalStateManifest,
@@ -31,6 +32,7 @@ from .records import (
     AuthorityRecord, MutationIntentRecord, NodeNameRecord, RetiredDeclarationAnchorRecord,
 )
 from . import authority
+from . import retention as state_retention
 from .authority import PreparedChange, StoreCutChanged
 from .store import (
     LocalStateSource, Store, StoreAuthorityError, StoreCapabilityError,
@@ -62,7 +64,8 @@ class DirStore(Store):
     Supported mutations use durable intents, byte CAS and one committed authority
     cut. Graph validation runs outside writer-blocking fences. Legacy Repo/query
     consumers still fail explicitly; enabled SQLite projection completes synchronously.
-    Active-use leases are separate.
+    Full-key native leases and physical grants fence private-data reclamation;
+    their handshake policy lives in the Store retention adapter.
 
     Args:
         base_dir (str or PathLike): Direct Store root to open or initialize.
@@ -106,6 +109,9 @@ class DirStore(Store):
         self._initialize_format(existing_only=_existing_only)
         self._store_uuid = self._read_file(self.store_format_path, StoreFormatRecord).store_uuid
         self._state_owner_closed = False
+        self._staging_leases = {}
+        self._staging_threads = {}
+        self._staging_owner_uuid = str(uuid4())
         self._prepared_fact_owner = object()
         evidence = os.stat(self._base_dir)
         self._authority_evidence = (evidence.st_dev, evidence.st_ino)
@@ -115,6 +121,37 @@ class DirStore(Store):
     def store_uuid(self):
         """Return the persistent format-4 authority UUID (str), without payload IO."""
         return self._store_uuid
+
+    @property
+    def retention_domain(self):
+        """Return stable Store UUID for key ordering/owner evidence (str).
+
+        During bootstrap only, a root-local provisional name tracks writer order.
+        No IO, graph preparation or grant acquisition occurs.
+        """
+        domain = getattr(self, "_store_uuid", None)
+        return domain if domain is not None else "bootstrap:" + os.path.realpath(self.base_dir)
+
+    @property
+    def retention(self):
+        """Return durable RetentionAuthority primitives; association policy is caller-owned."""
+        return state_retention.RetentionAuthority(self)
+
+    def _state_lease_path(self, key):
+        return os.path.join(self.base_dir, ".state-leases", key.cdef_digest[:2],
+                            key.cdef_digest, key.codec_hash + ".lock")
+
+    def state_leases(self, keys, *, exclusive=False, blocking=True):
+        """Protect exact keys with native leases before writer fences; see Store.state_leases."""
+        return state_retention.state_leases(((self, key) for key in keys), exclusive=exclusive, blocking=blocking)
+
+    def delete_state(self, key):
+        """Try immediate full-key cleanup, preserving history; see Store.delete_state."""
+        return state_retention.delete_state(self, key)
+
+    def retry_state_removal(self, key, incarnation):
+        """Retry exact withdrawn incarnation safely; see Store.retry_state_removal."""
+        return state_retention.delete_state(self, key, incarnation=incarnation)
 
     def _assert_state_owner_open(self):
         if getattr(self, "_state_owner_closed", False) or getattr(self, "_closed_handle", False):
@@ -197,6 +234,7 @@ class DirStore(Store):
                 raise
             raise authority.StoreMutationError(str(error), mutation_id, cut, refs) from error
 
+    @state_retention._protect_replay
     def replay_mutation(self, mutation_id):
         """Complete captured partial transitions without graph or lifecycle work.
 
@@ -206,6 +244,10 @@ class DirStore(Store):
         owned staging or invalid staged payload fails explicitly. All validation
         and payload authentication precede the writer fence. The repair is itself
         journaled, then acknowledges only the original captured mutation/cut.
+        State repair acquires independent nonblocking exclusive key leases and
+        refuses another live allocator's staging. Retention owner-ledger repair
+        serializes on its intent token; grant repair requires the owning
+        protect/release handshake instead of generic replay.
         """
         from .records import _uuid_value, _decode_authority_bytes, StateVariantManifest
         import json
@@ -296,6 +338,7 @@ class DirStore(Store):
         self._prepare_and_apply(prepare, retry_stale=False)
         return self.acknowledge_mutation(mutation_id, data["epoch"])
 
+    @state_retention._protect_prepared
     def apply_prepared_mutation(self, facts):
         """Apply Store-owned PreparedMutation facts; return (mutation UUID, cut).
 
@@ -307,6 +350,9 @@ class DirStore(Store):
         persistent projection commits and acknowledges before return. Callers can
         obtain replay data with pending_mutations. This seam is owned
         by this Store handle and refuses another handle's prepared facts.
+        State installs retain shared full-key leases. Manual retention, removal
+        and availability-record changes raise StoreCapabilityError: use their
+        owning lifecycle APIs so owner dispositions and key protection participate.
         """
         if type(facts) is not authority.PreparedMutation:
             raise TypeError("Store mutations require PreparedMutation facts.")
@@ -605,11 +651,15 @@ class DirStore(Store):
         independently with native filesystem durability, and never replaces a
         populated bucket. Missing reclaimed data may be reinstalled with a fresh
         incarnation. Failures preserve historical authority and owned staging.
+        staging must belong to the allocating handle/thread. Ordinary publication
+        retains a shared full-key lease; withdrawn/partial recovery releases that
+        lease and separately tries exclusive recovery without upgrading. No durable
+        root is created by this low-level installation receipt.
         """
         from ..state_values import StateKey, LocalState
         from ..node_views import CREATION_VIEW, view_equal
         self.preflight_publication("install state variant", local_state=True, record_family="dryml-node-graph/v1")
-        self._local_state_staging_id(staging)
+        self._require_staging_owner(staging)
         stage = os.fspath(staging)
         data = os.path.join(stage, "data")
         try:
@@ -670,9 +720,34 @@ class DirStore(Store):
                 changes.append(PreparedChange(self._relative(availability), first.after,
                                               incarnation.to_bytes()))
             return changes, ("state", "creation"), StateInstallation(LocalState(key, origin), True, self._state_durability)
-        result = self._prepare_and_apply(prepare)
-        if os.path.isdir(stage):
-            shutil.rmtree(stage)
+        # An unavailable key needs a separate exclusive recovery phase. Never
+        # upgrade this ordinary publication's shared lease in place.
+        class RecoveryRequired(Exception):
+            pass
+        original_prepare = prepare
+        def shared_prepare():
+            available = self._read_file(os.path.join(target, "availability.record"), StateAvailabilityRecord)
+            if available is not None and (available.status != "published" or not os.path.isdir(self.state_data_path(key))):
+                raise RecoveryRequired()
+            return original_prepare()
+        try:
+            with self.state_leases((key,)):
+                result = self._prepare_and_apply(shared_prepare)
+        except RecoveryRequired:
+            with self.state_leases((key,), exclusive=True, blocking=False) as acquired:
+                if not acquired:
+                    raise StoreAuthorityError("State recovery is in-use; release publication/read leases before retry.")
+                state_retention.settle_interrupted_publication(self, key)
+                with self._metadata_read():
+                    old_origin = self.read_creation(key.cdef_digest)
+                    if old_origin is not None and not view_equal(old_origin, origin, CREATION_VIEW):
+                        raise StoreAuthorityError("Creation bucket header collision.")
+                    old = self._read_variant(key, old_origin)
+                    if old is None or old.manifest != manifest:
+                        raise StoreAuthorityError("State recovery requires identical manifest/header history.")
+                state_retention.detach_withdrawn_data(self, key)
+                result = self._prepare_and_apply(original_prepare)
+        self.discard_local_state_staging(stage)
         return result
 
     @property
@@ -751,14 +826,21 @@ class DirStore(Store):
         key must be StateKey. Optional destination/codec/codec_version validate LocalState
         compatibility before payload IO. Raises StoreAuthorityError for missing,
         incompatible or damaged bytes; TypeError for incomplete options. Releases
-        metadata fence before yielding. Context/Store closure expires the source;
-        U09 active-use/cleanup protection is deliberately not claimed here.
+        metadata fence before yielding. A native shared full-key lease spans
+        validation and borrowing; cleanup immediately reports in-use. Context/Store
+        closure expires the source. No durable retention root is created.
         """
         self._assert_state_owner_open()
         StateKeyRecord(key)
         options = (destination is not None, codec is not None, codec_version is not None)
         if any(options) and (not all(options) or type(codec_version) is not int or codec_version < 1):
             raise TypeError("destination, codec and positive integer codec_version must be supplied together.")
+        with self.state_leases((key,)):
+            with self._read_state_source(key, destination, codec, codec_version) as source:
+                yield source
+
+    @contextmanager
+    def _read_state_source(self, key, destination, codec, codec_version):
         with self._metadata_read():
             origin = self.read_creation(key.cdef_digest)
             descriptor = self._read_variant(key, origin)
@@ -1423,10 +1505,15 @@ class DirStore(Store):
 
         Only bounded byte/association checks, prepared installs and authority cuts
         belong inside. Prepare graphs, invoke hooks/providers and authenticate
-        payloads before entry. Future key protection must precede this fence;
+        payloads before entry. StateKey protection must precede this fence;
         callers must not wrap high-level graph APIs in an externally held fence.
         """
-        return interprocess_lock(self._writer_lock_path)
+        @contextmanager
+        def fenced():
+            with interprocess_lock(self._writer_lock_path):
+                with state_retention.writer_scope(self):
+                    yield
+        return fenced()
 
     @property
     def store_format_path(self) -> str:
@@ -1669,11 +1756,110 @@ class DirStore(Store):
         return path
 
     def create_local_state_staging(self) -> str:
-        """Create one Store-owned empty staging directory with an empty ``data`` root."""
+        """Allocate staging/data with an exact owner marker and lifetime native lease.
+
+        Returns a path (str). The allocating handle owns it through successful
+        publication/discard or explicit lease release/close. Cooperating recovery
+        cannot remove live work. Capability/IO errors propagate before hooks.
+        """
         self.preflight_publication("create local-state staging", local_state=True, record_family="dryml-node-graph/v1")
-        path = os.path.join(self._staging_root, uuid4().hex)
-        os.makedirs(os.path.join(path, "data"))
+        allocation = uuid4().hex
+        path = os.path.join(self._staging_root, allocation)
+        lease = FileLock(os.path.join(self._staging_root, ".leases", allocation + ".lock"))
+        lease.acquire()
+        self._staging_leases[allocation] = lease
+        self._staging_threads[allocation] = (os.getpid(), threading.get_ident())
+        try:
+            os.makedirs(os.path.join(path, "data"))
+            self._atomic_write(path + ".owner", self._staging_owner_uuid.encode("ascii"))
+        except BaseException:
+            self._staging_leases.pop(allocation).release()
+            self._staging_threads.pop(allocation)
+            raise
         return path
+
+    def _staging_owner(self, allocation):
+        from .records import _uuid_value
+        self._resolve_local_state_staging_id(allocation)
+        payload = authority.raw(self, ".staging/" + allocation + ".owner")
+        if payload is None:
+            raise StoreAuthorityError("Staging owner evidence is missing.")
+        try:
+            return _uuid_value(payload.decode("ascii"))
+        except (UnicodeError, ValueError) as error:
+            raise StoreAuthorityError("Malformed staging owner evidence.") from error
+
+    def _require_staging_owner(self, handle):
+        allocation = self._local_state_staging_id(handle)
+        if (allocation not in self._staging_leases
+                or self._staging_threads.get(allocation) != (os.getpid(), threading.get_ident())
+                or self._staging_owner(allocation) != self._staging_owner_uuid):
+            raise StoreAuthorityError("Staging must belong to this live allocating handle/thread.")
+        return allocation
+
+    @contextmanager
+    def _replay_staging(self, changes):
+        with ExitStack() as stack:
+            allocations = set()
+            for change in changes:
+                relative = change["staging"]
+                if relative is None or not os.path.isdir(os.path.join(self.base_dir, relative)):
+                    continue
+                parts = relative.split("/")
+                if len(parts) not in {2, 3} or parts[0] != ".staging" or (len(parts) == 3 and parts[2] != "data"):
+                    raise StoreAuthorityError("Replay staging must name an exact owned allocation.")
+                allocations.add(parts[1])
+            for allocation in sorted(allocations):
+                owner = self._staging_owner(allocation)
+                if allocation in self._staging_leases:
+                    self._require_staging_owner(os.path.join(self._staging_root, allocation))
+                    continue
+                lease = FileLock(os.path.join(self._staging_root, ".leases", allocation + ".lock"))
+                if not lease.acquire(blocking=False):
+                    raise StoreAuthorityError("Replay staging is in-use by its live allocator.")
+                stack.callback(lease.release)
+                if self._staging_owner(allocation) != owner:
+                    raise StoreAuthorityError("Replay staging owner changed; preserve it.")
+            yield
+
+    def release_local_state_staging(self, handle):
+        """Release this handle's allocation lease while preserving exact recovery work.
+
+        handle is its staging path. Returns None; foreign owners raise
+        StoreAuthorityError. Release is explicit handoff, never abandonment proof.
+        The resource ledger must already name work needed after interruption.
+        """
+        allocation = os.path.basename(os.fspath(handle))
+        if os.path.abspath(os.fspath(handle)) != os.path.join(self._staging_root, allocation):
+            raise StoreAuthorityError("Staging handle is foreign.")
+        lease = self._staging_leases.get(allocation)
+        if lease is None or self._staging_threads.get(allocation) != (os.getpid(), threading.get_ident()):
+            raise StoreAuthorityError("Staging lease belongs to another owner.")
+        lease.release()
+        self._staging_leases.pop(allocation)
+        self._staging_threads.pop(allocation)
+
+    def _discard_abandoned_staging(self, allocation, owner):
+        path = self._resolve_local_state_staging_id(allocation)
+        marker = os.path.join(self._staging_root, allocation) + ".owner"
+        if not os.path.exists(marker):
+            if path is not None:
+                raise StoreAuthorityError("Staging has no owner evidence; preserve it.")
+            return True
+        if self._staging_owner(allocation) != owner:
+            raise StoreAuthorityError("Staging owner changed; preserve another allocation.")
+        lease = FileLock(os.path.join(self._staging_root, ".leases", allocation + ".lock"))
+        if not lease.acquire(blocking=False):
+            return False
+        try:
+            if self._staging_owner(allocation) != owner:
+                raise StoreAuthorityError("Staging owner changed before cleanup.")
+            if path is not None:
+                shutil.rmtree(path)
+            self._filesystem(filesystem.remove_file, marker, cleanup_directory=self._staging_root, missing_ok=True)
+            return True
+        finally:
+            lease.release()
 
     def _existing_immutable(self, path: str, record, record_type):
         """Return compatible existing authority or reject a collision."""
@@ -2505,16 +2691,25 @@ class DirStore(Store):
         return None if snapshot is None else snapshot[1]
 
     def discard_local_state_staging(self, handle: object) -> None:
-        """Idempotently remove only Store-owned unpublished local-state staging."""
+        """Discard only this allocating handle's staging, after releasing its live lease.
 
-        try:
-            path = os.path.abspath(os.fspath(handle))
-            root = os.path.realpath(self._staging_root)
-            if os.path.commonpath((root, os.path.realpath(path))) != root:
-                raise StoreAuthorityError("local-state staging is not owned by this Store.")
-            shutil.rmtree(path)
-        except FileNotFoundError:
-            return
+        handle is a direct staging path. Missing consumed allocations are idempotent;
+        foreign owners raise StoreAuthorityError. IO errors propagate and preserve
+        ownership evidence. This never authorizes cleanup of unrelated live work.
+        """
+        path = os.path.abspath(os.fspath(handle))
+        allocation = os.path.basename(path)
+        if path != os.path.join(self._staging_root, allocation):
+            raise StoreAuthorityError("local-state staging is not owned by this Store.")
+        lease = self._staging_leases.get(allocation)
+        if lease is None:
+            if not os.path.exists(path) and not os.path.exists(path + ".owner"):
+                return
+            raise StoreAuthorityError("Staging belongs to another live/recovery owner.")
+        owner = self._staging_owner(allocation)
+        self.release_local_state_staging(path)
+        if not self._discard_abandoned_staging(allocation, owner):
+            raise StoreAuthorityError("Staging is in use; preserve it for retry.")
 
     def prepare_local_state(self, source: object, manifest: LocalStateManifest) -> LocalStateSource:
         """Validate owned completed staging before it is copied into a snapshot."""
@@ -2970,12 +3165,20 @@ class DirStore(Store):
         return f"{type(self).__module__}.{type(self).__qualname__}:{self.base_dir}"
 
     def close(self) -> None:
-        """Release this handle's SQLite connections without touching authority.
+        """Release SQLite connections/staging leases, preserving authority and work.
 
         Raises:
             RuntimeError: If an active Session resource cache retains this Store.
+            LockError: If staging leases are closed by a different thread.
+        Closing expires borrowed sources. Active key leases last until their
+        contexts exit. Unconsumed staging bytes/markers remain for exact recovery;
+        owner death/close does not authorize retention-grant release.
         """
         super().close()
+        for lease in self._staging_leases.values():
+            lease.release()
+        self._staging_leases.clear()
+        self._staging_threads.clear()
         self._state_owner_closed = True
         if self._query_index_instance is not None:
             self._query_index_instance.close()

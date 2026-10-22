@@ -181,7 +181,8 @@ class StateReadSource:
 
     The directory is accessible only inside the context and while its Store is
     open. manifest and state are detached metadata. Closure/context exit raises
-    RuntimeError on directory access. This lifetime is not a U09 cleanup lease.
+    RuntimeError on directory access. Built-in sources retain a native full-key
+    lease for the context lifetime, excluding cooperating cleanup.
     """
 
     store: object
@@ -210,6 +211,45 @@ class Store(ABC):
     paths by default; explicit legacy backend opt-in may share evidence under
     a retained Repo cut, but cannot establish cross-operation payload validity.
     """
+
+    @property
+    def retention(self):
+        """Return the durable owner-ledger adapter or refuse unsupported authority.
+
+        Built-in DirStore supports prepare/protect/adopt/abandon/release primitives;
+        callers own association policy. Custom/buffered owners raise
+        StoreCapabilityError. Merely obtaining the adapter has no side effects.
+        """
+        raise StoreCapabilityError("Store does not support durable retention ownership.")
+
+    def state_leases(self, keys, *, exclusive=False, blocking=True):
+        """Return native full-key protection context, yielding acquisition bool.
+
+        keys is an iterable of StateKeys. Exclusive nonblocking acquisition returns
+        False on active use; no upgrade or queued deletion occurs. Unsupported
+        backends raise StoreCapabilityError. Acquire before Store writer fences;
+        growing a held key set requires release/reacquire and fresh validation.
+        """
+        raise StoreCapabilityError("Store does not support active StateKey leases.")
+
+    def delete_state(self, key):
+        """Immediately try private-data reclamation; return StateRemovalOutcome.
+
+        key is a full StateKey. Retained/in-use results have no queued request.
+        Successful withdrawal preserves graph/header/manifest history. Only physical
+        garbage failure returns cleanup-pending; journal/index failures propagate.
+        Unsupported backends raise StoreCapabilityError before effects.
+        """
+        raise StoreCapabilityError("Store does not support private-state reclamation.")
+
+    def retry_state_removal(self, key, incarnation):
+        """Retry exact withdrawn UUID under a fresh nonblocking exclusive key lease.
+
+        Returns StateRemovalOutcome; newer same-key publication obsoletes public
+        data removal. Missing evidence raises StoreAuthorityError; unsupported
+        backends raise StoreCapabilityError. Never infers release from owner death.
+        """
+        raise StoreCapabilityError("Store does not support incarnation-safe cleanup.")
 
     @property
     @abstractmethod
@@ -276,6 +316,9 @@ class Store(ABC):
         and may follow visibility. Built-in Stores journal supported mutations;
         explicit unsupported index coverage is refused before effects. Failures
         retain confirmed authority/cut/replay evidence, without rollback.
+        A built-in installation retains active protection only during publication;
+        the caller must establish an explicit owning/provisional root before a
+        retained association can become current. The receipt itself is unretained.
         """
         raise StoreCapabilityError("Store does not support state buckets.")
 
@@ -297,7 +340,7 @@ class Store(ABC):
         together. Metadata and every private byte
         are validated anew. Missing/malformed/incompatible state raises
         StoreAuthorityError. The source expires on context exit or Store closure;
-        this read lifetime does not implement active-use leases/retention.
+        built-in Stores retain active full-key protection through context exit.
         Unsupported backends raise StoreCapabilityError.
         """
         raise StoreCapabilityError("Store does not support state bucket sources.")

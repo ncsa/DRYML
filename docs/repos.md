@@ -33,7 +33,9 @@ no automatic conversion. The Store-owned APIs currently available are:
   data source. When supplied together, destination/codec/positive codec version are admitted before
   payload IO. Only `source.data_directory` is lent to a codec; framework metadata
   siblings are outside it. Context exit or Store closure expires the source.
-  Detached metadata remains inspectable. No cleanup lease/retention is implied.
+   Detached metadata remains inspectable. A native shared full-key lease spans
+   fresh validation and borrowing, preventing cooperating cleanup until context
+   exit. A read creates no durable retained root.
 - `publish_node(root, kind="recipe"|"saved")` / `read_node(digest, kind=...)`:
   explicit independent metadata publication/read. Saved roots require complete
   facets. Required ObjectId anchors compare canonical projections, so state-pin
@@ -43,8 +45,9 @@ no automatic conversion. The Store-owned APIs currently available are:
 
 Supported mutations are journaled under one Store authority cut and synchronously
 maintain enabled SQLite schema-10/coverage-1 projections before complete success.
-They do **not** claim retention, active-use leases, or integrated Repo/managed
-save/load. Legacy Repo snapshot/declaration writers explicitly raise
+DirStore also supplies physical grants and active-use leases as described below.
+Integrated Repo/managed save/load remains a separate consumer boundary. Legacy
+Repo snapshot/declaration writers explicitly raise
 `StoreCapabilityError` on format 4; legacy Query V3 views/coverage are likewise
 refused. `none`/`memory` have no persistent-maintenance obligation; `auto` uses
 usable SQLite and declares nonpersistent fallback only for optional-backend
@@ -63,6 +66,126 @@ directory persistence barriers. ZipStore's corresponding receipt is explicitly
 buffered; only successful archive `commit()` establishes durable completion.
 Failed commits propagate and retain dirty evidence; closing discards the buffered
 view. File-like ZipStores permit v4 reads but refuse writable publication.
+
+### Physical Retention And Active Use
+
+Protection is scoped to the Store authority domain **and full StateKey**, never
+just the codec hash or the creation bucket. Historical graph/manifest references
+alone retain no private bytes. `install_state()` is a low-level unretained
+installation: its shared publication lease ends on return. A caller must confirm
+protection before exposing a retained association; if cleanup wins before grant
+acquisition, protection fails as unavailable rather than claiming a usable root.
+
+`DirStore.retention` exposes Core handshake primitives. The owner Store can be
+different from the Stores holding the bytes:
+
+```python
+from uuid import uuid4
+
+token = str(uuid4())  # persist this stable root/intent token in caller authority
+owner.retention.prepare(token, saved_graph_digest, ((payload_store, (key,)),))
+owner.retention.protect(token, (payload_store,))
+owner.retention.adopt(token, (payload_store,))
+# The caller can now confirm its association, including token, in its own authority.
+# Only after the new association is confirmed may it retire an old root:
+owner.retention.release(old_token, old_payload_stores)
+```
+
+These methods implement evidence primitives, not managed role/association policy.
+Each independent user/durable/recovery reason uses its own token. The authoritative
+owner ledger records owner UUID, stable token, graph digest, exact target Store
+UUIDs/full keys, named staging resources, and disposition. Per-root grants live at
+`states/<shard>/<cdef>/<codec-hash>/grants/<owner-root-digest>.record`, beside the
+protected bytes. Deletion inspects these actual entries, never reverse counts or
+an index. Provisional and adopted grants protect equally.
+
+- `prepare(token, graph_digest, targets, staging=())` durably names affected work
+  before any grant. Targets are `(Store, iterable[StateKey])` pairs. Optional
+  staging entries are `(allocating_store, staging_handle)` pairs, recording exact
+  allocation IDs and owner markers. Same-token retries require identical facts;
+  a new attempt requires a new token.
+- `protect(token, connected_stores)` may incrementally protect prepared targets.
+  `adopt(token, connected_stores)` requires every named target and grant. Both
+  serialize with owner dispositions; neither establishes a managed association.
+- `abandon(token)` is an explicit owner-fenced tombstone for prepared work. It
+  permanently rejects later protection/adoption. Death, elapsed time, missing
+  index entries and disconnected/unreadable owners never call it automatically.
+- `release(token, connected_stores)` requires adoption or prior abandonment,
+  persists `release-pending` **before** removing owned grants, and acknowledges
+  each target independently. A failed target does not prevent independent targets
+  from completing; the first raised error carries `retention_failures` and
+  `retention_intent`. Owner/control errors or interruption stop dependent work.
+  Disconnected targets or live staging return an explicitly `release-pending`
+  record. Only confirmation of all targets produces `released`.
+- `read(token)` reads one exact ledger record. `pending(after=None, limit=100)`
+  pages the affected pending ledger, including interrupted journal work, without
+  scanning operation history. A zero limit performs no source work. Reconnect
+  the exact targets and retry the named token; do not infer release from absence.
+
+The pending-resource head is persisted before a new disposition. Settled tokens
+leave that head only after disposition publication and enabled-index
+acknowledgement, in a separate mutation. An interruption can leave extra named
+work, never an unnamed authorized release. Exact `replay_mutation()` repairs an
+interrupted owner-ledger write. Grant publication/removal instead requires the
+freshly connected owner's `protect()`/`release()` handshake; generic replay cannot
+resurrect an abandoned grant.
+
+Staging allocations have exact owner markers and native lifetime leases, bound to
+the allocating handle/thread. Foreign live allocations cannot be published,
+discarded or consumed by replay. `release_local_state_staging(handle)` explicitly
+releases the allocation lease while preserving recovery work; it is not
+abandonment evidence. Closing its owner also releases staging leases but preserves
+the allocations. Owner-fenced cleanup checks the exact marker and nonblocking
+live lease before removing only ledger-named work. It never inventories a shared
+staging directory to guess what is abandoned.
+
+`delete_state(key)` tries an exclusive native lease **nonblockingly**, before
+Store writer fences. It returns `StateRemovalOutcome`:
+
+| Status | Meaning |
+|---|---|
+| `retained` | Authoritative grants prevent reclamation. |
+| `in-use` | An active reader/publication lease or unresolved publication prevents reclamation. |
+| `unavailable` | No state variant exists. |
+| `removed` | Availability was withdrawn and private data removed; metadata history remains. |
+| `cleanup-pending` | Availability withdrawal completed, but physical garbage removal raised `cleanup_error`. |
+| `obsolete` | A newer incarnation superseded the requested old removal; current data was untouched. |
+
+Retained/in-use results neither wait for protection to end nor queue a deletion
+request. Retry explicitly after releasing owned roots/leases. Index, grant,
+control and availability-journal failures propagate as failure/ambiguity; only
+physical garbage deletion has the separate cleanup-report outcome.
+
+Withdrawal journals the exact availability incarnation and a removal record at
+`.../removals/<incarnation>.record`. The exclusive key lease lasts through physical
+removal. `retry_state_removal(key, incarnation)` reacquires it and rechecks grants,
+pending publication and the current incarnation. New same-key publication makes
+old public-path removal obsolete. Republishing withdrawn/partially removed data
+is a separate nonblocking exclusive recovery phase, with a complete validated
+owned stage. Old private leftovers are detached to incarnation-named remnants;
+the canonical bucket header, manifest and graph history remain. Old retries may
+remove only those retired remnants, never the new public `data/` directory.
+
+All grant, owner-ledger and availability changes enter the Store journal and
+enabled schema-10/coverage-1 index. The `retention` relation exposes per-key grant
+postings. Requested-metadata and managed-lifecycle relations remain explicitly
+unsupported. Missing reverse indexes may be rebuilt from authoritative records;
+they never authorize removal. Low-level `apply_prepared_mutation()` acquires key
+leases for state installations and refuses manual retention/availability
+transitions in favor of these owning primitives.
+
+ZipStore supports **transaction-local** active leases and buffered cleanup only.
+Different extraction handles are independent views; their leases do not protect
+one another's buffered bytes or establish cross-archive grant authority. Durable
+`retention` ownership/grants are explicitly refused, and read-only file-like
+archives refuse cleanup. Closing a handle expires borrowed sources immediately
+and defers extraction removal until its last active key lease/writer exits.
+
+For several keys, prepare the complete set and use `store.state_leases(keys)` or
+the plan adapter `repo_plan.state_use_leases((store, key) pairs)`, then freshly
+validate sources while protected. Growing a held set is refused: release,
+reacquire in global order and revalidate. Do not upgrade an owned shared lease to
+exclusive. See [Advisory Locking](locking.md) for native support and lock order.
 
 ### Publication, Names And Interrupted Work
 

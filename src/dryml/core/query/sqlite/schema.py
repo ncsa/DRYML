@@ -27,7 +27,7 @@ STORE_PROJECTION_FAMILIES = (
     "manifest", "availability", "node", "edge", "facet", "name",
     "requested_metadata", "retention", "lifecycle",
 )
-STORE_UNAVAILABLE_FAMILIES = frozenset({"requested_metadata", "retention", "lifecycle"})
+STORE_UNAVAILABLE_FAMILIES = frozenset({"requested_metadata", "lifecycle"})
 IndexCompatibilityDecision = Literal["compatible", "rebuild", "future-unsupported", "foreign-owned"]
 """Metadata disposition; foreign-owned destinations must never be repurposed."""
 

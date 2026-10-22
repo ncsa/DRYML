@@ -295,6 +295,12 @@ def projection_record_type(path):
     """
     import re
     from ..store import records as r
+    from ..store import retention as t
+    uuid = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    if re.fullmatch(rf"retention/intents/{uuid}\.record", path):
+        return t.RetentionIntentRecord
+    if path == "retention/pending.record":
+        return t.RetentionPendingRecord
     digest = r"[0-9a-f]{64}"
     shard = r"[0-9a-f]{2}"
     patterns = (
@@ -307,6 +313,8 @@ def projection_record_type(path):
         (rf"states/{shard}/{digest}/def\.pkl", r.NodeRootRecord),
         (rf"states/{shard}/{digest}/[^/]+/manifest\.record", r.StateVariantManifest),
         (rf"states/{shard}/{digest}/[^/]+/availability\.record", r.StateAvailabilityRecord),
+        (rf"states/{shard}/{digest}/[^/]+/grants/{digest}\.record", t.RetentionGrantRecord),
+        (rf"states/{shard}/{digest}/[^/]+/removals/{uuid}\.record", t.StateRemovalRecord),
     )
     for pattern, reader in patterns:
         if re.fullmatch(pattern, path):
@@ -360,6 +368,7 @@ def capture_store_projection(store, *, rebuild=False):
     import json
     import os
     from ..store import authority as a, records as r
+    from ..store import retention as t
     from ..node_codec import _decode_node_graph_views
     from ..node_prepare import NodePreparation
     from ..node_views import COMPATIBILITY_VIEW
@@ -380,7 +389,7 @@ def capture_store_projection(store, *, rebuild=False):
                     else:
                         projection_record_type(path)
                         paths.add(path)
-            for area in ("definitions", "graphs", "membership", "declarations", "names", "states"):
+            for area in ("definitions", "graphs", "membership", "declarations", "names", "states", "retention"):
                 inventory(area)
 
         rows, decoded, blocks, views, creations, anchors = [], {}, {}, {}, {}, {}
@@ -424,7 +433,26 @@ def capture_store_projection(store, *, rebuild=False):
             if value is None:
                 continue
             emit("record", path, "", value.to_data())
-            if isinstance(value, r.NodeBlockRecord):
+            if isinstance(value, t.RetentionGrantRecord):
+                from ..state_values import StateKey
+                parts = path.split("/")
+                key = StateKey(parts[2], parts[3])
+                if key not in value.keys or parts[-1] != value.address + ".record":
+                    raise StoreAuthorityError("Mismatched per-key retention grant address.")
+                emit("retention", path, "", {**value.to_data(), "key": r.StateKeyRecord(key).to_data()})
+            elif isinstance(value, t.RetentionIntentRecord):
+                if (path != "retention/intents/" + value.token + ".record"
+                        or value.owner_domain != store.retention_domain):
+                    raise StoreAuthorityError("Mismatched retention intent owner/token.")
+            elif isinstance(value, t.RetentionPendingRecord):
+                # A head can precede its intent during partial publication. Its
+                # exact bytes are projected, not certified as adopted roots.
+                pass
+            elif isinstance(value, t.StateRemovalRecord):
+                if (path.split("/")[2:4] != [value.key.cdef_digest, value.key.codec_hash]
+                        or path.split("/")[-1] != value.incarnation + ".record"):
+                    raise StoreAuthorityError("Mismatched removal incarnation address.")
+            elif isinstance(value, r.NodeBlockRecord):
                 if path != store._relative(store._node_path("definitions/blocks", value.digest)):
                     raise StoreAuthorityError("Mismatched Node block address.")
                 blocks[path] = value

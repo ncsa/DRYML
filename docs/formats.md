@@ -92,8 +92,8 @@ read private state or open Stores.
 
 Creation/compatibility policies use the same preparation/encoding. The format-4
 Store APIs below consume these blocks through their mutation journal.
-Repo/reference consumer integration, new query coverage, active-use leases and
-managed-format cutovers remain separate work.
+Store-owned query coverage and active-use leases consume the same authority;
+Repo/reference consumer integration and managed-format cutovers remain separate work.
 
 ### Store Format 4: CDef-Owned State And Metadata Readers
 
@@ -111,7 +111,8 @@ separately named: `dryml-state-key`, `dryml-node-blocks`, `dryml-node-root`,
 `dryml-state-variant`, `dryml-state-availability`, `dryml-node-membership`,
 `dryml-declaration-anchor`, `dryml-declaration-retired-anchor`,
 `dryml-declaration-required`, `dryml-node-name`, `dryml-store-authority`, and
-`dryml-store-mutation-intent`. Legacy
+`dryml-store-mutation-intent`, `dryml-retention-intent`, `dryml-retention-grant`,
+`dryml-retention-pending`, and `dryml-state-removal`. Legacy
 `local-state-manifest` v2/v3, V2 definitions and old reference records do not pass
 these readers, even beneath a forged current Store marker. Duplicate/noncanonical
 JSON, extra fields, trailing data, incompatible nested versions/domains, bad
@@ -122,6 +123,8 @@ store-format.record
 authority.record                            # Store UUID / committed epoch / pending UUIDs
 mutation-prepare.record                     # bounded intent-registration crash bridge, when present
 mutations/<mutation-uuid>.record             # separately named v1 intent / classification / replay
+retention/intents/<root-intent-uuid>.record   # exact affected-resource ledger / disposition
+retention/pending.record                     # unsettled tokens; no operation-history inventory
 definitions/blocks/<hh>/<block-digest>.record  # shared Node tables and values
 definitions/roots/<hh>/<recipe-key>.record    # compact recipe root view
 graphs/<hh>/<saved-key>.record                # compact exact saved root view
@@ -130,6 +133,8 @@ states/<first-two-cdef-hex>/<cdef-digest>/
   <codec>-<content-digest>/
     manifest.record                         # full StateKey + codec/inventory
     availability.record                     # publication UUID and status
+    grants/<owner-root-digest>.record        # authoritative owner/root/full-key protection
+    removals/<incarnation-uuid>.record       # exact withdrawal / cleanup evidence
     data/...                                # only codec-private files
 membership/{recipe,saved}/<hh>/<root-key>.record
 declarations/{anchors,required}/<hh>/<object-id-address>.record
@@ -158,9 +163,12 @@ different facts. A header alone publishes neither local state nor root membershi
 Manifests, headers and shared blocks remain inspectable when `data/` is missing.
 Availability requires a validated full-key publication record with `published`
 status plus a real data directory, not eager byte integrity or future retention.
+Withdrawal sets status `withdrawn`, preserving that incarnation's removal authority.
 Reinstallation has a fresh incarnation: `prepared` status prevents an interrupted
-data reinstall from advertising completion. A retry authenticates already visible
-same-key data before publishing its new incarnation.
+data reinstall from advertising completion. Withdrawn/partial recovery is a
+separate exclusive-key phase with a complete validated stage. It replaces only
+private data, detaching old remnants by incarnation and preserving bucket/manifest
+history. A stale removal cannot address a new public installation.
 
 `inspect_states()` is a direct **single-bucket inventory**, not indexed paging. It
 decodes the CDef once outside writer-blocking fences, reads no payload bytes,
@@ -170,7 +178,9 @@ instead of mixing cuts or silently restarting reads. `read_state()` validates fr
 evidence, optionally validates destination/codec/codec-version compatibility before payload IO,
 and lends only private data within an owner-checked context. Context exit or Store
 closure invalidates the borrowed source; detached LocalState/manifest metadata
-survives. This is not an active-use or retention lease.
+survives. A native shared full-key lease spans validation and borrowing; durable
+retention requires a separate explicit root grant. See [Repos](repos.md#physical-retention-and-active-use)
+for the owner-ledger handshake, staging ownership and cleanup outcomes.
 
 `publish_node()` validates ObjectId-addressed declaration anchors using canonical
 `dryml-object-projection/v2` evidence and source contributions, then publishes
@@ -260,8 +270,8 @@ Legacy Repo snapshot writers and Query V3 views/coverage remain explicit format-
 refusals. The Store-owned persistent projection uses **SQLite schema 10 / coverage
 contract 1**. It keeps source records, independent recipe/saved memberships,
 declarations, creation compatibility prefilters, full-StateKey manifests and
-availability, typed block/table/overlay postings, and names distinct. Capability
-entries for requested metadata, retention and lifecycle remain explicitly
+availability, per-key retention grants, typed block/table/overlay postings, and names distinct. Capability
+entries for requested metadata and lifecycle remain explicitly
 unavailable until their owning adapters integrate their authority and guards.
 Neither old schema 9 nor incomplete coverage is ready. Owned derived state can be
 rebuilt from compatible metadata without payload reads or source-format changes;

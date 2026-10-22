@@ -320,7 +320,7 @@ class SQLiteStoreQueryIndex:
         maintenance; True permits replay/rebuild before the short read cut. Returns
         sorted (source path, correlation key, canonical JSON bytes) tuples. Missing,
         stale, pending or incomplete coverage raises QueryIndexDirty. Unimplemented
-        metadata/retention/lifecycle owners raise QueryIndexUnavailable rather than
+        requested-metadata/lifecycle owners raise QueryIndexUnavailable rather than
         certify an empty relation. This is an index-level seam, not a Repo terminal.
         """
         if type(family) is not str or type(refresh) is not bool:

@@ -32,6 +32,20 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+def state_use_leases(sources):
+    """Return one globally ordered active-use lease context for exact plan sources.
+
+    sources is an iterable of (Store, StateKey) pairs. The context yields True
+    after native shared acquisition, before any Store writer/read fences. Callers
+    then freshly validate their source availability/compatibility; a plan itself
+    confers no payload validity. Growing an already held set raises
+    StoreAuthorityError: release/reacquire the complete set and revalidate.
+    This primitive does not execute legacy save/load or managed association policy.
+    """
+    from .store.retention import state_leases
+    return state_leases(sources)
+
+
 @dataclass(frozen=True, slots=True)
 class SaveRouting:
     """Detached, immutable ordered destination policy for future Repo saves.
