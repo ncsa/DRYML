@@ -1900,6 +1900,10 @@ class Repo:
         """Validate one metadata attachment target without touching live Objects."""
 
         from .reference_values import ObjectRef, StateRef
+        from .node import Node
+
+        if isinstance(target, Node):
+            return target
 
         if not isinstance(target, (ObjectRef, StateRef)):
             raise TypeError("metadata target must be an ObjectRef or StateRef.")
@@ -1915,6 +1919,10 @@ class Repo:
         """
 
         from .reference_values import ObjectRef
+        from .node import Node
+        if isinstance(target, Node):
+            with store._metadata_read():
+                return store._holds_node_metadata(target)
 
         if isinstance(target, ObjectRef):
             if self._reference_authoritative_in(store, target):
@@ -1970,12 +1978,16 @@ class Repo:
             raise MetadataConflictError("Selected Stores disagree about current metadata.")
         return first
 
-    def get_metadata(self, target, *, store=None):
-        """Return one detached current mapping for an exact ObjectRef or StateRef.
+    def get_metadata(self, target, *, store=None, scope=None):
+        """Return fresh detached annotations for a current concrete Node target.
 
         Args:
-            target: Exact ObjectRef or StateRef attachment scope.
+            target: Concrete Node object projection or saved graph. Fixed reference
+                adapters remain available only where their Store supports them.
             store: Optional already-connected Store restricting the authority cut.
+            scope: object/state, or None to infer state when the Node has selected
+                state and object otherwise. Use state explicitly for stateless saved
+                graphs whose object and saved descriptions have equal content.
 
         Returns:
             A detached whole mapping, or ``None`` when the known target has no
@@ -1986,12 +1998,17 @@ class Repo:
             MetadataConflictError: If selected target-holding Stores differ,
             including absent versus present mappings.
             StoreAuthorityError: If target or metadata authority is malformed.
+            ValueError: If scope is outside object/state/None.
 
         This is metadata-only inspection: it never materializes Objects, opens a
         Store, reads a payload, or runs environment observation.
         """
 
         target = self._metadata_target(target)
+        from .node import Node
+        if isinstance(target, Node):
+            from .metadata import _node_annotation_scope
+            return self._node_metadata_values(target, store=store, scope=_node_annotation_scope(scope))
         selected = (
             (self._connected_metadata_store(store),) if store is not None else tuple(self.stores)
         )
@@ -2004,7 +2021,8 @@ class Repo:
         holders = self._metadata_holders(target, store=store)
         if store is not None:
             selected = holders[0]
-            selected.preflight_publication(operation)
+            from .node import Node
+            selected.preflight_publication(operation, **({"record_family": "dryml-node-graph/v1"} if isinstance(target, Node) else {}))
             return selected
         writable = tuple(
             candidate for candidate in holders if candidate.publication_capabilities.writable
@@ -2013,18 +2031,20 @@ class Repo:
             raise RepoSaveError(
                 f"{operation} requires an explicit Store or exactly one writable target-holding Repo Store."
             )
-        writable[0].preflight_publication(operation)
+        from .node import Node
+        writable[0].preflight_publication(operation, **({"record_family": "dryml-node-graph/v1"} if isinstance(target, Node) else {}))
         return writable[0]
 
-    def set_metadata(self, target, values, *, store=None) -> None:
+    def set_metadata(self, target, values, *, store=None, scope=None) -> None:
         """Atomically replace one selected current metadata mapping.
 
         Args:
-            target: Exact ObjectRef or StateRef attachment scope.
+            target: Concrete Node object projection or saved graph.
             values: Complete bounded metadata mapping that replaces any current
                 mapping in the selected Store.
             store: Optional connected target-holding Store. It is required when
                 more than one writable connected Store holds ``target``.
+            scope: object/state or None, with the inference in get_metadata.
 
         Returns:
             ``None`` after atomic replacement succeeds.
@@ -2052,16 +2072,23 @@ class Repo:
         detached = encode_metadata_mapping(values)
         from .metadata import decode_metadata_mapping
 
+        from .node import Node
+        if isinstance(target, Node):
+            selected = self._node_metadata_mutation_store(target, store, scope)
+            selected.write_metadata(target, decode_metadata_mapping(detached), scope=scope)
+            return
+
         selected = self._metadata_mutation_store(target, store, "write current metadata")
         selected.write_metadata(target, decode_metadata_mapping(detached))
 
-    def delete_metadata(self, target, *, store=None) -> bool:
+    def delete_metadata(self, target, *, store=None, scope=None) -> bool:
         """Atomically remove one selected current mapping and return prior presence.
 
         Args:
-            target: Exact ObjectRef or StateRef attachment scope.
+            target: Concrete Node object projection or saved graph.
             store: Optional connected target-holding Store. It is required when
                 more than one writable connected Store holds ``target``.
+            scope: object/state or None, with the inference in get_metadata.
 
         Returns:
             ``True`` when a current mapping was removed, otherwise ``False``.
@@ -2081,6 +2108,9 @@ class Repo:
         """
 
         target = self._metadata_target(target)
+        from .node import Node
+        if isinstance(target, Node):
+            return self._node_metadata_mutation_store(target, store, scope).delete_metadata(target, scope=scope)
         selected = self._metadata_mutation_store(target, store, "delete current metadata")
         return selected.delete_metadata(target)
 
@@ -2088,11 +2118,12 @@ class Repo:
         """Return immutable creation evidence or a valid unknown marker.
 
         Args:
-            target: Exact ObjectRef lineage scope.
+            target: Current Node object projection, or retained fixed ObjectRef.
             store: Optional connected Store restricting the authority cut.
 
         Returns:
-            Detached LineageMetadata. A valid target with no creation evidence
+            Detached NodeLineageMetadata for a Node (LineageMetadata for a fixed
+            reference). A valid target with no creation evidence
             returns an explicit unknown marker rather than an inferred timestamp.
 
         Raises:
@@ -2111,6 +2142,9 @@ class Repo:
 
         from .metadata import LineageMetadata
         from .reference_values import ObjectRef
+        from .node import Node
+        if isinstance(target, Node):
+            return self._node_metadata_values(target, store=store, scope="lineage")
 
         if not isinstance(target, ObjectRef):
             raise TypeError("lineage metadata target must be an ObjectRef.")
@@ -2142,14 +2176,16 @@ class Repo:
         return LineageMetadata(target, "unknown", None) if values[0] is None else values[0]
 
     def get_snapshot_metadata(self, target, *, store=None):
-        """Return detached write-once captured metadata for one exact StateRef.
+        """Return detached first-capture metadata for one exact saved graph.
 
         Args:
-            target: Exact StateRef whose complete captured evidence is required.
+            target: Saved Node whose complete captured evidence is required, or a
+                retained fixed StateRef on a supporting Store.
             store: Optional connected Store restricting the authority cut.
 
         Returns:
-            Detached immutable SnapshotMetadata from the complete snapshot
+            Detached NodeSnapshotMetadata for a Node (SnapshotMetadata for a fixed
+            reference) from the complete captured
             association. Later current-metadata edits are never merged into it.
 
         Raises:
@@ -2168,6 +2204,9 @@ class Repo:
         """
 
         from .reference_values import StateRef
+        from .node import Node
+        if isinstance(target, Node):
+            return self._node_metadata_values(target, store=store, scope="capture")
 
         if not isinstance(target, StateRef):
             raise TypeError("snapshot metadata target must be a StateRef.")
@@ -2185,6 +2224,48 @@ class Repo:
         if any(value != first for value in values[1:]):
             raise MetadataConflictError("Selected Stores disagree about snapshot metadata.")
         return first
+
+    def _node_metadata_values(self, target, *, store, scope):
+        import json
+        from .metadata import NodeLineageMetadata, timestamp_from_seconds, decode_metadata_mapping, _node_snapshot_metadata
+        selected = (self._connected_metadata_store(store),) if store is not None else tuple(self.stores)
+        values = []
+        for candidate in selected:
+            with candidate._metadata_read():
+                if not candidate._holds_node_metadata(target, scope):
+                    continue
+                record = candidate._read_node_metadata(target, scope)
+                data = None if record is None else json.loads(record.content)
+                if scope == "capture":
+                    if data is None:
+                        raise StoreAuthorityError("Saved graph lacks captured metadata authority.")
+                    value = _node_snapshot_metadata(target, data)
+                elif scope == "lineage":
+                    value = NodeLineageMetadata(target.object_view(), "unknown" if data is None else data["creation_status"],
+                                                None if data is None else timestamp_from_seconds(data["created_at"]))
+                else:
+                    value = None if data is None else decode_metadata_mapping(data["values"])
+                values.append((None if record is None else record.content, value))
+        if not values:
+            raise KeyError("No connected Store holds the metadata target.")
+        if any(item[0] != values[0][0] for item in values[1:]):
+            raise MetadataConflictError("Selected Stores disagree about Node metadata.")
+        return values[0][1]
+
+    def _node_metadata_mutation_store(self, target, store, scope):
+        from .metadata import _node_annotation_scope
+        area = _node_annotation_scope(scope)
+        selected = (self._connected_metadata_store(store),) if store is not None else tuple(self.stores)
+        holders = []
+        for candidate in selected:
+            with candidate._metadata_read():
+                if candidate._holds_node_metadata(target, area) and candidate.publication_capabilities.writable:
+                    holders.append(candidate)
+        if not holders:
+            raise KeyError("No writable connected Store holds the metadata target.")
+        if len(holders) != 1:
+            raise RepoSaveError("Node metadata mutation requires an explicit Store when holders are ambiguous.")
+        return holders[0]
 
     def get_snapshot_directory(self, target, *, store=None):
         """Locate one exact complete v3 snapshot directory in connected Stores.
@@ -4120,8 +4201,8 @@ class Repo:
             report_stores: Whether to return an ephemeral StoreReport.
             source_store: Optional connected Store for selected local-state sources.
             source_stores: Optional full-StateKey/connected-Store source overrides.
-            annotations: Currently unsupported; a present value raises
-                StoreCapabilityError before capture rather than omitting metadata.
+            annotations: Optional SaveAnnotations replacing supplied current object
+                and state maps and copying them into a first immutable capture.
             _capture_memo: Private retained capture memo. It is accepted for
                 internal state-operation compatibility and does not alter routing.
             reservation: Optional active exact graph reservation reused by an
@@ -4148,8 +4229,8 @@ class Repo:
             Incomplete recovery preserves the prior receipt. Prepared local batches
             support alternating Store routes without splitting the per-Store commit.
             Durable user retention is established before association; uncertain
-            grants are preserved. Buffered/custom backends lacking this seam and
-            requested unimplemented metadata feeds fail before capture. Load the
+            grants are preserved. Buffered/custom backends lacking this seam
+            fail before capture. Load the
             returned SavedNode through this Repo's fresh materialization boundary.
 
         Concurrency:
@@ -4329,8 +4410,8 @@ class Repo:
             report_stores: Whether to pair the StateRef with a StoreReport.
             source_store: Optional connected Store for explicit local-state sources.
             source_stores: Optional full-StateKey/connected-Store source overrides.
-            annotations: Requested metadata feed; currently explicitly unsupported
-                before capture, including an explicitly empty mapping.
+            annotations: Optional SaveAnnotations replacing supplied current object
+                and state maps and copying them into a first immutable capture.
 
         Returns:
             The immutable SavedNode, or ``(SavedNode, StoreReport)`` when
@@ -4346,8 +4427,8 @@ class Repo:
 
         Side Effects:
             Uses save_object's one-batch publication, index and retention contract,
-            then flushes configured Stores. Requested annotation feeds and buffered
-            durable ownership currently raise StoreCapabilityError before capture.
+            then flushes configured Stores. Buffered durable ownership raises
+            StoreCapabilityError before capture.
 
         Concurrency:
             Store publication and initial-claim completion use writer locks and
@@ -6158,8 +6239,8 @@ def save_object(
         report_stores: Whether to return a StoreReport with the StateRef.
         source_store: Optional connected Store for explicit local-state sources.
         source_stores: Optional full-StateKey/connected-Store source overrides.
-        annotations: Requested metadata feed; currently explicitly unsupported
-            before capture, including an explicitly empty mapping.
+        annotations: Optional SaveAnnotations replacing supplied current object
+            and state maps and copying them into a first immutable capture.
 
     Returns:
         The complete SavedNode, or ``(SavedNode, StoreReport)`` when requested.
@@ -6176,8 +6257,7 @@ def save_object(
     Side Effects:
         Delegates one-batch state/graph/name/index publication and user retention
         to Repo.save_object. Partial failures preserve confirmed saved graphs and
-        provisional grants. Unsupported requested annotation feeds and buffered
-        durable ownership fail before capture.
+        provisional grants. Buffered durable ownership fails before capture.
 
     Lifetime and Concurrency:
         A supplied Repo/Store remains borrowed. When this convenience creates a

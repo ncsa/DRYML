@@ -25,9 +25,9 @@ STORE_COVERAGE_VERSION = 1
 STORE_PROJECTION_FAMILIES = (
     "record", "recipe_root", "saved_root", "declaration", "creation",
     "manifest", "availability", "node", "edge", "facet", "name",
-    "requested_metadata", "retention", "lifecycle",
+    "requested_metadata", "retention", "lifecycle", "discovery",
 )
-STORE_UNAVAILABLE_FAMILIES = frozenset({"requested_metadata", "lifecycle"})
+STORE_UNAVAILABLE_FAMILIES = frozenset({"lifecycle"})
 IndexCompatibilityDecision = Literal["compatible", "rebuild", "future-unsupported", "foreign-owned"]
 """Metadata disposition; foreign-owned destinations must never be repurposed."""
 
@@ -82,6 +82,10 @@ DDL = (
     ) WITHOUT ROWID
     """ % ", ".join("'" + family.replace("'", "''") + "'" for family in STORE_PROJECTION_FAMILIES),
     "CREATE INDEX store_projection_by_source ON store_projection_rows(source)",
+    """CREATE INDEX store_discovery_order ON store_projection_rows(
+        family, json_extract(CAST(payload AS TEXT), '$.key_kind'),
+        json_extract(CAST(payload AS TEXT), '$.digest'), source, row_key)
+        WHERE family='discovery'""",
     """
     CREATE TABLE store_projection_coverage (
         family TEXT PRIMARY KEY,

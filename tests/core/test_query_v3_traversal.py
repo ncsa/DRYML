@@ -80,21 +80,20 @@ def _references():
 
 
 def test_u2_occurrences_projections_closure_share_and_fixed_results_detach(tmp_path, monkeypatch):
-    from dryml.core.store.records import DefinitionRecord
     from dryml.core.query.sqlite import SQLiteQueryIndexConfig
 
     root, child, *_ = _references()
     producer, scope = (DirStore(tmp_path / name, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
                        for name in ("producer", "scope"))
-    producer.write_definition_record(DefinitionRecord(root))
+    producer.publish_node(root)
     calls = []
     for store in (producer, scope):
         store.rebuild_query_index()
         original = store.open_query_index().refresh
 
-        def refresh(policy, *, stats=None, _original=original, _store=store):
+        def refresh(policy, *, stats=None, _original=original, _store=store, **kwargs):
             calls.append(_store)
-            return _original(policy, stats=stats)
+            return _original(policy, stats=stats, **kwargs)
 
         monkeypatch.setattr(store.open_query_index(), "refresh", refresh)
     roots = producer.query().sel(root).refresh(True)
@@ -102,7 +101,7 @@ def test_u2_occurrences_projections_closure_share_and_fixed_results_detach(tmp_p
     fixed_occurrences = nested.collect()
     assert calls == [producer]
     fixed_identities = roots.closure().collect()
-    assert nested.owners().one() == root and nested.targets().one() == child
+    assert nested.owners().one().graph_equal(root) and nested.targets().one().graph_equal(child)
     assert calls == [producer]
     assert fixed_occurrences.query().count() == 1
     assert fixed_identities.query().count() == 2
@@ -186,6 +185,23 @@ def test_v3_occurrence_kind_restrictions_only_narrow_targets():
     assert occurrences.query().cdefs().count() == 1
     assert occurrences.query().cdefs().object_refs().count() == 0
     assert occurrences.query().target_kind("cdef").state_refs().count() == 0
+
+
+def test_stateless_owner_projection_preserves_each_source_domain(tmp_path):
+    """Equal-content recipe/object/saved roots keep domain-specific provenance."""
+    recipe, saved = (DirStore(tmp_path / name, query_index="sqlite") for name in ("recipe", "saved"))
+    child = Definition(V3TemplateLeaf, 64).concretize()
+    root = Definition(V3TemplateParent, child).concretize()
+    recipe.publish_node(root)
+    saved.publish_node(root, kind="saved")
+    owners = Repo((recipe, saved)).query().sel(root).nested(child).owners().collect()
+    assert owners.count() == 3
+    assert owners.query().cdefs().count() == 1
+    assert owners.query().object_refs().count() == 1
+    assert owners.query().saved().count() == 1
+    entries = {key.kind: evidence.sources for key, (_, evidence) in owners._entries.items()}
+    assert entries["cdef"] == frozenset((IdentityQuery._source_evidence(recipe), IdentityQuery._source_evidence(saved)))
+    assert entries["object_ref"] == entries["state_ref"] == frozenset((IdentityQuery._source_evidence(saved),))
 
 
 def test_v3_direct_projections_ignore_raw_caps_without_enumerating_occurrences(monkeypatch):
@@ -284,8 +300,8 @@ def test_v3_occurrence_metadata_filters_targets_with_shared_authority(tmp_path):
     roots = IdentityQuery.from_set(IdentitySet((state,)))
     nested = roots.nested().where(field("object", "team").eq("selected"), scope=store)
 
-    assert nested.targets().one() == state.object
-    assert nested.one().target == state.object
+    assert nested.targets().one().graph_equal(state.object_view())
+    assert nested.one().target.graph_equal(state.object_view())
     assert roots.nested().where(field("object", "team").eq("missing"), scope=store).count() == 0
 
 
@@ -300,11 +316,11 @@ def test_v3_fixed_occurrence_metadata_requires_explicit_scope(tmp_path):
         V3TraversalLeaf("child", repo=repo),
         annotations=SaveAnnotations(object={"team": "selected"}),
     )
-    result = OccurrenceSet((Occurrence(state, GraphPath((Parameter("edge"),)), state.object),))
+    result = OccurrenceSet((Occurrence(state, GraphPath((Parameter("edge"),)), state.object_view()),))
 
     with pytest.raises(QueryDomainError, match="explicit scope"):
         result.query().where(field("object", "team").eq("selected"))
-    assert result.query().where(field("object", "team").eq("selected"), scope=store).one().target == state.object
+    assert result.query().where(field("object", "team").eq("selected"), scope=store).one().target.graph_equal(state.object_view())
 
 
 def test_v3_occurrence_selector_cannot_hide_invalid_later_metadata(tmp_path):
@@ -323,14 +339,14 @@ def test_v3_occurrence_selector_cannot_hide_invalid_later_metadata(tmp_path):
     )
     owner = Definition(V3TraversalParent, None).concretize()
     fixed = OccurrenceSet((
-        Occurrence(owner, GraphPath((Parameter("first"),)), invalid.object),
-        Occurrence(owner, GraphPath((Parameter("second"),)), selected.object),
+        Occurrence(owner, GraphPath((Parameter("first"),)), invalid.object_view()),
+        Occurrence(owner, GraphPath((Parameter("second"),)), selected.object_view()),
     ))
 
     with pytest.raises(Exception, match="numeric field"):
-        fixed.query().sel(selected.object).where(field("object", "score").lt(3), scope=store).exists()
+        fixed.query().sel(selected.object_view()).where(field("object", "score").lt(3), scope=store).exists()
 
-    assert fixed.query().sel(selected.object).sel(invalid.object).count() == 0
+    assert fixed.query().sel(selected.object_view()).sel(invalid.object_view()).count() == 0
 
 
 def test_v3_occurrence_late_metadata_demand_restarts_root_evidence(tmp_path, monkeypatch):
@@ -343,7 +359,7 @@ def test_v3_occurrence_late_metadata_demand_restarts_root_evidence(tmp_path, mon
         V3TraversalLeaf("candidate", repo=repo),
         annotations=SaveAnnotations(object={"team": "old"}),
     )
-    lineage = repo.get_lineage_metadata(state.object)
+    lineage = repo.get_lineage_metadata(state.object_view())
     roots = IdentityQuery.from_store(store).state_refs().where(
         field("object", "team").eq("old")
     )
@@ -355,7 +371,7 @@ def test_v3_occurrence_late_metadata_demand_restarts_root_evidence(tmp_path, mon
         result = original(self, capture)
         if self is roots and not mutated:
             mutated = True
-            repo.set_metadata(state.object, {"team": "new"}, store=store)
+            repo.set_metadata(state.object_view(), {"team": "new"}, store=store, scope="object")
         return result
 
     monkeypatch.setattr(IdentityQuery, "_collect_with_capture", move_after_root)
@@ -363,7 +379,9 @@ def test_v3_occurrence_late_metadata_demand_restarts_root_evidence(tmp_path, mon
         field("lineage", "creation_status").eq(lineage.creation_status)
     )
 
-    assert nested.count() == 0
+    from dryml.core.query.model import QueryError
+    with pytest.raises(QueryError, match="changed"):
+        nested.count()
     assert mutated
 
 
@@ -405,7 +423,7 @@ def test_v3_nested_generator_preserves_shared_topology_witnesses(tmp_path):
         _v3_template_selector(shared=True)
     ).targets().collect()
 
-    assert tuple(result) == (shared.definition,)
+    assert len(result) == 1 and result.one().graph_equal(shared.definition)
 
 
 def test_v3_nested_generator_honors_reference_aware_edge_policies(tmp_path):
@@ -447,11 +465,10 @@ def test_u6_projection_disabled_refresh_survives_every_terminal(tmp_path, monkey
     """Projection inherits disabled refresh with no sidecar mutation."""
 
     from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
-    from dryml.core.store.records import DefinitionRecord
 
     root, child, *_ = _references()
     store = DirStore(tmp_path / "store", query_index="sqlite")
-    store.write_definition_record(DefinitionRecord(root))
+    store.publish_node(root)
     store.rebuild_query_index()
     index = store.open_query_index()
     if sidecar == "missing":
@@ -465,7 +482,9 @@ def test_u6_projection_disabled_refresh_survives_every_terminal(tmp_path, monkey
     query = getattr(store.query().cdefs().stored().refresh(False).nested(child), projection)()
     for terminal in (query.exists, query.count, query.one, query.one_or_none, query.collect,
                      lambda: query.take(1), lambda: query.explain(analyze=True)):
-        terminal()
+        from dryml.core.query.model import QueryIndexDirty, QueryIndexUnavailable
+        with pytest.raises((QueryIndexDirty, QueryIndexUnavailable)):
+            terminal()
         assert calls == []
     assert query.refresh_policy is False
 
@@ -516,20 +535,17 @@ def test_occurrence_combines_producer_and_external_metadata_authority(tmp_path, 
     """Unrelated root conflicts precede root/target filtering in every terminal."""
 
     from dryml.core.query.model import QueryError
-    from dryml.core.store.records import DeclarationRecord, DefinitionRecord
 
     producer = DirStore(tmp_path / "producer", query_index="memory")
     metadata = DirStore(tmp_path / "metadata", query_index="memory")
-    target = ObjectRef(Definition(V3TraversalLeaf, "target").concretize(), {GraphPath(): ObjectId()})
+    target = Definition(V3TraversalLeaf, "target").concretize().with_identity(ObjectId())
     owner = Definition(V3TraversalParent, target).concretize()
-    producer.write_definition_record(DefinitionRecord(owner))
-    metadata.write_declaration_record(DeclarationRecord(target))
-    metadata.write_metadata(target, {"team": "selected"})
+    producer.publish_node(owner)
+    metadata.publish_node(target)
+    Repo(metadata).set_metadata(target, {"team": "selected"}, scope="object")
     object_id = ObjectId()
     for store, name in ((producer, "first"), (metadata, "second")):
-        store.write_declaration_record(DeclarationRecord(ObjectRef(
-            Definition(V3TraversalLeaf, name).concretize(), {GraphPath(): object_id},
-        )))
+        store.publish_node(Definition(V3TraversalLeaf, name).concretize().with_identity(object_id))
     roots = producer.query().cdefs().sel(
         Definition(V3TraversalParent, None).concretize() if domain == "empty-roots" else owner
     )
@@ -541,34 +557,31 @@ def test_occurrence_combines_producer_and_external_metadata_authority(tmp_path, 
         query = getattr(query, projection)()
     for terminal in (query.exists, query.count, query.one, query.one_or_none, query.collect,
                      lambda: query.take(1)):
-        with pytest.raises(QueryError, match="object-reference authority conflicts"):
+        with pytest.raises(QueryError, match="authority conflicts"):
             terminal()
 
 
 def test_occurrence_metadata_preflight_does_not_admit_or_project_scope_holders(tmp_path):
     """External holder inventory proves authority without widening candidate work."""
 
-    from dryml.core.store.records import DeclarationRecord, DefinitionRecord
 
-    producer = DirStore(tmp_path / "producer", query_index="memory")
+    producer = DirStore(tmp_path / "producer", query_index="sqlite")
     metadata = DirStore(tmp_path / "metadata", query_index="memory")
-    target = ObjectRef(Definition(V3TraversalLeaf, "target").concretize(), {GraphPath(): ObjectId()})
-    owner = Definition(V3TraversalParent, target).concretize()
-    producer.write_definition_record(DefinitionRecord(owner))
-    metadata.write_declaration_record(DeclarationRecord(target))
-    metadata.write_metadata(target, {"team": "selected"})
+    target = Definition(V3TemplateLeaf, 64).concretize().with_identity(ObjectId())
+    owner = Definition(V3TraversalParent, DefLink.finalized(EdgeKind.REF, target)).concretize()
+    producer.publish_node(owner)
+    metadata.publish_node(target)
+    Repo(metadata).set_metadata(target, {"team": "selected"}, scope="object")
     for name in ("unrelated-a", "unrelated-b"):
-        metadata.write_declaration_record(DeclarationRecord(ObjectRef(
-            Definition(V3TraversalLeaf, name).concretize(), {GraphPath(): ObjectId()},
-        )))
-    query = producer.query().cdefs().sel(owner).max_verify(3).nested(target).where(
+        metadata.publish_node(Definition(V3TraversalLeaf, name).concretize().with_identity(ObjectId()))
+    query = producer.query().cdefs().stored().sel(owner).max_verify(3).nested(target).where(
         field("object", "team").eq("selected"), scope=metadata,
     )
-    assert query.one().target == target
-    assert query.owners().one() == owner
+    assert query.one().target.graph_equal(target)
+    assert query.owners().one().graph_equal(owner)
     result = query.targets().collect()
-    assert result.one() == target
-    assert result.sources(target) == frozenset((IdentityQuery._source_evidence(producer),))
+    assert result.one().graph_equal(target)
+    assert result.sources(result.one()) == frozenset((IdentityQuery._source_evidence(producer),))
     assert query.targets().explain(analyze=True).verified_count == 3
 def test_node_pattern_alias_partition_roles_and_exact_quotation():
     """Independent equal Nodes stay independent across Mat/Ref and quote barriers."""

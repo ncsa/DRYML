@@ -52,3 +52,16 @@ def _thaw_json_fact(value):
             return MappingProxyType({key: _thaw_json_fact(item) for key, item in items})
         return tuple(_thaw_json_fact(item) for item in items)
     return value
+
+
+def _node_block_owner_size(content, blocks):
+    """Conservatively charge an operation-local immutable decoded block owner.
+
+    Encoded syntax containers and leaves bound the decoded Node/value graph;
+    four prospective copies cover frozen carriers, table/edge bookkeeping and
+    named-view preparation. Source bytes and owner/key bookkeeping are charged
+    independently. Unsupported primitive syntax is deliberately not cacheable.
+    """
+    if type(content) is not bytes:
+        raise TypeError("Node block ownership requires exact immutable bytes.")
+    return 2048 + sys.getsizeof(content) + 4 * _primitive_size(blocks)

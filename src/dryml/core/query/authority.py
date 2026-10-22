@@ -247,7 +247,9 @@ def validate_captured_reference_authority(
     for item in facts:
         for object_id, projected in item._reference_projections.items():
             previous = by_object_id.setdefault(object_id, projected)
-            if previous != projected:
+            from ..node import Node
+            equal = previous.object_projection_equal(projected) if isinstance(previous, Node) else previous == projected
+            if not equal:
                 raise QueryError("Query V3 object-reference authority conflicts.")
 
 
@@ -315,6 +317,7 @@ def projection_record_type(path):
         (rf"states/{shard}/{digest}/[^/]+/availability\.record", r.StateAvailabilityRecord),
         (rf"states/{shard}/{digest}/[^/]+/grants/{digest}\.record", t.RetentionGrantRecord),
         (rf"states/{shard}/{digest}/[^/]+/removals/{uuid}\.record", t.StateRemovalRecord),
+        (rf"metadata/(?:current_object|current_state|lineage|capture)/{shard}/{digest}\.record", r.NodeMetadataRecord),
     )
     for pattern, reader in patterns:
         if re.fullmatch(pattern, path):
@@ -355,6 +358,49 @@ def mutation_projection_paths(records):
     return tuple(sorted(paths))
 
 
+def validate_node_root_views(selections, prepared, *, validated_views=None, validated_slots=None):
+    """Validate named root purposes and reachable state associations once per owner.
+
+    selections contains (NodeRootRecord, decoded Node) pairs authenticated by the
+    same immutable block preparation. Optional sets are private pure operation
+    memoization, never Store/cut/availability evidence. Raises StoreAuthorityError
+    for noncanonical views or invalid state admission without modifying input.
+    """
+    from ..node import require_saved
+    from ..node_views import creation_cdef, object_projection
+    validated_views = set() if validated_views is None else validated_views
+    validated_slots = set() if validated_slots is None else validated_slots
+    for record, root in selections:
+        purpose = record.root_kind, record.view_bytes
+        if purpose not in validated_views:
+            try:
+                if record.root_kind in {"construction", "projection"}:
+                    canonical = creation_cdef(root) if record.root_kind == "construction" else object_projection(root)
+                    if canonical is not root and not root.graph_equal(canonical):
+                        raise ValueError("Noncanonical named Node view.")
+                elif record.root_kind == "saved":
+                    require_saved(root)
+            except (TypeError, ValueError) as error:
+                raise StoreAuthorityError("Malformed or incompatible named Node root authority.") from error
+            validated_views.add(purpose)
+        pending = [prepared._slot(root)]
+        while pending:
+            slot = pending.pop()
+            if slot in validated_slots:
+                continue
+            node = prepared.nodes[slot]
+            state = getattr(node, "state", None)
+            if state is not None:
+                try:
+                    state.validate_for(node, codec=state.codec)
+                except (TypeError, ValueError) as error:
+                    raise StoreAuthorityError("Invalid selected state creation/compatibility evidence.") from error
+            validated_slots.add(slot)
+            pending.extend(prepared._children[slot])
+            if slot in prepared._construction:
+                pending.append(prepared._construction[slot])
+
+
 def capture_store_projection(store, *, rebuild=False):
     """Prepare changed-record replay or an explicit metadata-only Store inventory.
 
@@ -389,10 +435,12 @@ def capture_store_projection(store, *, rebuild=False):
                     else:
                         projection_record_type(path)
                         paths.add(path)
-            for area in ("definitions", "graphs", "membership", "declarations", "names", "states", "retention"):
+            for area in ("definitions", "graphs", "membership", "declarations", "names", "states", "retention", "metadata"):
                 inventory(area)
 
         rows, decoded, blocks, views, creations, anchors = [], {}, {}, {}, {}, {}
+        discovery = {}
+        root_records = {}
 
         def emit(family, source, key, value):
             rows.append((family, source, str(key), r._json_bytes(value)))
@@ -427,13 +475,18 @@ def capture_store_projection(store, *, rebuild=False):
                 raise StoreAuthorityError("Mismatched projection block address.")
             blocks[path] = block
             views.setdefault(path, {})[root.view_bytes] = root.view
+            root_records.setdefault(path, {})[root.root_kind, root.view_bytes] = root
 
         for path in sorted(paths):
             value = record(path)
             if value is None:
                 continue
             emit("record", path, "", value.to_data())
-            if isinstance(value, t.RetentionGrantRecord):
+            if isinstance(value, r.NodeMetadataRecord):
+                if path != store._relative(store._node_metadata_path(value.scope, value.target_digest)):
+                    raise StoreAuthorityError("Mismatched Node metadata projection address.")
+                emit("requested_metadata", path, "", value.to_data())
+            elif isinstance(value, t.RetentionGrantRecord):
                 from ..state_values import StateKey
                 parts = path.split("/")
                 key = StateKey(parts[2], parts[3])
@@ -485,6 +538,7 @@ def capture_store_projection(store, *, rebuild=False):
                             or (kind, digest) not in anchor.sources):
                         raise StoreAuthorityError("Incomplete membership declaration contribution.")
                 emit(kind + "_root", path, digest, root.to_data())
+                discovery.setdefault(root.block_digest, []).append((path, root))
             elif isinstance(value, r.DeclarationAnchorRecord):
                 key = store._anchor_key(value.object_id)
                 if path != store._relative(store._node_path("declarations/anchors", key)):
@@ -548,10 +602,16 @@ def capture_store_projection(store, *, rebuild=False):
             if selected:
                 packet["views"] = selected
                 try:
-                    roots = _decode_node_graph_views(packet)
+                    roots, decoded_owner = _decode_node_graph_views(packet, with_owner=True)
                 except (TypeError, ValueError) as error:
                     raise StoreAuthorityError("Malformed shared projection graph authority.") from error
                 by_view = {r._json_bytes(view): root for view, root in zip(selected, roots)}
+                validate_node_root_views(((header, by_view[header.view_bytes])
+                                          for header in root_records.get(path, {}).values()), decoded_owner)
+                from .relationships import _discovery_rows
+                for source, header in discovery.get(block.digest, ()):
+                    for ordinal, row in enumerate(_discovery_rows(by_view[header.view_bytes], header)):
+                        emit("discovery", source, str(ordinal), row)
                 for view_bytes, identity in anchors.get(block.digest, ()):
                     if by_view[view_bytes].object_id != identity:
                         raise StoreAuthorityError("Declaration projection names another ObjectId.")

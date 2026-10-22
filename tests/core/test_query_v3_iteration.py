@@ -16,7 +16,6 @@ from dryml.core.query.identity import identity_key
 from dryml.core.query.query import IdentityQuery
 from dryml.core.query.source import SourceCapture, _SourceRecapture
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
 from dryml.core.utils.graph.path import GraphPath
 
 
@@ -70,7 +69,7 @@ def test_iterator_captures_on_first_next_and_holds_no_store_fence_between_yields
     """Pre-start writes participate; writes during consumption affect only later terminals."""
     store = DirStore(tmp_path / 'store', query_index='memory')
     first, second, third = _values()
-    store.write_definition_record(DefinitionRecord(first))
+    store.publish_node(first)
     query = store.query().cdefs().stored()
     active = 0
     original = store.authority_read_fence
@@ -87,12 +86,14 @@ def test_iterator_captures_on_first_next_and_holds_no_store_fence_between_yields
 
     monkeypatch.setattr(store, 'authority_read_fence', fence)
     stream = query.iter()
-    store.write_definition_record(DefinitionRecord(second))
+    store.publish_node(second)
     expected = tuple(query.collect())
     head = next(stream)
     assert active == 0
-    store.write_definition_record(DefinitionRecord(third))
-    assert (head, *stream) == expected
+    store.publish_node(third)
+    with pytest.raises(QueryError, match="changed"):
+        tuple(stream)
+    assert head.graph_equal(expected[0])
     assert len(tuple(query.iter())) == 3
 
 
@@ -164,7 +165,7 @@ def test_repo_reference_iteration_keeps_multiple_realizations_without_loading(tm
     """The notebook pattern returns distinct ObjectRefs sharing one definition."""
     repo = Repo(DirStore(tmp_path / 'store', query_index='memory'))
     objects = [IterationLeaf('same', repo=repo) for _ in range(2)]
-    expected = {identity_key(repo.save_object(obj).object) for obj in objects}
+    expected = {identity_key(repo.save_object(obj).object_view()) for obj in objects}
     assert len(expected) == 2
     monkeypatch.setattr(repo, 'load_object', lambda *_a, **_k: pytest.fail('query loaded an Object'))
     monkeypatch.setattr(repo, 'load_state_ref', lambda *_a, **_k: pytest.fail('query loaded a payload'))
@@ -174,13 +175,13 @@ def test_repo_reference_iteration_keeps_multiple_realizations_without_loading(tm
 
 def test_identity_iterator_preserves_graph_distinctions_under_digest_collisions(monkeypatch):
     """Collision buckets retain graph topology and the collection's stable tie order."""
-    from dryml.core.definition import ConcreteDefinition
 
     child = _values()[0]
     shared = Definition(IterationRoot, (child, child)).concretize()
     separate = Definition(IterationRoot, (_values()[0], _values()[0])).concretize()
-    assert shared == separate and not shared.graph_equal(separate)
-    monkeypatch.setattr(ConcreteDefinition, 'graph_hash', lambda _: '0' * 64)
+    assert not shared.graph_equal(separate)
+    from dryml.core.node import Node
+    monkeypatch.setattr(Node, 'exact_digest', lambda _: '0' * 64)
     query = IdentitySet((separate, shared)).query()
     assert tuple(map(identity_key, query.iter())) == tuple(map(identity_key, query.collect()))
     assert len(tuple(query.iter())) == 2
@@ -255,15 +256,15 @@ def test_iterator_retries_recapture_only_before_first_output(monkeypatch):
 def test_iterator_defers_refresh_and_preserves_shared_request_cadence(tmp_path, monkeypatch):
     """Iterators join the same one-shot lifecycle as other explicit terminals."""
     store = DirStore(tmp_path / 'store')
-    store.write_definition_record(DefinitionRecord(_values()[0]))
+    store.publish_node(_values()[0])
     store.rebuild_query_index()
     index = store.open_query_index()
     original = index.refresh
     calls = []
 
-    def refresh(policy, *, stats=None):
+    def refresh(policy, *, stats=None, **kwargs):
         calls.append(policy)
-        return original(policy, stats=stats)
+        return original(policy, stats=stats, **kwargs)
 
     monkeypatch.setattr(index, 'refresh', refresh)
     once = store.query().refresh(True)
@@ -343,7 +344,7 @@ def test_independent_iterators_support_concurrent_consumers(tmp_path):
     """Each consumer gets its own capture even when it reuses an immutable plan."""
     store = DirStore(tmp_path / 'store', query_index='memory')
     for value in _values():
-        store.write_definition_record(DefinitionRecord(value))
+        store.publish_node(value)
     query = store.query().cdefs()
     expected = tuple(query.collect())
     paused = threading.Barrier(2, timeout=60)
@@ -355,7 +356,8 @@ def test_independent_iterators_support_concurrent_consumers(tmp_path):
             return (first, *stream)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        assert list(pool.map(consume, range(2))) == [expected, expected]
+        results = list(pool.map(consume, range(2)))
+    assert all(len(result) == len(expected) and all(a.graph_equal(b) for a, b in zip(result, expected)) for result in results)
 
 
 def test_suspended_iterator_rejects_a_different_consumer_thread():

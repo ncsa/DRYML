@@ -1274,6 +1274,8 @@ class NodeSaveBatch:
     names: tuple = ()
     provisional: bool = False
     creation_sources: tuple = ()
+    captures: tuple = ()
+    annotations: object = None
 
 
 def _save_graph_records(saved, roots, origins, previous):
@@ -1403,9 +1405,6 @@ def execute_routed_save_plan(
         from .metadata import SaveAnnotations
         if not isinstance(annotations, SaveAnnotations):
             raise TypeError("annotations must be a SaveAnnotations or None.")
-        raise StoreCapabilityError("Node save annotation/lifecycle metadata feeds are not integrated.")
-    if snapshot_observer is not None:
-        raise StoreCapabilityError("Node save lifecycle observation coverage is not integrated.")
     if any(getattr(node, "_claim_lease", None) or getattr(node, "_pending_claim_dependencies", ()) for node in plan.nodes):
         raise StoreCapabilityError("Legacy construction-claim publication requires the Node materialization cutover.")
     if any(action.state_hash is not None for action in plan.actions):
@@ -1501,6 +1500,9 @@ def execute_routed_save_plan(
                 finally:
                     lock.release()
             saved = require_saved(plan.node.with_realization(states=states_by_path))
+            from .snapshot_capture import capture_snapshot
+            from .metadata import _node_capture_data
+            observation = capture_snapshot(plan, observer=snapshot_observer)
             roots = [saved] if routed.graph_mode == "closure" else [saved.at(a.path) for a in plan.snapshots]
             all_origins = list({state.key.cdef_digest: state.creation_cdef for state in states_by_path.values()}.values())
             plan.capture_counts = MappingProxyType(dict(origin_preparation.counts))
@@ -1550,7 +1552,9 @@ def execute_routed_save_plan(
                     token = str(uuid.uuid4())
                 batch = NodeSaveBatch(block, tuple(chosen), tuple(creation_records), tuple(projection_records),
                                       tuple(installs), token, root_record.digest, tuple(names), provisional,
-                                      tuple(source_by_key.values()))
+                                      tuple(source_by_key.values()),
+                                      tuple((record, node, _json_bytes(_node_capture_data(observation, node)))
+                                            for record, node in chosen if record.root_kind == "saved"), annotations)
                 batches.append((target, batch, local_paths))
             # Every explicit source has now been detached into owned staging.
             lifetime.close()

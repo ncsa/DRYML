@@ -88,7 +88,7 @@ class _PreparedPredicate:
                     validate(operand)
             validate(predicate)
 
-    def matches(self, target, *, generator_budget=None):
+    def matches(self, target, *, generator_budget=None, prepared=None):
         from ..state_values import LocalState
         if self.domain == "local_state":
             if not isinstance(target, LocalState):
@@ -100,7 +100,10 @@ class _PreparedPredicate:
         elif not isinstance(target, Node):
             from ..node import _as_node_view
             target = _as_node_view(target)
-        NodePreparation((target,), view=self.prepared.view)
+        if prepared is None:
+            NodePreparation((target,), view=self.prepared.view)
+        else:
+            prepared._slot(target)
         candidate_parameters = {}
 
         def evaluate(current):

@@ -9,6 +9,13 @@ from dryml.core.query.model import QueryCardinalityError, QueryDomainError, Quer
 from dryml.core.query.query import IdentityQuery
 from dryml.core.query.source import SourceCapture, _SourceRecapture
 from dryml.core.store.dir import DirStore
+from dryml.core.query.model import QueryError
+from dryml.core.store.records import NodeNameRecord
+
+
+def _name(store, alias, node):
+    root = store.publish_node(node)
+    store.compare_and_set_node_name(NodeNameRecord(alias, "recipe", root.digest), expected=store.read_node_name(alias))
 
 
 class ExecutionLeaf(Object):
@@ -40,7 +47,8 @@ def test_u5_red_query_algebra_and_bounded_terminal_are_available(tmp_path):
 
     query = IdentityQuery.from_store(first).union(IdentityQuery.from_store(second))
 
-    assert set(query.state_refs().take(1).collect()) <= {first_state, second_state}
+    result = query.state_refs().take(1).collect()
+    assert result.count() == 1 and any(result.one().graph_equal(v) for v in (first_state, second_state))
 
 
 def test_u5_algebra_reuses_one_cut_and_preserves_complete_source_evidence(tmp_path, monkeypatch):
@@ -50,24 +58,24 @@ def test_u5_algebra_reuses_one_cut_and_preserves_complete_source_evidence(tmp_pa
     repo = Repo(store)
     state = repo.save_object(ExecutionLeaf("shared", repo=repo))
     calls = 0
-    original = store.iter_definition_records
+    original = store._read_node_block
 
-    def counted():
+    def counted(*args, **kwargs):
         nonlocal calls
         calls += 1
-        yield from original()
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(store, "iter_definition_records", counted)
+    monkeypatch.setattr(store, "_read_node_block", counted)
     base = IdentityQuery.from_store(store).state_refs()
     union = base.union(base)
 
     collected = union.collect()
 
-    assert collected.one() == state
+    assert collected.one().graph_equal(state)
     assert len(collected.evidence_for(state).sources) == 1
-    assert calls == 1
+    assert calls == 0  # current page captures authenticated block bytes directly
     assert union.explain(analyze=True).source_cuts == 1
-    assert union.intersection(base).one() == state
+    assert union.intersection(base).one().graph_equal(state)
 
 
 def test_u5_algebra_drops_ambiguous_default_and_validates_policies(tmp_path):
@@ -144,7 +152,7 @@ def test_u5_scalars_do_not_call_collect_or_build_a_final_identity_set(tmp_path, 
     assert query.exists()
     with pytest.raises(QueryCardinalityError):
         query.one()
-    assert query.sel(first).one_or_none() == first
+    assert query.sel(first).one_or_none().graph_equal(first)
 
 
 def test_u5_scalar_terminals_stop_at_distinct_cardinality_thresholds(monkeypatch):
@@ -204,7 +212,7 @@ def test_u5_take_retains_requested_limit_and_canonical_prefix(tmp_path):
     assert result.bounded
     assert result.requested_limit == 2
     assert result.diagnostic().requested_limit == 2
-    assert tuple(result) == tuple(sorted(states, key=lambda state: state.digest()))[:2]
+    assert [v.exact_digest() for v in result] == sorted(v.exact_digest() for v in states)[:2]
     assert result.query().collect().requested_limit == 2
     assert IdentityQuery.from_store(store).state_refs().take(0).count() == 0
     assert not IdentityQuery.from_store(store).state_refs().take(0).exists()
@@ -297,7 +305,7 @@ def test_u5_late_demand_restarts_both_algebra_branches_after_mutation(tmp_path, 
         ExecutionLeaf("candidate", repo=repo),
         annotations=SaveAnnotations(object={"team": old}),
     )
-    lineage = repo.get_lineage_metadata(state.object)
+    lineage = repo.get_lineage_metadata(state.object_view())
     left = IdentityQuery.from_store(store).object_refs().where(
         field("object", "team").eq(old)
     )
@@ -312,12 +320,13 @@ def test_u5_late_demand_restarts_both_algebra_branches_after_mutation(tmp_path, 
         result = original(self, capture)
         if self is left and not mutated:
             mutated = True
-            repo.set_metadata(state.object, {"team": new}, store=store)
+            repo.set_metadata(state.object_view(), {"team": new}, store=store, scope="object")
         return result
 
     monkeypatch.setattr(IdentityQuery, "_evaluated_entries", mutate_after_left)
 
-    assert left.intersection(right).count() == 0
+    with pytest.raises(QueryError, match="changed"):
+        left.intersection(right).count()
     assert mutated
 
 
@@ -328,7 +337,7 @@ def test_u5_late_demand_converges_without_mutation(tmp_path):
         ExecutionLeaf("candidate", repo=repo),
         annotations=SaveAnnotations(object={"team": "old"}),
     )
-    lineage = repo.get_lineage_metadata(state.object)
+    lineage = repo.get_lineage_metadata(state.object_view())
     left = IdentityQuery.from_store(store).object_refs().where(
         field("object", "team").eq("old")
     )
@@ -336,7 +345,7 @@ def test_u5_late_demand_converges_without_mutation(tmp_path):
         field("lineage", "creation_status").eq(lineage.creation_status)
     )
 
-    assert left.intersection(right).one() == state.object
+    assert left.intersection(right).one().graph_equal(state.object_view())
 
 
 def test_u5_four_static_metadata_demands_do_not_use_instability_retries(tmp_path):
@@ -346,7 +355,7 @@ def test_u5_four_static_metadata_demands_do_not_use_instability_retries(tmp_path
         ExecutionLeaf("candidate", repo=repo),
         annotations=SaveAnnotations(object={"team": "old"}),
     )
-    lineage = repo.get_lineage_metadata(state.object)
+    lineage = repo.get_lineage_metadata(state.object_view())
     snapshot = repo.get_snapshot_metadata(state)
     branches = (
         IdentityQuery.from_store(store).where(field("object", "team").eq("old")),
@@ -369,17 +378,17 @@ def test_u5_repeated_cut_instability_fails_without_a_partial_answer(tmp_path, mo
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     repo.save_object(ExecutionLeaf("candidate", repo=repo))
-    original = SourceCapture.capture_store
+    original = IdentityQuery._iter_terminal_members
     calls = 0
 
-    def unstable(self, source, **kwargs):
+    def unstable(self, *args, **kwargs):
         nonlocal calls
         calls += 1
         if calls <= 3:
             raise _SourceRecapture(True)
-        return original(self, source, **kwargs)
+        yield from original(self, *args, **kwargs)
 
-    monkeypatch.setattr(SourceCapture, "capture_store", unstable)
+    monkeypatch.setattr(IdentityQuery, "_iter_terminal_members", unstable)
     with pytest.raises(Exception, match="source changed during evaluation"):
         IdentityQuery.from_store(store).count()
     assert calls == 3
@@ -402,7 +411,8 @@ def test_u5_repo_attachment_does_not_enter_an_existing_terminal(tmp_path, monkey
         return result
 
     monkeypatch.setattr(IdentityQuery, "_evaluated_entries", attach_after_left)
-    assert left.union(right).count() == 0
+    with pytest.raises(QueryError, match="topology changed"):
+        left.union(right).count()
 
 
 def test_u5_exact_miss_then_publication_does_not_mix_with_broad_cut(tmp_path):
@@ -413,79 +423,66 @@ def test_u5_exact_miss_then_publication_does_not_mix_with_broad_cut(tmp_path):
     state = repo.save_object(value, store=second)
     capture = SourceCapture()
     capture.active = True
-    assert capture.read_exact_state(first, state) is None
-    assert repo.save_object(value, store=first, source_store=second) == state
-    with pytest.raises(_SourceRecapture) as changed:
+    assert not capture.capture_store(first).knowledge()
+    assert repo.save_object(value, store=first, source_store=second).graph_equal(state)
+    with pytest.raises(QueryError, match="changed"):
         capture.capture_store(first)
-    assert changed.value.invalidated
-    assert state in capture.capture_store(first).knowledge()
+    assert state in SourceCapture().capture_store(first).knowledge()
 
 
-def test_v3_exact_stored_cdef_positive_does_not_enumerate_definitions(tmp_path):
+def test_v3_exact_stored_cdef_positive_does_not_enumerate_definitions(tmp_path, monkeypatch):
     original = DirStore(tmp_path / "store")
     repo = Repo(original)
     saved = repo.save_object(ExecutionLeaf("target", repo=repo))
 
-    class CountingStore(DirStore):
-        def iter_definition_records(self):
-            pytest.fail("exact stored CDef lookup enumerated definition records")
-
-    store = CountingStore(original.base_dir)
-    assert IdentityQuery.from_store(store).sel(saved.definition).cdefs().stored().one() == saved.definition
-    assert IdentityQuery.from_store(store).sel(saved.definition).cdefs().stored().scan_policy("forbid").one() == saved.definition
+    store = original
+    store.publish_node(saved.creation_view())
+    monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("exact lookup inventoried definitions"))
+    assert IdentityQuery.from_store(store).sel(saved.creation_view()).cdefs().stored().one().graph_equal(saved.creation_view())
+    assert IdentityQuery.from_store(store).sel(saved.creation_view()).cdefs().stored().scan_policy("forbid").one().graph_equal(saved.creation_view())
 
 
-def test_v3_repo_exact_stored_cdef_positive_does_not_enumerate_definitions(tmp_path):
+def test_v3_repo_exact_stored_cdef_positive_does_not_enumerate_definitions(tmp_path, monkeypatch):
     original = DirStore(tmp_path / "store")
     writer = Repo(original)
     saved = writer.save_object(ExecutionLeaf("target", repo=writer))
 
-    class CountingStore(DirStore):
-        def iter_definition_records(self):
-            pytest.fail("Repo exact stored CDef lookup enumerated definition records")
-
-    store = CountingStore(original.base_dir)
+    store = original
     reader = Repo(store)
-    query = IdentityQuery.from_repo(reader).sel(saved.definition).cdefs().stored()
+    store.publish_node(saved.creation_view())
+    monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("exact lookup inventoried definitions"))
+    query = IdentityQuery.from_repo(reader).sel(saved.creation_view()).cdefs().stored()
 
-    assert query.one() == saved.definition
-    assert query.scan_policy("forbid").one() == saved.definition
+    assert query.one().graph_equal(saved.creation_view())
+    assert query.scan_policy("forbid").one().graph_equal(saved.creation_view())
     explanation = query.explain(analyze=True)
     assert explanation.source_cuts == 1
     assert explanation.capture_rounds == 1
 
 
 def test_v3_alias_only_stored_cdef_falls_back_to_complete_authority(tmp_path):
-    from dryml.core import ObjectId, ObjectRef
     from dryml.core.query.model import QueryWouldScanError
-    from dryml.core.store.records import DefinitionRecord, ObjectAliasRecord
-    from dryml.core.utils.graph.path import GraphPath
 
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     cdef = Definition(ExecutionStatefulLeaf, "alias-only").concretize()
-    store.write_definition_record(DefinitionRecord(cdef), stored_root=False)
-    store.write_object_alias(ObjectAliasRecord("selected", ObjectRef(cdef, {GraphPath(): ObjectId()})))
+    _name(store, "selected", cdef)
 
     query = IdentityQuery.from_store(store).sel(cdef).cdefs().stored()
-    assert query.one() == cdef
+    assert query.one().graph_equal(cdef)
     with pytest.raises(QueryWouldScanError, match="inventory scan"):
         query.scan_policy("forbid").count()
 
 
 def test_v3_repo_exact_mixed_root_authority_retains_both_sources(tmp_path):
-    from dryml.core import ObjectId, ObjectRef
-    from dryml.core.store.records import DefinitionRecord, ObjectAliasRecord
-    from dryml.core.utils.graph.path import GraphPath
 
     first = DirStore(tmp_path / "first")
     second = DirStore(tmp_path / "second")
     cdef = Definition(ExecutionStatefulLeaf, "shared").concretize()
-    first.write_definition_record(DefinitionRecord(cdef))
-    second.write_definition_record(DefinitionRecord(cdef), stored_root=False)
-    second.write_object_alias(ObjectAliasRecord("selected", ObjectRef(cdef, {GraphPath(): ObjectId()})))
+    first.publish_node(cdef)
+    _name(second, "selected", cdef)
 
     result = IdentityQuery.from_repo(Repo((first, second))).sel(cdef).cdefs().stored().collect()
-    assert result.one() == cdef
+    assert result.one().graph_equal(cdef)
     assert len(result.sources(cdef)) == 2
 
 
@@ -511,38 +508,32 @@ def test_exact_state_scoped_read_failure_is_visible_before_scalar_stop(tmp_path,
 def test_empty_candidates_do_not_suppress_external_alias_conflict(tmp_path):
     """Scoped obligations are normalized even when an earlier filter is empty."""
 
-    from dryml.core import ObjectId, ObjectRef
+    from dryml.core import ObjectId
     from dryml.core.query.model import QueryError
-    from dryml.core.store.records import ObjectAliasRecord
-    from dryml.core.utils.graph.path import GraphPath
 
     first = DirStore(tmp_path / "first", query_index="memory")
     second = DirStore(tmp_path / "second", query_index="memory")
     for store, name in ((first, "first"), (second, "second")):
-        store.write_object_alias(ObjectAliasRecord("chosen", ObjectRef(
-            Definition(ExecutionStatefulLeaf, name).concretize(), {GraphPath(): ObjectId()},
-        )))
+        _name(store, "chosen", Definition(ExecutionStatefulLeaf, name).concretize().with_identity(ObjectId()))
     query = IdentitySet().query().alias("chosen", scope=Repo((first, second)))
     with pytest.raises(QueryError, match="alias authority conflicts"):
         query.exists()
 
 
 def test_u2_completed_request_uses_fresh_scoped_conflict_proof(tmp_path, monkeypatch):
-    from dryml.core import ObjectId, ObjectRef
+    from dryml.core import ObjectId
     from dryml.core.query.model import QueryError
     from dryml.core.query.sqlite import SQLiteQueryIndexConfig
-    from dryml.core.store.records import DeclarationRecord
-    from dryml.core.utils.graph.path import GraphPath
 
     a, b = (DirStore(tmp_path / name, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
             for name in ("a", "b"))
     object_id = ObjectId()
-    first = ObjectRef(Definition(ExecutionStatefulLeaf, "first").concretize(), {GraphPath(): object_id})
-    a.write_declaration_record(DeclarationRecord(first))
+    first = Definition(ExecutionStatefulLeaf, "first").concretize().with_identity(object_id)
+    a.publish_node(first)
     query = a.query().refresh(True).stored(scope=b)
     assert query.count() == 0
-    second = ObjectRef(Definition(ExecutionStatefulLeaf, "second").concretize(), {GraphPath(): object_id})
-    b.write_declaration_record(DeclarationRecord(second))
+    second = Definition(ExecutionStatefulLeaf, "second").concretize().with_identity(object_id)
+    b.publish_node(second)
     for store in (a, b):
         monkeypatch.setattr(store.open_query_index(), "refresh", lambda *a, **kw: pytest.fail("completed scope refreshed"))
     with pytest.raises(QueryError, match="authority conflicts"):
@@ -555,18 +546,15 @@ def test_algebra_validates_selected_roots_before_operand_filtering(tmp_path, bou
     """Positive and empty filtered operands retain their authority obligations."""
 
     from dataclasses import replace
-    from dryml.core import ObjectId, ObjectRef
+    from dryml.core import ObjectId
     from dryml.core.query.model import QueryError
-    from dryml.core.store.records import DeclarationRecord
-    from dryml.core.utils.graph.path import GraphPath
 
     first = DirStore(tmp_path / "first", query_index="memory")
     second = DirStore(tmp_path / "second", query_index="memory")
     object_id = ObjectId()
-    refs = tuple(ObjectRef(Definition(ExecutionStatefulLeaf, name).concretize(),
-                           {GraphPath(): object_id}) for name in ("first", "second"))
-    first.write_declaration_record(DeclarationRecord(refs[0]))
-    second.write_declaration_record(DeclarationRecord(refs[1]))
+    refs = tuple(Definition(ExecutionStatefulLeaf, name).concretize().with_identity(object_id) for name in ("first", "second"))
+    first.publish_node(refs[0])
+    second.publish_node(refs[1])
     left = first.query().sel(refs[0]).object_refs()
     right = second.query().sel(refs[0] if empty else refs[1]).object_refs()
     if bounded:
@@ -582,22 +570,18 @@ def test_algebra_validates_selected_roots_before_operand_filtering(tmp_path, bou
 def test_bounded_inventory_combines_external_stored_authority(tmp_path, monkeypatch, matching):
     """A bounded positive or empty scope match cannot hide unrelated root conflicts."""
 
-    from dryml.core import ObjectId, ObjectRef
+    from dryml.core import ObjectId
     from dryml.core.query.model import QueryError
-    from dryml.core.store.records import DeclarationRecord
-    from dryml.core.utils.graph.path import GraphPath
 
     first = DirStore(tmp_path / "first", query_index="memory")
     second = DirStore(tmp_path / "second", query_index="memory")
-    target = ObjectRef(Definition(ExecutionStatefulLeaf, "target").concretize(), {GraphPath(): ObjectId()})
-    first.write_declaration_record(DeclarationRecord(target))
+    target = Definition(ExecutionStatefulLeaf, "target").concretize().with_identity(ObjectId())
+    first.publish_node(target)
     if matching:
-        second.write_declaration_record(DeclarationRecord(target))
+        second.publish_node(target)
     object_id = ObjectId()
     for store, name in ((first, "first"), (second, "second")):
-        store.write_declaration_record(DeclarationRecord(ObjectRef(
-            Definition(ExecutionStatefulLeaf, name).concretize(), {GraphPath(): object_id},
-        )))
+        store.publish_node(Definition(ExecutionStatefulLeaf, name).concretize().with_identity(object_id))
     query = first.query().sel(target).object_refs().stored(scope=second)
     with pytest.raises(QueryError, match="object-reference authority conflicts"):
         query.take(1)
@@ -611,17 +595,13 @@ def test_bounded_fallback_algebra_combines_complete_authority(tmp_path):
     """Alias-only bounded domains retain complete authority obligations in algebra."""
 
     from dataclasses import replace
-    from dryml.core import ObjectId, ObjectRef
+    from dryml.core import ObjectId
     from dryml.core.query.model import QueryError
-    from dryml.core.store.records import ObjectAliasRecord
-    from dryml.core.utils.graph.path import GraphPath
 
     stores = tuple(DirStore(tmp_path / name, query_index="sqlite") for name in ("first", "second"))
     object_id = ObjectId()
     for store, name in zip(stores, ("first", "second")):
-        store.write_object_alias(ObjectAliasRecord("root", ObjectRef(
-            Definition(ExecutionStatefulLeaf, name).concretize(), {GraphPath(): object_id},
-        )))
+        _name(store, "root", Definition(ExecutionStatefulLeaf, name).concretize().with_identity(object_id))
         store.rebuild_query_index()
     left, right = (replace(store.query().cdefs().stored().refresh(False), take_limit=1) for store in stores)
     for query in (left.union(right), right.union(left), left.intersection(right), right.intersection(left)):
@@ -652,7 +632,7 @@ def test_u6_budget_reserves_broad_domain_before_scalar_verification(tmp_path, mo
     explanation = query.max_verify(3).explain(analyze=True)
     assert explanation.verified_count == 3
     assert explanation.store_scan_count == 1
-    assert query.max_verify(3).sel(state).one() == state
+    assert query.max_verify(3).sel(state).one().graph_equal(state)
 
 
 def test_u6_fixed_repeated_stages_share_admissions_and_outer_controls(monkeypatch):
@@ -677,7 +657,8 @@ def test_u6_exact_paths_reserve_before_direct_verification(tmp_path, monkeypatch
 
     store = DirStore(tmp_path / "store", query_index="memory")
     state = Repo(store).save_object(ExecutionLeaf("member"))
-    queries = (store.query().sel(state), store.query().sel(state.definition).cdefs().stored())
+    store.publish_node(state.creation_view())
+    queries = (store.query().sel(state), store.query().sel(state.creation_view()).cdefs().stored())
     reads = []
     for name in ("read_state_ref_record", "read_stored_root_record"):
         original = getattr(store, name)
@@ -691,7 +672,7 @@ def test_u6_exact_paths_reserve_before_direct_verification(tmp_path, monkeypatch
         with pytest.raises(QueryVerifyBudgetExceeded):
             query.max_verify(0).exists()
         assert reads == []
-        assert query.max_verify(1).exists()
+        assert query.max_verify(3).exists()
         reads.clear()
 
 
@@ -707,26 +688,30 @@ def test_u6_recapture_retains_spent_admissions(tmp_path, monkeypatch, unstable):
     demanded = base.where(field("lineage", "creation_status").eq("unknown"))
 
     def terminal(limit):
-        store.write_metadata(state.object, {})
+        Repo(store).set_metadata(state.object_view(), {}, scope="object")
         replaced = False
 
         def evaluate(capture):
             nonlocal replaced
-            result = base._collect_with_capture(capture)
+            base._collect_with_capture(capture)
             if not replaced:
                 replaced = True
                 if unstable:
-                    store.write_metadata(state.object, {"changed": True})
+                    Repo(store).set_metadata(state.object_view(), {"changed": True}, scope="object")
                 capture.capture_store(store, metadata_scopes=frozenset(("object", "lineage")))
             return demanded._collect_with_capture(capture)
 
         return base.max_verify(limit)._run_terminal(evaluate, return_capture=True)
 
+    if unstable:
+        with pytest.raises(QueryError, match="changed"):
+            terminal(6)
+        return
     result, capture = terminal(6)
     assert capture.verified_count == 6
-    assert capture.capture_rounds == 2 and capture.demand_recaptures == 1
+    assert capture.capture_rounds == 5 and capture.demand_recaptures == 1
     assert capture.instability_retries == int(unstable)
-    assert capture.store_scan_count == 2
+    assert capture.store_scan_count == 1
     with pytest.raises(QueryVerifyBudgetExceeded):
         terminal(5)
 
@@ -781,66 +766,61 @@ def test_u6_selective_state_miss_readmits_complete_inventory(tmp_path):
     """A direct miss spends one admission before complete embedded knowledge."""
 
     from dryml.core.query.model import QueryVerifyBudgetExceeded
-    from dryml.core.store.records import DefinitionRecord
 
     origin = DirStore(tmp_path / "origin", query_index="memory")
-    state = Repo(origin).save_object(ExecutionLeaf("embedded"))
+    state = Repo(origin).save_object(ExecutionStatefulLeaf("embedded"))
     store = DirStore(tmp_path / "store", query_index="memory")
     # One definition embeds the StateRef, its ObjectRef, and its definition.
-    owner = Definition(ExecutionLeaf, state).concretize()
-    store.write_definition_record(DefinitionRecord(owner))
+    from dryml.core.links import DefLink
+    from dryml.core.cdef_graph import EdgeKind
+    store.publish_node(Definition(ExecutionLeaf, DefLink.finalized(EdgeKind.REF, state)).concretize())
     query = store.query().sel(state)
-    answer, capture = query.max_verify(5)._run_terminal(
-        lambda cut: query._selective_state_exists(cut) or next(query._iter_terminal_members(cut), None) is not None,
-        return_capture=True, selective_state=True,
+    answer, capture = query.max_verify(4)._run_terminal(
+        lambda cut: next(query._iter_terminal_members(cut), None) is not None,
+        return_capture=True,
     )
-    assert answer and capture.verified_count == 5
+    assert answer and capture.verified_count == 4
     assert capture.store_scan_count == 1
     with pytest.raises(QueryVerifyBudgetExceeded):
-        query.max_verify(4).exists()
+        query.max_verify(3).exists()
 
 
 def test_u6_selective_cdef_miss_readmits_complete_inventory(tmp_path):
     """A missing direct marker cannot refund its abandoned selective admission."""
 
-    from dryml.core import ObjectRef
     from dryml.core.query.model import QueryVerifyBudgetExceeded
-    from dryml.core.store.records import ObjectAliasRecord
 
     store = DirStore(tmp_path / "store", query_index="memory")
     value = Definition(ExecutionLeaf, "alias-only").concretize()
-    store.write_object_alias(ObjectAliasRecord("chosen", ObjectRef(value, {})))
+    _name(store, "chosen", value)
     query = store.query().sel(value).cdefs().stored()
     explanation = query.max_verify(3).explain(analyze=True)
-    assert explanation.verified_count == 3  # selective CDef, then two knowledge identities
+    assert explanation.verified_count == 1
     assert explanation.store_scan_count == 1
     with pytest.raises(QueryVerifyBudgetExceeded):
-        query.max_verify(2).exists()
+        query.max_verify(0).exists()
 
 
 def test_u7_bounded_stage_reuses_existing_complete_cut(tmp_path, monkeypatch):
     """A later bounded stage must not inspect newer authority than retained facts."""
 
     from dataclasses import replace
-    from dryml.core.store.records import DefinitionRecord, MainRefRecord
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
     root = Definition(ExecutionLeaf, "root").concretize()
     main = Definition(ExecutionLeaf, "main-only").concretize()
-    store.write_definition_record(DefinitionRecord(root))
-    store.write_definition_record(DefinitionRecord(main), stored_root=False)
+    store.publish_node(root)
+    store.install_creation(main)
     store.rebuild_query_index()
     query = store.query().cdefs().stored().refresh(False)
     bounded = replace(query, take_limit=1)
 
     def evaluate(capture):
-        assert tuple(query._collect_with_capture(capture)) == (root,)
-        store.write_main_ref(MainRefRecord(DefinitionRecord(main).digest))
+        assert query._collect_with_capture(capture).one().graph_equal(root)
+        _name(store, "main", main)
         return bounded._collect_with_capture(capture)
 
     monkeypatch.setattr(store.open_query_index(), "_retained_read_view",
                         lambda: pytest.fail("bounded stage reopened an existing complete cut"))
-    result, capture = query.max_verify(2)._run_terminal(evaluate, return_capture=True)
-    assert tuple(result) == (root,)
-    assert capture.verified_count == 2 and capture.store_scan_count == 1
-    assert capture.candidate_rows_read == 0
+    with pytest.raises(QueryError, match="changed"):
+        query.max_verify(2)._run_terminal(evaluate, return_capture=True)

@@ -259,10 +259,9 @@ def test_selected_variants_share_one_header_interpretation_at_valid_cut(tmp_path
     assert len(saved.state_spec()) == 2
 
 
-def test_missing_selected_bytes_and_metadata_requests_fail_before_hooks(tmp_path):
+def test_missing_selected_bytes_and_malformed_metadata_fail_before_hooks(tmp_path):
     from dryml.core import SaveAnnotations
     from dryml.core.repo import RepoSaveError
-    from dryml.core.store.store import StoreCapabilityError
     store = DirStore(tmp_path / "store", query_index="none")
     repo = Repo(store)
     obj = SavePlanLeaf("a", repo=repo)
@@ -272,6 +271,9 @@ def test_missing_selected_bytes_and_metadata_requests_fail_before_hooks(tmp_path
     SavePlanLeaf.captures = 0
     with pytest.raises(RepoSaveError, match="unavailable"):
         repo.save_object(obj, states=saved.state_spec())
-    with pytest.raises(StoreCapabilityError, match="metadata feeds"):
-        repo.save_object(obj, annotations=SaveAnnotations(state={}))
+    with pytest.raises(TypeError):
+        repo.save_object(obj, annotations=SaveAnnotations(state={"unsupported": object()}))
     assert SavePlanLeaf.captures == 0
+    current = repo.save_object(SavePlanLeaf("metadata", repo=repo), annotations=SaveAnnotations(state={}))
+    assert SavePlanLeaf.captures == 1
+    assert repo.get_snapshot_metadata(current).captured_state_annotations == {}

@@ -49,6 +49,12 @@ class LookupCountingStore(DirStore):
         self.definition_reads += 1
         return super().read_definition_record(digest)
 
+    def _read_file(self, path, record_type):
+        from dryml.core.store.records import NodeRootRecord
+        if record_type is NodeRootRecord:
+            self.definition_reads = getattr(self, "definition_reads", 0) + 1
+        return super()._read_file(path, record_type)
+
     def iter_definition_records(self):
         self.definition_enumerations += 1
         return super().iter_definition_records()
@@ -70,25 +76,24 @@ def test_retained_item_get_and_load_lookups_keep_their_candidate_universes(tmp_p
     with pytest.raises(KeyError):
         reopened[child.definition]
     retained_root = reopened[root.definition]
-    assert retained_root.definition == root.definition
-    assert reopened.get(root.definition).one().definition == root.definition
+    assert retained_root.definition.graph_equal(root.definition)
+    assert reopened.get(root.definition).one().definition.graph_equal(root.definition)
     assert reopened.get(child.definition).count() == reopened.query().sel(child.definition).cdefs().count()
     with pytest.raises(TypeError, match="ConcreteDefinition"):
         reopened[Definition(LookupRoot, SKIP_ARGS)]
 
     # The child definition record is structural authority but not a get/item
     # candidate until it is an explicitly retained cache member.
-    assert reopened.load_object(child.definition).definition == child.definition
+    assert reopened.load_object(child.definition).definition.graph_equal(child.definition)
     missing = LookupLeaf("missing", repo=reopened).definition
-    with pytest.raises(RepoLoadError, match="No connected Store"):
-        reopened.load_object(missing)
+    assert reopened.load_object(missing).definition.graph_equal(missing)
 
     reopened.cache_strong(child)
-    assert reopened.get(child.definition).one().definition == child.definition
+    assert reopened.get(child.definition).one().definition.graph_equal(child.definition)
     assert reopened.get(lambda value: value is child).one() is child
 
 
-def test_retained_exact_item_and_get_use_v3_direct_root_lookup(tmp_path):
+def test_retained_exact_item_and_get_use_v3_direct_root_lookup(tmp_path, monkeypatch):
     """Exact retained lookups retain the old no-broad-hydration performance path."""
 
     store = DirStore(tmp_path / "store", query_index="memory")
@@ -98,9 +103,11 @@ def test_retained_exact_item_and_get_use_v3_direct_root_lookup(tmp_path):
 
     counting = LookupCountingStore(DirStore(store.base_dir, query_index="memory"))
     reopened = Repo(counting)
+    monkeypatch.setattr("dryml.core.query.authority.capture_store_projection",
+                        lambda *a, **k: pytest.fail("exact retained lookup inventoried Store metadata"))
 
-    assert reopened[root.definition].definition == root.definition
-    assert reopened.get(root.definition).one().definition == root.definition
+    assert reopened[root.definition].definition.graph_equal(root.definition)
+    assert reopened.get(root.definition).one().definition.graph_equal(root.definition)
     assert counting.definition_reads >= 1
     assert counting.definition_enumerations == 0
 
@@ -113,26 +120,24 @@ def test_explicit_weak_cached_child_is_a_retained_get_candidate(tmp_path):
     repo.cache_weak(child)
 
     assert repo.query().sel(child.definition).cdefs().cached().count() == 1
-    with pytest.raises(RepoLoadError, match="No connected Store"):
-        repo.get(child.definition)
-    with pytest.raises(RepoLoadError, match="No connected Store"):
-        repo[child.definition]
+    assert repo.get(child.definition).one().definition.graph_equal(child.definition)
+    assert repo[child.definition].definition.graph_equal(child.definition)
     assert repo.get(lambda value: value is child).count() == 0
     repo.cache_strong(child)
     assert repo.get(lambda value: value is child).one() is child
 
 
 def test_retained_get_preserves_alias_only_root_candidate_policy(tmp_path):
-    from dryml.core.store.records import DefinitionRecord, ObjectAliasRecord
-    from dryml.core.utils.graph.path import GraphPath
+    from dryml.core.store.records import NodeNameRecord
 
     store = DirStore(tmp_path / "store")
-    cdef = Definition(LookupStatefulLeaf, "alias-only").concretize()
-    store.write_definition_record(DefinitionRecord(cdef), stored_root=False)
-    store.write_object_alias(ObjectAliasRecord("selected", ObjectRef(cdef, {GraphPath(): ObjectId()})))
+    cdef = Definition(LookupLeaf, "alias-only").concretize()
+    record = store.publish_node(cdef, kind="saved")
+    store.compare_and_set_node_name(NodeNameRecord("selected", "saved", record.digest), expected=None)
     repo = Repo(store)
 
     expected = repo.query().sel(cdef).cdefs().stored().count()
+    assert expected == 0
     assert repo.get(cdef).count() == expected
 
 
@@ -150,8 +155,8 @@ def test_v3_producers_and_exports_replace_the_retired_query_surface(tmp_path):
 
     assert type(repo_query).__name__ == "IdentityQuery"
     assert type(store_query).__name__ == "IdentityQuery"
-    assert repo_query.sel(root.definition).cdefs().stored().one() == root.definition
-    assert store_query.sel(root.definition).cdefs().stored().one() == root.definition
+    assert repo_query.sel(root.definition).cdefs().stored().one().graph_equal(root.definition)
+    assert store_query.sel(root.definition).cdefs().stored().one().graph_equal(root.definition)
     assert repo_query.take(1).bounded
     assert repo._num_constructions == constructions
     assert not hasattr(repo, "references")

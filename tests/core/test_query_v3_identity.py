@@ -1,7 +1,6 @@
 import pytest
 
 from dryml.core import Definition, ObjectId, ObjectRef, Serializable, StateRef
-from dryml.core.definition import ConcreteDefinition
 from dryml.core.query.identity import IdentitySet, Occurrence, OccurrenceSet, SourceEvidence
 from dryml.core.utils.graph.path import GraphPath, Key
 
@@ -30,19 +29,21 @@ def _graph_distinct_parents():
 def test_identity_set_characterizes_graph_identity_without_changing_cdef_equality():
     shared_parent, independent_parent = _graph_distinct_parents()
 
-    assert shared_parent == independent_parent
+    assert shared_parent != independent_parent
     assert not shared_parent.graph_equal(independent_parent)
     assert IdentitySet((shared_parent, independent_parent)).count() == 2
 
 
 def test_identity_set_keeps_graph_distinct_members_in_one_forced_digest_bucket(monkeypatch):
     shared_parent, independent_parent = _graph_distinct_parents()
-    monkeypatch.setattr(ConcreteDefinition, "graph_hash", lambda self: "0" * 64)
+    from dryml.core.node import Node
+    monkeypatch.setattr(Node, "exact_digest", lambda self: "0" * 64)
 
     values = IdentitySet((shared_parent, independent_parent))
 
     assert values.count() == 2
-    assert set(values) == {shared_parent}
+    assert set(values) == {shared_parent, independent_parent}
+    assert {key.digest for key in values._entries} == {"0" * 64}
 
 
 def test_ordering_avoids_extra_graph_encoding_without_digest_ties(monkeypatch):
@@ -59,25 +60,17 @@ def test_ordering_avoids_extra_graph_encoding_without_digest_ties(monkeypatch):
     assert len(tuple(values)) == 2
 
 
-def test_complete_identity_digests_are_cached_across_query_operators(monkeypatch):
-    """Immutable witnesses compute graph identity once across refinements."""
-
-    from dryml.core import cdef_codec
-
+def test_complete_identity_graph_keys_are_stable_across_query_operators():
+    """Refinements retain exact keys; explicit pure owners reuse warm facts."""
+    from dryml.core.node_prepare import NodePreparation
     value = Definition(V3IdentityLeaf, "shared").concretize()
-    calls = 0
-    original = cdef_codec.cdef_graph_hash
-
-    def counted(root):
-        nonlocal calls
-        calls += 1
-        return original(root)
-
-    monkeypatch.setattr(cdef_codec, "cdef_graph_hash", counted)
+    owner = NodePreparation((value,))
+    digest = owner.digest(value)
+    counts = dict(owner.counts)
     fixed = IdentitySet((value, value))
-
-    assert fixed.query().cdefs().union(fixed).intersection(fixed).one() == value
-    assert calls == 1
+    result = fixed.query().cdefs().union(fixed).intersection(fixed).collect()
+    assert result.one() == value and next(iter(result._entries)).digest == digest
+    assert owner.digest(result.one()) == digest and owner.counts == counts
 
 
 def test_reference_identity_uses_complete_object_and_state_reference_values():
@@ -208,7 +201,7 @@ def test_fixed_occurrence_membership_uses_graph_exact_root_identity():
     first = Occurrence(shared, path, target)
     different = Occurrence(independent, path, target)
 
-    assert first == different  # Ordinary CDef/dataclass equality is structural.
+    assert first != different  # Identity 3 includes graph topology.
     assert first in OccurrenceSet((first,))
     assert different not in OccurrenceSet((first,))
 

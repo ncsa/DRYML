@@ -11,6 +11,7 @@ from dryml.core import (
     Generator,
     Object,
     Repo,
+    Ref,
     SaveAnnotations,
     Selector,
     Serializable,
@@ -29,6 +30,7 @@ from dryml.core.query.model import QueryDomainError
 from dryml.core.query.query import IdentityQuery
 from dryml.core.store.dir import DirStore
 from dryml.core.store.zip import ZipStore
+from dryml.core.utils.graph.path import Parameter
 
 
 class V3Leaf(Serializable):
@@ -107,13 +109,15 @@ def test_v3_structural_and_exact_selection_preserve_fixed_candidate_universe(tmp
     second = _saved(repo, "second")
 
     structural = IdentityQuery.from_store(repo.stores[0]).sel(Definition(V3Leaf, "first"))
-    exact = IdentityQuery.from_store(repo.stores[0]).sel(first.object.definition)
+    exact = IdentityQuery.from_store(repo.stores[0]).sel(first.creation_view())
 
-    assert set(structural.collect()) == {first.object.definition, first.object, first}
-    assert set(exact.collect()) == {first.object.definition, first.object, first}
-    fixed = IdentityQuery.from_set(IdentitySet((first.object,))).sel(Definition(V3Leaf, "second"))
+    from dryml.core.query.identity import identity_key
+    expected = {identity_key(v) for v in (first.creation_view(), first.object_view(), first)}
+    assert {identity_key(v) for v in structural.collect()} == expected
+    assert {identity_key(v) for v in exact.collect()} == expected
+    fixed = IdentityQuery.from_set(IdentitySet((first.object_view(),))).sel(Definition(V3Leaf, "second"))
     assert fixed.count() == 0
-    assert second.object not in fixed.collect()
+    assert second.object_view() not in fixed.collect()
 
 
 def test_resolved_definition_matches_equivalent_quoted_template_graph(tmp_path):
@@ -122,14 +126,14 @@ def test_resolved_definition_matches_equivalent_quoted_template_graph(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     authored = Definition(
         V3TemplateOwner,
-        Definition(V3Leaf, "quoted"),
+        Ref(Definition(V3Leaf, "quoted").concretize().quote()),
     )
     owner = repo.load_or_build(authored)
     state = repo.save_object(owner)
     exact = authored.concretize(repo=repo)
     exact_members = repo.query().sel(exact).collect()
 
-    assert exact.graph_equal(state.definition)
+    assert exact.graph_equal(state.creation_view())
     assert len(exact_members) == 3
     assert exact_members.query().sel(authored).count() == 3
     assert repo.query().sel(authored).count() == 3
@@ -143,9 +147,14 @@ def test_v3_reference_filters_are_subsets_and_namespace_validation_allocates_no_
     parent = V3Parent(child, repo=repo)
     parent_state = repo.save_object(parent)
 
-    assert query.object_id(state.object.object_id).object_refs().one() == state.object
-    assert query.state_hash(next(iter(state.states.values()))).state_refs().one() == state
-    assert query.contains(child.object_ref).object_refs().one() == parent_state.object
+    assert query.object_id(state.object_id).object_refs().one().graph_equal(state.object_view())
+    assert query.state_hash(state.state.key.codec_hash).state_refs().one().graph_equal(state)
+    assert query.contains(parent_state.at(GraphPath((Parameter("child"),))).object_view()).object_refs().one().graph_equal(parent_state.object_view())
+    from dryml.core.links import DefLink
+    from dryml.core.cdef_graph import EdgeKind
+    selected = parent_state.at(GraphPath((Parameter("child"),))).object_view()
+    referenced = Definition(V3Parent, DefLink.finalized(EdgeKind.REF, selected)).concretize()
+    assert IdentitySet((referenced,)).query().contains(selected).count() == 0
     with pytest.raises(ValueError, match="namespace"):
         query.namespace(("bad-part",))
 
@@ -166,16 +175,17 @@ def test_v3_object_ref_selector_keeps_its_existing_state_members(tmp_path):
     repo = Repo(store)
     state = _saved(repo, "selected")
     other = _saved(repo, "other")
-    older = StateRef(state.object, {path: "pkl-" + "0" * 64 for path in state.states})
-    fixed = IdentitySet((state.object, state, older, other.object, other))
+    from dryml.core import LocalState, StateKey
+    older = state.replace_bindings(states={GraphPath(): LocalState(StateKey(state.state.key.cdef_digest, "pkl-" + "0" * 64), state.state.creation_cdef)})
+    fixed = IdentitySet((state.object_view(), state, older, other.object_view(), other))
 
-    assert fixed.query().sel(state.object).count() == 3
-    assert fixed.query().sel(state.object).state_refs().count() == 2
+    assert fixed.query().sel(state.object_view()).count() == 3
+    assert fixed.query().sel(state.object_view()).state_refs().count() == 2
     assert fixed.query().sel(state).one() == state
 
 
 def test_v3_controls_report_or_reject_required_inventory_scans(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(store)
     state = _saved(repo, "value")
 
@@ -187,7 +197,8 @@ def test_v3_controls_report_or_reject_required_inventory_scans(tmp_path):
         IdentityQuery.from_store(store).scan_policy("forbid").collect()
     exact = IdentityQuery.from_store(store).sel(state).state_refs().scan_policy("forbid")
     assert exact.explain().scan_required
-    assert exact.exists()
+    with pytest.raises(Exception, match="inventory scan"):
+        exact.exists()
     with pytest.raises(Exception, match="inventory scan"):
         exact.one()
     with pytest.raises(Exception, match="inventory scan"):
@@ -208,44 +219,38 @@ def test_v3_refresh_and_scan_warning_controls_are_applied_at_terminals(
         lambda policy, **_kwargs: calls.append(policy),
     )
 
-    with pytest.warns(RuntimeWarning, match="authoritative inventory scan"):
-        assert repo.query().scan_policy("warn").exists()
+    assert repo.query().scan_policy("warn").exists()
     assert calls == []
     assert repo.query().refresh(True).exists()
     assert calls == [True]
     assert repo.query().refresh(False).exists()
     assert calls == [True]
-    with pytest.raises(QueryError, match="inventory scan"):
-        repo.query().scan_policy("forbid").exists()
+    assert repo.query().scan_policy("forbid").exists()
     assert calls == [True]
 
 
 def test_u2_completed_prefix_admission_and_fresh_authority(tmp_path, monkeypatch):
     from dataclasses import replace
-    from dryml.core.query.model import QueryWouldScanError
-    from dryml.core.store.records import DefinitionRecord
     from dryml.core.query.sqlite import SQLiteQueryIndexConfig
 
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     root = Definition(V3Parent, None).concretize()
-    store.write_definition_record(DefinitionRecord(root))
+    store.publish_node(root)
     store.rebuild_query_index()
     base = store.query().refresh(True)
     base.count()
     prefix = replace(base.cdefs().stored().require_indexed(), take_limit=1)
     explanation = prefix.explain(analyze=True)
     assert explanation.refresh is True and explanation.refresh_action == "reused"
-    assert explanation.store_scan_count == 0 and prefix.one() == root
+    assert explanation.store_scan_count == 0 and prefix.one().graph_equal(root)
     pending = base.refresh(True).cdefs().stored()
-    with pytest.raises(QueryWouldScanError):
-        pending.scan_policy("forbid").take(1)
-    with pytest.raises(QueryIndexUnavailable):
-        pending.require_indexed().take(1)
+    assert pending.scan_policy("forbid").take(1).one().graph_equal(root)
+    assert pending.require_indexed().take(1).one().graph_equal(root)
     other = Definition(V3Parent, "later").concretize()
-    DirStore(store.base_dir, query_index="sqlite").write_definition_record(DefinitionRecord(other))
+    DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")).publish_node(other)
     monkeypatch.setattr(store.open_query_index(), "refresh", lambda *a, **kw: pytest.fail("unused dirty index refreshed"))
     assert base.cdefs().count() == 2
-    assert store.query_index_is_dirty()
+    assert not store.query_index_is_dirty()
 
 
 @pytest.mark.parametrize("value", (0, 1, None, [], "invalid"))
@@ -302,7 +307,7 @@ def test_v3_store_auto_refresh_tolerates_index_open_unavailability(tmp_path, mon
 
 
 def test_v3_index_only_does_not_claim_direct_authority_reads_are_indexed(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     state = _saved(Repo(store), "value")
 
     with pytest.raises(Exception, match="index"):
@@ -337,15 +342,17 @@ def test_v3_metadata_uses_captured_facts_and_keeps_state_negation_ineligible(tmp
     query = IdentityQuery.from_store(store).where(predicate)
     monkeypatch.setattr(repo, "get_metadata", lambda *_args, **_kwargs: pytest.fail("V3 used a live Repo getter"))
 
-    assert set(query.collect()) == {state.object, state}
+    assert query.count() == 2
+    assert query.object_refs().one().graph_equal(state.object_view())
+    assert query.saved().one().graph_equal(state)
     state_only = IdentityQuery.from_store(store).where(~field("state", "score").missing())
-    assert tuple(state_only.collect()) == (state,)
+    assert state_only.one().graph_equal(state)
 
 
 def test_v3_metadata_read_failure_is_not_a_missing_field(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
-    state = _saved(repo, "value")
+    _saved(repo, "value")
     monkeypatch.setattr(
         store, "read_metadata",
         lambda target: (_ for _ in ()).throw(PermissionError("private-path")),
@@ -363,13 +370,15 @@ def test_v3_metadata_absence_captures_inventory_once(tmp_path, monkeypatch):
     _saved(repo, "first")
     _saved(repo, "second")
     calls = []
-    original = store.iter_definition_records
+    import dryml.core.query.authority as authority
+    original = authority.capture_store_projection
 
-    def counted():
+    def counted(*args, **kwargs):
         calls.append(1)
-        yield from original()
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(store, "iter_definition_records", counted)
+    store = DirStore(store.base_dir, query_index="memory")
+    monkeypatch.setattr(authority, "capture_store_projection", counted)
     assert IdentityQuery.from_store(store).where(field("object", "team").missing()).exists()
     assert len(calls) == 1
 
@@ -401,23 +410,23 @@ def test_v3_metadata_capture_reads_each_holder_fact_once_per_cut(tmp_path, monke
     calls = Counter()
     snapshot_calls = Counter()
     original = store.read_metadata
-    original_snapshot = store.read_snapshot_metadata
+    original_snapshot = store._read_node_capture
 
-    def counted(target):
-        calls[(type(target), target.digest())] += 1
-        return original(target)
+    def counted(target, *, scope=None):
+        calls[(scope, target.exact_digest())] += 1
+        return original(target, scope=scope)
 
     def counted_snapshot(digest):
-        snapshot_calls[digest] += 1
+        snapshot_calls[digest.exact_digest()] += 1
         return original_snapshot(digest)
 
     monkeypatch.setattr(store, "read_metadata", counted)
-    monkeypatch.setattr(store, "read_snapshot_metadata", counted_snapshot)
+    monkeypatch.setattr(store, "_read_node_capture", counted_snapshot)
     facts = SourceCapture().capture_store(
         store, metadata_scopes=frozenset(("object", "state", "lineage", "snapshot")),
     )
 
-    assert facts.captured_metadata(first.object, "object") is not None
+    assert facts.captured_metadata(first.object_view(), "object") is not None
     assert calls
     assert all(count == 1 for count in calls.values())
     assert snapshot_calls
@@ -428,15 +437,15 @@ def test_v3_metadata_lineage_and_snapshot_scopes_use_the_captured_store_cut(tmp_
     store = DirStore(tmp_path / "store")
     repo = Repo(store, clock=lambda: 0)
     state = _saved(repo, "value")
-    lineage = repo.get_lineage_metadata(state.object)
+    lineage = repo.get_lineage_metadata(state.object_view())
     snapshot = repo.get_snapshot_metadata(state)
 
     assert IdentityQuery.from_store(store).where(
         field("lineage", "creation_status").eq(lineage.creation_status)
-    ).object_refs().one() == state.object
+    ).object_refs().one().graph_equal(state.object_view())
     assert IdentityQuery.from_store(store).where(
         field("snapshot", "saved_at").eq(snapshot.saved_at)
-    ).state_refs().one() == state
+    ).state_refs().one().graph_equal(state)
 
 
 def test_v3_metadata_keeps_scalar_types_and_validates_every_populated_leaf(tmp_path):
@@ -456,15 +465,15 @@ def test_v3_metadata_keeps_scalar_types_and_validates_every_populated_leaf(tmp_p
             "mapping": {"value": 1},
         },
     )
-    selected = repo.query().sel(state.object).object_refs()
+    selected = repo.query().sel(state.object_view()).object_refs()
 
     assert selected.where(field("object", "bool").eq(1)).count() == 0
     assert selected.where(field("object", "int").eq(1.0)).count() == 0
     assert selected.where(
         field("object", "tags").eq(("vision", "baseline"))
     ).count() == 0
-    assert selected.where(field("object", "text").contains("vision")).one() == state.object
-    assert selected.where(field("object", "tags").contains("vision")).one() == state.object
+    assert selected.where(field("object", "text").contains("vision")).one().graph_equal(state.object_view())
+    assert selected.where(field("object", "tags").contains("vision")).one().graph_equal(state.object_view())
     with pytest.raises(QueryError, match="numeric field"):
         selected.where(
             field("object", "text").lt(2)
@@ -489,28 +498,31 @@ def test_v3_unknown_and_epoch_lineage_times_remain_distinct(tmp_path, monkeypatc
     unknown = repo.save_object(V3Parent(V3Leaf("child", repo=repo), repo=repo))
     known = _saved(repo, "known")
 
-    assert repo.get_lineage_metadata(unknown.object).creation_status == "unknown"
-    assert repo.query().sel(unknown.object).where(
+    assert repo.get_lineage_metadata(unknown.object_view()).creation_status == "unknown"
+    assert repo.query().sel(unknown.object_view()).where(
         field("lineage", "created_at").ge(0)
     ).object_refs().count() == 0
-    assert repo.query().sel(known.object).where(
+    assert repo.query().sel(known.object_view()).where(
         field("lineage", "created_at").eq(0)
-    ).object_refs().one() == known.object
+    ).object_refs().one().graph_equal(known.object_view())
 
 
 def test_v3_metadata_authority_has_zipstore_parity(tmp_path):
     """Buffered archive authority reopens with the same metadata query answer."""
 
     archive = tmp_path / "metadata.zip"
+    from dryml.core import ObjectId
     store = ZipStore(archive)
-    repo = Repo(store)
-    state = _saved(repo, "zip", object_metadata={"team": "vision"})
-    repo.close(flush=True)
+    state = Definition(V3Leaf, "zip").concretize().with_identity(ObjectId())
+    store.publish_node(state)
+    Repo(store).set_metadata(state, {"team": "vision"}, scope="object")
+    store.commit()
+    store.close()
     reopened = Repo(ZipStore.open_existing(archive))
 
     assert reopened.query().where(
         field("object", "team").eq("vision")
-    ).object_refs().one() == state.object
+    ).object_refs().one().graph_equal(state.object_view())
 
 
 def test_v3_fixed_metadata_requires_explicit_scope_and_alias_is_live_per_terminal(tmp_path):
@@ -518,16 +530,20 @@ def test_v3_fixed_metadata_requires_explicit_scope_and_alias_is_live_per_termina
     repo = Repo(store)
     first = _saved(repo, "first", object_metadata={"team": "vision"})
     second = _saved(repo, "second", object_metadata={"team": "platform"})
-    fixed = IdentityQuery.from_set(IdentitySet((first.object, second.object)))
+    fixed = IdentityQuery.from_set(IdentitySet((first.object_view(), second.object_view())))
 
     with pytest.raises(Exception, match="explicit scope"):
         fixed.where(field("object", "team").eq("vision"))
-    assert fixed.where(field("object", "team").eq("vision"), scope=store).one() == first.object
-    repo.set_alias("chosen", first.object)
-    query = IdentityQuery.from_store(store).alias("chosen").object_refs()
-    assert query.one() == first.object
-    repo.set_alias("chosen", second.object)
-    assert query.one() == second.object
+    assert fixed.where(field("object", "team").eq("vision"), scope=store).one().graph_equal(first.object_view())
+    from dryml.core.store.records import NodeNameRecord
+    first_record = store.publish_node(first, kind="saved")
+    name = NodeNameRecord("chosen", "saved", first_record.digest)
+    store.compare_and_set_node_name(name, expected=None)
+    query = IdentityQuery.from_store(store).alias("chosen").saved()
+    assert query.one().graph_equal(first)
+    second_record = store.publish_node(second, kind="saved")
+    store.compare_and_set_node_name(NodeNameRecord("chosen", "saved", second_record.digest), expected=name)
+    assert query.one().graph_equal(second)
 
 
 def test_v3_cached_restricts_input_members_with_explicit_repo_cache_scope(tmp_path):
@@ -567,7 +583,7 @@ def test_v3_source_scope_preserves_conflicts_without_reading_live_metadata(tmp_p
         value, store=first_store, annotations=SaveAnnotations(object={"team": "vision"})
     )
     writer.save_object(value, store=second_store, source_store=first_store)
-    writer.set_metadata(state.object, {"team": "platform"}, store=second_store)
+    writer.set_metadata(state.object_view(), {"team": "platform"}, store=second_store, scope="object")
     query = IdentityQuery.from_repo(Repo((first_store, second_store))).where(
         field("object", "team").eq("vision")
     ).object_refs()
@@ -576,16 +592,16 @@ def test_v3_source_scope_preserves_conflicts_without_reading_live_metadata(tmp_p
         query.collect()
     assert IdentityQuery.from_repo(Repo((first_store, second_store))).where(
         field("object", "team").eq("vision"), scope=first_store
-    ).object_refs().one() == state.object
+    ).object_refs().one().graph_equal(state.object_view())
 
 
 def test_v3_selector_value_edits_retain_exact_authority_without_widening(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     first = _saved(repo, "first")
     _saved(repo, "second")
-    selector = Selector(first.object.definition)
+    selector = Selector(first.creation_view())
 
-    assert selector.categorical(drop_args=True).restore().root == first.object.definition
+    assert selector.categorical(drop_args=True).restore().root.graph_equal(first.creation_view())
     assert (
         IdentityQuery.from_store(repo.stores[0])
         .sel(selector)
@@ -596,13 +612,12 @@ def test_v3_selector_value_edits_retain_exact_authority_without_widening(tmp_pat
     )
     assert (
         IdentityQuery.from_store(repo.stores[0])
-        .sel(first.object.definition)
+        .sel(first.creation_view())
         .categorical(drop_args=True)
         .exact()
         .cdefs()
-        .stored()
         .one()
-        == first.object.definition
+        .graph_equal(first.creation_view())
     )
     with pytest.raises(Exception, match="ConcreteDefinition"):
         Selector(Definition(V3Leaf, "first")).exact()
@@ -636,11 +651,10 @@ def test_v3_soft_state_selector_requires_explicit_scoped_preparation(tmp_path, m
     """Prepared soft aliases pin their named Repo authority before V3 composition."""
 
     repo = Repo(DirStore(tmp_path / "store"))
-    value = V3Leaf("first", repo=repo)
-    first = repo.save_object(value)
-    value.value = "second"
-    second = repo.save_object(value)
-    repo.set_state_alias("chosen", first)
+    from dryml.core import ObjectId, ObjectRef
+    ref = ObjectRef(Definition(V3Leaf, "first").concretize(), {GraphPath(): ObjectId()})
+    first = StateRef(ref, {GraphPath(): "pkl-" + "1" * 64})
+    monkeypatch.setattr(repo, "resolve_state_selector", lambda _: first)
     source = Definition(V3StateConsumer, first.object.state("chosen"))
 
     with pytest.raises(TypeError, match=r"selector\(value, scope"):
@@ -648,7 +662,6 @@ def test_v3_soft_state_selector_requires_explicit_scoped_preparation(tmp_path, m
 
     prepared = selector(source, scope=repo)
     assert prepared.root.parameters["selected"] == first
-    repo.set_state_alias("chosen", second)
     monkeypatch.setattr(
         repo,
         "resolve_state_selector",
@@ -661,7 +674,8 @@ def test_v3_soft_state_selector_requires_explicit_scoped_preparation(tmp_path, m
 
 def test_v3_scoped_selector_failure_does_not_disclose_alias_or_upstream_error(tmp_path, monkeypatch):
     repo = Repo(DirStore(tmp_path / "store"))
-    state = repo.save_object(V3Leaf("candidate", repo=repo))
+    from dryml.core import ObjectId, ObjectRef
+    state = StateRef(ObjectRef(Definition(V3Leaf, "candidate").concretize(), {GraphPath(): ObjectId()}), {GraphPath(): "pkl-" + "1" * 64})
     secret = "query-v3-private-alias-sentinel"
     source = Definition(V3StateConsumer, state.object.state(secret))
     monkeypatch.setattr(
@@ -678,8 +692,8 @@ def test_v3_scoped_selector_failure_does_not_disclose_alias_or_upstream_error(tm
 def test_v3_soft_alias_validation_does_not_skip_invalid_sibling(tmp_path):
     from dryml.core.selector import _contains_state_selector
 
-    repo = Repo(DirStore(tmp_path / "store"))
-    state = repo.save_object(V3Leaf("candidate", repo=repo))
+    from dryml.core import ObjectId, ObjectRef
+    state = StateRef(ObjectRef(Definition(V3Leaf, "candidate").concretize(), {GraphPath(): ObjectId()}), {GraphPath(): "pkl-" + "1" * 64})
     cyclic = {}
     cyclic["self"] = cyclic
 
@@ -732,14 +746,14 @@ def test_v3_generator_retains_matching_graph_witness_before_deduplication():
     shared_leaf = V3Leaf("shared")
     shared = V3Parent([shared_leaf, shared_leaf]).definition
     independent = V3Parent([V3Leaf("shared"), V3Leaf("shared")]).definition
-    assert shared == independent
+    assert shared.creation_digest() != independent.creation_digest()
     assert not shared.graph_equal(independent)
 
     result = IdentityQuery.from_set(
         IdentitySet((independent, shared)),
     ).sel(_shared_v3_parent_selector()).collect()
 
-    assert tuple(result) == (shared,)
+    assert len(result) == 1 and result.one().graph_equal(shared)
 
 
 @pytest.mark.parametrize("shared_first", [False, True])
@@ -771,8 +785,8 @@ def test_v3_generator_preserves_graph_witnesses_across_stores(
         _shared_v3_parent_selector()
     ).collect()
 
-    assert tuple(result) == (shared.definition,)
-    assert result.sources(shared.definition) == frozenset((
+    assert len(result) == 1 and result.one().graph_equal(shared.definition)
+    assert result.sources(result.one()) == frozenset((
         SourceEvidence.from_source(shared_store.authority_fence_key()),
     ))
 
@@ -816,13 +830,14 @@ def test_u6_fixed_external_scopes_reject_before_inventory(tmp_path, monkeypatch,
     query = query.require_indexed() if policy == "indexed" else query.scan_policy("forbid")
     assert query.explain().scan_required
     scans = []
-    original = store._validated_definition_root_inventory
+    import dryml.core.query.authority as authority
+    original = authority.capture_store_projection
 
-    def inventory():
+    def inventory(*args, **kwargs):
         scans.append(1)
-        return original()
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(store, "_validated_definition_root_inventory", inventory)
+    monkeypatch.setattr(authority, "capture_store_projection", inventory)
     with pytest.raises(QueryIndexUnavailable if policy == "indexed" else QueryWouldScanError):
         query.exists()
     assert scans == []
@@ -835,17 +850,18 @@ def test_u6_external_scope_warning_precedes_io_once(tmp_path, monkeypatch):
 
     store = DirStore(tmp_path / "scope", query_index="memory")
     state = _saved(Repo(store), "member")
-    original = store._validated_definition_root_inventory
+    import dryml.core.query.authority as authority
+    original = authority.capture_store_projection
     scans = []
     with warnings.catch_warnings(record=True) as observed:
         warnings.simplefilter("always")
 
-        def inventory():
+        def inventory(*args, **kwargs):
             assert len(observed) == 1
             scans.append(1)
-            return original()
+            return original(*args, **kwargs)
 
-        monkeypatch.setattr(store, "_validated_definition_root_inventory", inventory)
+        monkeypatch.setattr(authority, "capture_store_projection", inventory)
         query = IdentitySet((state,)).query().stored(scope=store).where(
             field("state").missing(), scope=store,
         ).scan_policy("warn")
@@ -858,11 +874,13 @@ def test_u6_forced_refresh_cannot_authorize_recovery_scan(tmp_path, monkeypatch,
     """A missing sidecar is refused before initialization or rebuild IO."""
 
     from dryml.core.query.model import QueryWouldScanError
-    from dryml.core.store.records import DefinitionRecord
 
     store = DirStore(tmp_path / "scope", query_index="sqlite")
     value = Definition(V3Parent, None).concretize()
-    store.write_definition_record(DefinitionRecord(value))
+    store.publish_node(value)
+    index = store.open_query_index()
+    index.close()
+    index.path.unlink()
     index = store.open_query_index()
     calls = []
     monkeypatch.setattr(index, "rebuild", lambda **kw: calls.append("rebuild"))
@@ -875,7 +893,8 @@ def test_u6_forced_refresh_cannot_authorize_recovery_scan(tmp_path, monkeypatch,
 
 
 def test_u6_external_metadata_and_recovery_io_do_not_charge_holder_identities(tmp_path, monkeypatch):
-    """Authority-only external metadata leaves dirty unused indexes untouched."""
+    """Current scope recovery and holder evidence do not consume admissions."""
+    import dryml.core.query.authority as authority
 
     store = DirStore(tmp_path / "scope", query_index="sqlite")
     state = _saved(Repo(store), "member")
@@ -883,8 +902,8 @@ def test_u6_external_metadata_and_recovery_io_do_not_charge_holder_identities(tm
     reads = []
     scans = []
     rebuilds = []
-    original = store.read_snapshot_metadata
-    original_inventory = store._validated_definition_root_inventory
+    original = store._read_node_capture
+    original_inventory = authority.capture_store_projection
     index = store.open_query_index()
     original_rebuild = index.rebuild
 
@@ -892,16 +911,17 @@ def test_u6_external_metadata_and_recovery_io_do_not_charge_holder_identities(tm
         reads.append(digest)
         return original(digest)
 
-    def inventory():
-        scans.append(1)
-        return original_inventory()
+    def inventory(*args, **kwargs):
+        if kwargs.get("rebuild"):
+            scans.append(1)
+        return original_inventory(*args, **kwargs)
 
     def rebuild(**kwargs):
         rebuilds.append(1)
         return original_rebuild(**kwargs)
 
-    monkeypatch.setattr(store, "read_snapshot_metadata", snapshot)
-    monkeypatch.setattr(store, "_validated_definition_root_inventory", inventory)
+    monkeypatch.setattr(store, "_read_node_capture", snapshot)
+    monkeypatch.setattr(authority, "capture_store_projection", inventory)
     monkeypatch.setattr(index, "rebuild", rebuild)
     query = IdentitySet((state,)).query().where(
         field("snapshot", "saved_at").exists(), scope=store,
@@ -909,7 +929,7 @@ def test_u6_external_metadata_and_recovery_io_do_not_charge_holder_identities(tm
     explanation = query.explain(analyze=True)
     assert explanation.result_count == 1 and explanation.verified_count == 1
     assert explanation.store_scan_count == 1
-    assert explanation.refresh_action == "none"
-    assert reads == [state.digest()]
+    assert explanation.refresh_action == "rebuild"
+    assert len(reads) == 1 and reads[0].graph_equal(state)
     assert len(scans) == 1 and rebuilds == []
-    assert store.query_index_is_dirty()
+    assert not store.query_index_is_dirty()

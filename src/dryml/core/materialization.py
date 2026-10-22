@@ -30,6 +30,82 @@ MaterializationActionKind = Literal["reuse", "construct"]
 MaterializationReuseSource = Literal["memo", "cache", None]
 
 
+class _NodeStateSources(dict):
+    """Operation-owned borrowed sources plus the same retained Store topology."""
+
+    def __init__(self, sources, stores):
+        super().__init__(sources)
+        self.stores = tuple(stores)
+
+
+def _node_metadata_evidence(repo, node, owned, sources, prepared, *, source_store=None, source_stores=None, reservation=None):
+    """Read selected capture/lineage authority afresh, never retain it in a plan.
+
+    Records are metadata-only and independently cut-revalidated outside writer
+    fences. Exact capture replicas must agree unless a provider was selected;
+    lineage evidence must agree with that capture and existing live identities.
+    Missing object declarations are not invented from a donor LocalState.
+    """
+    import json
+    from .repo import MetadataConflictError
+    from .metadata import timestamp_from_seconds
+    from .reference_values import ObjectId
+    stores = getattr(sources, "stores", tuple(repo.stores))
+    overrides = {} if source_stores is None else source_stores
+    captured = {}
+    selected_nodes = (node, *(current for _, current in owned if current is not node))
+    for current in selected_nodes:
+        from .node import require_saved
+        try:
+            require_saved(current)
+        except (TypeError, ValueError):
+            continue
+        provider = (overrides.get(current.state.key) if current.state is not None else None) or source_store
+        captures = []
+        for store in ((provider,) if provider is not None else stores):
+            with store._metadata_read():
+                selected = store._read_node_capture_for_selection(current, prepared)
+                if selected is not None:
+                    captures.append(selected[0].content)
+        if captures and any(content != captures[0] for content in captures[1:]):
+            raise MetadataConflictError("Selected snapshot evidence conflicts across Stores.")
+        for row in (() if not captures else json.loads(captures[0])["lineages"]):
+            if row["identity"] is None:
+                continue
+            identity = ObjectId.from_data(row["identity"])
+            previous = captured.setdefault(identity, row)
+            if (previous["creation_status"], previous["created_at"]) != (row["creation_status"], row["created_at"]):
+                raise MetadataConflictError("Selected lineage evidence conflicts across saved graphs.")
+    facts = {}
+    for _, current in owned:
+        identity = current.object_id
+        if identity is None:
+            continue
+        provider = (overrides.get(current.state.key) if current.state is not None else None) or source_store
+        candidates = (provider,) if provider is not None else stores
+        rows = []
+        root_fact = captured.get(identity)
+        if root_fact is not None:
+            rows.append((root_fact["creation_status"], root_fact["created_at"]))
+        for store in candidates:
+            with store._metadata_read():
+                if not store._holds_node_metadata(current, "lineage"):
+                    continue
+                record = store._read_node_metadata(current, "lineage")
+                row = None if record is None else json.loads(record.content)
+                rows.append(("unknown", None) if row is None else (row["creation_status"], row["created_at"]))
+        if rows:
+            if any(row != rows[0] for row in rows[1:]):
+                raise MetadataConflictError("Selected lineage evidence conflicts across Stores.")
+            facts[identity] = timestamp_from_seconds(rows[0][1])
+    for candidate in repo._all_live_candidates(reservation=reservation):
+        identity = candidate.object_id
+        if (identity in facts and getattr(candidate, "_lineage_fact_object_id", None) == identity
+                and getattr(candidate, "_lineage_created_at", None) != facts[identity]):
+            raise MetadataConflictError("Live cached identity disagrees with selected lineage evidence.")
+    return facts
+
+
 def _runtime_recipe(node):
     """Project Node facets off the retained legacy runtime-binding adapter."""
     from .node import _clone, _Facets, _rewrite
@@ -94,7 +170,7 @@ def _selected_state_sources(repo, associations, *, source_store=None, source_sto
                     raise RepoLoadError(f"Selected state preflight is incomplete: unavailable state at {path!s}.")
                 if source.state != state or source.manifest.codec_version != 1:
                     raise RepoLoadError(f"Selected state preflight is incomplete: incompatible source evidence at {path!s}.")
-            yield sources
+            yield _NodeStateSources(sources, context.stores)
 
 
 def _node_inputs(node, *, classes=None, preparation=None):
@@ -179,6 +255,9 @@ def realize_node(repo, node, *, cache="weak", reuse_live="matching", exact=False
         source_context = (_selected_state_sources(repo, associations, source_store=source_store, source_stores=source_stores)
                           if _sources is None else nullcontext(_sources))
         with source_context as sources, ExitStack() as reservations:
+            lineage_facts = (_node_metadata_evidence(repo, node, owned, sources, prepared, source_store=source_store,
+                source_stores=source_stores, reservation=_identity_reservation)
+                if exact or any(current.object_id is not None for _, current in owned) else {})
             try:
                 identity_reservation = _identity_reservation
                 if exact:
@@ -233,6 +312,9 @@ def realize_node(repo, node, *, cache="weak", reuse_live="matching", exact=False
                     completed.append(obj)
                     # Retain construction selections, not newly captured states.
                     obj._construction_node = source
+                    if source.object_id in lineage_facts:
+                        from .snapshot_capture import install_lineage_fact
+                        install_lineage_fact(obj, source.object_id, lineage_facts[source.object_id])
                     if source.state is not None:
                         from .state import reserve_node
                         if identity_reservation is None:
@@ -253,7 +335,11 @@ def realize_node(repo, node, *, cache="weak", reuse_live="matching", exact=False
                         _publish_cache(repo, obj, cache)
                 root = selected[runtime]
                 identities = {path: selected[current].object_id for path, current in owned if current._stateful_role}
-                apply_exact_reference_identity(root, ObjectRef(runtime, identities))
+                for _, current in owned:
+                    if current._stateful_role and current.object_id is None:
+                        target = selected[current]
+                        lineage_facts[target.object_id] = getattr(target, "_lineage_created_at", None)
+                apply_exact_reference_identity(root, ObjectRef(runtime, identities), lineage_facts=lineage_facts)
                 if not publish_structural:
                     for obj in completed:
                         _publish_cache(repo, obj, cache)
@@ -413,6 +499,8 @@ class PreparedRestoration:
         TypeError, ValueError: For malformed constraints or projection mismatch.
         RepoLoadError: For unavailable/incompatible state or unusable live targets.
         RepoSaveError: For conflicting, foreign or inactive graph ownership.
+        MetadataConflictError: If selected capture/lineage evidence disagrees with
+            another selected source or the supplied live target before hooks.
 
     Preparation retains leases and live reservations without running hooks. The
     factory prepare_restoration validates mutually exclusive partial/full inputs.
@@ -458,6 +546,23 @@ class PreparedRestoration:
                 reservation._covers(self.nodes, ids)
             associations = [(path, current.state, current, classes[current]) for path, current in owned if current.state is not None]
             self.sources = self._lifetime.enter_context(_selected_state_sources(repo, associations, source_store=source_store, source_stores=source_stores))
+            self._lineage_updates = []
+            if saved is not None:
+                metadata_prepared, metadata_owned, _ = _node_inputs(saved)
+                facts = _node_metadata_evidence(repo, saved, metadata_owned, self.sources, metadata_prepared,
+                                                source_store=source_store, source_stores=source_stores,
+                                                reservation=reservation)
+                from .repo import MetadataConflictError
+                for path, current in metadata_owned:
+                    if current.object_id not in facts:
+                        continue
+                    target = obj.graph_at(path)
+                    expected = facts[current.object_id]
+                    if getattr(target, "_lineage_fact_object_id", None) == current.object_id:
+                        if getattr(target, "_lineage_created_at", None) != expected:
+                            raise MetadataConflictError("Target live identity disagrees with selected lineage evidence.")
+                    else:
+                        self._lineage_updates.append((target, current.object_id, expected))
             for target in sorted((t for _, _, t in self.actions), key=id):
                 lock = target._save_load_reservation
                 if not lock.acquire(blocking=False):
@@ -504,6 +609,9 @@ class PreparedRestoration:
         self._check()
         try:
             validate_retained_save_plan(self.plan, self.obj)
+            from .snapshot_capture import install_lineage_fact
+            for target, identity, created_at in self._lineage_updates:
+                install_lineage_fact(target, identity, created_at)
             order = {id(self.plan.binding.objects[current]): index
                      for index, current in enumerate(self.plan.graph.topological_order(dependencies_first=True))
                      if current in self.plan.binding.objects}
@@ -1042,6 +1150,7 @@ def build_exact_state_load_plan(
         prepared, owned, classes = _node_inputs(state_ref)
         associations = [(path, node.state, node, classes[node]) for path, node in owned if node.state is not None]
         with _selected_state_sources(repo, associations, source_store=source_store, source_stores=source_stores) as sources:
+            _node_metadata_evidence(repo, state_ref, owned, sources, prepared, source_store=source_store, source_stores=source_stores)
             actions = tuple(NodeStateSelection(path, state, sources[state.key].store) for path, state, _, _ in associations)
         return NodeLoadPlan(state_ref, actions, prepared, source_store,
                             None if source_stores is None else MappingProxyType(dict(source_stores)))

@@ -591,10 +591,14 @@ def decode_node_graph(packet, *, view=0, expected_view="exact"):
         raise NodeCodecError("Malformed Node graph metadata.") from error
 
 
-def _decode_node_graph_views(packet):
-    """Return all advertised roots using one validated shared-block decode."""
+def _decode_node_graph_views(packet, *, with_owner=False):
+    """Return advertised roots, optionally with their private shared preparation.
+
+    with_owner retains only decoded immutable metadata and exact semantic facts;
+    it is not Store authority. Callers must validate fresh bytes/cuts separately.
+    """
     try:
-        return _decode(packet, 0, packet["views"][0]["view"], _all_views=True)
+        return _decode(packet, 0, packet["views"][0]["view"], _all_views=True, _with_owner=with_owner)
     except NodeCodecError:
         raise
     except (KeyError, IndexError, TypeError, ValueError, AttributeError, OverflowError,
@@ -602,7 +606,7 @@ def _decode_node_graph_views(packet):
         raise NodeCodecError("Malformed Node graph metadata.") from error
 
 
-def _decode(packet, selected, expected_view, *, _all_views=False):
+def _decode(packet, selected, expected_view, *, _all_views=False, _with_owner=False):
     from .bound_args import BoundArguments
     from .definition import ConcreteNode, Definition
     from .freeze import FrozenDict
@@ -751,19 +755,15 @@ def _decode(packet, selected, expected_view, *, _all_views=False):
         raise NodeCodecError("Unreachable value blocks.")
     # Validate every advertised key; unrelated storage roots do not enter any
     # selected semantic preimage. No policy is inferred from an untrusted name.
-    from .node_prepare import PreparationView
-    groups = {}
+    prepared = NodePreparation(node for table in built_tables.values() for node in table.values())
     for root_view in packet["views"]:
         slot = root_view["slot"]
         if type(slot) is not int or slot < 0:
             raise NodeCodecError("Invalid root slot.")
         root = built_tables[root_view["table"]][slot]
-        groups.setdefault(root_view["view"], []).append((root_view, root))
-    for policy, selections in groups.items():
-        prepared = NodePreparation((root for _, root in selections), view=PreparationView(policy))
-        for root_view, root in selections:
-            if prepared.exact_key(root).decode("ascii") != root_view["expected_key"]:
-                raise NodeCodecError("Root view semantic key mismatch.")
+        if prepared.semantic_key(root, policy=root_view["view"]).decode("ascii") != root_view["expected_key"]:
+            raise NodeCodecError("Root view semantic key mismatch.")
     if _all_views:
-        return tuple(built_tables[item["table"]][item["slot"]] for item in packet["views"])
+        roots = tuple(built_tables[item["table"]][item["slot"]] for item in packet["views"])
+        return (roots, prepared) if _with_owner else roots
     return built_tables[chosen["table"]][chosen["slot"]]

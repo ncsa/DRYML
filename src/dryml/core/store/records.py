@@ -1475,3 +1475,47 @@ class RetiredDeclarationAnchorRecord(DeclarationAnchorRecord):
 
 
 __all__ += ["RetiredDeclarationAnchorRecord"]
+
+
+@dataclass(frozen=True, slots=True)
+class NodeMetadataRecord(_NodeRecord):
+    """Closed format-4 current annotations, lineage, or saved capture evidence.
+
+    scope selects current_object/current_state/lineage/capture; target_digest is
+    the owning object projection or saved-root address. content is canonical JSON
+    validated by core.metadata. Invalid schemas, values or associations raise
+    StoreRecordError before publication. No graph or private state is embedded.
+    """
+
+    schema = "dryml-node-metadata"
+    fields = frozenset({"scope", "target_digest", "content"})
+    scope: str
+    target_digest: str
+    content: bytes
+
+    def __post_init__(self):
+        from ..metadata import _validate_node_metadata
+        if self.scope not in {"current_object", "current_state", "lineage", "capture"}:
+            raise StoreRecordError("Unsupported Node metadata scope.")
+        _digest_value(self.target_digest, "metadata target digest")
+        if type(self.content) is not bytes:
+            raise StoreRecordError("Metadata content must be immutable bytes.")
+        try:
+            data = json.loads(self.content)
+            _validate_node_metadata(self.scope, data)
+            if self.scope == "lineage" and data["projection"] != self.target_digest:
+                raise ValueError("Lineage projection does not match its metadata target.")
+            if self.content != _json_bytes(data):
+                raise ValueError("Noncanonical metadata content.")
+        except (TypeError, ValueError, KeyError) as error:
+            raise StoreRecordError("Malformed Node metadata content.") from error
+
+    def _payload(self):
+        return {"scope": self.scope, "target_digest": self.target_digest, "content": json.loads(self.content)}
+
+    @classmethod
+    def _from_payload(cls, data):
+        return cls(data["scope"], data["target_digest"], _json_bytes(data["content"]))
+
+
+__all__ += ["NodeMetadataRecord"]

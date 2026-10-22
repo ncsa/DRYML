@@ -1,5 +1,85 @@
 from __future__ import annotations
 
+
+def _store_discovery_relation(query):
+    """Compile necessary format-4 predicates with occurrence correlation intact.
+
+    Returns (family, where SQL, parameters). Predicates are prefilters only;
+    detached authority and exact Node residuals establish the answer. Boolean
+    predicates without a safe conjunct retain the complete domain.
+    """
+    import json
+    from ...selector import QueryPredicate, Selector
+    from ...node import Node
+    from ...definition import ConcreteDefinition
+    from ..relationships import _discovery_features
+    kinds = [r.value for r in query.restrictions if r.kind == "kind"]
+    local = "local_state" in kinds
+    family, terms, params = ("manifest" if local else "discovery"), [], []
+    payload = "CAST(p.payload AS TEXT)"
+    if local:
+        for item in query.restrictions:
+            if item.kind == "origin":
+                digest = item.value.creation_digest()
+                prefix = "states/" + digest[:2] + "/" + digest + "/"
+                terms.append("p.source >= ? AND p.source < ?")
+                params.extend((prefix, prefix + "\uffff"))
+            elif item.kind == "compatible":
+                terms.append("json_extract(CAST(p.payload AS TEXT),'$.key.cdef_digest') IN "
+                             "(SELECT json_extract(CAST(c.payload AS TEXT),'$.digest') FROM store_projection_rows c "
+                             "WHERE c.family='creation' AND json_extract(CAST(c.payload AS TEXT),'$.compatibility_digest')=?)")
+                params.append(item.value.compatibility_fingerprint())
+        return family, " AND ".join(terms) or "1", tuple(params)
+    for kind in kinds:
+        terms.append(f"json_extract({payload}, '$.kind')=?")
+        params.append(kind)
+    if any(r.kind == "stored" and r.scope == query.source for r in query.restrictions):
+        terms.append(f"json_extract({payload}, '$.stored')=1")
+    from ..source import RetainedRepoLookupSource
+    if isinstance(query.source, RetainedRepoLookupSource):
+        terms.append(f"json_extract({payload}, '$.stored')=1")
+
+    def pattern(value):
+        if isinstance(value, Selector):
+            value = value.root
+        if isinstance(value, QueryPredicate):
+            if value.kind == "and":
+                for operand in value.operands:
+                    pattern(operand)
+            elif value.kind == "node":
+                pattern(value.value)
+            return
+        if not isinstance(value, Node):
+            return
+        for feature in _discovery_features(value):
+            # Partial unordered members do not have the candidate's fingerprint
+            # or ordinal. Keep same-occurrence facets correlated, but leave the
+            # unordered assignment/path proof to the exact matcher.
+            unordered = any(segment["kind"] == "set_member" for segment in feature["path"]["segments"])
+            parts, values = [], []
+            if not unordered:
+                parts.append("json_extract(f.value,'$.path')=json(?)")
+                values.append(json.dumps(feature["path"], sort_keys=True, separators=(",", ":")))
+            parts.append("json_extract(f.value,'$.role')=?")
+            values.append(feature["role"])
+            for field in ("identity", "state"):
+                if feature[field] is not None:
+                    parts.append(f"json_extract(f.value,'$.{field}')=json(?)")
+                    values.append(json.dumps(feature[field], sort_keys=True, separators=(",", ":")))
+            for name, scalar in feature["scalars"].items():
+                parts.append("EXISTS (SELECT 1 FROM json_each(f.value,'$.scalars') s WHERE s.key=? AND s.value=json(?))")
+                values.extend((name, json.dumps(scalar, separators=(",", ":"))))
+            if isinstance(value, ConcreteDefinition) and feature["class"] is not None:
+                parts.append("json_extract(f.value,'$.class')=json(?)")
+                values.append(json.dumps(feature["class"], separators=(",", ":")))
+            terms.append(f"EXISTS (SELECT 1 FROM json_each({payload}, '$.features') f WHERE " + " AND ".join(parts) + ")")
+            params.extend(values)
+
+    for restriction in query.restrictions:
+        if restriction.kind == "sel":
+            pattern(restriction.value)
+    return family, " AND ".join(terms) or "1", tuple(params)
+
 import warnings
 from dataclasses import dataclass
 from typing import Any

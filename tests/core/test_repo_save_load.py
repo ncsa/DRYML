@@ -438,25 +438,29 @@ def test_reopen_v3_query_discovers_definition_authority_without_materializing(tm
 
     reopened = Repo(DirStore(store.base_dir, query_index="memory"))
 
-    assert set(reopened.query().cdefs().stored().collect()) == {first.definition, second.definition}
+    found = tuple(reopened.query().cdefs().stored().collect())
+    assert len(found) == 2
+    assert all(any(node.graph_equal(expected) for node in found) for expected in (first.definition, second.definition))
     assert reopened._num_constructions == 0
-    assert set(reopened.default_store.hydrate_index()) == {first.definition, second.definition}
+    assert reopened.default_store.query().cdefs().stored().count() == 2
 
 
 def test_reopening_main_definition_is_read_only_hydration(tmp_path):
     source = DirStore(tmp_path / "source")
     target = DirStore(tmp_path / "target")
-    definition = DefinitionRecord(SaveLoadValue(3).definition)
-    source.write_definition_record(definition)
-    source.write_main_ref(MainRefRecord(definition.digest))
-    before = tuple(Path(target.base_dir).rglob("*"))
+    from dryml.core.store.records import NodeNameRecord
+    definition = SaveLoadValue(3).definition
+    record = source.publish_node(definition)
+    source.compare_and_set_node_name(NodeNameRecord("main", "recipe", record.digest), expected=None)
+    before = {path.name: path.read_bytes() for path in (Path(target.base_dir) / "store-format.record", Path(target.base_dir) / "authority.record")}
 
     repo = Repo([target, source])
 
-    assert repo.main_def == definition.definition
-    assert target.read_main_ref() is None
-    assert target.read_definition_record(definition.digest) is None
-    assert tuple(Path(target.base_dir).rglob("*")) == before
+    assert repo.main_def.graph_equal(definition)
+    assert target.read_node_name("main") is None
+    assert target.read_node(record.digest) is None
+    assert {name: (Path(target.base_dir) / name).read_bytes() for name in before} == before
+    assert not (Path(target.base_dir) / "membership").exists()
 
 
 def test_u7_exact_state_ref_restores_published_local_state(tmp_path):
@@ -504,7 +508,12 @@ def test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph(tmp
 
 
 def test_real_borrowed_reads_share_budget_but_not_authority_or_public_values(tmp_path):
-    """Nested owning reads charge pending facts together and detach decoded values."""
+    """Node readers share the owner's budget, never its authority or public values.
+
+    Snapshot-JSON retention was removed with Store 3. Current Node readers do not
+    admit those facts: repeated/borrowed reads authenticate fresh full-key bytes,
+    and no record, payload or resource leaks into that retired cache facility.
+    """
     from dryml.core import SaveAnnotations
     from dryml.core.cdef_identity import cdef_node_key
     from dryml.core.materialization import build_exact_state_load_plan
@@ -520,49 +529,35 @@ def test_real_borrowed_reads_share_budget_but_not_authority_or_public_values(tmp
     facility.max_entries = 6
     borrower = Repo._for_state_io((store,), _content_owner=owner)
     try:
-        with owner._read_cut() as outer:
-            with exact_work_counts() as cold:
-                build_exact_state_load_plan(owner, state, _read_cut=outer)
-            assert len(facility._pending) == 6 and not facility._resident
-            charge = facility.accounted_bytes
-            with exact_work_counts() as nested:
-                build_exact_state_load_plan(borrower, state)
-            assert nested["validate_payload"] == cold["validate_payload"] == 1
-            assert nested["canonical_json_load_bytes"] == 3
-            assert nested["_freeze_graph_content"] == 0
-            assert len(facility._pending) == 6 and facility.accounted_bytes == charge
-            first = outer.snapshot(store, state.digest())
-        assert not facility._pending
-        assert facility.accounted_bytes == sum(fact.charge for fact in facility._resident.values())
-        with exact_work_counts() as warm:
-            with borrower._read_cut() as cut:
-                build_exact_state_load_plan(borrower, state, _read_cut=cut)
-                second = cut.snapshot(store, state.digest())
-        assert warm["canonical_json_load_bytes"] == 0
-        assert warm["_realize_prepared_graph"] == 3 and warm["validate_payload"] == 1
-        assert cdef_node_key(first[0].state_ref.definition) != cdef_node_key(second[0].state_ref.definition)
-        second[1].captured_state_annotations["nested"][0]["values"].append(99)
-        with borrower._read_cut() as cut:
-            assert cut.metadata(store, state.digest()).captured_state_annotations["nested"] == [{"values": [1, 2]}]
+        assert borrower._validation_evidence is facility
+        with exact_work_counts() as cold:
+            build_exact_state_load_plan(owner, state)
+        with exact_work_counts() as nested:
+            build_exact_state_load_plan(borrower, state)
+        assert nested["validate_payload"] == cold["validate_payload"] == 2  # wrapper and inventory authenticator
+        first = owner.get_snapshot_metadata(state)
+        second = borrower.get_snapshot_metadata(state)
+        assert first is not second
+        second.captured_state_annotations["nested"][0]["values"].append(99)
+        assert borrower.get_snapshot_metadata(state).captured_state_annotations["nested"] == [{"values": [1, 2]}]
+        assert not facility._pending and not facility._resident and facility.accounted_bytes == 0
         owner.clear_cache(strong=False, weak=False)
         assert facility.accounted_bytes == 0
         with exact_work_counts() as cleared:
             build_exact_state_load_plan(borrower, state)
-        assert cleared["canonical_json_load_bytes"] == 3
-        assert cleared["decode_cdef_graph"] == 3 and cleared["validate_payload"] == 1
+        assert cleared["validate_payload"] == 2
         independent = Repo(store)
         try:
             with exact_work_counts() as isolated:
                 build_exact_state_load_plan(independent, state)
-            assert isolated["canonical_json_load_bytes"] == 3
-            assert isolated["decode_cdef_graph"] == 3
+            assert isolated["validate_payload"] == 2
             assert independent._validation_evidence is not facility
         finally:
             independent.close(flush=False)
         retained = tuple(facility._resident.values())
         borrower.close(flush=False)
         assert tuple(facility._resident.values()) == retained
-        assert facility.high_water_entries == 6
+        assert facility.high_water_entries == 0
         assert facility.high_water_bytes <= facility.max_bytes
         assert owner._topology_leases == 0
     finally:

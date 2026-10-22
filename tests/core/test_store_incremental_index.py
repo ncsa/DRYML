@@ -262,7 +262,7 @@ def test_closed_coverage_families_are_guarded_or_explicitly_unavailable(tmp_path
     store = indexed_store(tmp_path / "store")
     store.publish_node(creation())
     index = store.open_query_index()
-    if family in {"requested_metadata", "lifecycle"}:
+    if family == "lifecycle":
         with pytest.raises(QueryIndexUnavailable):
             values(index, family)
     else:
@@ -359,12 +359,12 @@ def test_graph_work_never_runs_under_store_fence(tmp_path, monkeypatch):
     store.open_query_index().rebuild()
 
 
-def test_legacy_consumers_refuse_without_inventory_or_authority_effects(tmp_path):
+def test_legacy_writers_refuse_and_current_query_construction_is_inert(tmp_path):
     store = indexed_store(tmp_path / "store")
     before = store.authority_cut()
-    for action in (store.query, lambda: store.write_definition_record(DefinitionRecord(creation()))):
-        with pytest.raises(StoreCapabilityError, match="not integrated|legacy Store consumer"):
-            action()
+    assert store.query().refresh(True).take(0).count() == 0
+    with pytest.raises(StoreCapabilityError, match="legacy Store consumer"):
+        store.write_definition_record(DefinitionRecord(creation()))
     assert store.authority_cut() == before and not Path(store.base_dir, "mutations").exists()
     saved = Repo(store).save_object(IndexedObject())
     assert saved.state is None
@@ -549,9 +549,9 @@ def test_shared_creation_block_decodes_once_and_retains_compatibility_prefilters
     from dryml.core.node_views import COMPATIBILITY_VIEW, view_digest
     store = indexed_store(tmp_path / "store")
     calls, decode = [], codec._decode_node_graph_views
-    def shared(packet):
+    def shared(packet, **kwargs):
         calls.append(len(packet["views"]))
-        return decode(packet)
+        return decode(packet, **kwargs)
     monkeypatch.setattr(codec, "_decode_node_graph_views", shared)
     roots = (creation(), creation(2))
     store.install_creations(roots)

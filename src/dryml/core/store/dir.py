@@ -716,11 +716,49 @@ class DirStore(Store):
                                NodeMembershipRecord(kind, record.digest, identities)))
             for name in batch.names:
                 changes.append(self._prepared_file(os.path.join(self.base_dir, "names", name.name + ".record"), name, mutable=True))
+            from .records import NodeMetadataRecord
+            from ..metadata import _captured_annotation_data, _node_snapshot_metadata, encode_metadata_mapping
+            import json
+            for root_record, node, content in batch.captures:
+                data = json.loads(content)
+                for lineage in data["lineages"]:
+                    if lineage["identity"] is None:
+                        continue
+                    digest = lineage["projection"]
+                    path = self._node_metadata_path("lineage", digest)
+                    old = self._read_file(path, NodeMetadataRecord)
+                    if old is None:
+                        record = NodeMetadataRecord("lineage", digest, _json_bytes(lineage))
+                        changes.append(self._prepared_file(path, record))
+                    else:
+                        self._validate_node_metadata_record(old, "lineage", digest)
+                        lineage.update(json.loads(old.content))
+                for scope, digest, field in (("current_object", node.object_projection_digest(), "object"),
+                                              ("current_state", root_record.digest, "state")):
+                    path = self._node_metadata_path(scope, digest)
+                    old = self._read_file(path, NodeMetadataRecord)
+                    if old is not None:
+                        self._validate_node_metadata_record(old, scope, digest)
+                    values = None if old is None else json.loads(old.content)["values"]
+                    explicit = None if batch.annotations is None else getattr(batch.annotations, field)
+                    if explicit is not None:
+                        values = encode_metadata_mapping(explicit)
+                        changes.append(self._prepared_file(path, NodeMetadataRecord(scope, digest, _json_bytes({"values": values})), mutable=True))
+                    from ..metadata import decode_metadata_mapping
+                    data["captured_annotations"][field] = _captured_annotation_data(None if values is None else decode_metadata_mapping(values))
+                _node_snapshot_metadata(node, data)
+                path = self._node_metadata_path("capture", root_record.digest)
+                old = self._read_file(path, NodeMetadataRecord)
+                if old is None:
+                    changes.append(self._prepared_file(path, NodeMetadataRecord("capture", root_record.digest, _json_bytes(data))))
+                else:
+                    self._validate_node_metadata_record(old, "capture", root_record.digest)
+                    _node_snapshot_metadata(node, json.loads(old.content))
             if not batch.provisional and previous_intent is None:
                 changes.append(PreparedChange(self._relative(intent_path), intent.to_bytes(),
                                               replace(intent, disposition="adopted").to_bytes()))
                 changes.append(PreparedChange(self._relative(pending_path), prepared_pending.to_bytes(), pending.to_bytes()))
-            return changes, ("state", "creation", "root", "membership", "declarations", "names", "retention"), None
+            return changes, ("state", "creation", "root", "membership", "declarations", "names", "retention", "metadata"), None
         return self._prepare_and_apply(prepare, return_receipt=True)
 
     def save_batch_needs_recovery(self, batch):
@@ -739,12 +777,16 @@ class DirStore(Store):
             return False
 
     def query(self):
-        """Refuse legacy query coverage until the format-4 query consumer cutover.
+        """Return a deferred current-format identity/discovery query.
 
-        Raises StoreCapabilityError without inventory or index IO; no empty or
-        current-index claim is made for the new root/state authority families.
+        Reads no source until a terminal. Enabled ready indexes supply bounded
+        candidates; missing/stale coverage follows refresh/scan controls. Memory
+        and disabled indexing require an explicitly permitted metadata-only scan.
+        Malformed authority and changed continuations fail visibly; no payload IO
+        or Object construction occurs during discovery.
         """
-        raise StoreCapabilityError("Format 4 Node queries are not integrated yet.")
+        from ..query.query import IdentityQuery
+        return IdentityQuery.from_store(self)
 
     def _node_path(self, area, digest):
         _digest_value(digest, area + " digest")
@@ -801,6 +843,10 @@ class DirStore(Store):
         from ..node_views import creation_cdef, object_projection
         from ..node import require_saved
         block = self._read_node_block(record.block_digest)
+        detached = authority.detached_owner(self)
+        cache_key = block.content, record.view_bytes, record.root_kind
+        if detached is not None and cache_key in detached.node_views:
+            return detached.node_views[cache_key]
         packet = block.blocks
         packet["views"] = [record.view]
         try:
@@ -813,6 +859,12 @@ class DirStore(Store):
             if record.root_kind == "saved":
                 require_saved(root)
             self._validate_node_selections(root)
+            if detached is not None:
+                from .._content_facts import _node_block_owner_size
+                charge = _node_block_owner_size(block.content, packet)
+                if len(detached.node_views) < 16 and detached.node_view_bytes + charge <= 8 * 1024 * 1024:
+                    detached.node_views[cache_key] = root
+                    detached.node_view_bytes += charge
             return root
         except (NodeCodecError, TypeError, ValueError) as error:
             raise StoreAuthorityError("Malformed or incompatible Node root authority.") from error
@@ -1562,6 +1614,13 @@ class DirStore(Store):
         from ..query.model import QueryIndexIncompatible
         binding = self._query_index_binding(index)
         relative = ".dryml/query-index-destination.record"
+        # The destination is write-once. Readers of an existing atomic record
+        # need no writer lock, including refresh waiters joining a fenced owner.
+        previous = authority.raw(self, relative)
+        if previous == binding:
+            return
+        if previous is not None:
+            raise QueryIndexIncompatible("Conflicting persistent index destination/configuration for this Store authority domain.")
         with self.writer_lock():
             previous = authority.raw(self, relative)
             if previous is not None and previous != binding:
@@ -2519,23 +2578,151 @@ class DirStore(Store):
         payload = canonical_json_bytes(value, max_depth=64, max_nodes=131072, max_entries=65536, max_string=4096, max_int_bits=4096)
         Path(path).write_bytes(payload)
 
-    def read_metadata(self, target):
-        """Refuse legacy exact-reference metadata until its consumer cutover.
+    @staticmethod
+    def _node_metadata_address(target, scope=None):
+        from ..node import Node, require_saved
+        from ..definition import ConcreteDefinition
+        if not isinstance(target, Node) or not isinstance(target, ConcreteDefinition):
+            raise TypeError("Format-4 metadata requires a concrete Node.")
+        if scope is None:
+            scope = "current_state" if target.state_spec() else "current_object"
+        if scope in {"current_state", "capture"}:
+            require_saved(target)
+            digest = hashlib.sha256(b"dryml-saved-root/v1\0" + target.exact_key()).hexdigest()
+        elif scope in {"current_object", "lineage"}:
+            digest = target.object_projection_digest()
+        else:
+            raise ValueError("Unsupported Node metadata scope.")
+        return scope, digest
 
-        target is the old ObjectRef/StateRef scope. Raises StoreCapabilityError
-        without reading or admitting a V2 nested reference in format 4.
+    def _node_metadata_path(self, scope, digest):
+        if scope not in {"current_object", "current_state", "lineage", "capture"}:
+            raise ValueError("Unsupported Node metadata scope.")
+        return self._node_path("metadata/" + scope, digest)
+
+    @staticmethod
+    def _validate_node_metadata_record(record, scope, digest):
+        if record.scope != scope or record.target_digest != digest:
+            raise StoreAuthorityError("Node metadata target/scope does not match authority address.")
+
+    def _holds_node_metadata(self, target, scope=None):
+        scope, digest = self._node_metadata_address(target, scope)
+        if scope in {"current_state", "capture"}:
+            node = self.read_node(digest, kind="saved")
+            if node is None:
+                return False
+            if not node.graph_equal(target):
+                raise StoreAuthorityError("Saved metadata target has incompatible exact authority.")
+            return True
+        if target.object_id is None:
+            return self.query().object_refs().sel(target.object_view()).exists()
+        anchor = self.read_declaration_anchor(target.object_id)
+        if anchor is None:
+            return False
+        if not target.object_projection_equal(self._expand_node_root(anchor.projection)):
+            raise StoreAuthorityError("Object metadata target conflicts with declaration authority.")
+        return True
+
+    def _read_node_metadata(self, target, scope=None):
+        from .records import NodeMetadataRecord
+        scope, digest = self._node_metadata_address(target, scope)
+        with self._metadata_read():
+            if not self._holds_node_metadata(target, scope):
+                raise KeyError(digest)
+            record = self._read_file(self._node_metadata_path(scope, digest), NodeMetadataRecord)
+            if record is not None:
+                self._validate_node_metadata_record(record, scope, digest)
+                if scope == "lineage":
+                    import json
+                    from ..reference_values import ObjectId
+                    if ObjectId.from_data(json.loads(record.content)["identity"]) != target.object_id:
+                        raise StoreAuthorityError("Lineage metadata names another ObjectId.")
+            return record
+
+    def _read_node_capture(self, target):
+        import json
+        from ..metadata import _node_snapshot_metadata
+        record = self._read_node_metadata(target, "capture")
+        if record is None:
+            raise StoreAuthorityError("Published saved graph lacks captured metadata authority.")
+        return _node_snapshot_metadata(target, json.loads(record.content))
+
+    def _read_node_capture_for_selection(self, target, prepared):
+        """Read capture after an owning active-source destination preflight.
+
+        The private caller has validated every selected StateKey/destination.
+        Decode fresh captured block bytes, compare exact graph evidence with that
+        prepared target, and check every declaration contribution. This reuses the
+        destination validation instead of repeating it for an equal saved graph.
+        The detached owner/final cut witness remains operation-local. Custom root
+        readers retain their public validation path.
         """
-        raise StoreCapabilityError("Legacy reference metadata is not format-4 authority.")
+        import json
+        from ..node_codec import _decode_node_graph_views
+        from ..metadata import _node_snapshot_metadata
+        from .records import NodeMetadataRecord
+        if (getattr(self.read_node, "__func__", None) is not DirStore.read_node
+                or getattr(self._expand_node_root, "__func__", None) is not DirStore._expand_node_root):
+            if not self._holds_node_metadata(target, "capture"):
+                return None
+            record = self._read_node_metadata(target, "capture")
+            return None if record is None else (record, self._read_node_capture(target))
+        digest = hashlib.sha256(b"dryml-saved-root/v1\0" + target.exact_key(prepared=prepared)).hexdigest()
+        with self._metadata_read():
+            member = self._read_membership(digest, "saved")
+            if member is None:
+                return None
+            record = self._read_file(self._node_path("graphs", digest), NodeRootRecord)
+            if record is None or record.root_kind != "saved" or record.digest != digest:
+                raise StoreAuthorityError("Missing or mismatched selected saved-graph authority.")
+            block = self._read_node_block(record.block_digest)
+            packet = block.blocks
+            packet["views"] = [record.view]
+            (root,), owner = _decode_node_graph_views(packet, with_owner=True)
+            if not owner.exact_equal(root, prepared, target):
+                raise StoreAuthorityError("Selected saved graph conflicts with captured authority.")
+            nodes = self._publication_identities(root)
+            if set(member.identities) != {node.object_id for node in nodes}:
+                raise StoreAuthorityError("Selected membership declaration requirements mismatch.")
+            for node in nodes:
+                anchor = self.read_declaration_anchor(node.object_id)
+                if anchor is None or ("saved", digest) not in anchor.sources:
+                    raise StoreAuthorityError("Missing selected declaration anchor/source.")
+                if not node.object_projection_equal(self._expand_node_root(anchor.projection)):
+                    raise StoreAuthorityError("Selected declaration conflicts with its anchor.")
+            capture = self._read_file(self._node_metadata_path("capture", digest), NodeMetadataRecord)
+            if capture is None:
+                raise StoreAuthorityError("Published saved graph lacks captured metadata authority.")
+            self._validate_node_metadata_record(capture, "capture", digest)
+            return capture, _node_snapshot_metadata(target, json.loads(capture.content))
 
-    def write_metadata(self, target, values) -> None:
-        """Refuse unmigrated reference-metadata publication on format 4.
+    def read_metadata(self, target, *, scope=None):
+        """Read a fresh detached current mapping for a concrete Node target.
 
-        StoreCapabilityError precedes authority effects. Remaining arguments
-        describe the legacy consumer boundary, not supported format-4 publication.
+        scope is object/state, or None to infer state when selections exist and
+        object otherwise. Stateless saved graphs need explicit scope='state' to
+        distinguish that question from an equal object projection. Returns dict
+        or None (absent). Unknown targets raise KeyError; invalid scope/authority
+        raises ValueError/StoreAuthorityError. Old exact-reference inputs raise
+        StoreCapabilityError. Reads metadata only, under a revalidated cut, without
+        payload IO, environment observation, construction or mutation.
+        """
+        from ..node import Node
+        if not isinstance(target, Node):
+            raise StoreCapabilityError("Legacy reference metadata is not format-4 authority.")
+        import json
+        from ..metadata import decode_metadata_mapping, _node_annotation_scope
+        area = _node_annotation_scope(scope)
+        record = self._read_node_metadata(target, area)
+        return None if record is None else decode_metadata_mapping(json.loads(record.content)["values"])
+
+    def write_metadata(self, target, values, *, scope=None) -> None:
+        """Journal one whole current annotation replacement and index its cut.
 
         Args:
-            target: Exact ObjectRef or StateRef attachment scope.
+            target: Concrete Node object projection or saved graph.
             values: Valid complete metadata mapping to install.
+            scope: object/state or None, with the inference in read_metadata.
 
         Returns:
             ``None``.
@@ -2546,10 +2733,28 @@ class DirStore(Store):
             StoreCapabilityError: If this filesystem cannot provide publication.
 
         Side Effects:
-            Serializes cooperating writers and atomically replaces one sidecar.
-            It does not alter snapshots, lineage metadata, or payload files.
+            Validates fresh target authority in detached preparation, publishes
+            intent before effects, and synchronously maintains enabled indexing.
+            Captured metadata and payloads are not changed. Partial publication
+            failures retain the Store mutation's confirmed cut/repair evidence.
         """
 
+        from ..node import Node
+        if isinstance(target, Node):
+            from .records import NodeMetadataRecord
+            from ..metadata import encode_metadata_mapping, _node_annotation_scope
+            scope, digest = self._node_metadata_address(target, _node_annotation_scope(scope))
+            record = NodeMetadataRecord(scope, digest, _json_bytes({"values": encode_metadata_mapping(values)}))
+            self.preflight_publication("replace Node annotations", record_family="dryml-node-graph/v1")
+            def prepare():
+                if not self._holds_node_metadata(target, scope):
+                    raise KeyError(digest)
+                old = self._read_file(self._node_metadata_path(scope, digest), NodeMetadataRecord)
+                if old is not None:
+                    self._validate_node_metadata_record(old, scope, digest)
+                return [self._prepared_file(self._node_metadata_path(scope, digest), record, mutable=True)], ("metadata",), None
+            self._prepare_and_apply(prepare)
+            return
         from dryml.formats import canonical_json_bytes
         from ..metadata import encode_current_annotations
 
@@ -2565,13 +2770,12 @@ class DirStore(Store):
             self.mark_query_index_dirty(metadata_target=target)
             self._atomic_write(self._metadata_path(target), payload)
 
-    def delete_metadata(self, target) -> bool:
-        """Refuse legacy reference-metadata removal before effects on format 4.
-
-        Raises StoreCapabilityError pending the reference consumer cutover.
+    def delete_metadata(self, target, *, scope=None) -> bool:
+        """Journal removal of one current mapping without removing capture history.
 
         Args:
-            target: Exact ObjectRef or StateRef attachment scope.
+            target: Concrete Node object projection or saved graph.
+            scope: object/state or None, with the inference in read_metadata.
 
         Returns:
             ``True`` when the sidecar existed and was removed, otherwise ``False``.
@@ -2582,11 +2786,27 @@ class DirStore(Store):
             StoreCapabilityError: If this filesystem cannot provide publication.
 
         Side Effects:
-            Serializes cooperating writers and durably removes only the current
-            metadata name. Windows may retain a non-authoritative tombstone after
-            best-effort cleanup. Snapshot, lineage, and payload authority remain.
+            Revalidates the target/cut before mutation and synchronously updates
+            enabled indexing. Only current annotations are removed; lineage,
+            captured values and private state remain. Failures retain classified
+            mutation/repair evidence rather than claiming rollback.
         """
 
+        from ..node import Node
+        if isinstance(target, Node):
+            from .records import NodeMetadataRecord
+            from ..metadata import _node_annotation_scope
+            scope, digest = self._node_metadata_address(target, _node_annotation_scope(scope))
+            self.preflight_publication("delete Node annotations", record_family="dryml-node-graph/v1")
+            def prepare():
+                if not self._holds_node_metadata(target, scope):
+                    raise KeyError(digest)
+                path = self._node_metadata_path(scope, digest)
+                old = self._read_file(path, NodeMetadataRecord)
+                if old is not None:
+                    self._validate_node_metadata_record(old, scope, digest)
+                return [self._prepared_file(path, None, mutable=True)], ("metadata",), old is not None
+            return self._prepare_and_apply(prepare)
         self.preflight_publication("delete current metadata")
         path = self._metadata_path(target)
         with self.writer_lock():

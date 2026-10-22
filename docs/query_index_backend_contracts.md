@@ -23,7 +23,7 @@ binding is not an API for maintaining independent sidecars over one domain.
 
 The closed relation families are `record`, `recipe_root`, `saved_root`,
 `declaration`, `creation`, `manifest`, `availability`, `node`, `edge`, `facet`,
-`name`, `requested_metadata`, `retention`, and `lifecycle`. Compact root membership
+`name`, `requested_metadata`, `retention`, `lifecycle`, and `discovery`. Compact root membership
 joins to its authenticated block/table/overlay slot. Node, typed edge, and facet
 postings retain those correlations and typed value paths; they do not flatten
 different occurrences into one match. Manifests and availability retain the full
@@ -40,10 +40,15 @@ pending heads and exact removal-incarnation records also feed the closed `record
 relation through the same journal. They do not imply managed associations. Rebuild
 uses those records without trusting reverse counts or reading private bytes.
 
-`requested_metadata` and `lifecycle` are **explicitly unavailable** until their owning
-metadata/managed adapters supply their versioned authority through the
-Store protocol. Their closed coverage entries have `supported=0`; asking for one
-raises `QueryIndexUnavailable`, never a certified empty result. Unknown families
+`requested_metadata` is supplied by closed `dryml-node-metadata/v1` authority:
+current object/state annotations, first saved-graph capture, and lineage evidence.
+SaveAnnotations, current-mapping replacement/removal, and immutable captures use
+the same journal/projection/acknowledgement boundary. Rebuild never reconstructs
+captured annotations from current mappings.
+`lifecycle` remains **explicitly unavailable** until its managed owner supplies
+versioned authority through the Store protocol. Its closed coverage entry has
+`supported=0`; asking for it raises `QueryIndexUnavailable`, never a certified empty
+result. Unknown families
 and unknown prepared record paths are refused. Later adapters must add their
 closed record readers, journal transitions, source projections and publication
 guards together before enabling a capability. Managed lifecycle integration remains
@@ -63,8 +68,11 @@ semantic, or coverage versions remain intact and are refused.
 seam. It returns detached `(source_path, correlation_key, canonical_json_bytes)`
 rows under a short certified Store/SQLite cut. False performs no initialization,
 replay or rebuild and refuses missing/stale/pending/incomplete coverage. True
-permits maintenance first. This collected seam is not the later bounded Repo
-query, continuation, or state-discovery API. Legacy Query V3 read views and
+permits maintenance first. The ordinary Repo/Store consumer separately uses bounded
+`discovery` and manifest pages under the same certificate. Discovery postings retain
+source membership, root/block identity, typed occurrence paths, result domain and
+correlated necessary features; exact residuals and direct authority validate
+acceptance. Legacy Query V3 read views and
 coverage claims remain explicitly unavailable for format-4 authority.
 
 `maintain_store()`/enabled mutation completion replay classified pending records
@@ -104,11 +112,36 @@ ZipStore retains its extracted nonpersistent/buffered policy. Its journal cut
 becomes durable only after successful archive commit; no persistent SQLite claim
 is made for an uncommitted extraction.
 
-## Legacy Query V3 Consumer Contracts (Awaiting U10/U13 Cutover)
+### Detached Query Pages and Continuation
+
+The current consumer captures bounded keys and immutable record/block bytes under
+short Store/SQLite cuts. It releases both before preparation, exact matching and
+metadata expansion, revalidates that same cut before accepting the page, and
+releases again before user output. One decoded preparation serves captured views
+of an authenticated block; operation-local reuse compares exact bytes/views and
+uses conservative `_content_facts` ownership sizing.
+
+Tokens retain Store UUID/epoch/pending evidence, index file identity/UUID,
+schema/coverage/generation, producer and external-scope Repo topology, and keyset
+ordering position. A changed continuation fails explicitly without replaying the
+delivered prefix. Per-Store cuts are not a global transaction. Full-StateKey exact
+lookup is an authority-only plan, including a negative lookup, and does not open
+SQLite. Ready selective queries do not inventory unrelated Store contents.
+
+All coverage families and publication guards are checked even for empty/count
+queries. Applicable declaration anchors are read in every connected Store, not
+only Stores contributing candidates. Pure cache hits are never freshness,
+membership, availability or completeness evidence. `refresh(False)` disables
+maintenance, not these checks. Query maintenance supplies `scan_admission` to the
+backend: required rebuild inventory is admitted before it starts, including if
+readiness changes after preflight. `maintain_store()` without that callback retains
+its ordinary explicit maintenance policy.
+
+## Retained Legacy Standalone SQLite Contracts
 
 The remaining sections describe the retained legacy consumer implementation.
-They do not advertise format-4 Repo/query support. Its tests retain strict expected
-capability refusals alongside live schema-10 Store and SQLite ownership proofs.
+They do not govern Store-4 Node sources. Standalone codecs and SQLite interfaces
+remain separate from current persistent input support; old Stores are not migrated.
 
 Query indexes are derived acceleration for current Store authority. DefinitionRecords, explicit stored-root membership, declarations, complete v3 snapshots, aliases, lineage records, current annotation records, and verified snapshot-local directories remain authoritative. Closure-only DefinitionRecords hydrate graph nodes but do not become stored roots during rebuild. A backend must reject incompatible schema or semantic metadata before row decoding or ready activation, then rebuild only derived files from validated records.
 

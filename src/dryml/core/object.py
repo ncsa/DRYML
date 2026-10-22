@@ -559,8 +559,8 @@ class Object(metaclass=Dryml):
             report_stores: Whether to also return the selected Store report.
             source_store: Optional connected Store for explicit local-state sources.
             source_stores: Optional full-StateKey/connected-Store source overrides.
-            annotations: Requested metadata feed; currently explicitly unsupported
-                before capture, including an explicitly empty mapping.
+            annotations: Optional SaveAnnotations replacing supplied current object
+                and state maps and copying them into a first immutable capture.
 
         Returns:
             The published SavedNode, or it paired with a StoreReport.
@@ -580,8 +580,7 @@ class Object(metaclass=Dryml):
             membership, names and enabled projection to Repo.save_object's batch.
             Receipts advance only for confirmed protected recovery closures and
             can survive partial/index failure. Incomplete metadata alone does not
-            advance them. Requested annotation
-            feeds and buffered durable ownership currently raise StoreCapabilityError
+            advance them. Buffered durable ownership raises StoreCapabilityError
             before capture. A plain later save captures again; receipts are historical.
 
         Concurrency:

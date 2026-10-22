@@ -585,17 +585,19 @@ class _CapturedMetadataContext:
 
     def __init__(self, reference, projections: Mapping[str, Any]) -> None:
         from ..reference_values import ObjectRef, StateRef
+        from ..node import Node
 
-        if not isinstance(reference, (ObjectRef, StateRef)):
+        if not isinstance(reference, (ObjectRef, StateRef, Node)):
             raise TypeError("Metadata query candidates must be ObjectRef or StateRef values.")
         self.reference = reference
         self.projections = projections
 
     def value(self, selector: MetadataField):
         from ..reference_values import StateRef
+        from ..node import Node
 
         if selector.scope in {"state", "snapshot"} and not isinstance(
-            self.reference, StateRef
+            self.reference, (StateRef, Node)
         ):
             from .model import QueryDomainError
 

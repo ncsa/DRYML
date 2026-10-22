@@ -134,6 +134,8 @@ class _DetachedRead:
     def __init__(self, store, cut):
         self.store, self.cut = store, cut
         self.files, self.directories = {}, {}
+        self.node_views = {}
+        self.node_view_bytes = 0
 
     def file(self, path, payload):
         relative = os.path.relpath(path, self.store.base_dir).replace(os.sep, "/")
@@ -170,6 +172,12 @@ def observe(store, path, payload):
     current = _READ.get()
     if current is not None and current.store is store:
         current.file(path, payload)
+
+
+def detached_owner(store):
+    """Return only this operation's detached reader; never an external proof."""
+    current = _READ.get()
+    return current if current is not None and current.store is store else None
 
 
 def read_cut(store):

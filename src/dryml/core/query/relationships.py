@@ -9,6 +9,7 @@ seam rather than treating transitive descendants as adjacency.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+import hashlib
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, ClassVar, Iterator
@@ -18,6 +19,8 @@ from ..cdef_graph import EdgeKind
 from ..definition import ConcreteDefinition
 from ..links import DefLink
 from ..reference_values import ObjectRef, StateRef
+from ..node import Node
+from ..state_values import LocalState
 from ..utils.graph.path import GraphPath, graph_path_sort_key
 from ..utils.graph.value import iter_value_edges
 
@@ -29,6 +32,7 @@ class RelationshipKind(str, Enum):
     OBJECT_DEFINITION = "object_definition"
     MATERIALIZE = "materialize"
     REFERENCE = "reference"
+    STATE_CREATION = "state_creation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +176,16 @@ def iter_direct_relationships(
     association; recursive traversal is intentionally left to consumers.
     """
 
+    if isinstance(value, LocalState):
+        yield DirectRelationship(RelationshipKind.STATE_CREATION, GraphPath(), value.creation_cdef)
+        return
+    if isinstance(value, Node):
+        if value.state_spec():
+            yield DirectRelationship(RelationshipKind.STATE_OBJECT, GraphPath(), value.object_view())
+        elif value.object_id is not None:
+            yield DirectRelationship(RelationshipKind.OBJECT_DEFINITION, GraphPath(), value.creation_view())
+        yield from _definition_edges(value)
+        return
     if isinstance(value, StateRef):
         yield DirectRelationship(RelationshipKind.STATE_OBJECT, GraphPath(), value.object)
         yield from _reference_edges(value, state=True)
@@ -204,6 +218,94 @@ def _reference_edges(value: ObjectRef | StateRef, *, state: bool) -> Iterator[Di
 def _definition_edges(value: ConcreteDefinition) -> Iterator[DirectRelationship]:
     for value_edge in iter_value_edges(value):
         yield from _value_edges(value_edge.value, GraphPath((value_edge.segment,)))
+
+
+def _node_occurrences(root):
+    """Yield typed, role-preserving paths to unique immutable Node occurrences.
+
+    Quoted configuration is a traversal barrier. Repeated aliases use their first
+    canonical path; the exact residual still compares the complete alias graph.
+    This private projection helper performs no authority or payload IO.
+    """
+    from ..node import Node
+    seen = set()
+
+    def walk(value, path, role="materialize"):
+        if isinstance(value, DefLink):
+            yield from walk(value.target, path, value.kind.value)
+        elif isinstance(value, (Node, ConcreteDefinition)):
+            key = value._view if isinstance(value, Node) else value._node_id
+            if key in seen:
+                return
+            seen.add(key)
+            yield path, role, value
+            if isinstance(value, Node):
+                from .node_pattern import _parameters
+                from ..utils.graph.path import Parameter
+                for name, child in _parameters(value).items():
+                    yield from walk(child, path.child(Parameter(name)))
+            else:
+                for edge in iter_value_edges(value):
+                    yield from walk(edge.value, path.child(edge.segment))
+        elif isinstance(value, (ObjectRef, StateRef)):
+            return
+        else:
+            from ..quoted import QuotedDef, SelectorSpec
+            if isinstance(value, (QuotedDef, SelectorSpec)):
+                return
+            for edge in iter_value_edges(value):
+                yield from walk(edge.value, path.child(edge.segment), role)
+
+    yield from walk(root, GraphPath())
+
+
+def _discovery_features(root):
+    """Return necessary correlated occurrence facts, never a semantic proof."""
+    from ..symbol import maybe_symbol_ref, ImportRef
+    from .node_pattern import _parameters
+    result = []
+    for path, role, node in _node_occurrences(root):
+        cls = maybe_symbol_ref(node.cls)
+        scalars = {name: [type(value).__name__, value] for name, value in _parameters(node).items()
+                   if type(value) in (str, int, bool, type(None))}
+        result.append({"path": path.to_data(), "role": role,
+                       "identity": None if getattr(node, "object_id", None) is None else node.object_id.to_data(),
+                       "state": None if getattr(node, "state", None) is None else
+                       [node.state.key.cdef_digest, node.state.key.codec_hash],
+                       "class": [cls.module, cls.qualname] if isinstance(cls, ImportRef) else None, "scalars": scalars})
+    return result
+
+
+def _discovery_rows(root, record):
+    """Derive contribution-scoped discovery postings from an authenticated root.
+
+    Rows reference the original root/path; they do not persist a second graph.
+    Independent membership and each represented identity domain remain distinct.
+    """
+    from ..node import _as_node_view, require_saved
+    for path, _, value in _node_occurrences(root):
+        node = _as_node_view(value)
+        choices = [("cdef", "creation", node.creation_view())] if isinstance(node, ConcreteDefinition) else [("cdef", "recipe", node)]
+        if node.identity_spec() or record.root_kind == "saved":
+            choices.append(("object_ref", "object", node.object_view()))
+        if node.state_spec() or record.root_kind == "saved":
+            try:
+                require_saved(node)
+            except (TypeError, ValueError):
+                pass
+            else:
+                choices.append(("state_ref", "saved", node))
+        for kind, projection, selected in choices:
+            yield {"kind": kind, "digest": selected.exact_digest(), "root": record.to_data(),
+                   "key_kind": kind,
+                   "object_digest": selected.object_projection_digest() if kind in {"object_ref", "state_ref"} else None,
+                   "recipe_digest": hashlib.sha256(b"dryml-recipe-root/v1\0" + selected.exact_key()).hexdigest() if kind == "cdef" else None,
+                   "saved_digest": (hashlib.sha256(b"dryml-saved-root/v1\0" + selected.exact_key()).hexdigest()
+                                    if kind == "state_ref" else None),
+                   "path": path.to_data(), "projection": projection,
+                   "stored": (kind == "object_ref" or not path and
+                              record.root_kind == ("recipe" if kind == "cdef" else "saved")),
+                   "features": _discovery_features(selected)}
 
 
 def _value_edges(value: Any, path: GraphPath) -> Iterator[DirectRelationship]:
@@ -256,7 +358,7 @@ def relationship_closure(
     pending = [(value, 0) for value in roots]
     while pending:
         value, depth = pending.pop()
-        if not isinstance(value, (ConcreteDefinition, ObjectRef, StateRef)):
+        if not isinstance(value, (ConcreteDefinition, ObjectRef, StateRef, LocalState)):
             raise TypeError("Relationship roots must be ConcreteDefinition, ObjectRef, or StateRef values.")
         key = identity_key(value)
         if key in retained:
@@ -289,7 +391,6 @@ def iter_relationship_occurrences(
     existential helpers below and intentionally ignore it.
     """
 
-    from .identity import Occurrence
 
     policy = normalize_edge_policy(edges)
     _validate_traversal_inputs(matches, through, path, max_occurrences, max_depth)
@@ -520,5 +621,5 @@ def _validate_max_depth(max_depth: int | None) -> None:
 
 
 def _require_relationship_value(value: object, label: str) -> None:
-    if not isinstance(value, (ConcreteDefinition, ObjectRef, StateRef)):
+    if not isinstance(value, (ConcreteDefinition, ObjectRef, StateRef, LocalState)):
         raise TypeError(f"{label} must be ConcreteDefinition, ObjectRef, or StateRef values.")

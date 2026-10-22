@@ -28,7 +28,7 @@ no automatic conversion. The Store-owned APIs currently available are:
 - `read_creation(cdef_digest)` / `inspect_states(cdef_digest, available_only=False)`:
   read detached creation/history metadata without Objects or payload IO.
   Inspection interprets one bucket once within a coherent batch. It is a complete
-  single-bucket inventory, not the later indexed/paged discovery interface.
+   single-bucket inventory; use `query().local_states(origin=...)` for indexed paging.
 - `read_state(key, destination=None, codec=None, codec_version=None)`: context-managed fresh validated
   data source. When supplied together, destination/codec/positive codec version are admitted before
   payload IO. Only `source.data_directory` is lent to a codec; framework metadata
@@ -48,8 +48,9 @@ maintain enabled SQLite schema-10/coverage-1 projections before complete success
 DirStore also supplies physical grants and active-use leases as described below.
 Ordinary Repo saves now use the format-4 Node/state-bucket pipeline described
 below. Node build/load/apply/restore use full-key state readers. Managed lifecycle
-and Query V3 remain separate consumer boundaries; legacy snapshot/declaration writers and Query V3 coverage
-are explicitly refused. `none`/`memory` have no persistent-maintenance obligation; `auto` uses
+remains a separate consumer boundary. Repo/Store queries use the current Node
+discovery consumer; legacy snapshot/declaration writers and standalone Query V3
+read views are explicitly refused on Store 4. `none`/`memory` have no persistent-maintenance obligation; `auto` uses
 usable SQLite and declares nonpersistent fallback only for optional-backend
 unavailability. Explicit `sqlite` never falls back. One persistent destination
 and compatible settings are bound per Store authority domain before mutation;
@@ -129,9 +130,10 @@ work, admitted before capture.
 Ordinary saves currently require the durable DirStore retained-batch seam.
 ZipStore still supports buffered low-level primitives, but its lack of durable
 owner grants makes ordinary retained save explicitly unsupported **before
-capture**. Requested annotation or lifecycle-observer feeds are likewise refused
-before capture; no empty metadata-coverage claim is made. These boundaries do not
-add Store-v3 migration.
+capture**. Ordinary saves support requested annotations and passive creation,
+environment, requirement and first-capture evidence through closed Node metadata
+records in the same journal/index batch. Managed operation lifecycle policy remains
+separate. These boundaries do not add Store-v3 migration.
 
 ### Build, Load, Partial Apply And Full Restore
 
@@ -318,8 +320,8 @@ remove only those retired remnants, never the new public `data/` directory.
 
 All grant, owner-ledger and availability changes enter the Store journal and
 enabled schema-10/coverage-1 index. The `retention` relation exposes per-key grant
-postings. Requested-metadata and managed-lifecycle relations remain explicitly
-unsupported. Missing reverse indexes may be rebuilt from authoritative records;
+postings. Requested metadata has its own supported closed relation; managed
+lifecycle associations remain explicitly unsupported. Missing reverse indexes may be rebuilt from authoritative records;
 they never authorize removal. Low-level `apply_prepared_mutation()` acquires key
 leases for state installations and refuses manual retention/availability
 transitions in favor of these owning primitives.
@@ -646,15 +648,21 @@ the owner's facts. Owner clear invalidates the shared epoch for every borrower,
 and owner close rejects while a borrower retains its lifetime. No reopened path or
 resource is stored in a content fact.
 
-## Query V3
+## Current Query Sources
 
 `Repo.query()` creates one unevaluated identity universe over connected Store
 authority and retained cache knowledge. `Store.query()` creates the equivalent
 single-Store universe. Use `sel()` for structural or exact identity restrictions,
-`cdefs()`/`object_refs()`/`state_refs()` for kind restrictions, and `collect()` or a
+`cdefs()`/`object_refs()`/`saved()` for graph domains, `local_states()` for full-key
+variant discovery, and `collect()` or a
 scalar terminal to evaluate. Query terminals never construct Objects or open
 payloads; load an identity explicitly with `load_object()` or an exact-state load
-method. See [Graph Querying](graph_querying.md) and [Query V3 Migration](query_v3_migration.md).
+method. Source graph results are Nodes; use `graph_equal()` for semantic equality
+after a fresh decode. See [Graph Querying](graph_querying.md) for current domains,
+bounded cuts, continuation failures, and observable repair/scan/refusal policy.
+`take(0)` reads no source. Exact full-StateKey hit/miss opens no index. Ready
+selective queries use bounded candidate pages, release fences before preparation
+and output, and reject changed continuation evidence explicitly.
 `Repo.load_state_ref(state_ref, reuse_live="matching")` is the exact-state load
 operation. It follows records across the connected Stores, not the current route
 map. `matching`, `greedy`, and `never` are live-reuse policies; structural
@@ -713,18 +721,41 @@ a conflict. Malformed alias scope or missing target remains an authority error.
 ## Persistent Metadata
 
 `Repo.get_metadata()`, `set_metadata()`, and `delete_metadata()` read, replace,
-and remove current whole mappings attached independently to exact ObjectRefs and
-StateRefs. Replacements are Store-local atomic LWW writes, not field merges.
+and remove current whole mappings attached independently to Node object projections
+and exact saved graphs. `scope="object"` / `scope="state"` selects the question
+explicitly. Without it, selected state implies state scope, otherwise object scope;
+stateless saved graphs therefore need explicit state scope. Replacements are
+Store-local journaled atomic LWW writes, not field merges, and synchronously update
+enabled indexing.
 `SaveAnnotations(object=..., state=...)` applies optional current replacements
 during save and captures the publication-time values in a new snapshot. `None`
 means no explicit replacement; `{}` is a present empty mapping.
 
-`Repo.get_snapshot_metadata()` returns immutable write-once save evidence,
+`Repo.get_snapshot_metadata(saved_node)` returns detached `NodeSnapshotMetadata`,
+the immutable first-capture save evidence,
 including UTC save time, environment, combined requirement outcome/coverage,
 diagnostics, lineage facts, and captured annotation copies. Repeated saves,
 copies, and later current edits do not refresh this record.
 `Repo.get_lineage_metadata()` returns known creation evidence or explicit unknown;
 it never infers creation from save or filesystem time.
+
+Node metadata uses the closed `dryml-node-metadata/v1` family under
+`metadata/{current_object,current_state,lineage,capture}/<shard>/<digest>.record`.
+Object scopes use object-projection addresses; state/capture scopes use exact
+saved-root addresses. Current replacements/deletions do not refresh captured
+annotations. Pure decoded/prepared metadata cannot establish current holder,
+source, availability, name or completeness evidence. Legacy snapshot-JSON content
+facts are not admitted by current Node readers.
+
+Exact Node loads freshly compare captured evidence among selected root holders
+and reconcile lineage evidence before constructors or restore hooks. Conflicting
+unqualified replicas require an explicit provider. Plans retain no authority
+verdict; each use revalidates. A validated destination/source preflight may be
+shared with exact equal captured graph metadata inside that private operation,
+without repeating every LocalState/destination compatibility check. Known lineage
+is installed on the live identity before later saves, including saves to another
+Store. Low-level graph publication need not carry a descriptive capture; explicitly
+requesting missing captured metadata still fails rather than inventing it.
 
 Metadata inspection validates authority without payload reads, materialization,
 probes, or optional framework imports. Multi-Store reads compare all target
