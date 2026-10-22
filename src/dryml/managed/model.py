@@ -70,6 +70,10 @@ class InvocationResult:
     value freshly validates authority and bytes on every access, raising
     ManagedResultError for missing/corrupt/replaced sources without reexecution.
     References retain metadata closure only, never private StateKey data grants.
+    cleanup_report entries are (Store domain, full StateKey, StateRemovalOutcome)
+    for physical garbage failures only. Retry the outcome's exact incarnation with
+    Store.retry_state_removal; grant/association/index failures never enter this
+    successful report. Historical final/status/value inspection survives state cleanup.
     """
     status: ManagedStatus
     execution: ExecutionIdentity

@@ -194,3 +194,28 @@ def test_current_save_does_not_mask_interruption(tmp_path, monkeypatch):
         repo.save_object_if_current(
             HistoryValue(1, repo=repo), alias="history", expected=None, store=store,
         )
+
+
+def test_retention_cleanup_preserves_saved_and_independent_recipe_history_on_rebuild(tmp_path, monkeypatch):
+    from dryml.core.node_prepare import NodePreparation
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    live = HistoryValue(4, repo=repo)
+    recipe = store.publish_node(live.definition)
+    saved, report = repo.save_object(live, report_stores=True)
+    saved_key = NodePreparation((saved,)).digest(saved, domain="dryml-saved-root/v1")
+    publication, = report.publications
+    assert [item.status for item in repo.release(publication.retention_token)] == ["removed"]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("historical inspection/index rebuild opened a payload")
+    monkeypatch.setattr(store, "read_state", forbidden)
+    monkeypatch.setattr(store, "_authenticate_state_data", forbidden)
+    index = store.open_query_index()
+    index.close()
+    index.path.unlink()
+    index.maintain_store()
+    assert store.read_node(saved_key, kind="saved").graph_equal(saved)
+    assert store.read_node(recipe.digest, kind="recipe").graph_equal(live.definition)
+    descriptor, = repo.inspect_states(saved.state.key.cdef_digest)
+    assert not descriptor.descriptor.available

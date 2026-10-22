@@ -56,6 +56,73 @@ def _validate_selection(repo, obj, original, selected):
     return build_exact_state_load_plan(repo, selected)
 
 
+def _cleanup_checkpoints(control, owner, operation_id, *, tokens=None):
+    from uuid import UUID
+    from dryml.core.store.retention import StateCleanupOutcome, _held
+    from .errors import ManagedRecoveryError
+    owner.require_owner()
+    current = control.inspect(operation_id)
+    preparation = control.read_preparation(operation_id)
+    if preparation is not None and not preparation.settled:
+        raise ManagedRecoveryError("pending_reconciliation", "settle checkpoint preparation before cleanup")
+    roots = {root.token: root for root in current.intents}
+    selected = tuple(root.token for root in current.intents if root.disposition != "released") if tokens is None else tuple(tokens)
+    if any(type(token) is not str or token not in roots for token in selected):
+        raise ManagedConflictError("unknown_checkpoint", "unknown checkpoint token")
+    selected = tuple(dict.fromkeys(selected))
+    if any(roots[token].disposition not in {"adopted", "release_pending", "released"} for token in selected):
+        raise ManagedRecoveryError("pending_reconciliation", "checkpoint adoption is unresolved")
+    if _held():
+        return tuple(StateCleanupOutcome(resource.domain, key, "in-use")
+            for token in selected for resource in roots[token].resources for key in resource.keys)
+    def unattempted(tokens):
+        return tuple(StateCleanupOutcome(resource.domain, key, "unattempted")
+            for token in tokens for resource in roots[token].resources for key in resource.keys)
+
+    pending = {token for token in selected if roots[token].disposition == "adopted"}
+    try:
+        if pending:
+            current = control._retire_checkpoint_roots(current, pending, "release_pending", owner=owner)
+    except BaseException as error:
+        error.cleanup_outcomes = unattempted(selected)
+        raise
+    stores = tuple(dict.fromkeys((*control.state_repo.stores, control.control_store)))
+    repo = Repo._for_state_io(stores)
+    outcomes, released, failures = [], set(), []
+    remaining = selected
+    try:
+        for index, token in enumerate(selected):
+            remaining = selected[index:]
+            owner.require_owner()
+            root = roots[token]
+            ledger = control.control_store.retention.read(str(UUID(token)))
+            from .runtime import _confirm_root
+            if ledger is None:
+                raise ManagedRecoveryError("missing_grant_intent", "checkpoint lacks retention authority")
+            _confirm_root(ledger, root.selection, resources=root.resources)
+            try:
+                outcomes.extend(repo.release(ledger, owner_store=control.control_store))
+            except Exception as error:
+                outcomes.extend(getattr(error, "cleanup_outcomes", ()))
+                failures.append(error)
+            remaining = selected[index + 1:]
+            if control.control_store.retention.read(ledger.token).disposition == "released":
+                released.add(token)
+        changed = {token for token in released if roots[token].disposition != "released"}
+        if changed:
+            current = control._retire_checkpoint_roots(current, changed, "released", owner=owner)
+    except BaseException as error:
+        nested = getattr(error, "cleanup_outcomes", ())
+        error.cleanup_outcomes = tuple(outcomes) + nested + unattempted(remaining[1:] if nested else remaining)
+        raise
+    finally:
+        repo.close(flush=False)
+    if failures:
+        failures[0].cleanup_outcomes = tuple(outcomes)
+        raise failures[0]
+    return tuple(outcomes)
+
+
 def _caller():
     try:
         task = asyncio.current_task()

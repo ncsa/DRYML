@@ -1,7 +1,7 @@
 # Managed Operations
 
-`dryml.managed` owns the lifecycle of state-mutating Object methods. Its **U17
-durable-result lifecycle** supports explicit checkpoints, optional immutable initial state,
+`dryml.managed` owns the lifecycle of state-mutating Object methods. Its
+durable-result lifecycle supports explicit checkpoints, optional immutable initial state,
 exact final selection, detached completion replay, deterministic starts,
 two-phase rerun, resume, operation-scoped ownership, fenced control CAS, metadata
 history, and independent status/interruption control. Importing Core does not
@@ -214,6 +214,75 @@ tokens. Initial, durable, independent user and active-reader protection are sepa
 Partial Core publications preserve their exact provisional resource ledger/report;
 they never become latest just because bytes exist. Pending recovery performs no
 capture, restore, body or callbacks. Later resumable execution freshly restores.
+
+### Explicit Retention And Cleanup By Operation
+
+During a body, `managed.retain(saved)` adds an independent explicit root for a
+complete compatible SavedNode, without capture, restore or private-state serialization.
+Repeating the exact retained selection is idempotent. `managed.release(saved)`
+releases matching explicit and durable roots only: initial/latest/final roots,
+another operation, independent user saves and active readers remain effective.
+Both validate the original active caller and owner/generation fence. Released root
+metadata remains inspectable. Explicit roots and durable checkpoints survive reruns
+until explicitly released.
+
+```python
+first = managed.checkpoint()
+managed.retain(first)
+# Later, after another checkpoint replaces latest:
+outcomes = managed.release(first)
+```
+
+Outside a body, use the selected control authority and detached operation ID:
+
+```python
+from dryml.managed.control import ManagedControlStore
+
+control = ManagedControlStore(control_store, repo)
+roots = control.list_checkpoints(result.execution.operation_id)
+outcomes = control.cleanup_checkpoints(
+    result.execution.operation_id, tokens=[root.token for root in roots]
+)
+historical_roots = control.list_checkpoints(
+    result.execution.operation_id, include_released=True
+)
+```
+
+Each root exposes its kind, token, saved selection, disposition and exact affected
+Store/full-key resources. Listing reads bounded current metadata, not payloads or
+all operation history. `tokens=None` explicitly cleans all remaining associations,
+including initial/latest/final/durable roots. Unknown tokens fail before release.
+Cleanup takes nonblocking operation ownership: an active invocation returns an
+`already_running` conflict immediately rather than waiting or interrupting it.
+Unsettled preparation requires separate reconciliation before explicit cleanup.
+
+Cleanup journals `release_pending` before releasing grants, then acknowledges
+`released` without erasing historical checkpoint/final/result metadata. A disconnected
+or failed grant target stays pending/protected. Reconnect its exact Store and retry
+the same tokens; acknowledged targets are not granted authority over other roots.
+The returned per-target `StateCleanupOutcome` entries use the Repo cleanup contract
+in [Repos and Stores](repos.md#inventory-explicit-retention-and-federated-cleanup).
+Independent targets continue after ordinary target failure; unsafe dependent work
+is unattempted. Grant/association/withdrawal/index failures never become successful
+garbage reports. Required failures in automatic checkpoint/rerun cleanup propagate
+with `.cleanup_outcomes`; independent completed deletions are preserved.
+
+An active foreign reader can leave a released root's payload `in-use`; no deletion
+is queued, so retry `repo.delete_states([key])` after that reader exits. Release
+inside the same caller's key scope instead reports `in-use` without retiring its
+root; retry release after leaving the scope. All own reader/publication leases end
+before automatic cleanup enters a separate exclusive deletion phase, never an upgrade.
+
+Only failure to remove already-unreferenced private garbage after confirmed
+authority/index changes preserves checkpoint/result success. `managed.cleanup_report`
+and `InvocationResult.cleanup_report` expose `(domain, key, removal_outcome)` entries;
+retry the exact incarnation via `store.retry_state_removal(key, removal_outcome.incarnation)`.
+Ordinary `InvocationResult` success is unchanged. Historical completion, exact saved
+references and `.value` remain inspectable after state cleanup. Loading reclaimed
+state raises unavailable; a compatible completed call replays its result without
+body, capture or restore. A separately unavailable ordinary-result source fails only
+on `.value`, without reexecution. No per-checkpoint whole-Store liveness scan or
+deletion of history is used to repair derived indexes.
 
 `interrupt(cause=None)` validates the optional BaseException cause, makes one explicit
 checkpoint, then requests and records interruption; the resulting ManagedInterrupted

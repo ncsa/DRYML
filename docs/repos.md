@@ -214,10 +214,67 @@ It serializes on the owner token, rejects abandoned/retired intents, acquires
 independent nonblocking exclusive key leases and refuses missing staging or a
 conflicting later cut. An uncertain grant remains protective until owner-fenced
 resolution. To retire a completed ordinary user root, release each target-local
-token from its report through that Store's retention authority. Releasing a root
-does not itself delete payloads. Provisional roots require conclusive abandonment
+token from its report with `repo.release(token, owner_store=publication.store)`.
+The Repo releases protection then attempts affected-key reclamation. The lower-level
+`Store.retention.release` releases grants only. Provisional roots require conclusive abandonment
 before release. Withdrawing/reinstalling an identical key uses a separate
 exclusive phase, never an upgrade of held shared leases.
+
+### Inventory, Explicit Retention And Federated Cleanup
+
+`repo.inspect_states(cdef_digest, available_only=False)` returns detached
+`StateInventoryEntry(domain, descriptor)` rows for one creation bucket across
+connected Stores. It reads metadata/presence only, constructs no Objects and reads
+no payload bytes. `descriptor.state.key` is the compound StateKey;
+`descriptor.available` distinguishes historical knowledge from published payloads.
+For indexed, bounded discovery use `repo.query().local_states(origin=...)`.
+
+`repo.retain(saved, owner_store=None)` validates an existing complete SavedNode's
+selected provider closure and returns an independent `RetentionIntentRecord` root
+handle. It captures/restores/serializes no private state. The durable owner defaults
+to `repo.default_store`. Keep that handle (owner UUID, token and affected resources)
+for explicit release; references alone do not grant retention. Ordinary saves already
+create their own independent user roots, so retaining again adds another reason.
+
+```python
+saved, publications = repo.save_object(obj, report_stores=True)
+extra_root = repo.retain(saved)
+for publication in publications.publications:
+    outcomes = repo.release(publication.retention_token, owner_store=publication.store)
+    # Still retained by extra_root (and any other independent roots).
+outcomes = repo.release(extra_root)  # only the affected Store/full-key closure
+
+inventory = repo.inspect_states(saved.state.key.cdef_digest)
+outcomes = repo.delete_states([entry.descriptor.state.key for entry in inventory])
+```
+
+`repo.delete_states(keys, store=None)` attempts every requested full key in each
+connected Store, or in the selected connected Store. `release(root, owner_store=None)`
+first retires the named owner's exact grants, then attempts only acknowledged
+resources. Both return tuples of `StateCleanupOutcome`: `domain`, `key`, `phase`,
+`status`, optional Core `outcome`, and optional `error`. Statuses include `removed`,
+`retained`, `in-use`, `unavailable`, `obsolete`, `cleanup-pending`, `failed`, and
+`unattempted`. Reports describe individual targets, never a distributed rollback or
+one global success. A removes/B fails/C continues when C is independently safe;
+disconnected targets and targets lacking prerequisite acknowledgements are unattempted.
+Root-retirement grant/owner/index failures raise with `.cleanup_outcomes` attached,
+including completed independent work. Deletion-phase errors are failed outcomes
+in both APIs. Direct deletion reports ordinary per-target failures;
+interruption raises with completed/failed/unattempted evidence.
+
+Deletion is nonblocking with respect to active use: it neither waits nor queues a
+deferred request. Release from within the same caller's active key scope returns
+`in-use` **without retiring the root**; explicitly retry release after that scope
+ends. Other readers keep protecting data after a root is retired. Shared publication/
+reader leases end before the separate exclusive deletion phase; no lock upgrade occurs.
+Physical garbage failure alone returns `cleanup-pending` after valid withdrawal/index
+updates. Use the matching Store's `retry_state_removal(key, outcome.incarnation)` for
+exact retry; a newer incarnation makes the old public-data deletion obsolete.
+
+Cleanup preserves saved graph/definition/manifest/name history and ordinary managed
+results. A later `repo.load(saved)` fails if its payload is unavailable; it does not
+invent state or reexecute completed work. Enabled index failures remain failures,
+and rebuilding an index never deletes historical authority to make it fit.
 
 ### Physical Retention And Active Use
 

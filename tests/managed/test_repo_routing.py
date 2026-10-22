@@ -1136,3 +1136,16 @@ def test_routed_stateful_parent_replica_cuts_keep_complete_view_evidence(tmp_pat
         repo.close(flush=False)
         for item in required:
             item.close()
+
+
+def test_retention_cleanup_reports_every_routed_child_authority(tmp_path):
+    """Public cleanup uses exact routed keys, preserving result and saved metadata."""
+    from tests.managed.test_retention_cleanup import CleanupGroup, routed
+    control, root, stores = routed(tmp_path)
+    CleanupGroup.action = lambda obj, ctx: {"done": True}
+    result = root.run(managed=ManagedConfig(state_repo=control.state_repo))
+    outcomes = control.cleanup_checkpoints(result.execution.operation_id)
+    assert {item.domain for item in outcomes} == {store.retention_domain for store in stores}
+    assert len(outcomes) == 3 and all(item.status == "removed" for item in outcomes)
+    assert result.value == {"done": True}
+    assert control.status(result.execution.operation_id).final.graph_equal(result.final_state_ref)

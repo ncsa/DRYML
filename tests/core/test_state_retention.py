@@ -664,3 +664,56 @@ def test_cleanup_cannot_reuse_its_operations_exclusive_recovery_lease(tmp_path):
         assert store.delete_state(key).status == "in-use"
         assert store.authority_cut() == before
     assert store.delete_state(key).status == "removed"
+
+
+def test_repo_federated_delete_continues_and_reports_every_full_key(tmp_path, monkeypatch):
+    from dryml.core import Repo
+    stores = [DirStore(tmp_path / name, query_index="none") for name in ("a", "b", "c")]
+    keys = [install(store) for store in stores]
+    assert keys[0] == keys[1] == keys[2]
+    def fail(key):
+        raise OSError("B withdrawal failed")
+    monkeypatch.setattr(stores[1], "delete_state", fail)
+    outcomes = Repo(stores).delete_states([keys[0]])
+    assert [item.status for item in outcomes] == ["removed", "failed", "removed"]
+    assert outcomes[1].error.args == ("B withdrawal failed",)
+    assert [Path(store.state_data_path(keys[0])).exists() for store in stores] == [False, True, False]
+
+
+def test_repo_saved_root_retain_release_and_inventory_without_reserialization(tmp_path, monkeypatch):
+    from dryml.core import Repo
+    from tests.managed.u16_fixtures import Value
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    saved, report = repo.save_object(Value(repo=repo), report_stores=True)
+    publication, = report.publications
+    def forbidden(*args, **kwargs):
+        pytest.fail("retain/release serialized or scanned historical inventory")
+    monkeypatch.setattr(store, "iter_state_ref_records", forbidden)
+    monkeypatch.setattr(store, "iter_stored_root_records", forbidden)
+    monkeypatch.setattr(Value, "save_state_to_dir_imp", forbidden)
+    root = repo.retain(saved)
+    assert [item.status for item in repo.release(publication.retention_token, owner_store=store)] == ["retained"]
+    assert [item.status for item in repo.release(root)] == ["removed"]
+    inventory, = repo.inspect_states(saved.state.key.cdef_digest)
+    assert inventory.domain == store.retention_domain
+    assert inventory.descriptor.state.key == saved.state.key and not inventory.descriptor.available
+    assert repo.inspect_states(saved.state.key.cdef_digest, available_only=True) == ()
+    from dryml.core.node_prepare import NodePreparation
+    digest = NodePreparation((saved,)).digest(saved, domain="dryml-saved-root/v1")
+    assert store.read_node(digest, kind="saved").graph_equal(saved)
+
+
+def test_repo_interrupted_cleanup_reports_completed_and_unattempted_targets(tmp_path, monkeypatch):
+    from dryml.core import Repo
+    stores = [DirStore(tmp_path / name, query_index="none") for name in ("a", "b", "c")]
+    key = install(stores[0])
+    for store in stores[1:]:
+        assert install(store) == key
+    def interrupt(key):
+        raise KeyboardInterrupt("withdrawal interrupted")
+    monkeypatch.setattr(stores[1], "delete_state", interrupt)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        Repo(stores).delete_states([key])
+    assert [item.status for item in caught.value.cleanup_outcomes] == ["removed", "failed", "unattempted"]
+    assert Path(stores[2].state_data_path(key)).is_dir()

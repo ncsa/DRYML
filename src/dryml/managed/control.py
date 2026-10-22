@@ -751,6 +751,60 @@ class ManagedControlStore:
             snapshot.interrupt_request is not None, "owner_lost" if lost else snapshot.failure_code,
             snapshot.producer_invocation_id)
 
+    def list_checkpoints(self, operation_id, *, include_released=False):
+        """Return detached root associations for one operation, without payload IO.
+
+        operation_id is a digest; include_released is an exact bool, default False.
+        Returns tuple[ControlIntent], including kind, saved selection, token and
+        affected full-key resources. Released metadata remains inspectable with
+        include_released=True; it confers no availability. Missing operations return
+        (). Corrupt/pending authority raises ManagedControlError. No owner wait,
+        serialization, historical inventory scan or retention change occurs.
+        """
+        if type(include_released) is not bool:
+            raise ManagedControlError("invalid_cleanup", "include_released must be bool")
+        current = self.inspect(operation_id)
+        return () if current is None else tuple(root for root in current.intents
+            if include_released or root.disposition != "released")
+
+    def cleanup_checkpoints(self, operation_id, *, tokens=None):
+        """Explicitly retire selected operation roots, preserving completion/history.
+
+        operation_id is a digest. tokens is an optional iterable of root UUID hex
+        strings from list_checkpoints(); None selects every remaining association,
+        including durable/initial/latest/final roots. Returns per-Store/full-key
+        StateCleanupOutcomes, continuing independently safe targets after failure.
+        Unknown tokens fail before effects. Active owners raise ManagedConflictError
+        immediately; this method never interrupts or waits for them. Grant/control/
+        index failures during root retirement propagate with cleanup_outcomes and
+        durable release-pending evidence. Deletion-phase errors are failed outcomes.
+        Only physical garbage failure returns cleanup-pending. Ordinary
+        results, historical references and lifecycle state are never deleted or
+        rewritten as unfinished; subsequent loads revalidate availability.
+        """
+        current = self.inspect(operation_id)
+        if current is None:
+            if tokens is not None and tuple(tokens):
+                raise ManagedConflictError("unknown_checkpoint", "unknown checkpoint token")
+            return ()
+        with self.state_repo.retain_topology():
+            with OperationOwnership(self._domain, operation_id, self._owner_path(operation_id)) as owner:
+                self.reconcile(operation_id, owner=owner)
+                from .storage import _cleanup_checkpoints
+                return _cleanup_checkpoints(self, owner, operation_id, tokens=tokens)
+
+    def _retire_checkpoint_roots(self, current, tokens, disposition, *, owner):
+        self._require_owner(owner, current.operation_id)
+        if not _same_snapshot_bytes(self.inspect(current.operation_id), current):
+            raise ManagedConflictError("generation_conflict", "cleanup authority changed")
+        proposed = replace(current, generation=current.generation + 1,
+            intents=tuple(replace(root, disposition=disposition) if root.token in tokens else root
+                          for root in current.intents))
+        # Cleanup owns only root disposition. Producer/run/result/recovery metadata
+        # stays historical, including when this owner is not the producer invocation.
+        self._publish(current, proposed)
+        return proposed
+
     def create_initial(self, snapshot, *, owner):
         """Commit generation-one snapshot under its exact admission token.
 

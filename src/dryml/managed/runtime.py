@@ -342,19 +342,13 @@ def _settle_preparation(control, owner, preparation):
                 if retired is None:
                     raise ManagedRecoveryError("missing_grant_intent", "superseded root lacks physical retention authority")
                 _confirm_root(retired, intent.selection, resources=intent.resources)
-                released = retention.release(retired.token, _stores(control))
-                if released.disposition != "released":
-                    raise ManagedRecoveryError("release_pending", "superseded root target remains disconnected")
-                _reclaim_resources(control, owner, retired.resources)
+                _release_and_reclaim(control, owner, retired)
     elif ledger is not None:
         # The managed abandonment tombstone above also fences an already-adopted
         # physical grant whose current CAS never committed.
         if ledger.disposition == "prepared":
             retention.abandon(token)
-        released = retention.release(token, _stores(control))
-        if released.disposition != "released":
-            raise ManagedRecoveryError("release_pending", "abandoned start target remains disconnected")
-        _reclaim_resources(control, owner, ledger.resources)
+        _release_and_reclaim(control, owner, ledger)
     control.write_preparation(replace(settled, settled=True), owner=owner, expected=settled)
     return ("run_admitted" if admitted else "preparation_abandoned"), current
 
@@ -452,19 +446,39 @@ def _confirm_root(ledger, selected, *, resources=None):
         raise ManagedRecoveryError("grant_evidence_mismatch", "retention ledger differs from exact saved root evidence")
 
 
-def _reclaim_resources(control, owner, resources):
-    targets = {store.retention_domain: store for store in _stores(control)}
-    for resource in resources:
-        target = targets.get(resource.domain)
-        if target is None:
-            raise ManagedRecoveryError("cleanup_disconnected", "retired resource target remains disconnected")
-        for key in resource.keys:
-            owner.require_owner()
-            outcome = target.delete_state(key)
-            # Core reports only already-unreferenced physical garbage OSErrors as
-            # cleanup_error. Grant/journal/index failures propagate, never success.
-            if outcome.cleanup_error is not None:
-                owner.cleanup_report += ((resource.domain, key, outcome),)
+def _release_and_reclaim(control, owner, ledger):
+    from dryml.core import Repo
+    from dryml.core.store.retention import RetentionReleasePending
+    owner.require_owner()
+    repo = Repo._for_state_io(_stores(control))
+    try:
+        try:
+            outcomes = repo.release(ledger, owner_store=control.control_store)
+        except Exception as error:
+            _record_cleanup(owner, getattr(error, "cleanup_outcomes", ()))
+            if isinstance(error, RetentionReleasePending):
+                failure = ManagedRecoveryError("release_pending", "retired root target remains disconnected")
+                failure.cleanup_outcomes = error.cleanup_outcomes
+                raise failure from error
+            raise
+        _record_cleanup(owner, outcomes)
+        _require_cleanup(outcomes)
+    finally:
+        repo.close(flush=False)
+
+
+def _record_cleanup(owner, outcomes):
+    for item in outcomes:
+        if item.outcome is not None and item.outcome.cleanup_error is not None:
+            owner.cleanup_report += ((item.domain, item.key, item.outcome),)
+
+
+def _require_cleanup(outcomes):
+    failed = next((item for item in outcomes if item.status in {"failed", "unattempted"}), None)
+    if failed is not None:
+        error = failed.error or ManagedRecoveryError("cleanup_disconnected", "retired resource target remains disconnected")
+        error.cleanup_outcomes = outcomes
+        raise error
 
 
 def _recover_finalization(control, owner, current):

@@ -231,6 +231,92 @@ class StateRemovalOutcome:
     cleanup_error: OSError | None = None
 
 
+@dataclass(frozen=True)
+class StateInventoryEntry:
+    """Detached federated inventory row; construction performs no IO.
+
+    domain is a Store authority UUID and descriptor its StateDescriptor. The
+    descriptor distinguishes known history from current availability, not a lease.
+    No Store handle or private payload is retained; readers own field validation.
+    """
+
+    domain: str
+    descriptor: object
+
+
+@dataclass(frozen=True)
+class StateCleanupOutcome:
+    """One Store/full-key cleanup result, without a global transaction claim.
+
+    domain/key identify the exact target. phase is removal or release. status is a Core removal status or
+    failed/unattempted. outcome is optional StateRemovalOutcome (including exact
+    incarnation retry evidence); error is an optional authority/IO exception.
+    Construction performs no IO or validation. Failed/unattempted outcomes never
+    certify withdrawal, grant release or enabled-index completion.
+    """
+
+    domain: str
+    key: object
+    status: str
+    outcome: StateRemovalOutcome | None = None
+    error: BaseException | None = None
+    phase: str = "removal"
+
+
+class RetentionReleasePending(StoreAuthorityError):
+    """An explicit root retirement has disconnected/unconfirmed affected targets.
+
+    intent is the current RetentionIntentRecord; outcomes is the immutable tuple of
+    per-target cleanup evidence. Both are exposed as retention_intent and
+    cleanup_outcomes. Construction performs no IO and does not authorize deletion.
+    """
+
+    def __init__(self, intent, outcomes):
+        """Bind pending intent and per-target outcomes without IO; return None."""
+        super().__init__("Retained root release remains pending; reconnect its exact targets.")
+        self.retention_intent, self.cleanup_outcomes = intent, outcomes
+
+
+def reclaim_resources(resources, stores, *, blocked=(), before=None):
+    """Reclaim only named full keys, continuing independently safe targets.
+
+    resources is RetentionResource values, stores connected handles, blocked
+    domains lack prerequisite confirmation, and optional before() rechecks caller
+    ownership before each attempt. Returns tuple[StateCleanupOutcome]. Disconnected
+    or blocked targets are unattempted. Ordinary deletion failures are reported;
+    interruption and before() failures propagate, with no further attempts. No
+    grant release, inventory scan or lease upgrade is performed.
+    """
+    connected = RetentionAuthority._targets(stores)
+    result = []
+    targets = tuple((resource.domain, key) for resource in resources for key in resource.keys)
+    for index, (domain, key) in enumerate(targets):
+        target = connected.get(domain)
+        if target is None or domain in blocked:
+            result.append(StateCleanupOutcome(domain, key, "unattempted"))
+            continue
+        try:
+            if before is not None:
+                before()
+        except BaseException as error:
+            error.cleanup_outcomes = tuple(result) + tuple(
+                StateCleanupOutcome(d, k, "unattempted") for d, k in targets[index:])
+            raise
+        try:
+            outcome = target.delete_state(key)
+        except Exception as error:
+            result.append(StateCleanupOutcome(domain, key, "failed", error=error))
+        except BaseException as error:
+            # Interrupted withdrawal may already be visible. Do not label that
+            # target removed; remaining independent work was never attempted.
+            error.cleanup_outcomes = tuple(result) + (StateCleanupOutcome(domain, key, "failed", error=error),) + tuple(
+                StateCleanupOutcome(d, k, "unattempted") for d, k in targets[index + 1:])
+            raise
+        else:
+            result.append(StateCleanupOutcome(domain, key, outcome.status, outcome))
+    return tuple(result)
+
+
 _HELD = ContextVar("dryml_state_key_leases", default=())
 _WRITERS = ContextVar("dryml_state_writer_fences", default=())
 

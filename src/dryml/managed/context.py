@@ -19,7 +19,9 @@ class ManagedContext:
     complete SavedNode before notifying callbacks. initial_state and final_state
     accept complete compatible saved graphs without capture or restore. Initial is
     operation-wide and immutable; final selection protects its exact graph while
-    completed-result authority remains owned by the result finalizer. Foreign/retired/recursive use raises
+    completed-result authority remains owned by the result finalizer. retain/release
+    manage independent explicit/durable roots without private-state serialization.
+    Foreign/retired/recursive use raises
     ManagedContextError; stale ownership raises ManagedConflictError. Accepted
     interruption always prevents completion, even when author code catches it.
     """
@@ -194,6 +196,50 @@ class ManagedContext:
         if self._final is None or not _selection_equal(self._final, state):
             _associate_state(self, state, "final")
         self._final = state
+
+    def retain(self, state):
+        """Add an independent explicit root for a compatible complete SavedNode.
+
+        state is existing saved metadata, freshly validated against the receiver.
+        Returns None; no capture, restore, payload serialization or callback occurs.
+        Repeated exact retained selections are idempotent. The root survives rerun
+        until release() or explicit operation cleanup. Stale/foreign/recursive use,
+        incompatible/unavailable state and publication/grant/index failures raise
+        before claiming a confirmed retained association.
+        """
+        self._require_mutation()
+        from .storage import _validate_selection
+        from .runtime import _associate_state
+        current = self._safe_point()
+        _validate_selection(self.state_repo, self._obj, current.receiver, state)
+        if not any(root.kind == "root" and root.disposition == "adopted"
+                   and _selection_equal(root.selection, state) for root in current.intents):
+            _associate_state(self, state, "root")
+
+    def release(self, state):
+        """Release this operation's explicit/durable roots matching saved state.
+
+        state is SavedNode metadata; exact semantic/retained-construction equality
+        selects roots, without loading or serializing private data. Initial, latest,
+        final, other-operation and user-save roots survive. Returns per-target
+        StateCleanupOutcomes, including retained/in-use and independent failures.
+        Same-caller active key scopes return in-use without retirement; retry after
+        those scopes end. Unknown selections raise ManagedConflictError. Required
+        authority/index failures propagate with cleanup_outcomes; only physical
+        garbage failure is cleanup-pending. No history or ordinary result is deleted.
+        """
+        self._require_mutation()
+        from .storage import _cleanup_checkpoints
+        current = self._safe_point()
+        tokens = tuple(root.token for root in current.intents if root.kind in {"root", "durable"}
+                       and root.disposition != "released" and _selection_equal(root.selection, state))
+        if not tokens:
+            raise ManagedConflictError("unknown_checkpoint", "no explicit or durable root matches selection")
+        try:
+            return _cleanup_checkpoints(self._control, self._admission, self.operation_id, tokens=tokens)
+        finally:
+            observed = self._control.inspect(self.operation_id)
+            self._snapshot, self._generation = observed, observed.generation
 
     def interrupt(self, *, cause=None):
         """Checkpoint once then terminate this invocation with ManagedInterrupted.

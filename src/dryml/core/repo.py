@@ -907,6 +907,9 @@ class Repo:
     Retention does not change live Object weak/strong cache policies or expose
     shared mutable public values. ``clear_cache`` and accepted owner close discard
     facts independently of those live-cache policies.
+    Saved-root retain/release and affected-full-key cleanup preserve metadata
+    history. Federated inventory is metadata-only; cleanup reports each target
+    independently and never claims distributed rollback or payload availability.
     """
     # Trackers
     _num_saves: int
@@ -4312,6 +4315,115 @@ class Repo:
                 if main:
                     self.main_def = obj.definition
                 return (state_ref, report) if report_stores else state_ref
+
+    def inspect_states(self, cdef_digest, *, available_only=False):
+        """Inventory one creation bucket in each connected Store, without payload IO.
+
+        cdef_digest is a carried creation digest; available_only is bool. Returns
+        tuple[StateInventoryEntry] in Store order, distinguishing historical
+        descriptors from currently available variants. No Objects are constructed
+        and no future availability is promised. Invalid/corrupt/unsupported Store
+        evidence raises its original error; no partial inventory is called complete.
+        """
+        from .store.retention import StateInventoryEntry
+        with self.retain_topology():
+            return tuple(StateInventoryEntry(store.retention_domain, descriptor)
+                         for store in self.stores
+                         for descriptor in store.inspect_states(cdef_digest, available_only=available_only))
+
+    def delete_states(self, keys, *, store=None):
+        """Try immediate full-key deletion through the connected Store federation.
+
+        keys is an iterable of StateKeys; optional store selects one connected
+        Store. Returns tuple[StateCleanupOutcome], in Store then sorted key order,
+        including every requested target. Independent targets continue after an
+        ordinary failure. Retained/in-use is immediate and queues nothing; physical
+        garbage failure carries incarnation retry evidence. Metadata/history remains.
+        Malformed keys/Store selection and interruptions raise; per-target authority,
+        capability and index errors are failed outcomes, never global success.
+        """
+        from .store.retention import RetentionResource, _keys, reclaim_resources
+        keys = _keys(set(keys))
+        with self.retain_topology():
+            targets = tuple(self.stores) if store is None else (self._ensure_store(store),)
+            resources = tuple(RetentionResource(target.retention_domain, keys) for target in targets)
+            return reclaim_resources(resources, targets)
+
+    def retain(self, saved, *, owner_store=None):
+        """Retain an existing SavedNode without capture, restore or serialization.
+
+        saved must be complete and freshly available in this Repo. owner_store is
+        an optional connected durable Store (default: default_store). Returns its
+        RetentionIntentRecord, an explicit independent root handle for release().
+        Only this graph's selected provider/full-key closure is visited. Protection
+        precedes adoption; errors propagate and preserve provisional intent/grants
+        for explicit reconciliation, never infer abandonment or remove old roots.
+        """
+        from .materialization import build_exact_state_load_plan
+        with self.retain_topology():
+            owner = self.default_store if owner_store is None else self._ensure_store(owner_store)
+            retention = owner.retention
+            plan = build_exact_state_load_plan(self, saved)
+            targets = {}
+            for action in plan.actions:
+                targets.setdefault(action.store, set()).add(action.state.key)
+            token = str(uuid4())
+            retention.prepare(token, saved.exact_digest(), targets.items())
+            retention.protect(token, self.stores)
+            return retention.adopt(token, self.stores)
+
+    def release(self, root, *, owner_store=None):
+        """Release one owned retained-root handle and reclaim its affected keys.
+
+        root is a RetentionIntentRecord from retain(), or a UUID token from a save
+        publication report. owner_store defaults to this Repo's default Store and
+        must match the handle's owner. Returns tuple[StateCleanupOutcome]. Other
+        roots/readers remain effective. A same-caller active key lease returns
+        in-use without retiring the root; retry explicitly after that scope ends.
+        Grant/owner/index failures raise with cleanup_outcomes attached; independently
+        acknowledged targets still reclaim and unsafe dependents are unattempted.
+        Deletion-phase authority/index failures are explicit failed outcomes.
+        Only physical garbage failure is a successful cleanup-pending outcome.
+        No graph/result/history metadata or private payload is serialized or removed
+        to repair derived state. Interrupted work preserves its exact resource ledger.
+        """
+        from .store.retention import (
+            RetentionIntentRecord, RetentionReleasePending, StateCleanupOutcome,
+            _held, reclaim_resources,
+        )
+        with self.retain_topology():
+            owner = self.default_store if owner_store is None else self._ensure_store(owner_store)
+            token = root.token if isinstance(root, RetentionIntentRecord) else root
+            intent = owner.retention.read(token)
+            if intent is None or isinstance(root, RetentionIntentRecord) and (
+                    root.owner_domain != owner.retention_domain or root.resources != intent.resources
+                    or root.graph_digest != intent.graph_digest):
+                raise StoreAuthorityError("Retained root is missing or belongs to another owner.")
+            if _held():
+                return tuple(StateCleanupOutcome(resource.domain, key, "in-use")
+                             for resource in intent.resources for key in resource.keys)
+            error = None
+            try:
+                released = owner.retention.release(token, self.stores)
+            except Exception as failure:
+                error = failure
+                released = getattr(failure, "retention_intent", None)
+            except BaseException as failure:
+                failure.cleanup_outcomes = tuple(StateCleanupOutcome(resource.domain, key, "unattempted")
+                    for resource in intent.resources for key in resource.keys)
+                raise
+            confirmed = () if released is None else released.released_targets
+            blocked = {resource.domain for resource in intent.resources} - set(confirmed)
+            outcomes = reclaim_resources(intent.resources, self.stores, blocked=blocked)
+            if error is not None:
+                failures = dict(getattr(error, "retention_failures", ()))
+                outcomes = tuple(replace(item, status="failed", error=failures[item.domain], phase="release")
+                                 if item.domain in failures else item for item in outcomes)
+                error.cleanup_outcomes = outcomes
+                raise error
+            if released.disposition != "released":
+                raise RetentionReleasePending(released, outcomes)
+            return outcomes
 
     def describe(self, obj):
         """Return a ConcreteNode realization view from retained live construction.
