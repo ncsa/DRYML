@@ -1,134 +1,75 @@
-"""U6 resume coverage using a deliberately seeded associated checkpoint."""
+"""Current-format U15 resume admission, independent of U16/U17 completion."""
 
-from __future__ import annotations
+from dataclasses import replace
 
-from uuid import uuid4
-
-from dryml.core import Repo
-from dryml.core.object import Pickleable
-from dryml.core.store.dir import DirStore
 import pytest
 
-pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-
-from dryml.managed import ManagedConfig, ManagedRecoveryError, ManagedRerunRequiredError, managed_operation
-from dryml.managed.control import ControlSnapshot, ManagedControlStore
-from dryml.managed.identity import argument_digest, operation_digest
-from dryml.managed.storage import ownership_evidence
+from dryml.core.repo import RepoLoadError
+from dryml.managed import ManagedConfig
+from dryml.managed.errors import ManagedRerunRequiredError
+from tests.managed.u15_fixtures import Value, enter, seed, setup
 
 
-class ResumeValue(Pickleable):
-    """Stateful receiver whose method proves exact restoration before re-entry."""
-
-    def __init__(self, value=0):
-        self.value = value
-
-    @managed_operation(resumable=True)
-    def add(self, amount, *, managed):
-        """Return scalar resume metadata after mutating restored state."""
-
-        was_resuming = managed.is_resuming
-        self.value += amount
-        return was_resuming, self.value
+def test_resume_restores_latest_keeps_run_and_changes_invocation(tmp_path):
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved)
+    live.value = 91
+    resumed, value, resuming = enter(control, live)
+    assert (value, resuming) == (1, True)
+    assert resumed.run_id == old.run_id and resumed.invocation_id != old.invocation_id
+    assert resumed.checkpoint.graph_equal(saved)
+    assert (Value.restores, Value.captures, Value.bodies) == (1, 0, 0)
 
 
-def test_resume_restores_the_supplied_live_target_and_keeps_attempt_identity(tmp_path):
-    """A compatible unfinished authority restores then re-enters under a new owner."""
-
-    store = DirStore(tmp_path / "state")
-    repo = Repo((store,))
-    value = ResumeValue(4, repo=repo)
-    checkpoint = repo.save_object(value, store=store, deep_capture=True)
-    operation = value.add
-    operation_id = operation_digest(value.object_ref, "add")
-    arguments = argument_digest(ResumeValue.add, value, (3,), {"managed": None})
-    attempt_id = uuid4().hex
-    ManagedControlStore(store, repo).create_initial(ControlSnapshot(
-        operation_id, value.object_ref.digest(), arguments, "add", attempt_id, None,
-        1, "interrupted", None, checkpoint.digest(), None, None,
-        ownership_evidence(repo, value.object_ref.objects.values()),
-    ))
-    value.value = 99
-
-    was_resuming, result = operation(3, managed=ManagedConfig(state_repo=store))
-    status = operation.status(state_repo=store)
-    assert (was_resuming, result, value.value) == (True, 7, 7)
-    assert status.checkpoint_state_ref == checkpoint
-    assert status.attempt_id == attempt_id
-    assert status.state == "completed"
-
-
-def test_resume_requires_matching_arguments_and_an_associated_checkpoint(tmp_path):
-    """Incomplete or incompatible current authority cannot silently enter workload."""
-
-    store = DirStore(tmp_path / "state")
-    repo = Repo((store,))
-    value = ResumeValue(4, repo=repo)
-    operation_id = operation_digest(value.object_ref, "add")
-    arguments = argument_digest(ResumeValue.add, value, (3,), {"managed": None})
-    authority = ManagedControlStore(store, repo)
-    authority.create_initial(ControlSnapshot(
-        operation_id, value.object_ref.digest(), arguments, "add", uuid4().hex, None,
-        1, "interrupted", None, None, None, None,
-        ownership_evidence(repo, value.object_ref.objects.values()),
-    ))
-
+def test_nonresumable_unfinished_requires_rerun_even_with_latest(tmp_path):
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, descriptor=Value.fixed)
     with pytest.raises(ManagedRerunRequiredError, match="rerun_required"):
-        value.add(4, managed=ManagedConfig(state_repo=store))
-    assert value.value == 4
+        enter(control, live, descriptor=Value.fixed)
+    assert control.inspect(old.operation_id) == old and Value.restores == 0
 
 
-class RestoreFailureValue(Pickleable):
-    """Receiver with a controlled restore-hook failure for invalid-target recovery."""
-
-    fail_restore = False
-
-    def __init__(self, value=0):
-        self.value = value
-
-    def restore_state_from_dir_imp(self, src_dir, *, codec):
-        """Fail before the default payload hook when the class seam requests it."""
-
-        if type(self).fail_restore:
-            raise RuntimeError("restore failed")
-
-    @managed_operation(resumable=True)
-    def add(self, amount, *, managed):
-        """Mutate restored state after a successful managed resume."""
-
-        self.value += amount
-        return self.value
+def test_resume_never_falls_back_from_unavailable_latest_to_initial(tmp_path, monkeypatch):
+    control, live, initial = setup(tmp_path)
+    live.value = 2
+    latest = control.state_repo.save(live)
+    Value.captures = 0
+    old = seed(control, live, latest, initial=initial)
+    selected = []
+    def missing(keys):
+        keys = tuple(keys)
+        assert initial.state.key not in keys
+        selected.extend(keys)
+        raise RepoLoadError("latest unavailable")
+    monkeypatch.setattr(control.control_store, "read_states", missing)
+    with pytest.raises(RepoLoadError):
+        enter(control, live)
+    assert control.inspect(old.operation_id) == old
+    assert selected == [latest.state.key]
+    assert (Value.restores, Value.captures, Value.bodies) == (0, 0, 0)
 
 
-def test_restore_failure_invalidates_old_target_but_fresh_load_can_resume(tmp_path):
-    """Failed in-place restore retains checkpoint authority while retiring old live state."""
+@pytest.mark.parametrize("phase", ["completed", "interrupted", "failed"])
+def test_changed_arguments_require_explicit_rerun_before_effects(tmp_path, phase):
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state=phase)
+    with pytest.raises(ManagedRerunRequiredError, match="argument_mismatch"):
+        enter(control, live, amount=3)
+    assert control.inspect(old.operation_id) == old
+    assert Value.restores == 0
 
-    store = DirStore(tmp_path / "state")
-    repo = Repo((store,))
-    value = RestoreFailureValue(4, repo=repo)
-    checkpoint = repo.save_object(value, store=store, deep_capture=True)
-    operation_id = operation_digest(value.object_ref, "add")
-    arguments = argument_digest(RestoreFailureValue.add, value, (3,), {"managed": None})
-    attempt_id = uuid4().hex
-    ManagedControlStore(store, repo).create_initial(ControlSnapshot(
-        operation_id, value.object_ref.digest(), arguments, "add", attempt_id, None,
-        1, "interrupted", None, checkpoint.digest(), None, None,
-        ownership_evidence(repo, value.object_ref.objects.values()),
-    ))
-    RestoreFailureValue.fail_restore = True
-    try:
-        with pytest.raises(Exception, match="restore failed"):
-            value.add(3, managed=ManagedConfig(state_repo=store))
-        with pytest.raises(ManagedRecoveryError, match="fresh exact load"):
-            value.add(3, managed=ManagedConfig(state_repo=store, rerun=True))
-        assert value.add.status(state_repo=store).checkpoint_state_ref == checkpoint
-        RestoreFailureValue.fail_restore = False
-        fresh = Repo._for_state_io((store,))
-        try:
-            recovered = fresh.load_state_ref(checkpoint, reuse_live="never")
-            assert recovered.add(3, managed=ManagedConfig(state_repo=store)) == 7
-            assert recovered.add.status(state_repo=store).attempt_id == attempt_id
-        finally:
-            fresh.close()
-    finally:
-        RestoreFailureValue.fail_restore = False
+
+def test_resumed_failure_preserves_latest_for_fresh_resume(tmp_path):
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved)
+    def fail(*args):
+        raise ValueError("body seam failed")
+    with pytest.raises(ValueError, match="body seam failed"):
+        enter(control, live, execute=fail)
+    failed = control.inspect(old.operation_id)
+    assert failed.state == "failed" and failed.run_id == old.run_id
+    live.value = 99
+    current, value, resuming = enter(control, live)
+    assert resuming and value == 1 and current.run_id == old.run_id
+    assert len({old.invocation_id, failed.invocation_id, current.invocation_id}) == 3
+    assert (Value.restores, Value.captures, Value.bodies) == (2, 0, 0)

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from dryml.core.repo import Repo
+from dryml.core.node import require_saved
+from dryml.core.definition import SavedNode
 from dryml.core.store.dir import DirStore
 from dryml.core.store.store import Store
 
@@ -23,13 +25,16 @@ class ManagedConfig:
         state_repo: Optional borrowed :class:`~dryml.core.repo.Repo` or existing
             :class:`~dryml.core.store.store.Store` selected for Object state.
         control_store: Optional supported DirStore selected for control authority.
-        rerun: Exact bool requesting a fresh attempt when lifecycle support is
-            available.
+        rerun: Exact bool requesting a new run, with fresh run/invocation UUIDs.
+        start_from: Optional complete SavedNode for this run only. Supplying it
+            requires explicit rerun at invocation, even for an absent operation.
+            Metadata completeness is checked here; availability at preparation.
         callbacks: ``None`` or a list of at most 64 callable checkpoint observers.
 
     Raises:
-        ManagedConfigError: If ``rerun`` or ``callbacks`` violates the closed
-            caller grammar.
+        ManagedConfigError: If ``rerun``, ``callbacks`` or saved-start metadata
+            violates the closed caller grammar. The explicit-rerun requirement
+            for a supplied start is enforced by invocation before effects.
         ManagedStoreError: If state authority is not a Repo or Store, or control
             authority is not an exact DirStore.
 
@@ -52,6 +57,7 @@ class ManagedConfig:
     state_repo: Repo | Store | None = None
     control_store: DirStore | None = None
     rerun: bool = False
+    start_from: SavedNode | None = None
     callbacks: list[Callback] | None = None
 
     def __post_init__(self) -> None:
@@ -63,6 +69,11 @@ class ManagedConfig:
             raise ManagedStoreError(message="control_store must be a DirStore")
         if type(self.rerun) is not bool:
             raise ManagedConfigError(message="rerun must be an exact bool")
+        if self.start_from is not None:
+            try:
+                require_saved(self.start_from)
+            except (TypeError, ValueError) as error:
+                raise ManagedConfigError("invalid_start", "start_from must be complete SavedNode metadata") from error
         if self.callbacks is not None:
             if type(self.callbacks) is not list:
                 raise ManagedConfigError(message="callbacks must be a list or None")
@@ -101,6 +112,7 @@ class ManagedConfig:
             state_repo=self.state_repo,
             control_store=self.control_store,
             rerun=self.rerun,
+            start_from=self.start_from,
             callbacks=callback_snapshot,
         )
 
@@ -112,4 +124,5 @@ class _ResolvedManagedConfig:
     state_repo: Repo | Store | None
     control_store: DirStore | None
     rerun: bool
+    start_from: SavedNode | None
     callbacks: tuple[Callback, ...]

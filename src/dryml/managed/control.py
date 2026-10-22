@@ -103,14 +103,24 @@ def _node(data, *, saved=False):
         raise ManagedControlError("invalid_node", "incompatible nested managed Node metadata") from error
 
 
-@dataclass(frozen=True, slots=True)
+def _node_equal(left, right):
+    return left is right or left is not None and right is not None and left.graph_equal(right)
+
+
+def _same_snapshot_bytes(left, right):
+    # Logical graph equality cannot authenticate a persisted packet's placement.
+    return left is right or left is not None and right is not None and left.to_bytes() == right.to_bytes()
+
+
+@dataclass(frozen=True, slots=True, eq=False)
 class ControlHistory:
     """Retained metadata-only run/invocation outcome, independent of private data.
 
     run_id/invocation_id are UUID hex, generation is a positive fence, state is a
     lifecycle string, and checkpoint/final are optional SavedNodes. Invalid fields
     raise ManagedControlError. This immutable value performs no payload IO, grants
-    no retention and never recursively embeds earlier history.
+    no retention and never recursively embeds earlier history. Equality compares
+    exact logical Node graphs, independent of newly allocated handles/packet labels.
     """
     run_id: str
     invocation_id: str
@@ -141,6 +151,15 @@ class ControlHistory:
                 "generation": self.generation, "state": self.state,
                 "checkpoint": _node_data(self.checkpoint), "final": _node_data(self.final)}
 
+    def __eq__(self, other):
+        return (type(other) is ControlHistory
+                and (self.run_id, self.invocation_id, self.generation, self.state) ==
+                    (other.run_id, other.invocation_id, other.generation, other.state)
+                and _node_equal(self.checkpoint, other.checkpoint)
+                and _node_equal(self.final, other.final))
+
+    __hash__ = None
+
     @classmethod
     def from_data(cls, data):
         """Decode history mapping; incompatible nested metadata raises ManagedControlError."""
@@ -150,14 +169,18 @@ class ControlHistory:
                    _node(data["checkpoint"], saved=True), _node(data["final"], saved=True))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class ControlIntent:
     """Fenced root/publication disposition and exact affected-resource evidence.
 
     token/run_id/invocation_id are UUID hex, generation is its preparation fence,
     disposition is prepared/adopted/abandoned/release_pending/released, resources
-    is a tuple of Core RetentionResource values. Validation raises ManagedControlError.
-    This ledger authorizes no physical release on its own and performs no IO.
+    is a tuple of Core RetentionResource values. kind is root/initial/start/latest/
+    final/durable; typed reasons require selection SavedNode metadata. Root intent
+    v2 explicitly rejects v1 nested input. Validation raises ManagedControlError.
+    Equality compares full resource values and exact logical selection graphs,
+    not packet labels or digests alone. This ledger authorizes no physical release
+    on its own and performs no IO.
     """
     token: str
     run_id: str
@@ -165,6 +188,8 @@ class ControlIntent:
     generation: int
     disposition: str
     resources: tuple = ()
+    kind: str = "root"
+    selection: Node | None = None
 
     def __post_init__(self):
         from dryml.core.store.retention import RetentionResource
@@ -175,25 +200,47 @@ class ControlIntent:
                 or type(self.resources) is not tuple or len(self.resources) > 256
                 or any(type(value) is not RetentionResource for value in self.resources)):
             raise ManagedControlError("invalid_intent", "invalid managed root intent evidence")
+        if type(self.kind) is not str or self.kind not in {"root", "initial", "start", "latest", "final", "durable"}:
+            raise ManagedControlError("invalid_intent", "unknown root reason")
+        if self.selection is not None:
+            try:
+                _receiver(self.selection)
+                require_saved(self.selection)
+            except (TypeError, ValueError, ManagedConfigError) as error:
+                raise ManagedControlError("invalid_intent", "root selection requires saved metadata") from error
+        if self.kind != "root" and self.selection is None:
+            raise ManagedControlError("invalid_intent", "typed roots require saved selection metadata")
 
     def to_data(self):
-        """Return closed intent v1 metadata; no grants are acquired or released."""
-        return {"schema": "dryml-managed-root-intent", "version": 1, "token": self.token,
+        """Return closed intent v2 kind/selection evidence, without grant effects."""
+        return {"schema": "dryml-managed-root-intent", "version": 2, "token": self.token,
                 "run_id": self.run_id, "invocation_id": self.invocation_id,
                 "generation": self.generation, "disposition": self.disposition,
-                "resources": [value.to_data() for value in self.resources]}
+                "resources": [value.to_data() for value in self.resources],
+                "kind": self.kind, "selection": _node_data(self.selection)}
+
+    def __eq__(self, other):
+        return (type(other) is ControlIntent
+                and (self.token, self.run_id, self.invocation_id, self.generation,
+                     self.disposition, self.resources, self.kind) ==
+                    (other.token, other.run_id, other.invocation_id, other.generation,
+                     other.disposition, other.resources, other.kind)
+                and _node_equal(self.selection, other.selection))
+
+    __hash__ = None
 
     @classmethod
     def from_data(cls, data):
         """Decode closed root intent mapping, rejecting incompatible resource versions."""
         from dryml.core.store.retention import RetentionResource
-        _closed(data, "dryml-managed-root-intent", 1,
-                {"token", "run_id", "invocation_id", "generation", "disposition", "resources"})
+        _closed(data, "dryml-managed-root-intent", 2,
+                {"token", "run_id", "invocation_id", "generation", "disposition", "resources", "kind", "selection"})
         if type(data["resources"]) is not list:
             raise ManagedControlError("invalid_intent", "resources must be a list")
         try:
             return cls(data["token"], data["run_id"], data["invocation_id"], data["generation"],
-                       data["disposition"], tuple(RetentionResource.from_data(v) for v in data["resources"]))
+                       data["disposition"], tuple(RetentionResource.from_data(v) for v in data["resources"]),
+                       data["kind"], _node(data["selection"], saved=True))
         except (ValueError, TypeError, ManagedConfigError) as error:
             raise ManagedControlError("invalid_intent", "invalid affected resource metadata") from error
 
@@ -210,7 +257,11 @@ class ControlSnapshot:
     interrupt_request is an exact (run, invocation) pair. history/intents are bounded
     immutable tuples. Invalid schemas/cross-fields raise ManagedControlError.
     Construction validates and retains the immutable operation digest; replacement
-    recomputes it. Codec methods read no payloads and grant no retention.
+    recomputes it. Equality compares exact logical Node graphs, not packet labels
+    or digest-only evidence. Decoding retains bounded immutable source bytes as a
+    private, nonserialized fact, not proof of external authority. Replacement drops
+    that fact; every CAS still checks fresh persisted bytes and ownership/fences.
+    Codec methods read no payloads and grant no retention.
     """
     receiver: Node
     member: str
@@ -227,6 +278,7 @@ class ControlSnapshot:
     history: tuple[ControlHistory, ...] = ()
     intents: tuple[ControlIntent, ...] = ()
     _operation_id: str = field(init=False, repr=False)
+    _source_bytes: bytes | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         try: object.__setattr__(self, "_operation_id", operation_digest(self.receiver, self.member))
@@ -272,6 +324,15 @@ class ControlSnapshot:
             raise ManagedControlError("invalid_intent", "intent preparation fence is newer than authority")
         if len({v.token for v in self.intents}) != len(self.intents):
             raise ManagedControlError("invalid_current", "duplicate managed intent tokens")
+        initials = [v for v in self.intents if v.kind == "initial"]
+        if len(initials) > 1 or any(v.selection is not None and not self.receiver.object_projection_equal(v.selection)
+                                  for v in self.intents):
+            raise ManagedControlError("invalid_intent", "root selection does not belong to operation")
+
+    @property
+    def initial(self):
+        """Return optional immutable initial SavedNode metadata, without payload IO."""
+        return next((v.selection for v in self.intents if v.kind == "initial"), None)
 
     @property
     def operation_id(self):
@@ -279,7 +340,14 @@ class ControlSnapshot:
         return self._operation_id
 
     def to_data(self):
-        """Return the exact current v3 canonical-JSON projection, with nested versions."""
+        """Return detached current v3 primitives, preserving validated source packets.
+
+        Decoded records retain their original nested storage labels; new records
+        encode valid Node packets. The returned mutable mapping is not retained.
+        No private data or external authority is read.
+        """
+        if self._source_bytes is not None:
+            return _data(self._source_bytes)
         return {"schema": "dryml-managed-current", "version": 3,
                 "operation_id": self.operation_id, "receiver": _node_data(self.receiver),
                 "member": self.member, "argument_digest": self.argument_digest,
@@ -291,7 +359,14 @@ class ControlSnapshot:
                 "history": [v.to_data() for v in self.history], "intents": [v.to_data() for v in self.intents]}
 
     def to_bytes(self):
-        """Return bounded canonical JSON bytes; oversized graphs raise ManagedControlError."""
+        """Return validated source bytes or bounded canonical JSON for a new value.
+
+        Source bytes are immutable data, not a cached authority check. New values
+        may use different Node packet labels for logically equal unordered graphs.
+        Oversized new records raise ManagedControlError; no IO occurs.
+        """
+        if self._source_bytes is not None:
+            return self._source_bytes
         return _bytes(self.to_data())
 
     @classmethod
@@ -320,10 +395,20 @@ class ControlSnapshot:
                      intents=tuple(ControlIntent.from_data(v) for v in data["intents"]))
         if result.operation_id != data["operation_id"] or (operation_id is not None and result.operation_id != operation_id):
             raise ManagedControlError("invalid_current", "operation projection does not match record/path identity")
+        object.__setattr__(result, "_source_bytes", payload)
         return result
 
     def __eq__(self, other):
-        return type(other) is ControlSnapshot and self.to_bytes() == other.to_bytes()
+        return (type(other) is ControlSnapshot
+                and (self.member, self.argument_digest, self.run_id, self.invocation_id,
+                     self.generation, self.state, self.interrupt_request,
+                     self.producer_invocation_id, self.failure_code, self.history, self.intents) ==
+                    (other.member, other.argument_digest, other.run_id, other.invocation_id,
+                     other.generation, other.state, other.interrupt_request,
+                     other.producer_invocation_id, other.failure_code, other.history, other.intents)
+                and _node_equal(self.receiver, other.receiver)
+                and _node_equal(self.checkpoint, other.checkpoint)
+                and _node_equal(self.final, other.final))
 
     __hash__ = None
 
@@ -358,6 +443,65 @@ class _PendingIntent:
         result = cls(**{name: data[name] for name in cls.__dataclass_fields__})
         if result.operation_id != operation_id:
             raise ManagedControlError("invalid_pending", "pending operation differs from path")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class StartPreparation:
+    """Durable two-phase admission intent, never a transferable restore receipt.
+
+    previous/proposed are exact current-record fingerprints encoded as snapshots;
+    token names the Core affected-resource ledger. phase is prepared, ready,
+    admitted or abandoned; settled acknowledges resource reconciliation. Decoding
+    rejects incompatible nested metadata without opening state. No hooks run here.
+    Validated source bytes are a bounded immutable nonserialized fact, discarded
+    by replacement. Nested snapshots preserve their own exact byte evidence. The
+    fact confers no authority: publication freshly checks sidecar/current bytes.
+    """
+
+    token: str
+    previous: ControlSnapshot | None
+    proposed: ControlSnapshot
+    phase: str = "prepared"
+    settled: bool = False
+    _source_bytes: bytes | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        _uuid(self.token, "preparation token")
+        if (type(self.proposed) is not ControlSnapshot
+                or self.previous is not None and type(self.previous) is not ControlSnapshot
+                or type(self.phase) is not str or self.phase not in {"prepared", "ready", "admitted", "abandoned"}
+                or type(self.settled) is not bool
+                or self.settled and self.phase not in {"admitted", "abandoned"}):
+            raise ManagedControlError("invalid_preparation", "invalid start preparation")
+        old = self.previous
+        if (self.proposed.generation != (0 if old is None else old.generation) + 1
+                or self.proposed.state != "running"
+                or old is not None and self.proposed.operation_id != old.operation_id):
+            raise ManagedControlError("invalid_preparation", "preparation does not name adjacent operation authority")
+
+    def to_data(self):
+        """Return closed start-intent v1 primitives for metadata-only projection."""
+        return {"schema": "dryml-managed-start", "version": 1, "token": self.token,
+            "previous": None if self.previous is None else self.previous.to_data(),
+            "proposed": self.proposed.to_data(), "phase": self.phase, "settled": self.settled}
+
+    def to_bytes(self):
+        """Return bounded closed start-intent v1 bytes, including exact CAS evidence."""
+        if self._source_bytes is not None:
+            return self._source_bytes
+        return _bytes(self.to_data())
+
+    @classmethod
+    def from_bytes(cls, payload, *, operation_id):
+        """Decode exact start evidence for operation_id or raise ManagedControlError."""
+        data = _data(payload)
+        _closed(data, "dryml-managed-start", 1, {"token", "previous", "proposed", "phase", "settled"})
+        result = cls(data["token"], None if data["previous"] is None else
+            ControlSnapshot.from_bytes(_bytes(data["previous"]), operation_id=operation_id),
+            ControlSnapshot.from_bytes(_bytes(data["proposed"]), operation_id=operation_id),
+            data["phase"], data["settled"])
+        object.__setattr__(result, "_source_bytes", payload)
         return result
 
 
@@ -449,6 +593,79 @@ class ManagedControlStore:
             _PendingIntent.from_bytes(pending, operation_id=operation_id)
             raise ManagedControlError("pending_reconciliation", "managed current has a pending replacement")
         return None if current is None else ControlSnapshot.from_bytes(current, operation_id=operation_id)
+
+    def read_preparation(self, operation_id):
+        """Return optional detached StartPreparation; no realization or cleanup occurs.
+
+        operation_id is a digest. This retained intent is separate from current so
+        first-start/rerun preparation cannot displace old authority. Invalid bytes
+        raise ManagedControlError and remain intact.
+        """
+        _digest(operation_id, "operation_id")
+        payload = self._read_optional(self._preparation_path(operation_id))
+        return None if payload is None else StartPreparation.from_bytes(payload, operation_id=operation_id)
+
+    def write_preparation(self, proposed, *, owner, expected):
+        """Journal an exact start-intent CAS under lifetime ownership, returning it.
+
+        proposed/expected are StartPreparation/optional old intent. Graph encoding
+        happens before Store fences. Stale ownership/evidence fails closed; IO or
+        projection ambiguity preserves the affected-resource ledger. No hooks or
+        state leases are acquired under a writer or short control section.
+        """
+        operation_id = proposed.proposed.operation_id
+        self._require_owner(owner, operation_id)
+        if expected is None or expected.settled:
+            if (proposed.phase != "prepared" or proposed.settled
+                    or proposed.proposed.invocation_id != owner.invocation_id
+                    or expected is not None and expected.token == proposed.token):
+                raise ManagedConflictError("preparation_conflict", "fresh work requires a fresh preparation token")
+        else:
+            phases = {"prepared": {"ready", "abandoned"}, "ready": {"admitted", "abandoned"},
+                      "admitted": {"admitted"}, "abandoned": {"abandoned"}}
+            same_proposal = _same_snapshot_bytes(proposed.proposed, expected.proposed)
+            if expected.phase == "prepared" and proposed.phase == "ready":
+                same_proposal = replace(proposed.proposed, intents=expected.proposed.intents) == expected.proposed
+            if (proposed.token != expected.token or not _same_snapshot_bytes(proposed.previous, expected.previous)
+                    or proposed.phase not in phases[expected.phase] or not same_proposal):
+                raise ManagedConflictError("preparation_conflict", "preparation dispositions are irreversible")
+        path = self._preparation_path(operation_id)
+        payload = proposed.to_bytes()
+        old = None if expected is None else expected.to_bytes()
+        def prepare():
+            if self._read_optional(path) != old:
+                raise ManagedConflictError("preparation_conflict", "start intent changed")
+            return [journal.PreparedChange(self.control_store._relative(path), old, payload)], ("managed-start:" + operation_id,), proposed
+        # Generic Store publication owns journaling, index invalidation and ack;
+        # the operation owner is the only writer of this preparation sidecar.
+        self.control_store._prepare_and_apply(prepare)
+        return proposed
+
+    def admit_prepared(self, preparation, *, owner):
+        """Admit exactly a ready start under the original invocation and byte CAS.
+
+        preparation is persisted StartPreparation. Required grant/restore work is
+        performed by the managed caller outside fences before phase ready. The
+        exact previous current (including interrupt generation) must still match.
+        Returns committed ControlSnapshot; uncertain writes retain both sides for
+        reconciliation. This is the only new-run replacement policy primitive.
+        """
+        proposed = preparation.proposed
+        self._require_owner(owner, proposed.operation_id)
+        persisted = self.read_preparation(proposed.operation_id)
+        if (preparation.phase != "ready" or preparation.settled
+                or proposed.invocation_id != owner.invocation_id
+                or persisted is None or persisted.to_bytes() != preparation.to_bytes()):
+            raise ManagedConflictError("preparation_conflict", "start was not prepared by this invocation")
+        if self.inspect(proposed.operation_id) != preparation.previous:
+            raise ManagedConflictError("generation_conflict", "authority or interrupt fence changed during preparation")
+        self._publish(preparation.previous, proposed)
+        owner.run_id = proposed.run_id
+        return proposed
+
+    def _preparation_path(self, operation_id):
+        return os.path.join(self.root, "operations", "v2", "starts", "v1",
+                            operation_id[:2], operation_id, "current.json")
 
     def status(self, operation_id):
         """Return metadata-only ManagedStatus, without taking/waiting on ownership.
@@ -654,8 +871,8 @@ class ManagedControlStore:
             raise ManagedConflictError("owner_conflict", "owner belongs to another control domain/operation")
 
     def _pending_mutations(self, operation_id):
-        scope = "managed-current:" + operation_id
-        return any(scope in record.intent["scopes"] for record in self.control_store.pending_mutations())
+        scopes = {"managed-current:" + operation_id, "managed-start:" + operation_id}
+        return any(scopes.intersection(record.intent["scopes"]) for record in self.control_store.pending_mutations())
 
     @staticmethod
     def _validate_intent_transition(current, proposed):
@@ -820,6 +1037,15 @@ class ManagedControlStore:
 
 
 def _projection_reader(path):
+    start = re.fullmatch(r"managed/operations/v2/starts/v1/([0-9a-f]{2})/([0-9a-f]{64})/current\.json", path)
+    if start is not None:
+        if start[1] != start[2][:2]:
+            raise ManagedControlError("invalid_control_path", "unsupported managed start projection path")
+        class _SelectedStart:
+            @staticmethod
+            def from_bytes(payload):
+                return StartPreparation.from_bytes(payload, operation_id=start[2])
+        return _SelectedStart
     match = re.fullmatch(r"managed/operations/v2/([0-9a-f]{2})/([0-9a-f]{64})/current\.json", path)
     if match is None or match[1] != match[2][:2]:
         raise ManagedControlError("invalid_control_path", "unsupported managed projection path")
@@ -843,7 +1069,7 @@ def _validate_projection_namespace(store):
 
 
 # Core accepts an owner-supplied reader, but never imports this lifecycle package.
-# Only current-record bytes are integrated; lifecycle relation coverage remains
+# Only operation/current-intent bytes are integrated; lifecycle relation coverage remains
 # explicitly unavailable until all owning association/result families are wired.
 from dryml.core.query.authority import register_control_projection
 register_control_projection("managed", "managed/operations/v2", _projection_reader,

@@ -165,8 +165,10 @@ class OperationAdmission(AbstractContextManager):
     current is validated metadata or None. run_id is stable for existing current
     and new for absent authority; invocation_id is fresh even for replay. No run
     is persisted by this value. reconciled=True marks a recovery-only admission
-    that cannot realize a receiver. U15 owns explicit rerun/start policy. Construction
-    has no effects; callers obtain instances from ManagedControlStore.admission.
+    that cannot realize a receiver. cleanup_report holds only Core physical-garbage
+    removal outcomes; unresolved grant/control/index failures still propagate.
+    U15 owns explicit rerun/start policy. Construction has no effects; callers
+    obtain instances from ManagedControlStore.admission.
     """
 
     def __init__(self, identity, ownership, current, *, reconciled=False):
@@ -181,6 +183,7 @@ class OperationAdmission(AbstractContextManager):
         self.run_id = current.run_id if current is not None else uuid4().hex
         self.invocation_id = ownership.invocation_id
         self.reconciled = reconciled
+        self.cleanup_report = ()
 
     @property
     def active(self):

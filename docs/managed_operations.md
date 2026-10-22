@@ -1,25 +1,87 @@
 # Managed Operations
 
-`dryml.managed` owns the lifecycle of state-mutating Object methods. Its **U14
-Node identity/control foundation** supports detached metadata admission,
-operation-scoped ownership, fenced control CAS, metadata history, and independent
-status/interruption control. Importing Core does not import managed, Execute,
-Dispatch, or optional frameworks.
+`dryml.managed` owns the lifecycle of state-mutating Object methods. Its **U15
+admission foundation** supports detached replay selection, deterministic starts,
+two-phase rerun, resume, operation-scoped ownership, fenced control CAS, metadata
+history, and independent status/interruption control. Importing Core does not
+import managed, Execute, Dispatch, or optional frameworks.
 
 ## Integration status
 
-The previous StateRef/current-v2 execution path is retired. Calling a decorated
-method currently raises `ManagedControlError("lifecycle_not_integrated", ...)`
-before body execution, state capture, restore, or control publication. Declarations
-remain available with `@managed_operation`, including the checked synchronous
-instance-method/signature composition rules.
+The previous StateRef/current-v2 execution path is retired. A decorated direct call
+now validates ordinary arguments, selects admission, and can prepare/restore a
+saved start and publish running authority. **The authored body is still not
+entered.** Execution admission raises
+`ManagedControlError("completion_policy_not_integrated", ...)` and records failure
+with latest recovery preserved. Compatible completed calls select replay without
+receiver payload IO, then raise `result_policy_not_integrated` with detached
+`.admission` metadata until durable-result delivery is integrated. A pending-repair
+call returns an explicit `AdmissionOutcome`; that is reconciliation, not ordinary
+method success. Declarations retain their checked synchronous signature rules.
 
-This foundation is not the completed managed runtime. U15 owns selected starts,
-two-phase rerun and resume admission policy; U16 owns checkpoint/final policy and
-retention handshakes; U17 owns durable ordinary results and completed replay; U19
-integrates the detached target into execution transport. In particular, acquiring
-an admission or constructing control metadata does not claim that a result can
-already be replayed or that its private state is retained/available.
+This foundation is not the completed managed runtime. U16 owns author checkpoint/
+initial/final policy; U17 owns durable ordinary results and replay delivery; U18
+owns model/artifact caller integration; U19 integrates the detached target into
+Core Execute transport. The new `start_from` policy is currently local admission
+policy, not a qualified model-wrapper or Core Execute transport capability.
+Acquiring low-level admission or constructing metadata alone does not retain
+private state. U15's selected saved-start handshake does acquire physical grants.
+
+## Caller configuration and start selection
+
+`ManagedConfig` remains immutable and keyword-only. It accepts borrowed
+`state_repo`/`control_store`, exact-boolean `rerun`, optional `start_from` SavedNode,
+and the caller-owned checkpoint callback list. `snapshot()` retains the immutable
+start metadata and copies callback membership into a tuple. Config construction
+checks saved completeness only; it does not promise current availability.
+
+```python
+config = ManagedConfig(
+    state_repo=repo,
+    control_store=control_store,
+    rerun=True,
+    start_from=checkpoint_b,
+)
+# This is the delivered admission configuration. Body/final/result delivery awaits
+# U16/U17; a direct call currently raises the integration error described above.
+```
+
+Supplying `start_from` without `rerun=True` fails with `start_requires_rerun`
+**before restore or cleanup**, on absent, completed and unfinished operations alike.
+Rerun selects supplied start, otherwise the operation's immutable recorded initial,
+otherwise current live state. It never opens an unselected initial payload and
+never falls back from an unavailable/incompatible selected start. A saved start
+seeds latest recovery without reserialization; a live start creates no checkpoint.
+An override changes neither operation identity nor the recorded initial default.
+
+Ordinary compatible completed calls select replay. Ordinary unfinished calls
+require both `resumable=True` and a usable latest recovery checkpoint, restore
+that checkpoint, retain the run ID, and allocate a fresh invocation ID. Changed
+normalized ordinary arguments require explicit rerun. Missing latest recovery
+does not fall back to initial or live state.
+
+Rerun is two phase: journal a proposed run/start token while old current remains;
+validate selected state, prepare/protect physical grants, consume Core's one-shot
+`Repo.prepare_restore`, confirm the saved recovery association, then admit by exact
+owner/generation CAS. Only after confirmed association/admission are superseded
+non-durable start/latest/final roots released. Initial, durable and independent
+user-save grants survive. Garbage reclamation uses full StateKeys after all
+source leases end. Only already-unreferenced physical garbage-removal OSErrors
+become a cleanup report; grant, publication, control and index failures propagate.
+
+Before-hook validation failure leaves the live receiver usable. Hook failure can
+invalidate it while preserving old persisted current; there is no rollback.
+Uncertain CAS retains exact previous/proposed fingerprints and both resource sides.
+Accepted interruption advances the independent generation fence and is checked
+at admission CAS and the execution handoff.
+
+Pending recovery **terminates**: unadmitted preparation is fenced/abandoned and its
+exact resources reconciled, while old current survives; admitted preparation keeps
+its run/latest; incomplete finalization becomes a failure preserving latest;
+recorded completion is inspected without final payload reads. No receiver restore,
+capture, callback or body is replayed. A separate invocation must freshly prepare
+or restore for later work. There is no cross-invocation restore receipt. Complete
+result/final evidence acknowledgement belongs to U17's future result format.
 
 ## Identity and metadata-first admission
 
@@ -61,9 +123,17 @@ control metadata before any realization. Its `OperationAdmission` exposes
 `current`, stable `run_id`, fresh `invocation_id`, and an execution-only
 `realize(callable)` seam. That callable receives the detached Node while the
 **same owner remains held**. Transport integration must use this seam before
-receiver reconstruction, so a future completed replay need not open a reclaimed
+receiver reconstruction, so completed replay selection need not open a reclaimed
 receiver checkpoint. Recovery admissions report `reconciled=True` and refuse
 realization: reconciliation terminates separately from execution.
+
+The managed-owned internal `runtime.admit_execution(identity, declaration,
+config.snapshot(), control, realize=..., execute=...)` layers U15 policy on that
+same admission. It accepts detached receiver and normalized argument authority;
+only an execution branch calls `realize` with state-unpinned receiver metadata,
+then performs the selected one-shot restore. The same lifetime owner remains held
+through `execute(admission, running_snapshot, live, is_resuming)`. This integration
+callback is not a public completed-operation result or a replacement state machine.
 
 ## Operation ownership and shared mutation
 
@@ -128,7 +198,14 @@ The selected control DirStore owns:
 - Area envelope: `dryml-managed`, **format 2**.
 - Current authority: `dryml-managed-current`, **record version 3**.
 - Pending authority: `dryml-managed-pending`, **record version 2**.
-- Version-1 named managed Node, history and root-intent metadata records.
+- Version-1 named managed Node and history records.
+- Version-2 root intents with explicit kind and SavedNode selection evidence;
+  version-1 root intents are rejected without conversion.
+- Version-1 start-preparation sidecars under
+  `managed/operations/v2/starts/v1/<shard>/<operation>/current.json`, containing exact
+  previous/proposed current metadata, the physical retention token, disposition
+  and reconciliation acknowledgement. These are intents, not current authority
+  or serialized process-local restoration capabilities.
 - Nested `dryml-node-graph/v1` / identity-3 graph, reference and StateKey codecs.
 
 Area format 2 does **not** admit old current-record version 2. Every owning reader
@@ -136,6 +213,17 @@ rejects incompatible nested versions as well as old area/current/pending records
 preserving source bytes. No old authority is automatically converted, deleted or
 overwritten. A pending replacement is reconciled only against its exact
 previous/proposed generation and byte fingerprints under operation ownership.
+
+Decoded current and start-preparation records retain their validated source bytes
+as a private bounded immutable fact. This preserves exact CAS evidence when fresh
+Node handles reorder unordered containers or authenticated packet tables. It is
+not cached external proof: reads and publication still freshly validate persisted
+bytes, ownership and generation. Replacing a record discards its source-byte fact;
+new values use canonical JSON with valid Node packets. Nested previous/proposed
+snapshots preserve their original packet evidence. Logical snapshot, history and
+root-selection equality uses exact Node graph comparison (including facets,
+aliases, roles and quotations), never packet placement or digest equality alone.
+Logically equal graphs need not have identical storage bytes.
 
 Current/history snapshots retain bounded detached receiver and SavedNode metadata.
 Status and replay admission do not open any referenced private payload, even after

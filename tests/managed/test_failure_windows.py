@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import shutil
 import warnings
+from uuid import UUID
 
 import pytest
 
@@ -21,6 +22,267 @@ from dryml.managed import context as context_module
 from dryml.managed import runtime as runtime_module
 from dryml.managed import storage as storage_module
 from dryml.managed.errors import ManagedRecoveryError
+
+
+@pytest.mark.parametrize("boundary", ["validation", "restore", "association", "ready", "before_cas", "after_cas"])
+def test_u15_preparation_failure_preserves_exact_authority_and_restart_never_executes(tmp_path, monkeypatch, boundary):
+    """Each start cut retains exact intent evidence and terminates recovery-only."""
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    from dryml.core.store.retention import RetentionAuthority
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state="completed")
+    live.value = 91
+    original_admit = control.admit_prepared
+    original_write = control.write_preparation
+    original_adopt = RetentionAuthority.adopt
+    original_prepare = control.state_repo.prepare_restore
+    original_read = control.control_store.read_states
+    def fail(*args, **kwargs):
+        raise OSError("U15 injected " + boundary)
+    if boundary == "validation":
+        monkeypatch.setattr(control.control_store, "read_states", fail)
+    elif boundary == "restore":
+        monkeypatch.setattr(control.state_repo, "prepare_restore", fail)
+    elif boundary == "association":
+        monkeypatch.setattr(RetentionAuthority, "adopt", fail)
+    elif boundary == "ready":
+        def write(proposed, **kwargs):
+            if proposed.phase == "ready":
+                fail()
+            return original_write(proposed, **kwargs)
+        monkeypatch.setattr(control, "write_preparation", write)
+    else:
+        def admit(prepared, **kwargs):
+            if boundary == "after_cas":
+                original_admit(prepared, **kwargs)
+            fail()
+        monkeypatch.setattr(control, "admit_prepared", admit)
+    with pytest.raises(Exception):
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    pending = control.read_preparation(old.operation_id)
+    current = control.inspect(old.operation_id)
+    assert current == (pending.proposed if boundary == "after_cas" else old)
+    assert not pending.settled
+    monkeypatch.setattr(control, "admit_prepared", original_admit)
+    monkeypatch.setattr(control, "write_preparation", original_write)
+    monkeypatch.setattr(RetentionAuthority, "adopt", original_adopt)
+    monkeypatch.setattr(control.state_repo, "prepare_restore", original_prepare)
+    monkeypatch.setattr(control.control_store, "read_states", original_read)
+    counts = Value.restores, Value.captures, Value.bodies
+    callbacks = []
+    result = enter(control, live, config=ManagedConfig(callbacks=[lambda *args: callbacks.append(args)]),
+                   realize=lambda _: pytest.fail("recovery realized"),
+                   execute=lambda *args: pytest.fail("recovery executed"))
+    assert result.disposition == ("run_admitted" if boundary == "after_cas" else "preparation_abandoned")
+    assert (Value.restores, Value.captures, Value.bodies) == counts
+    assert callbacks == []
+    assert control.read_preparation(old.operation_id).settled
+    ledger = control.control_store.retention.read(str(UUID(pending.token)))
+    if ledger is not None:
+        assert ledger.disposition == ("adopted" if boundary == "after_cas" else "released")
+
+
+def test_u15_post_hook_failure_invalidates_live_but_preserves_old_current(tmp_path):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state="completed")
+    Value.fail_restore = True
+    try:
+        with pytest.raises(Exception, match="fresh materialization"):
+            enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    finally:
+        Value.fail_restore = False
+    assert live._restore_failed and control.inspect(old.operation_id) == old
+    from dryml.managed.identity import AdmissionIdentity
+    result = runtime_module.admit_execution(AdmissionIdentity(old.receiver, old.member, old.argument_digest),
+        Value.run, ManagedConfig().snapshot(), control,
+        realize=lambda _: pytest.fail("recovery must not require a usable live receiver"),
+        execute=lambda *args: pytest.fail("recovery executed"))
+    assert result.disposition == "preparation_abandoned"
+    assert (Value.restores, Value.captures, Value.bodies) == (1, 0, 0)
+
+
+def test_u15_interrupt_during_preparation_fences_next_admission_cas(tmp_path, monkeypatch):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    from dataclasses import replace
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state="running")
+    original = control.state_repo.prepare_restore
+    def prepare(*args, **kwargs):
+        outcome, requested = control.request_interrupt_if_running(old.operation_id)
+        assert outcome == "requested" and requested.generation == old.generation + 1
+        return original(*args, **kwargs)
+    monkeypatch.setattr(control.state_repo, "prepare_restore", prepare)
+    with pytest.raises(Exception, match="generation_conflict"):
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    interrupted = control.inspect(old.operation_id)
+    assert interrupted.run_id == old.run_id and interrupted.interrupt_request is not None
+    assert enter(control, live).disposition == "preparation_abandoned"
+    assert Value.bodies == 0
+
+
+def test_u15_interrupted_preparation_recovery_never_transfers_restore_receipt(tmp_path, monkeypatch):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved)
+    original = control.admit_prepared
+    monkeypatch.setattr(control, "admit_prepared", lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    token = control.read_preparation(old.operation_id).token
+    assert Value.restores == 1
+    monkeypatch.setattr(control, "admit_prepared", original)
+    result = enter(control, live)
+    assert result.disposition == "preparation_abandoned" and Value.restores == 1
+    current, value, resuming = enter(control, live)
+    assert current.run_id == old.run_id and resuming and value == 1
+    assert Value.restores == 2 and control.read_preparation(old.operation_id).token != token
+
+
+@pytest.mark.parametrize("after", [False, True])
+def test_u15_uncertain_cas_keeps_both_fingerprints_and_reconciles_without_execution(tmp_path, monkeypatch, after):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved)
+    original = control._replace_file
+    def publish(path, payload):
+        if path.endswith("current.json"):
+            if after:
+                original(path, payload)
+            raise OSError("CAS uncertain")
+        return original(path, payload)
+    monkeypatch.setattr(control, "_replace_file", publish)
+    with pytest.raises(Exception):
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    preparation = control.read_preparation(old.operation_id)
+    assert preparation.previous == old and preparation.phase == "ready"
+    monkeypatch.setattr(control, "_replace_file", original)
+    result = enter(control, live, realize=lambda _: pytest.fail("pending receiver work"),
+        execute=lambda *args: pytest.fail("pending execution"))
+    assert result.disposition == ("run_admitted" if after else "preparation_abandoned")
+    assert result.current == (preparation.proposed if after else old)
+    assert (Value.restores, Value.captures, Value.bodies) == (1, 0, 0)
+    resumed, value, resuming = enter(control, live)
+    assert resuming and value == 1 and resumed.run_id == result.current.run_id
+    assert resumed.invocation_id not in {result.invocation_id, preparation.proposed.invocation_id}
+    assert (Value.restores, Value.captures, Value.bodies) == (2, 0, 0)
+
+
+def test_u15_incomplete_finalization_records_failure_and_returns_latest_without_hooks(tmp_path):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state="finalizing")
+    result = enter(control, live, realize=lambda _: pytest.fail("finalizing realized"),
+        execute=lambda *args: pytest.fail("finalizing executed"))
+    assert result.disposition == "finalization_incomplete"
+    assert result.current.run_id == old.run_id and result.current.state == "failed"
+    assert result.current.checkpoint.graph_equal(saved)
+    assert (Value.restores, Value.captures, Value.bodies) == (0, 0, 0)
+
+
+def test_u15_interrupt_after_admission_preserves_new_run_and_blocks_execution(tmp_path, monkeypatch):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state="completed")
+    original = control.admit_prepared
+    def admit(*args, **kwargs):
+        current = original(*args, **kwargs)
+        assert control.request_interrupt_if_running(current.operation_id)[0] == "requested"
+        return current
+    monkeypatch.setattr(control, "admit_prepared", admit)
+    with pytest.raises(Exception, match="interrupted"):
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=saved),
+              execute=lambda *args: pytest.fail("interrupted admission executed"))
+    current = control.inspect(old.operation_id)
+    assert current.run_id != old.run_id and current.interrupt_request is not None
+    assert current.checkpoint.graph_equal(saved)
+    assert control.read_preparation(old.operation_id).settled
+    assert (Value.restores, Value.captures, Value.bodies) == (1, 0, 0)
+
+
+@pytest.mark.parametrize("failure", ["grant_error", "disconnected", "physical_garbage"])
+def test_u15_only_unreferenced_physical_garbage_failure_is_a_cleanup_report(tmp_path, monkeypatch, failure):
+    from tests.managed.u15_fixtures import Value, enter, setup
+    from dryml.core.store.retention import RetentionAuthority, StateRemovalOutcome
+    from dataclasses import replace
+    control, live, saved = setup(tmp_path)
+    first, _, _ = enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    from dryml.core.store.retention import grants
+    for grant in grants(control.control_store, saved.state.key):
+        if grant.token != str(UUID(first.intents[-1].token)):
+            control.control_store.retention.release(grant.token, (control.control_store,))
+    live.value = 2
+    next_start = control.state_repo.save(live)
+    original_release = RetentionAuthority.release
+    def release(self, token, stores):
+        if failure == "grant_error":
+            raise OSError("grant removal failed")
+        if failure == "disconnected":
+            return replace(self.read(token), disposition="release-pending")
+        return original_release(self, token, stores)
+    monkeypatch.setattr(RetentionAuthority, "release", release)
+    if failure == "physical_garbage":
+        monkeypatch.setattr(control.control_store, "delete_state", lambda key:
+            StateRemovalOutcome("cleanup-pending", cleanup_error=OSError("physical garbage removal failed")))
+        reports = []
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=next_start),
+              execute=lambda owner, *args: reports.append(owner.cleanup_report))
+        assert len(reports[0]) == 1
+        assert control.read_preparation(first.operation_id).settled
+    else:
+        with pytest.raises((OSError, ManagedRecoveryError)):
+            enter(control, live, config=ManagedConfig(rerun=True, start_from=next_start),
+                  execute=lambda *args: pytest.fail("unresolved release fell into execution"))
+        assert not control.read_preparation(first.operation_id).settled
+        assert control.inspect(first.operation_id).run_id != first.run_id
+
+
+def _u15_prepared_worker(root, saved, reached, release):
+    """Spawn target stopped after the one-shot restore but before current CAS."""
+    from tests.managed.u15_fixtures import enter
+    store = DirStore(root, query_index="none")
+    repo = Repo(store)
+    live = repo.load(saved)
+    control = ManagedControlStore(store, repo)
+    def prepared(*args, **kwargs):
+        reached.set()
+        release.recv()
+        raise AssertionError("parent must terminate the prepared owner")
+    control.admit_prepared = prepared
+    enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+
+
+def test_u15_spawned_prepared_owner_loss_reconciles_without_hooks_or_receipt(tmp_path):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state="completed")
+    ctx = multiprocessing.get_context("spawn")
+    reached = ctx.Event()
+    release_reader, release_writer = ctx.Pipe(duplex=False)
+    process = ctx.Process(target=_u15_prepared_worker,
+        args=(control.control_store.base_dir, saved, reached, release_reader))
+    try:
+        process.start()
+        assert reached.wait(20)
+        process.terminate()
+        process.join(10)
+        assert process.exitcode != 0
+        prepared = control.read_preparation(old.operation_id)
+        assert prepared.phase == "ready" and control.inspect(old.operation_id) == old
+        recovered = enter(control, live, realize=lambda _: pytest.fail("restart receiver work"),
+                          execute=lambda *args: pytest.fail("restart body work"))
+        assert recovered.disposition == "preparation_abandoned"
+        assert (Value.restores, Value.captures, Value.bodies) == (0, 0, 0)
+        assert control.control_store.retention.read(str(UUID(prepared.token))).disposition == "released"
+        fresh, value, resuming = enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+        assert fresh.run_id != old.run_id and not resuming and Value.restores == 1
+        assert control.read_preparation(old.operation_id).token != prepared.token
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        release_reader.close()
+        release_writer.close()
 
 
 class FailureWindowValue(Pickleable):

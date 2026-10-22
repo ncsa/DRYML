@@ -63,7 +63,8 @@ class ManagedOperation:
     Args:
         target: Exact synchronous Python function with a required keyword-only
             ``managed`` parameter.
-        resumable: Exact declaration flag retained for future resume policy.
+        resumable: Exact declaration flag required for ordinary unfinished resume;
+            a usable latest recovery checkpoint is also mandatory.
         return_state_ref: Exact declaration flag selecting a final StateRef result
             after successful publication and completion association.
         store_parameter: Optional declared keyword-only Store control excluded from
@@ -512,24 +513,29 @@ class _BoundOperation:
         Args:
             *args: Ordinary positional method arguments.
             managed: Optional caller-owned ManagedConfig selecting state/control
-                authority, rerun policy, and checkpoint callbacks.
+                authority, rerun/start policy, and checkpoint callbacks. A supplied
+                SavedNode start always requires explicit rerun.
             **kwargs: Ordinary keyword method arguments.
 
         Raises:
             ManagedConfigError: If config or normalized ordinary arguments are
                 unsupported.
             ManagedError: If selected lifecycle authority cannot be used safely.
-            ManagedControlError: With ``lifecycle_not_integrated`` while the Node
-                start/checkpoint/result execution policies await integration.
+            ManagedControlError: With ``completion_policy_not_integrated`` after
+                execution admission while U16/U17 checkpoint/final/result policy
+                awaits integration, or ``result_policy_not_integrated`` for a
+                compatible completed replay awaiting durable result delivery.
 
         Side Effects:
-            The U14 foundation refuses legacy execution before state/control
-            publication or body work. Its detached control APIs are usable now.
+            U15 validates arguments, may prepare/restore a selected saved start,
+            and admits a run under the lifetime owner. The authored body is not
+            entered until checkpoint/final/result policy is integrated. Failed
+            preparation preserves previous current and exact recovery evidence.
 
         Returns:
-            The wrapped method's ordinary return value, or its invocation-captured
-            final StateRef when the declaration selects ``return_state_ref``, after
-            final publication and control completion association succeed.
+            A detached reconciliation disposition when pending authority required
+            repair; it never falls through into body execution. Ordinary success
+            and lazy result values are not delivered by the U15 integration.
         """
 
         if managed is not None and type(managed) is not ManagedConfig:

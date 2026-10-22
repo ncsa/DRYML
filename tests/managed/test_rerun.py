@@ -1,133 +1,118 @@
-"""U6 explicit-rerun current-state coverage."""
+"""U15 selected-start precedence, recovery seeding and retained physical roots."""
 
-from __future__ import annotations
+from dataclasses import replace
+from uuid import UUID, uuid4
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-
-from dryml.core import Repo
-from dryml.core.object import Pickleable
-from dryml.core.store.dir import DirStore
-from dryml.managed import ManagedConfig, ManagedRerunRequiredError, managed_operation
-from dryml.managed import control as control_module
-from dryml.managed.control import ControlSnapshot, ManagedControlStore
-from dryml.managed.identity import argument_digest, operation_digest
-from dryml.managed.storage import ownership_evidence
+from dryml.core.repo import RepoLoadError
+from dryml.managed import ManagedConfig
+from tests.managed.u15_fixtures import Value, enter, identity, seed, setup
 
 
-class RerunValue(Pickleable):
-    """Stateful receiver used to prove rerun does not reset live state."""
-
-    def __init__(self, value=0):
-        self.value = value
-
-    @managed_operation()
-    def add(self, amount, *, managed):
-        """Mutate current state for completion and rerun checks."""
-
-        self.value += amount
-        return self.value
-
-
-def test_completed_default_requires_rerun_and_rerun_uses_current_state(tmp_path):
-    """Rerun creates a new attempt while retaining the caller's current Object state."""
-
-    store = DirStore(tmp_path / "state")
-    value = RerunValue(1, repo=Repo((store,)))
-    config = ManagedConfig(state_repo=store)
-    assert value.add(2, managed=config) == 3
-    first_attempt = value.add.status(state_repo=store).attempt_id
-    with pytest.raises(ManagedRerunRequiredError, match="already_completed"):
-        value.add(2, managed=config)
-    assert value.add(4, managed=ManagedConfig(state_repo=store, rerun=True)) == 7
-    status = value.add.status(state_repo=store)
-    assert status.attempt_id != first_attempt
-    assert status.state == "completed"
+def test_override_b_never_opens_unavailable_unselected_initial_a(tmp_path, monkeypatch):
+    control, live, a = setup(tmp_path)
+    live.value = 2
+    b = control.state_repo.save(live)
+    old = seed(control, live, b, state="completed", initial=a)
+    Value.captures = 0
+    original = control.control_store.read_states
+    opened = []
+    def selected(keys):
+        keys = tuple(keys)
+        assert a.state.key not in keys
+        opened.extend(keys)
+        return original(keys)
+    monkeypatch.setattr(control.control_store, "read_states", selected)
+    new, value, resuming = enter(control, live, config=ManagedConfig(rerun=True, start_from=b))
+    assert value == 2 and not resuming and opened and set(opened) == {b.state.key}
+    assert new.initial.graph_equal(a) and new.checkpoint.graph_equal(b)
+    assert new.operation_id == old.operation_id and new.run_id != old.run_id
+    assert (Value.restores, Value.captures, Value.bodies) == (1, 0, 0)
+    # The override did not replace the immutable default: the next no-override
+    # rerun selects unavailable A and cannot fall back to its usable B recovery.
+    with pytest.raises(RepoLoadError):
+        enter(control, live, config=ManagedConfig(rerun=True))
+    assert control.inspect(old.operation_id) == new and Value.restores == 1
 
 
-def test_invocation_reconciles_a_pending_completed_authority_before_deciding(tmp_path):
-    """A recovered completed replacement is not mistaken for an orphan final state."""
-
-    store = DirStore(tmp_path / "state")
-    repo = Repo((store,))
-    value = RerunValue(1, repo=repo)
-    final_state = repo.save_object(value, store=store, deep_capture=True)
-    operation_id = operation_digest(value.object_ref, "add")
-    arguments = argument_digest(RerunValue.add, value, (2,), {"managed": None})
-    control = ManagedControlStore(store, repo)
-    initial = control.create_initial(ControlSnapshot(
-        operation_id, value.object_ref.digest(), arguments, "add", "a" * 32,
-        "b" * 32, 1, "running", None, None, None, None,
-        ownership_evidence(repo, value.object_ref.objects.values()),
-    ))
-    completed = ControlSnapshot(
-        operation_id, value.object_ref.digest(), arguments, "add", initial.attempt_id,
-        None, 2, "completed", None, None, final_state.digest(), None,
-        initial.ownership,
-    )
-    operation = control._operation_path(operation_id)
-    control._replace_file(control._current_path(operation), completed.to_bytes())
-    intent = control_module._PendingIntent(
-        operation_id, 1, control_module._payload_digest(initial.to_bytes()),
-        2, control_module._payload_digest(completed.to_bytes()),
-    )
-    control._write_new(control._pending_path(operation), intent.to_bytes())
-
-    with pytest.raises(ManagedRerunRequiredError, match="already_completed"):
-        value.add(2, managed=ManagedConfig(state_repo=store))
-    assert control.inspect(operation_id) == completed
+def test_invalid_selected_b_never_falls_back_to_initial_a(tmp_path, monkeypatch):
+    control, live, a = setup(tmp_path)
+    live.value = 2
+    b = control.state_repo.save(live)
+    old = seed(control, live, a, initial=a)
+    original = control.control_store.read_states
+    def selected(keys):
+        keys = tuple(keys)
+        assert a.state.key not in keys
+        raise RepoLoadError("B unavailable")
+    monkeypatch.setattr(control.control_store, "read_states", selected)
+    with pytest.raises(RepoLoadError):
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=b))
+    assert control.inspect(old.operation_id) == old and live.value == 2
+    monkeypatch.setattr(control.control_store, "read_states", original)
+    recovered = enter(control, live)
+    assert recovered.disposition == "preparation_abandoned"
+    assert (Value.restores, Value.bodies) == (0, 0)
 
 
-class RerunResumeValue(Pickleable):
-    """Resumable receiver used to retain a synthetic U7 checkpoint after rerun."""
+def test_rerun_initial_seeds_recovery_and_resume_does_not_resave(tmp_path):
+    control, live, a = setup(tmp_path)
+    old = seed(control, live, a, state="completed", initial=a)
+    live.value = 81
+    def fail(*args):
+        raise ValueError("execution seam failure")
+    with pytest.raises(ValueError):
+        enter(control, live, config=ManagedConfig(rerun=True), amount=3, execute=fail)
+    failed = control.inspect(old.operation_id)
+    assert failed.run_id != old.run_id and failed.checkpoint.graph_equal(a)
+    live.value = 92
+    resumed, value, resuming = enter(control, live, amount=3)
+    assert value == 1 and resuming and resumed.run_id == failed.run_id
+    assert resumed.initial.graph_equal(a)
+    assert (Value.restores, Value.captures, Value.bodies) == (2, 0, 0)
 
-    fail = True
 
-    def __init__(self, value=0):
-        self.value = value
+def test_selected_prior_start_has_new_grant_before_old_root_release(tmp_path, monkeypatch):
+    control, live, saved = setup(tmp_path)
+    first, _, _ = enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    old_root = first.intents[-1]
+    calls = []
+    # retention is a property returning wrappers, so observe the owning class.
+    from dryml.core.store.retention import RetentionAuthority
+    release = RetentionAuthority.release
+    def observed(self, token, stores):
+        current = control.inspect(first.operation_id)
+        assert current.run_id != first.run_id
+        new_root = current.intents[-1]
+        assert self.read(str(UUID(new_root.token))).disposition == "adopted"
+        calls.append(token)
+        return release(self, token, stores)
+    monkeypatch.setattr(RetentionAuthority, "release", observed)
+    second, _, _ = enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    assert calls == [str(UUID(old_root.token))]
+    assert control.control_store.retention.read(calls[0]).disposition == "released"
+    assert second.intents[-1].token != old_root.token
+    from dryml.core.store.retention import grants
+    assert grants(control.control_store, saved.state.key)
 
-    @managed_operation(resumable=True)
-    def add(self, amount, *, managed):
-        """Fail once so the rerun authority can be inspected before resume."""
 
-        if type(self).fail:
-            raise ValueError("rerun failure")
-        self.value += amount
-        return managed.is_resuming, self.value
-
-
-def test_rerun_replaces_argument_digest_for_a_later_checkpoint_resume(tmp_path):
-    """A rerun attempt records its new arguments rather than inheriting old ones."""
-
-    store = DirStore(tmp_path / "state")
-    repo = Repo((store,))
-    value = RerunResumeValue(4, repo=repo)
-    checkpoint = repo.save_object(value, store=store, deep_capture=True)
-    operation_id = operation_digest(value.object_ref, "add")
-    old_arguments = argument_digest(RerunResumeValue.add, value, (2,), {"managed": None})
-    new_arguments = argument_digest(RerunResumeValue.add, value, (3,), {"managed": None})
-    control = ManagedControlStore(store, repo)
-    control.create_initial(ControlSnapshot(
-        operation_id, value.object_ref.digest(), old_arguments, "add", "a" * 32,
-        None, 1, "interrupted", None, checkpoint.digest(), None, None,
-        ownership_evidence(repo, value.object_ref.objects.values()),
-    ))
-
-    with pytest.raises(ValueError, match="rerun failure"):
-        value.add(3, managed=ManagedConfig(state_repo=store, rerun=True))
-    failed = control.inspect(operation_id)
-    assert failed.argument_digest == new_arguments
-
-    seeded = ControlSnapshot(
-        operation_id, value.object_ref.digest(), new_arguments, "add", failed.attempt_id,
-        None, failed.generation + 1, "failed", None, checkpoint.digest(), None, "method_error",
-        failed.ownership,
-    )
-    control.transition(operation_id, seeded, expected_generation=failed.generation)
-    value.value = 99
-    RerunResumeValue.fail = False
-    try:
-        assert value.add(3, managed=ManagedConfig(state_repo=store)) == (True, 7)
-    finally:
-        RerunResumeValue.fail = True
+def test_retired_invocation_cannot_reconcile_or_release_new_run_grants(tmp_path, monkeypatch):
+    from dryml.managed import runtime
+    from dryml.managed.errors import ManagedConflictError
+    from dryml.core.store.retention import RetentionAuthority
+    control, live, saved = setup(tmp_path)
+    owners = []
+    enter(control, live, config=ManagedConfig(rerun=True, start_from=saved),
+          execute=lambda owner, *args: owners.append(owner))
+    new, _, _ = enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    preparation = control.read_preparation(new.operation_id)
+    root = new.intents[-1]
+    ledger = control.control_store.retention.read(str(UUID(root.token)))
+    monkeypatch.setattr(RetentionAuthority, "release", lambda *args, **kwargs: pytest.fail("stale physical release"))
+    with pytest.raises(ManagedConflictError, match="invalid_operation_owner"):
+        runtime._settle_preparation(control, owners[0], preparation)
+    with pytest.raises(ManagedConflictError):
+        control.authorize_release(new.operation_id, root.token, owner=owners[0],
+            run_id=new.run_id, invocation_id=new.invocation_id, expected_generation=new.generation)
+    assert control.control_store.retention.read(ledger.token) == ledger
