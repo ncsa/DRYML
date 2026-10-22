@@ -674,8 +674,6 @@ class _ToCanonicalTransformer(GraphTransformer):
         repo = ctx.state["repo"]
 
         if kind is NodeKind.NDARRAY:
-            if obj.dtype.hasobject:
-                raise TypeError("Object-dtype arrays are not immutable construction values.")
             return FrozenNDArray.from_array(obj)
 
         if kind is NodeKind.TYPE:
@@ -1222,8 +1220,6 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
         return value
     kind = node_kind(value)
     if kind in {NodeKind.NDARRAY, NodeKind.FROZEN_NDARRAY}:
-        if value.dtype.hasobject:
-            raise TypeError("Object-dtype arrays are not immutable construction values.")
         return FrozenNDArray.from_array(value)
     if kind in {
         NodeKind.LIST,

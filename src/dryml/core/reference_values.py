@@ -186,7 +186,7 @@ def _reference_types():
     return ObjectRef, StateRef
 
 
-def _collect_occurrences(definition: Any) -> dict[object, list[GraphPath]]:
+def _collect_occurrences(definition: Any, *, node_values=None) -> dict[object, list[GraphPath]]:
     """Collect every owned stateful occurrence under a CDef without imports."""
 
     from .definition import ConcreteDefinition
@@ -201,6 +201,8 @@ def _collect_occurrences(definition: Any) -> dict[object, list[GraphPath]]:
         key = ("cdef", cdef._node_id)
         if cdef._stateful_role:
             occurrences.setdefault(key, []).append(path)
+            if node_values is not None:
+                node_values[key] = cdef
         if key in active:
             raise ValueError(f"Materializing CDef cycle at {path!s}.")
         active.add(key)
@@ -244,8 +246,8 @@ def _primary_paths(occurrences: Mapping[object, list[GraphPath]]) -> dict[object
     }
 
 
-def _expected_paths(definition: Any) -> tuple[dict[object, GraphPath], dict[GraphPath, object]]:
-    by_key = _primary_paths(_collect_occurrences(definition))
+def _expected_paths(definition: Any, *, node_values=None) -> tuple[dict[object, GraphPath], dict[GraphPath, object]]:
+    by_key = _primary_paths(_collect_occurrences(definition, node_values=node_values))
     return by_key, {path: key for key, path in by_key.items()}
 
 
@@ -262,6 +264,11 @@ class ObjectRef:
         ValueError: If paths, identities, aliases, or imported materializing
             references do not form the exact complete owned-stateful mapping.
             Imported occurrences must retain their embedded ObjectIds.
+
+    Validation also retains private immutable target/ObjectId associations for
+    shared Node encoding. Context-local unordered path ordinals are not portable
+    identity evidence; these associations let that codec rebase paths without
+    changing pin meanings. The existing V2 data record remains unchanged.
     """
 
     definition: Any
@@ -269,13 +276,15 @@ class ObjectRef:
     _digest_cache: str | None = field(
         default=None, init=False, repr=False, compare=False, hash=False,
     )
+    _node_bindings: tuple = field(default=(), init=False, repr=False, compare=False, hash=False)
 
     def __init__(self, definition: Any, objects: Mapping[Any, ObjectId]):
         from .definition import ConcreteDefinition
 
         if not isinstance(definition, ConcreteDefinition):
             raise TypeError("ObjectRef definition must be a ConcreteDefinition.")
-        expected_by_key, expected_by_path = _expected_paths(definition)
+        node_values = {}
+        expected_by_key, expected_by_path = _expected_paths(definition, node_values=node_values)
         normalized = _normalize_mapping(objects, ObjectId, "ObjectRef objects")
         if set(normalized) != set(expected_by_path):
             missing = sorted(set(expected_by_path) - set(normalized), key=graph_path_sort_key)
@@ -296,6 +305,8 @@ class ObjectRef:
         object.__setattr__(self, "definition", definition)
         object.__setattr__(self, "objects", normalized)
         object.__setattr__(self, "_digest_cache", None)
+        object.__setattr__(self, "_node_bindings", tuple(
+            (node_values.get(key), normalized[path]) for key, path in expected_by_key.items()))
 
     @property
     def object_id(self) -> ObjectId | None:

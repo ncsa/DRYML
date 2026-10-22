@@ -146,7 +146,9 @@ def replace_subtree(
     Side Effects:
         Does not mutate ``obj``. CDef ancestors are rebuilt from their stored
         named parameters, preserving their named authority; only the addressed
-        occurrence is replaced.
+        occurrence is replaced. Node ancestors retain exact facets and their
+        Node carrier, but the edit invalidates retained construction evidence on
+        those rebuilt ancestors. This does not validate state compatibility.
     """
 
     norm = normalize_path(path)
@@ -234,12 +236,13 @@ def _replace_child(
             from ...symbol import symbol_ref
 
             cls = obj.cls if not isinstance(obj.cls, type) else symbol_ref(obj.cls)
-            return Definition._from_prepared_parameters(cls, parameters)
-        return ConcreteDefinition._from_bound_record(
+            return _edited_node_view(obj, Definition._from_prepared_parameters(cls, parameters))
+        result = ConcreteDefinition._from_bound_record(
             obj.cls,
             BoundArguments(parameters),
             stateful_role=obj._stateful_role,
         )
+        return _edited_node_view(obj, result)
 
     if isinstance(obj, (Definition, ConcreteDefinition)):
         args = None if obj.args is None else list(obj.args)
@@ -256,8 +259,8 @@ def _replace_child(
             raise QueryPathError(f"{seg!s} is not valid on a definition.")
 
         if args is None:
-            return Definition._from_prepared_parameters(obj.cls, kwargs)
-        return Definition(obj.cls, *args, **kwargs)
+            return _edited_node_view(obj, Definition._from_prepared_parameters(obj.cls, kwargs))
+        return _edited_node_view(obj, Definition(obj.cls, *args, **kwargs))
 
     if isinstance(obj, list):
         if not isinstance(seg, Index):
@@ -313,6 +316,17 @@ def _replace_child(
         return _replace_set_member(obj, seg, child, FrozenSet, _origins=_origins)
 
     raise QueryPathError(f"Cannot replace a child on {type(obj).__name__}.")
+
+
+def _edited_node_view(source, result):
+    from ...node import Node, _as_node_view, _coalesce
+
+    if isinstance(source, Node):
+        result = _as_node_view(result)
+        object.__setattr__(result, "_facets", source._facets)
+        object.__setattr__(result, "_construction", None)
+        return _coalesce(result)
+    return result
 
 
 def _contains_soft_definition(value: Any) -> bool:

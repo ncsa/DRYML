@@ -1,3 +1,9 @@
+"""Legacy CDef V2 adapters and the explicit Node identity-3 format gate.
+
+The live V2 consumers retain their reader until their owning cutover. New shared
+Node blocks use identity 3 and never pass through the V2 record decoder.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,7 +14,25 @@ if TYPE_CHECKING:
 
 
 V2_IDENTITY_VERSION = 2
+NODE_IDENTITY_VERSION = 3
 _SUPPORTED_IDENTITY_VERSIONS = frozenset((V2_IDENTITY_VERSION,))
+
+
+def validate_node_identity_version(version):
+    """Return exact integer 3 or reject incompatible Node/CDef block authority.
+
+    Args:
+        version (object): Identity version from a new Node graph envelope.
+    Returns:
+        int: The validated identity-3 version.
+    Raises:
+        ValueError: For V2, booleans, missing, future or foreign versions.
+    Side Effects:
+        None; no conversion, rewriting or deletion of source authority.
+    """
+    if type(version) is not int or version != NODE_IDENTITY_VERSION:
+        raise ValueError("Incompatible Node CDef identity version; expected 3.")
+    return version
 
 
 def new_node_id() -> object:
@@ -157,11 +181,26 @@ def stable_hash_domain(type_marker: str, version: int) -> str:
 
 
 def same_cdef(left: "ConcreteDefinition", right: "ConcreteDefinition") -> bool:
+    """Compare legacy structural CDef facts across immutable occurrence handles.
+
+    Args:
+        left, right (ConcreteDefinition): Legacy records or concrete Node views.
+    Returns:
+        bool: Whether the legacy digest and recipe evidence agree. Like the V2
+            structural index, this ignores occurrence sharing and Node facets;
+            exact selector verification separately compares graph evidence.
+            Unsupported recipe comparisons raising TypeError return False.
+    Raises:
+        Exception: Propagates unsupported-value or hashing failures.
+    Side Effects:
+        May memoize legacy structural digests; no resolution, construction or IO.
+        Node equality and identity-3 exact keys are unaffected.
+    """
     if left is right:
         return True
     if left.stable_hash() != right.stable_hash():
         return False
     try:
-        return left == right
+        return left.recipe_equal(right)
     except TypeError:
         return False

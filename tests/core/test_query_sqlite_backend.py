@@ -1583,8 +1583,10 @@ def test_definition_hash_collision_confirms_full_cdef_equality(monkeypatch, tmp_
     assert len(left_ids) == 1
     assert len(right_ids) == 1
     assert left_ids != right_ids
-    assert left_cdefs == (left.definition,)
-    assert right_cdefs == (right.definition,)
+    assert len(left_cdefs) == len(right_cdefs) == 1
+    assert left_cdefs[0].graph_equal(left.definition)
+    assert right_cdefs[0].graph_equal(right.definition)
+    assert not left_cdefs[0].graph_equal(right_cdefs[0])
 
 
 def test_feature_hash_collision_confirms_full_token_equality(monkeypatch, tmp_path):

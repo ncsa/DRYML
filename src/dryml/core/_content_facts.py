@@ -1,4 +1,4 @@
-"""Internal primitive representation and owned-size rules for Repo content facts.
+"""Internal primitive and owned-size rules for Repo and pure Node content facts.
 
 This dependency-light helper owns no cache, parser, domain values or resources.
 Sizes overcount repeated immutable leaves and prospective tuple/container slots;

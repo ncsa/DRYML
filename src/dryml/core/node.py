@@ -9,16 +9,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Generic, TypeVar, TYPE_CHECKING
+from typing import Generic, TypeVar
+import numpy as np
 
-from .freeze import FrozenDict, FrozenTuple
+from .freeze import FrozenDict, FrozenTuple, FrozenList, FrozenSet, FrozenNDArray
 from .utils.graph.path import GraphPath, GraphPathError, normalize_path
 
 T = TypeVar("T")
-
-if TYPE_CHECKING:
-    from .definition import ConcreteNode, SavedNode
-
 
 @dataclass(frozen=True, slots=True)
 class _Facets:
@@ -54,10 +51,24 @@ def _as_node_view(value, memo=None):
     elif isinstance(value, DefLink):
         target = _as_node_view(value.target, memo)
         result = value if target is value.target else (DefLink.finalized(value.kind, target) if value.is_finalized else DefLink.assertion(value.kind, target))
-    elif isinstance(value, (FrozenDict, dict)):
-        result = type(value)((k, _as_node_view(v, memo)) for k, v in value.items())
-    elif isinstance(value, (tuple, list, set, frozenset)):
-        result = type(value)(_as_node_view(v, memo) for v in value)
+    elif isinstance(value, Mapping):
+        result = FrozenDict((k, _as_node_view(v, memo)) for k, v in value.items())
+    elif isinstance(value, (FrozenList, list)):
+        result = FrozenList(_as_node_view(v, memo) for v in value)
+    elif isinstance(value, (FrozenTuple, tuple)):
+        result = FrozenTuple(_as_node_view(v, memo) for v in value)
+    elif isinstance(value, (FrozenSet, set)):
+        result = FrozenSet(_as_node_view(v, memo) for v in value)
+    elif isinstance(value, frozenset):
+        result = frozenset(_as_node_view(v, memo) for v in value)
+    elif isinstance(value, np.ndarray):
+        if value.dtype.hasobject:
+            raise TypeError("Object-dtype arrays are not immutable construction values.")
+        result = value if isinstance(value, FrozenNDArray) else FrozenNDArray.from_array(value)
+    elif isinstance(value, np.generic) and value.dtype.kind == "V":
+        if value.dtype.hasobject:
+            raise TypeError("Object-dtype scalars are not immutable construction values.")
+        result = np.ndarray((), dtype=value.dtype, buffer=value.tobytes())[()]
     else:
         result = value
     memo[id(value)] = result
@@ -270,6 +281,8 @@ class Node(Generic[T]):
             GraphPathError: On ``set`` if the path cannot be resolved.
         Side Effects:
             None. Unlike occurrence replacement, this edits one structural slot.
+            Rebuilt Node ancestors preserve exact facets and invalidate retained
+            construction evidence; state compatibility is not inferred.
         """
         from .definition import DefinitionLens
         return DefinitionLens(self, path)
@@ -304,10 +317,53 @@ class Node(Generic[T]):
             other (object): Candidate graph/value.
         Returns:
             bool: Exact semantic equality, independent of private handle tokens.
+        Raises:
+            TypeError, ValueError: For unsupported semantic values or cycles.
         Side Effects:
             None; unordered incidence is matched without repr-based identity.
         """
-        return _semantic_equal(self, other, topology=True, facets=True)
+        from .definition import ConcreteDefinition
+        from .node_prepare import NodePreparation
+        if not isinstance(other, (Node, ConcreteDefinition)):
+            return False
+        return NodePreparation((self,)).exact_equal(self, NodePreparation((other,)), other)
+
+    def exact_key(self, *, prepared=None):
+        """Return v1 canonical graph-exact certificate bytes, including facets.
+
+        Args:
+            prepared (NodePreparation | None): Optional operation-owned reusable
+                preparation containing this immutable handle.
+        Returns:
+            bytes: ``dryml-node-exact/v1`` envelope, independent of scheduling,
+            process tokens, enclosing roots and physical block placement.
+        Raises:
+            TypeError, ValueError: For unsupported values or a foreign preparation.
+        Side Effects:
+            Pure owned preparation only. At collision-sensitive authority boundaries
+            compare exact evidence with ``NodePreparation.exact_equal`` as well.
+        """
+        from .node_prepare import NodePreparation
+        return (NodePreparation((self,)) if prepared is None else prepared).exact_key(self)
+
+    def exact_digest(self, *, prepared=None):
+        """Return the domain-separated Node graph v1 digest of ``exact_key``.
+
+        Accepts an optional owning NodePreparation, with the same errors and pure
+        effects as ``exact_key``. Returns lowercase SHA-256 text. The legacy V2
+        ``graph_hash`` adapter is retained for consumers awaiting their cutover.
+
+        Args:
+            prepared (NodePreparation | None): Optional owning pure preparation.
+        Returns:
+            str: Lowercase 64-hex Node graph digest.
+        Raises:
+            TypeError, ValueError: For unsupported values or a foreign preparation.
+        Side Effects:
+            Updates only owned immutable-preparation caches and work counts.
+        """
+        from .node_prepare import NodePreparation
+        return (NodePreparation((self,)) if prepared is None else prepared).digest(self)
 
     def object_view(self):
         """Return a view with owned/reference state facets removed, identities kept.
@@ -454,10 +510,6 @@ def _bind(root, identities, states, *, replace, realization):
 
 
 def _facet_equal(left, right):
-    from .state_values import LocalState
-
-    if isinstance(left, LocalState) and isinstance(right, LocalState):
-        return left.key == right.key and _semantic_equal(left.creation_cdef, right.creation_cdef, topology=True, facets=True)
     return left == right
 
 
@@ -578,12 +630,12 @@ def _semantic_equal(left, right, *, topology, facets):
     from .links import DefLink
     from .quoted import QuotedDef
 
-    def sequence(pairs, forward, reverse):
-        if not pairs:
+    def sequence(pairs, forward, reverse, index=0):
+        if index == len(pairs):
             yield forward, reverse
             return
-        for nf, nr in compare(*pairs[0], forward, reverse):
-            yield from sequence(pairs[1:], nf, nr)
+        for nf, nr in compare(*pairs[index], forward, reverse):
+            yield from sequence(pairs, nf, nr, index + 1)
 
     def compare(a, b, forward, reverse):
         if isinstance(a, (Node, ConcreteDefinition)) or isinstance(b, (Node, ConcreteDefinition)):

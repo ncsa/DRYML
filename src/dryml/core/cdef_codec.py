@@ -35,7 +35,7 @@ class CDefGraphCodecError(ValueError):
 
 
 def encode_cdef_graph(root: ConcreteDefinition) -> dict[str, Any]:
-    """Encode a rooted CDef graph with deterministic, token-free labels.
+    """Encode legacy V2 construction metadata with token-free labels.
 
     Args:
         root: Root exact CDef to encode.
@@ -47,13 +47,19 @@ def encode_cdef_graph(root: ConcreteDefinition) -> dict[str, Any]:
     Raises:
         TypeError: If ``root`` is not a concrete definition.
         CDefGraphCodecError: If the graph cannot be represented as current
-            acyclic CDef authority.
+            acyclic V2 authority, or contains Node facets/retained construction
+            evidence. Use ``node_codec`` for the new identity-3 family.
+
+    Side Effects:
+        Metadata allocation only; no target resolution, materialization, payload
+        IO, publication or conversion of existing source authority.
     """
 
     if not isinstance(root, ConcreteDefinition):
         raise TypeError(
             f"Expected ConcreteDefinition, got {type(root).__name__}."
         )
+    _require_v2_evidence(root)
     graph, labels = _graph_and_labels(root)
     quotation_budget = _QuotationBudget()
     nodes = []
@@ -356,15 +362,113 @@ def _thaw_graph_content(content):
 
 
 def cdef_graph_equal(left: ConcreteDefinition, right: object) -> bool:
-    """Compare rooted CDef topology without comparing raw private tokens."""
+    """Compare exact rooted evidence without raw tokens or hash-only authority.
+
+    Args:
+        left (ConcreteDefinition): Rooted construction graph.
+        right (object): Candidate graph.
+    Returns:
+        bool: Exact normalized graph equality, including independent occurrences.
+            Legacy CDef pairs retain V2 reference/quotation value scopes; Node
+            pairs and mixed pairs compare the complete identity-3 closure.
+    Raises:
+        TypeError, ValueError: For unsupported graph values or cycles.
+    Side Effects:
+        Pure owned preparation; no class resolution, construction or IO.
+    """
 
     if not isinstance(right, ConcreteDefinition):
         return False
-    return _topology_projection(left) == _topology_projection(right)
+    from .node import Node
+    from .node_prepare import NodePreparation
+    a, b = NodePreparation((left,)), NodePreparation((right,))
+    if not isinstance(left, Node) and not isinstance(right, Node):
+        return _scoped_cdef_equal(a, left, b, right)
+    return a.exact_equal(left, b, right)
+
+
+def _scoped_cdef_equal(left, left_root, right, right_root):
+    """Compare V2 value scopes using full normalized evidence, never old hashes.
+
+    V2 transports references and quotations independently, so aliases crossing
+    those boundaries cannot be authority. Each scope still checks a complete
+    occurrence bijection, typed fields, bindings and any embedded Node facets.
+    Backtracking carries unordered choices through later ordered aliases.
+    """
+    scopes = ("object-ref", "object-selector", "quote")
+
+    def sequence(pairs, bindings):
+        if not pairs:
+            yield bindings
+            return
+        first, *rest = pairs
+        for updated in match(*first, bindings):
+            yield from sequence(rest, updated)
+
+    def unordered(items, candidates, bindings):
+        if not items:
+            yield bindings
+            return
+        for index, candidate in enumerate(candidates):
+            for updated in match(items[0], candidate, bindings):
+                yield from unordered(items[1:], candidates[:index] + candidates[index + 1:], updated)
+
+    def match(a, b, bindings, *, row=False, scoped=True):
+        if type(a) is not type(b):
+            return
+        if isinstance(a, dict):
+            tag = a.get("tag")
+            if tag != b.get("tag"):
+                return
+            if scoped and tag in scopes:
+                if next(match(a, b, ({}, {}), scoped=False), None) is not None:
+                    yield bindings
+                return
+            if tag == "node":
+                source, target = a["slot"], b["slot"]
+                forward, reverse = bindings
+                if source in forward or target in reverse:
+                    if forward.get(source) == target and reverse.get(target) == source:
+                        yield bindings
+                    return
+                updated = ({**forward, source: target}, {**reverse, target: source})
+                yield from match(left._rows[source], right._rows[target], updated, row=True)
+                return
+            ignored = ({"stateful_role"} if row else set()) | ({"finalized"} if tag == "link" else set())
+            if tag in ("set", "frozenset"):
+                if len(a["items"]) != len(b["items"]):
+                    return
+                ignored.add("items")
+            keys = sorted(set(a) - ignored)
+            if keys != sorted(set(b) - ignored):
+                return
+            for updated in sequence([(a[key], b[key]) for key in keys], bindings):
+                if tag in ("set", "frozenset"):
+                    yield from unordered(a["items"], b["items"], updated)
+                else:
+                    yield updated
+        elif isinstance(a, (list, tuple)):
+            if len(a) == len(b):
+                yield from sequence(list(zip(a, b)), bindings)
+        elif a == b:
+            yield bindings
+
+    return next(match({"tag": "node", "slot": left._slot(left_root)},
+                      {"tag": "node", "slot": right._slot(right_root)}, ({}, {})), None) is not None
 
 
 def cdef_graph_hash(root: ConcreteDefinition) -> str:
-    """Return a deterministic hash of CDef topology and structural node data."""
+    """Return the legacy V2 graph digest for existing consumers awaiting cutover.
+
+    Args:
+        root (ConcreteDefinition): A V2-representable construction graph.
+    Returns:
+        str: Its unchanged legacy digest, not an identity-3 Node exact key.
+    Raises:
+        CDefGraphCodecError: If new Node facets/construction evidence would be lost.
+    Side Effects:
+        Metadata inspection only. Use Node.exact_digest for the new key domain.
+    """
 
     projection = _topology_projection(root)
     payload = json.dumps(
@@ -717,6 +821,7 @@ def render_cdef_repr(root: ConcreteDefinition) -> str:
 
 
 def _topology_projection(root: ConcreteDefinition) -> dict[str, Any]:
+    _require_v2_evidence(root)
     graph, labels = _graph_and_labels(root)
     return {
         "root": labels[cdef_node_key(root)],
@@ -736,6 +841,52 @@ def _topology_projection(root: ConcreteDefinition) -> dict[str, Any]:
             for node in graph.nodes()
         ],
     }
+
+
+def _require_v2_evidence(root):
+    """Refuse lossy old-format exports before hashing or serializing new facets."""
+    from collections.abc import Mapping
+    from .definition import Definition
+    from .node import Node
+    from .factory import FactorySpec
+    from .config import ConfigRef
+    from .template import _BinaryExpr, _RepeatExpr
+
+    seen = set()
+
+    def visit(value):
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, Node) and (value.object_id is not None or value.state is not None or value._construction is not None):
+            raise CDefGraphCodecError("Node facets and retained construction require the identity-3 Node codec.")
+        if isinstance(value, ConcreteDefinition):
+            visit(value.parameters)
+        elif isinstance(value, Definition):
+            visit(value.args)
+            visit(value.kwargs)
+        elif isinstance(value, DefLink):
+            visit(value.target)
+        elif isinstance(value, QuotedDef):
+            visit(value.value)
+        elif isinstance(value, FactorySpec):
+            visit(value.args)
+            visit(value.kwargs)
+        elif isinstance(value, ConfigRef) and value.has_default:
+            visit(value.default)
+        elif isinstance(value, _BinaryExpr):
+            visit(value.left)
+            visit(value.right)
+        elif isinstance(value, _RepeatExpr):
+            visit(value.group)
+            visit(value.count)
+        elif isinstance(value, Mapping):
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            for child in value:
+                visit(child)
+    visit(root)
 
 
 def _graph_and_labels(root: ConcreteDefinition):

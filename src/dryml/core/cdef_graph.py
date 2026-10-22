@@ -226,6 +226,26 @@ class ConcreteDefinitionGraph:
 
         return self._closure
 
+    def prepare(self, *, scheduler="deferred", previous=None):
+        """Return one owning exact Node preparation for this graph's roots.
+
+        Args:
+            scheduler (str): ``eager`` or ``deferred``; key bytes are identical.
+            previous (NodePreparation | None): Optional bounded pure-fact reuse
+                source after immutable edits. External validity is never reused.
+        Returns:
+            NodePreparation: Shared occurrence/value/typed-edge analysis over the
+            full exact semantic closure, including Ref and quotation data even
+            when this legacy traversal graph selects materialization only.
+        Raises:
+            TypeError, ValueError: For unsupported values, cycles or options.
+        Side Effects:
+            Pure owned metadata preparation; no class resolution, construction,
+            payload IO, publication or changes to this traversal graph.
+        """
+        from .node_prepare import NodePreparation
+        return NodePreparation(self.roots, scheduler=scheduler, previous=previous)
+
     @property
     def roots(self) -> tuple[ConcreteDefinition, ...]:
         """Return graph roots in deterministic insertion order."""

@@ -73,7 +73,7 @@ def test_loose_projection_keeps_partial_factory_call_shape_without_building():
 
 
 @pytest.mark.parametrize("query_index", ("memory", "sqlite"))
-def test_loose_projection_preserves_fixed_cdef_anchors_in_queries(tmp_path, query_index):
+def test_loose_projection_preserves_fixed_cdef_anchors_in_queries(tmp_path, query_index, monkeypatch):
     """Mapping-like CDefs stay exact in loose selectors and Generator prefilters."""
 
     child = Definition(ProjectionChild, value=7).concretize()
@@ -92,9 +92,48 @@ def test_loose_projection_preserves_fixed_cdef_anchors_in_queries(tmp_path, quer
     assert not loose.matches(other)
     assert not support.matches(other)
 
+    store = DirStore(tmp_path / "store", query_index=query_index)
+    repo = Repo(store)
+    repo.declare_object(candidate)
+    repo.declare_object(other)
+
+    assert repo.query().sel(loose).cdefs().one().graph_equal(candidate)
+    assert repo.query().sel(support).cdefs().one().graph_equal(candidate)
+
+    from dryml.core.query.graph_plan import graph_candidate_ids
+    from dryml.core.query.selector_graph import compile_selector_graph
+
+    index = store.open_query_index() if query_index == "sqlite" else repo._query_catalog
+    index.refresh(True)
+    compiled = compile_selector_graph(loose)
+    assert not compiled.requires_scan
+    with index.read_view(include_cached=False) as view:
+        anchor_ids = view.exact_ids(child)
+        assert len(anchor_ids) == 1
+        assert next(iter(view.cdefs_by_id(anchor_ids).values())).graph_equal(child)
+        monkeypatch.setattr(type(view), "all_definition_ids", lambda self: pytest.fail("fixed anchor fell back to full index enumeration"))
+        candidate_ids = graph_candidate_ids(view, compiled, None)
+        assert len(candidate_ids) == 1
+        assert next(iter(view.cdefs_by_id(candidate_ids).values())).graph_equal(candidate)
+
+
+@pytest.mark.parametrize("query_index", ("memory", "sqlite"))
+def test_fixed_cdef_query_anchor_keeps_exact_topology_after_decode(tmp_path, query_index):
+    """A structural index hit cannot admit a different fixed-anchor alias graph."""
+    leaf = Definition(ProjectionChild, value=7).concretize()
+    child = Definition(ProjectionChild, value=(leaf, leaf)).concretize()
+    different_topology = Definition(ProjectionChild, value=(leaf, leaf.copy_graph())).concretize()
+    assert child.stable_hash() == different_topology.stable_hash()
+    assert not child.graph_equal(different_topology)
+
+    authored = Definition(ProjectionOwner, child=child, width=Par("width"))
+    candidate = authored.sub(width=32).concretize()
+    other = Definition(ProjectionOwner, child=different_topology, width=32).concretize()
     repo = Repo(DirStore(tmp_path / "store", query_index=query_index))
     repo.declare_object(candidate)
     repo.declare_object(other)
 
-    assert repo.query().sel(loose).cdefs().one() == candidate
-    assert repo.query().sel(support).cdefs().one() == candidate
+    support = Generator(authored, {"width": UniformFromSet((32, 64))}).support_selector()
+    for selector in (authored.loose_selector(), support):
+        assert not selector.matches(other)
+        assert repo.query().sel(selector).cdefs().one().graph_equal(candidate)

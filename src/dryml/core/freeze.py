@@ -90,6 +90,21 @@ class FrozenNDArray(np.ndarray):
 
     @staticmethod
     def from_array(a: np.ndarray, *, copy: bool = True, writeable: bool = False) -> "FrozenNDArray":
+        """Snapshot nonobject array contents without changing dtype or shape.
+
+        Args:
+            a (np.ndarray): Source logical contents.
+            copy (bool): Copy storage by default; internal callers may borrow it.
+            writeable (bool): Desired writeability, false for immutable values.
+        Returns:
+            FrozenNDArray: Tagged array snapshot with preserved dtype/byte order.
+        Raises:
+            TypeError: For object dtypes, which retain mutable Python references.
+        Side Effects:
+            Copies by default; ``copy=False`` can change source writeability.
+        """
+        if a.dtype.hasobject:
+            raise TypeError("Object-dtype arrays are not immutable construction values.")
         arr = np.array(a, copy=copy)
         try:
             arr.setflags(write=writeable)

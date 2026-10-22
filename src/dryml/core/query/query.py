@@ -237,7 +237,7 @@ def _query_match(
         return isinstance(target, ConcreteDefinition) and (
             _object_selector_value_match(selector, target)
             if _contains_object_selector(selector)
-            else cdef_equal(selector, target)
+            else selector.graph_equal(target)
         )
 
     from ..factory import FactorySpec

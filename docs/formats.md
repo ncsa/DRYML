@@ -8,10 +8,104 @@ there is no migration, conversion format, or fallback reader.
 
 ## Object And Store Authority
 
+### Shared Node Graph V1 / CDef Identity 3
+
+`dryml.core.node_codec` introduces a separate, closed JSON-compatible family with
+`format="dryml-node-graph/v1"` and exact integer `identity_version=3`. The packet
+contains authenticated `tables`, authenticated `values`, and compact `views`.
+Domain/version tags are explicit SHA-256 preimage components; digests are lowercase
+64-hex text. The domains are `dryml-node-table/v1`, `dryml-node-values/v1`,
+`dryml-node-value/v1`, `dryml-node-value-atom/v1`, `dryml-node-value-step/v1`,
+`dryml-node-topology/v1`, and `dryml-node-graph/v1`.
+Semantic certificates carry `dryml-node-exact/v1` and the explicit view name.
+
+Each table has unique occurrence `rows`, local `overlays`, and declared root-view
+slots. Occurrences may have several immutable local construction structures, for
+example supplied soft and normalized concrete views of the same occurrence.
+Overlays select an occurrence/structure, exact identity/state facets, typed target
+view slots, and an optional retained construction handle with required
+`view="construction"`. Tagged immutable values, including shared symbolic operands
+and array bytes, are interned into value blocks with authenticated block references.
+Pure-value sharing is a storage optimization, not Node occurrence identity; exact
+comparison normalizes it without expanding the value DAG. A graph link is a local
+slot reference; no root view contains a
+complete descendant graph export. Neither local slots nor private process tokens
+are semantic identities.
+
+A compact root view carries its authenticated table hash, root slot, semantic-view
+name, `key_format="dryml-node-exact/v1"`, and expected exact key. The reader
+authenticates blocks, validates all declarations/links and reachability, rejects
+cycles and invalid view kinds, realizes fresh occurrence/view tokens, and verifies
+advertised root keys with shared preparation. Multiple roots can share a table;
+the selected semantic key covers only its reachable view, so unrelated declared
+roots, slot placement and block placement do not alter it. Retained construction
+views preserve the original explicit selections alongside realization facets.
+Construction handles must select the associated occurrence and the declared view
+kind. General metadata can retain a supplied soft view across concretization;
+the later creation-policy boundary owns normalized creation-authority admission.
+
+The grammar preserves list/tuple/set/frozenset distinctions, exact string/integer
+map keys (not bool keys), symbolic ImportRef/SourceSpec values, supported symbolic
+arithmetic/repetition and Match leaves, factories, immutable Core semantic leaves,
+references, quotations, ObjectIds and LocalStates. Nested reference/state tags
+carry their own exact integer version 1, independently checked on read. There is
+no opaque serialization fallback for unsupported live/custom values or nonportable
+callbacks. Symbol-addressable `Satisfies` predicates carry explicit import/source
+evidence and resolve only when the existing matcher is called, not during metadata
+decoding. A descriptive predicate name alone does not replace its exact callable
+evidence. Arrays are nonobject snapshots with dtype (including structured
+offsets/alignment/subarrays), shape, byte order and logical contents; structure
+padding (including x87 extended-precision ABI padding) is canonicalized, not
+treated as constructor data. Extended float/complex layouts carry numeric ABI
+evidence so a different long-double interpretation is refused on read. NumPy
+scalar codecs preserve empty strings and trailing NUL content as well as numeric
+and structured scalar values.
+Registered nonobject NumPy extension dtypes retain an explicit importable scalar
+type, name, byte order, item size and format string rather than degrading to a
+void dtype. Their type is resolved lazily on read and its representation is
+revalidated; an unavailable or incompatible extension is rejected.
+Managed/variable-width storage dtypes require a separate interpretation codec and
+are rejected before raw storage bytes can enter this fixed-storage format.
+
+Embedded ObjectRef bindings name target occurrences (or imported ObjectIds), and
+StateRef selections name ObjectIds. These unordered bindings are canonicalized
+with the complete graph. Context-local legacy SetMember ordinals/fingerprints do
+not enter their semantic preimages. The existing ObjectRef constructor retains
+pure target-binding facts while validating its public path map; the new reader
+reconstructs that map in the decoded graph's path context. This preserves pins and
+cross-boundary aliases even when fresh tokens change unordered path ordinals.
+Query-only ObjectSelectors have an explicit version-1 tag retaining their query
+definition and ObjectRef association as graph-aware shared-table values. This
+preserves recursive state-weakened selectors, directly constructed exact pins,
+and their occurrence/ObjectId bindings without nested rooted exports. Node graph
+transport does not admit these query values as legacy CDef/Store authority.
+The legacy V2 reference data layout and Store consumers are unchanged.
+
+Readers reject unknown fields/tags, invalid slots/block references, unused
+declarations, bad authentication, incompatible CDef identity/key versions and
+semantic-key mismatches without rewriting the source. V2 records are not accepted
+as identity-3 records or converted. The V2 reader likewise rejects new packets.
+The new reader performs metadata allocation only, with explicit enum/extension
+dtype type codecs resolving those value types; it does not materialize targets,
+read private state or open Stores.
+
+This delivers shared Node encoding and exact preparation. Creation/compatibility
+policy, Store v4 state buckets, reference consumer cutovers and managed format
+changes are later integration work. The existing formats below remain the live
+Store/managed formats; identity 3 here does not claim those cutovers have occurred.
+
+### Existing Store V3 And CDef V2 Consumers
+
 CDef V2 graph records contain deterministic graph-local labels, class references,
 fully bound parameters, and stateful-role bits. `ObjectRef` records add canonical
 primary ObjectId paths. `StateRef` records add exactly matching state-hash paths.
 Private graph node tokens and Store locations are never durable identity.
+Legacy CDef-to-CDef comparison retains the reference/quotation value scopes that
+V2 transports independently. It compares normalized occurrence bijections and
+complete values, including embedded Node facets, rather than legacy hashes.
+Comparisons involving an identity-3 Node root retain full cross-boundary topology.
+Legacy V2 export/digest paths refuse Node-local facets and retained construction
+handles that they cannot represent. Unbound V2 consumer bytes remain unchanged.
 
 Core owns the portable `dryml-reference-json` v1 envelope for embedding exact
 `ObjectRef` and `StateRef` authority in closed JSON formats. It tags canonical
