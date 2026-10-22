@@ -22,7 +22,9 @@ no automatic conversion. The Store-owned APIs currently available are:
   `state`, `installed`, and `durability`. Same-CDef/hash captures reuse one directory;
   equal codec content in different CDef buckets is independent. On failure,
   preserve authoritative metadata and inspectable partial work; an unconsumed
-  staging allocation can be explicitly discarded by its allocating Store.
+  staging allocation can be explicitly discarded by its allocating Store. A complete
+  Store-prepared stage left by intent failure can be retried with the same exact
+  creation/codec input without capturing its payload again.
 - `read_creation(cdef_digest)` / `inspect_states(cdef_digest, available_only=False)`:
   read detached creation/history metadata without Objects or payload IO.
   Inspection interprets one bucket once within a coherent batch. It is a complete
@@ -39,12 +41,16 @@ no automatic conversion. The Store-owned APIs currently available are:
   conflicts, malformed evidence and missing established anchors fail explicitly.
   Publishing saved metadata does not automatically publish a recipe root.
 
-These APIs supply installation/read primitives and a prepared-facts seam for the
-next journal unit. They do **not** claim journal/index-complete public mutations,
-retention, active-use leases, or integrated Repo/managed save/load. Legacy Repo
+Supported mutations are journaled under one Store authority cut. They do **not**
+claim integrated SQLite coverage, retention, active-use leases, or integrated
+Repo/managed save/load. Legacy Repo
 snapshot/declaration writers explicitly raise `StoreCapabilityError` on format 4;
 legacy Query V3 / SQLite coverage is likewise refused before inventory or index
-repair. Enabling a SQLite policy does not make old coverage valid. The remaining
+repair. Explicit `query_index="sqlite"` refuses mutation before effects until its
+new coverage is integrated. `none`/`memory` have no persistent-maintenance
+obligation; `auto` currently uses an explicitly nonpersistent publication policy
+(`store.mutation_index_disposition` reports the choice), with query coverage still
+refused. The remaining
 consumer documentation below describes the existing interfaces awaiting their
 owning cutover; its snapshot-based workflows are not currently supported against
 new built-in format-4 Stores.
@@ -56,6 +62,69 @@ directory persistence barriers. ZipStore's corresponding receipt is explicitly
 buffered; only successful archive `commit()` establishes durable completion.
 Failed commits propagate and retain dirty evidence; closing discards the buffered
 view. File-like ZipStores permit v4 reads but refuse writable publication.
+
+### Publication, Names And Interrupted Work
+
+- `authority_cut()` returns the persistent Store UUID, committed epoch and exact
+  pending mutation identities. It does not certify query-index coverage.
+- `compare_and_set_node_name(NodeNameRecord(name, kind, digest), expected=...)`
+  assigns a format-4 name to an independently published recipe/saved root. Use
+  `expected=None` for absence or the previously read exact record for replacement.
+  `read_node_name(name)` validates its target membership. These names are separate
+  from the unmigrated ObjectRef/StateRef alias and main-reference APIs.
+- `delete_node_name(name, expected=...)` and
+  `rename_node_name(name, new_name, expected=..., expected_target=None)` use exact
+  source/target CAS. Mismatches raise `StoreAliasConflictError` before effects.
+  Interrupted rename may retain both complete mappings; the journal records that
+  actual result instead of claiming a rollback.
+- `withdraw_node(digest, kind="recipe"|"saved")` removes only that root's explicit
+  membership and declaration-source contributions. It returns False for an absent
+  or still-named root. It preserves immutable graph metadata, canonical declaration
+  history, manifests and all payloads; this is not reclamation or retention.
+
+Graph/codec validation happens outside writer-blocking fences. Short metadata scopes
+capture/revalidate the cut and exact byte/directory witnesses. An unstable read
+raises `StoreCutChanged`; publication retries stale preparation within a bounded
+budget. Do not surround these high-level APIs with an externally retained
+`writer_lock()` or `authority_read_fence()`. Only prepared byte/association checks,
+installs and cuts belong inside those scopes. Shared use requires same-host native
+advisory locks, atomic rename and the filesystem persistence guarantees documented
+in [Filesystem](filesystem.md); unsupported network/distributed filesystems are
+outside this contract.
+
+Intent and invalidation persist before query-visible effects. After a visible
+failure, `StoreMutationError` exposes `mutation_id`, `cut`, `confirmed_refs`, and
+`index_disposition="repair_pending"`, with the original cause. The epoch describes
+the honest classified result, not all-or-nothing completion. Cancellation retains
+the same evidence attributes. Preserve partial staging when recovery is needed.
+
+Open a compatible Store and call `recover_authority()` to classify interrupted
+work. This reads affected metadata only; it neither runs capture/restore/hooks nor
+deletes authority. `pending_mutations()` supplies exact expected transitions and
+observed projection bytes. `replay_mutation(uuid)` can finish from that prepared
+evidence and surviving staging without graph preparation, then acknowledge only
+the repaired original cut. A later Store epoch, changed byte witnesses or missing
+staging fails explicitly; replay does not guess through ABA changes. Already visible
+records still cross native persistence barriers before acknowledgement.
+An earlier repair never acknowledges a later writer. Missing/corrupt/future
+authority or intent versions are errors, not permission to reset the Store.
+
+The Store-owned `PreparedMutation`/`apply_prepared_mutation` seam accepts detached
+immutable byte facts from the same handle, with cut/CAS witnesses and affected
+scopes. It returns `(mutation_uuid, cut)` and leaves exact replay work pending for
+the projection owner. `acknowledge_mutation(uuid, epoch)` is only valid after that
+work and its coverage are incorporated. The built-in nonpersistent policy performs
+its own synchronous exact acknowledgement; no SQLite delta/coverage implementation
+is claimed yet. Authoritative no-ops at a current cut do not churn epochs or intents.
+
+ZipStore buffers these same cuts and intents in its extraction.
+`committed_archive_cut` records the last confirmed durable archive cut; it remains
+unchanged after a failed commit. `ZipStoreCommitError` includes the buffered cut,
+confirmed references and previous durable cut with `durability="buffered"`.
+Failure before replacement leaves a reopened archive on its previous contents;
+failure after replacement visibility is ambiguous, not rolled back. The live dirty
+extraction and stable attempted-archive evidence remain retryable. Only a successful
+native archive persistence boundary establishes a new confirmed durable cut.
 
 See [Formats](formats.md#store-format-4-cdef-owned-state-and-metadata-readers) for
 record families, physical layout and failure rules. Repo and managed integration

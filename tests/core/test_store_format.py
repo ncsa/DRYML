@@ -33,13 +33,14 @@ def _bootstrap_format_worker(root, ready, start, paused, resume, outcomes):
         outcomes.put((type(error).__name__, str(error)))
 
 
-def test_new_store_has_only_the_current_format_gate(tmp_path):
+def test_new_store_has_current_format_gate_and_initial_authority_cut(tmp_path):
     store = DirStore(tmp_path / "store")
 
     assert Path(store.store_format_path).is_file()
     assert not (Path(store.base_dir) / "objects").exists()
     assert Path(store._bootstrap_lock_path).is_file()
-    assert {entry.name for entry in Path(store.base_dir).iterdir()} == {"store-format.record"}
+    assert {entry.name for entry in Path(store.base_dir).iterdir()} == {"store-format.record", "authority.record"}
+    assert store.authority_cut().epoch == 0
 
 
 def test_spawned_bootstrap_serializes_root_creation_and_format_publication(tmp_path):
@@ -64,7 +65,9 @@ def test_spawned_bootstrap_serializes_root_creation_and_format_publication(tmp_p
         assert paused.wait(10)
         entries = tuple(Path(root).iterdir())
         assert not Path(root, "store-format.record").exists()
-        assert len(entries) == 1 and entries[0].name.startswith(".store-")
+        assert len(entries) == 2
+        assert Path(root, "authority.record").is_file()
+        assert any(entry.name.startswith(".store-") for entry in entries)
     finally:
         resume.set()
         first.join(20)
@@ -77,11 +80,11 @@ def test_spawned_bootstrap_serializes_root_creation_and_format_publication(tmp_p
     assert StoreFormatRecord.from_bytes(expected).format_version == 4
     readers = [DirStore(root) for _ in range(3)]
     assert [Path(store.store_format_path).read_bytes() for store in readers] == [expected] * 3
-    assert {entry.name for entry in Path(root).iterdir()} == {"store-format.record"}
+    assert {entry.name for entry in Path(root).iterdir()} == {"store-format.record", "authority.record"}
 
 
-def test_failed_initial_format_publication_leaves_an_empty_root_recoverable(tmp_path, monkeypatch):
-    """A failed initial replacement leaves no partial authority for a later constructor."""
+def test_failed_initial_format_publication_preserves_initial_authority_for_retry(tmp_path, monkeypatch):
+    """An interrupted gate install completes from exact initial cut evidence, without deletion."""
     root = tmp_path / "source" / "store"
     target = os.fspath(root / "store-format.record")
     original_publish = filesystem.publish_file
@@ -97,8 +100,10 @@ def test_failed_initial_format_publication_leaves_an_empty_root_recoverable(tmp_
             DirStore(root)
 
     assert root.is_dir()
-    assert tuple(root.iterdir()) == ()
+    assert {entry.name for entry in root.iterdir()} == {"authority.record"}
+    before = Path(root, "authority.record").read_bytes()
     store = DirStore(root)
+    assert Path(root, "authority.record").read_bytes() == before
     assert StoreFormatRecord.from_bytes(Path(store.store_format_path).read_bytes()).store_uuid == store.store_uuid
 
 

@@ -1285,5 +1285,193 @@ class DeclarationRequirementRecord(_NodeRecord):
 
 
 __all__ += ["StateKeyRecord", "NodeBlockRecord", "NodeRootRecord", "StateVariantManifest",
-            "StateAvailabilityRecord", "NodeMembershipRecord", "DeclarationAnchorRecord",
-            "DeclarationRequirementRecord"]
+             "StateAvailabilityRecord", "NodeMembershipRecord", "DeclarationAnchorRecord",
+             "DeclarationRequirementRecord"]
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorityRecord(_NodeRecord):
+    """Store UUID, committed epoch and exact unacknowledged intent UUIDs.
+
+    Epoch is a nonnegative exact integer; pending is a unique tuple of canonical
+    UUID strings. Invalid values/versions raise StoreRecordError. This closed v1
+    record contains no graph and performs no IO.
+    """
+
+    schema = "dryml-store-authority"
+    fields = frozenset({"store_uuid", "epoch", "pending"})
+    store_uuid: str
+    epoch: int = 0
+    pending: tuple = ()
+
+    def __post_init__(self):
+        _uuid_value(self.store_uuid)
+        if type(self.epoch) is not int or self.epoch < 0:
+            raise StoreRecordError("Invalid authority epoch.")
+        if type(self.pending) is not tuple or len(set(self.pending)) != len(self.pending):
+            raise StoreRecordError("Invalid pending mutation identities.")
+        for identity in self.pending:
+            _uuid_value(identity)
+
+    def _payload(self):
+        return {"store_uuid": self.store_uuid, "epoch": self.epoch, "pending": list(self.pending)}
+
+    @classmethod
+    def _from_payload(cls, data):
+        if type(data["pending"]) is not list:
+            raise StoreRecordError("Invalid pending mutation list.")
+        return cls(data["store_uuid"], data["epoch"], tuple(data["pending"]))
+
+
+@dataclass(frozen=True, slots=True)
+class MutationIntentRecord(_NodeRecord):
+    """Replayable v1 mutation evidence, independent of the Store format marker.
+
+    content is immutable canonical JSON with a stable mutation/store UUID, base
+    cut, affected scopes, expected byte transitions, confirmed references, exact
+    observed projection work and classification/acknowledgement state. Invalid
+    fields raise StoreRecordError; decoding never runs graph or lifecycle hooks.
+    """
+
+    schema = "dryml-store-mutation-intent"
+    fields = frozenset({"intent"})
+    content: bytes
+
+    def __post_init__(self):
+        if type(self.content) is not bytes:
+            raise StoreRecordError("Intent content must be immutable bytes.")
+        data = self.intent
+        _require_exact(data, {"mutation_id", "store_uuid", "base_epoch", "scopes", "transitions",
+                              "confirmed", "projection", "epoch", "status"}, self.schema)
+        _uuid_value(data["mutation_id"])
+        _uuid_value(data["store_uuid"])
+        if type(data["base_epoch"]) is not int or data["base_epoch"] < 0:
+            raise StoreRecordError("Invalid intent base cut.")
+        if data["epoch"] is not None and (type(data["epoch"]) is not int or data["epoch"] < data["base_epoch"]):
+            raise StoreRecordError("Invalid classified cut.")
+        if data["status"] not in {"pending", "classified", "acknowledged"}:
+            raise StoreRecordError("Invalid intent disposition.")
+        for field_name in ("scopes", "transitions", "confirmed", "projection"):
+            if type(data[field_name]) is not list:
+                raise StoreRecordError("Invalid intent work list.")
+        if any(type(scope) is not str or not scope for scope in data["scopes"]):
+            raise StoreRecordError("Invalid affected scope.")
+        if (data["status"] == "pending" and (data["epoch"] is not None or data["confirmed"] or data["projection"])):
+            raise StoreRecordError("Pending intent cannot certify a resulting cut.")
+        if data["status"] != "pending" and data["epoch"] is None:
+            raise StoreRecordError("Classified intent requires a resulting cut.")
+        for transition in data["transitions"]:
+            _require_exact(transition, {"path", "before", "after", "staging", "kind"}, "transition")
+            _normalized_file_path(transition["path"])
+            if transition["kind"] not in {"file", "variant", "data"}:
+                raise StoreRecordError("Invalid transition kind.")
+            for name in ("before", "after"):
+                _decode_authority_bytes(transition[name])
+            if transition["staging"] is not None:
+                _normalized_file_path(transition["staging"])
+            if transition["kind"] == "file" and transition["staging"] is not None:
+                raise StoreRecordError("File transitions cannot borrow directory staging.")
+            if transition["kind"] != "file":
+                if (transition["before"] is not None or transition["after"] is None
+                        or transition["staging"] is None or not re.fullmatch(
+                            r"\.staging/[0-9a-f]{32}(?:/data)?", transition["staging"])):
+                    raise StoreRecordError("Child installation requires owned staging and absent destination.")
+        for row in data["projection"]:
+            _require_exact(row, {"path", "kind", "value"}, "projection work")
+            _normalized_file_path(row["path"])
+            if row["kind"] not in {"file", "variant", "data"}:
+                raise StoreRecordError("Invalid projection kind.")
+            _decode_authority_bytes(row["value"])
+        keys = [(row["path"], row["kind"]) for row in data["projection"]]
+        if data["status"] != "pending" and (len(set(keys)) != len(keys)
+                or set(keys) != {(row["path"], row["kind"]) for row in data["transitions"]}):
+            raise StoreRecordError("Classified projection must cover exactly the affected transitions.")
+        if any(type(ref) is not str or ref not in {t["path"] for t in data["transitions"]}
+               for ref in data["confirmed"]):
+            raise StoreRecordError("Invalid confirmed publication.")
+        if self.content != _json_bytes(data):
+            raise StoreRecordError("Noncanonical intent content.")
+
+    @property
+    def intent(self):
+        """Return detached primitive evidence (dict), with no Store or graph access."""
+        return json.loads(self.content)
+
+    def _payload(self):
+        return {"intent": self.intent}
+
+    @classmethod
+    def _from_payload(cls, data):
+        return cls(_json_bytes(data["intent"]))
+
+
+def _encode_authority_bytes(value):
+    import base64
+    return None if value is None else base64.b64encode(value).decode("ascii")
+
+
+def _decode_authority_bytes(value):
+    import base64
+    try:
+        if value is None:
+            return None
+        if type(value) is not str:
+            raise ValueError()
+        result = base64.b64decode(value, validate=True)
+        if _encode_authority_bytes(result) != value:
+            raise ValueError()
+        return result
+    except (ValueError, TypeError) as error:
+        raise StoreRecordError("Invalid intent byte evidence.") from error
+
+
+@dataclass(frozen=True, slots=True)
+class NodeNameRecord(_NodeRecord):
+    """One format-4 mutable name targeting an explicitly published Node root.
+
+    name is a bounded path-safe string; root_kind is recipe/saved and root_digest
+    its semantic address. Invalid values raise StoreRecordError. This is separate
+    from legacy ObjectRef/StateRef aliases and carries no availability guarantee.
+    """
+
+    schema = "dryml-node-name"
+    fields = frozenset({"name", "root_kind", "root_digest"})
+    name: str
+    root_kind: str
+    root_digest: str
+
+    def __post_init__(self):
+        _alias(self.name)
+        NodeMembershipRecord(self.root_kind, self.root_digest)
+
+    def _payload(self):
+        return {"name": self.name, "root_kind": self.root_kind, "root_digest": self.root_digest}
+
+    @classmethod
+    def _from_payload(cls, data):
+        return cls(data["name"], data["root_kind"], data["root_digest"])
+
+
+__all__ += ["AuthorityRecord", "MutationIntentRecord", "NodeNameRecord"]
+
+
+@dataclass(frozen=True, slots=True)
+class RetiredDeclarationAnchorRecord(DeclarationAnchorRecord):
+    """Zero-source canonical declaration history after journaled withdrawal.
+
+    Uses a separate v1 schema at the same ObjectId anchor path, so an emptied
+    active-anchor record remains corruption. Fields/returns match the active
+    anchor, but sources must be (). Projection history and requirement remain
+    authoritative; malformed identity/projection raises StoreRecordError.
+    """
+
+    schema = "dryml-declaration-retired-anchor"
+
+    def __post_init__(self):
+        from ..reference_values import ObjectId
+        if (not isinstance(self.object_id, ObjectId) or not isinstance(self.projection, NodeRootRecord)
+                or self.projection.root_kind != "projection" or self.sources != ()):
+            raise StoreRecordError("Invalid retired declaration anchor.")
+
+
+__all__ += ["RetiredDeclarationAnchorRecord"]

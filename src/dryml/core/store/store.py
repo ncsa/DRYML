@@ -273,7 +273,9 @@ class Store(ABC):
         interpretation a JSON mapping. Returns StateInstallation. Codec content
         is confined to staging/data. Invalid evidence raises StoreAuthorityError;
         unsupported publication raises StoreCapabilityError. I/O errors propagate
-        and may follow visibility; this primitive is not journal/index completion.
+        and may follow visibility. Built-in Stores journal supported mutations;
+        explicit unsupported index coverage is refused before effects. Failures
+        retain confirmed authority/cut/replay evidence, without rollback.
         """
         raise StoreCapabilityError("Store does not support state buckets.")
 
@@ -281,7 +283,7 @@ class Store(ABC):
         """Return detached StateDescriptors for one carried creation digest.
 
         Reads metadata/presence only, interpreting same-bucket creation once per
-        fenced batch. Header-only buckets return (). Malformed records raise
+        detached, cut-revalidated batch. Header-only buckets return (). Malformed records raise
         StoreAuthorityError; unsupported backends raise StoreCapabilityError.
         No Objects or payload bytes are loaded; no future availability is promised.
         """
@@ -307,9 +309,9 @@ class Store(ABC):
         facets. Returns its NodeRootRecord, buffered in ZipStore. ObjectId anchors
         compare canonical projections, permitting state-pin changes. Missing or
         conflicting required anchors raise StoreAuthorityError before membership.
-        This metadata primitive does not claim journal/index/retention completion;
-        unsupported backends raise StoreCapabilityError. IO failures can leave
-        safely inspectable partial metadata.
+        Built-in backends journal this transition and refuse unsupported explicit
+        index policies. No retention completion is implied. Unsupported backends
+        raise StoreCapabilityError. IO failures carry inspectable partial metadata.
         """
         raise StoreCapabilityError("Store does not support identity-3 root publication.")
 
@@ -331,6 +333,103 @@ class Store(ABC):
         Reads metadata only and does not create declarations or load Objects.
         """
         raise StoreCapabilityError("Store does not support declaration anchors.")
+
+    def authority_cut(self):
+        """Return UUID/epoch/pending AuthorityRecord, or refuse unsupported authority.
+
+        This is a metadata cut, buffered for ZipStore. Missing/corrupt authority
+        raises StoreAuthorityError; it never certifies a derived index by itself.
+        """
+        raise StoreCapabilityError("Store does not support mutation cuts.")
+
+    def pending_mutations(self):
+        """Return exact pending intent/replay records without performing repair.
+
+        Unsupported backends raise StoreCapabilityError; inconsistent evidence
+        raises StoreAuthorityError. Records do not load graphs or private data.
+        """
+        raise StoreCapabilityError("Store does not support mutation replay evidence.")
+
+    def recover_authority(self):
+        """Classify interrupted publication and return exact pending replay records.
+
+        Recovery preserves authoritative files and staging, without rerunning
+        capture/restore/hooks or inventing rollback. Unsupported backends raise
+        StoreCapabilityError; corrupt evidence/IO failures remain explicit.
+        """
+        raise StoreCapabilityError("Store does not support mutation recovery.")
+
+    def apply_prepared_mutation(self, facts):
+        """Apply owned immutable PreparedMutation facts; return (mutation UUID, cut).
+
+        Stale witnesses fail before effects. Resulting projection work remains
+        pending exact acknowledgement. Unsupported backends raise
+        StoreCapabilityError; partial IO failures retain actual cut/evidence.
+        """
+        raise StoreCapabilityError("Store does not support prepared mutation batches.")
+
+    def replay_mutation(self, mutation_id):
+        """Complete one classified pending UUID's exact prepared transitions.
+
+        Returns repaired AuthorityRecord. Later conflicting authority or missing
+        staging refuses repair; no capture/restore/hook work runs. Unsupported
+        backends raise StoreCapabilityError. Repair is journaled and never rolls
+        back or deletes authoritative state to satisfy derived bookkeeping.
+        """
+        raise StoreCapabilityError("Store does not support exact mutation replay.")
+
+    def acknowledge_mutation(self, mutation_id, epoch):
+        """Acknowledge only one classified UUID/cut whose projection was incorporated.
+
+        Returns current AuthorityRecord, retaining later work. Wrong evidence
+        raises StoreAuthorityError; unsupported backends raise StoreCapabilityError.
+        """
+        raise StoreCapabilityError("Store does not support exact mutation acknowledgement.")
+
+    def read_node_name(self, name):
+        """Return a validated format-4 NodeNameRecord or None for a path-safe name.
+
+        Dangling/malformed names raise StoreAuthorityError; unsupported backends
+        raise StoreCapabilityError. Reads metadata only and does not mutate it.
+        """
+        raise StoreCapabilityError("Store does not support format-4 Node names.")
+
+    def compare_and_set_node_name(self, record, *, expected):
+        """Journal a NodeNameRecord CAS against a record or expected absence (None).
+
+        Returns record; target must be independently published. A mismatch raises
+        StoreAliasConflictError before effects; unsupported backends raise
+        StoreCapabilityError. Failed IO preserves classified partial authority.
+        """
+        raise StoreCapabilityError("Store does not support format-4 Node names.")
+
+    def delete_node_name(self, name, *, expected):
+        """Remove an exact name CAS, returning bool without deleting graph/state.
+
+        expected is a NodeNameRecord or None. Mismatch raises
+        StoreAliasConflictError; unsupported backends raise StoreCapabilityError.
+        """
+        raise StoreCapabilityError("Store does not support format-4 Node names.")
+
+    def rename_node_name(self, name, new_name, *, expected, expected_target=None):
+        """Journal source/target name CAS; return the resulting NodeNameRecord.
+
+        expected is the source record; expected_target is the target record or
+        None. Mismatch raises StoreAliasConflictError; interruption preserves
+        complete partial mappings/evidence. Unsupported stores raise
+        StoreCapabilityError. Graph and private state are never removed.
+        """
+        raise StoreCapabilityError("Store does not support format-4 Node names.")
+
+    def withdraw_node(self, digest, *, kind="recipe"):
+        """Withdraw membership and its declaration contributions, preserving history.
+
+        Returns bool (False for absent/still-named root). No state reclamation or
+        retention is implied. Corrupt authority raises StoreAuthorityError;
+        unsupported backends raise StoreCapabilityError. Failed IO retains exact
+        partial cut and replay evidence.
+        """
+        raise StoreCapabilityError("Store does not support Node membership withdrawal.")
 
     def _query_v3_inventory_capabilities(self) -> StoreInventoryCapabilities:
         """Return private broad-inventory coverage for Query V3 source capture.

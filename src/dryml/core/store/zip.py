@@ -13,6 +13,7 @@ from io import IOBase
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
 from threading import RLock
+from uuid import uuid4
 import zipfile
 from contextlib import contextmanager, nullcontext
 
@@ -21,6 +22,7 @@ from .dir import DirStore, _REMOVED_ENTRY_PREFIX, _EXACT_READERS, _EXACT_READER_
 from .records import StoreFormatRecord, StoreRecordError, _MAX_RECORD_BYTES
 from ...locking import interprocess_lock
 from .store import StoreAuthorityError, StorePublicationCapabilities
+from .authority import StoreMutationError
 
 
 def _is_file_like(value) -> bool:
@@ -29,6 +31,21 @@ def _is_file_like(value) -> bool:
 
 class ZipStoreConflictError(StoreAuthorityError):
     """Raised when a buffered path-backed archive changed before commit."""
+
+
+class ZipStoreCommitError(StoreMutationError):
+    """Archive commit failed with buffered cut/evidence retained for retry.
+
+    Inherits mutation_id/cut/confirmed_refs/index_disposition and adds
+    committed_archive_cut (the last confirmed durable archive cut) and
+    durability='buffered'. Failure after replacement visibility is ambiguous;
+    it never promotes buffered authority to confirmed durable completion.
+    """
+
+    def __init__(self, message, mutation_id, cut, committed_archive_cut, confirmed_refs=()):
+        super().__init__(message, mutation_id, cut, confirmed_refs)
+        self.committed_archive_cut = committed_archive_cut
+        self.durability = "buffered"
 
 
 class ZipStore(DirStore):
@@ -80,6 +97,8 @@ class ZipStore(DirStore):
         self._file_like = _is_file_like(zip_dest)
         self._archive_baseline = None
         self._archive_evidence = None
+        self._archive_retry_identity = None
+        self._commit_mutation_id = None
         try:
             if _existing_only:
                 if self._file_like:
@@ -88,6 +107,7 @@ class ZipStore(DirStore):
                     self._validate_existing_archive(self._archive_path)
             self._extract_if_present()
             super().__init__(self._tmp.name, query_index="memory", _existing_only=_existing_only)
+            self._committed_archive_cut = self.authority_cut() if self._archive_baseline is not None else None
         except BaseException:
             self._tmp.cleanup()
             raise
@@ -126,12 +146,20 @@ class ZipStore(DirStore):
             return StorePublicationCapabilities(False, False, False, False, False, "read-only")
         return StorePublicationCapabilities(True, True, True, True, True, "buffered")
 
-    def _state_content_changed(self):
-        self._archive_dirty = True
-
     @property
     def _archive_path(self) -> str:
         return self._archive_path_value
+
+    @property
+    def committed_archive_cut(self):
+        """Return last confirmed durable AuthorityRecord, or None before first commit.
+
+        This does not certify current extraction contents. Failed commits retain
+        the previous value, dirty extraction, intents and stable retry identity.
+        Closed handles raise RuntimeError; no archive IO is performed.
+        """
+        self._assert_open()
+        return self._committed_archive_cut
 
     @property
     def archive_path(self) -> str | None:
@@ -487,11 +515,15 @@ class ZipStore(DirStore):
             if not self._archive_dirty:
                 return
             self.preflight_publication("commit ZipStore", record_family="dryml-node-graph/v1")
+            buffered_cut = self.authority_cut()
+            if self._commit_mutation_id is None:
+                self._commit_mutation_id = str(uuid4())
             destination = self._archive_path
             directory = os.path.dirname(destination) or "."
-            fd, temporary = tempfile.mkstemp(prefix=".dryml-store-", suffix=".zip", dir=directory)
-            os.close(fd)
+            temporary = None
             try:
+                fd, temporary = tempfile.mkstemp(prefix=".dryml-store-", suffix=".zip", dir=directory)
+                os.close(fd)
                 with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
                     for root, dirs, files in os.walk(self.base_dir):
                         dirs[:] = sorted(name for name in dirs if root != self.base_dir or name != ".staging")
@@ -500,7 +532,9 @@ class ZipStore(DirStore):
                             relative_parts = Path(os.path.relpath(path, self.base_dir)).parts
                             is_tombstone = (
                                 name.startswith((_REMOVED_ENTRY_PREFIX, ".dryml-removed-"))
-                                and relative_parts[0] in {".dryml", "metadata"}
+                                and not name.endswith(".record")
+                                and (len(relative_parts) == 1 or relative_parts[0] in {
+                                    ".dryml", "metadata", "names", "membership", "declarations", "mutations"})
                             )
                             if path == self._writer_lock_path or is_tombstone:
                                 continue
@@ -510,8 +544,10 @@ class ZipStore(DirStore):
                         raise StoreAuthorityError("Buffered ZipStore archive validation failed.")
                 staged = self._archive_identity(temporary)
                 with interprocess_lock(self._archive_lock_path):
-                    if self._archive_identity() != self._archive_baseline:
+                    current = self._archive_identity()
+                    if current != self._archive_baseline and current != self._archive_retry_identity:
                         raise ZipStoreConflictError("ZipStore archive changed since open; reopen and reapply the mutation.")
+                    self._archive_retry_identity = staged
                     self._filesystem(
                         filesystem.publish_file,
                         temporary,
@@ -520,12 +556,30 @@ class ZipStore(DirStore):
                     )
                     self._archive_baseline = staged
                     self._archive_evidence = self._physical_archive_evidence()
+                    self._committed_archive_cut = buffered_cut
                     self._archive_dirty = False
-            except BaseException:
+                    self._archive_retry_identity = None
+                    self._commit_mutation_id = None
+            except BaseException as error:
                 try:
-                    os.unlink(temporary)
+                    if temporary is not None:
+                        os.unlink(temporary)
                 except FileNotFoundError:
                     pass
+                if isinstance(error, Exception) and not isinstance(error, ZipStoreConflictError):
+                    from .records import MutationIntentRecord
+                    confirmed = set()
+                    try:
+                        for path in Path(self.base_dir, "mutations").glob("*.record"):
+                            record = self._read_file(os.fspath(path), MutationIntentRecord)
+                            data = record.intent
+                            if data["epoch"] is not None and (self._committed_archive_cut is None
+                                    or data["epoch"] > self._committed_archive_cut.epoch):
+                                confirmed.update(data["confirmed"])
+                    except Exception:
+                        pass
+                    raise ZipStoreCommitError(str(error), self._commit_mutation_id,
+                                             buffered_cut, self._committed_archive_cut, sorted(confirmed)) from error
                 raise
 
     def _assert_open(self) -> None:

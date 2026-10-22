@@ -28,7 +28,10 @@ from .records import (
     StateKeyRecord, NodeBlockRecord, NodeRootRecord, StateVariantManifest,
     StateAvailabilityRecord, NodeMembershipRecord, DeclarationAnchorRecord,
     DeclarationRequirementRecord, _json_bytes, _digest_value, _digest, _MAX_RECORD_BYTES,
+    AuthorityRecord, MutationIntentRecord, NodeNameRecord, RetiredDeclarationAnchorRecord,
 )
+from . import authority
+from .authority import PreparedChange, StoreCutChanged
 from .store import (
     LocalStateSource, Store, StoreAuthorityError, StoreCapabilityError,
     StorePublicationCapabilities, _DELEGATED_LOCAL_STATE,
@@ -56,9 +59,9 @@ class DirStore(Store):
     sibling advisory lock, so simultaneous trusted constructors never mistake a
     live temporary format file for old authority.
 
-    This unit provides installation/read primitives, not journal/index-complete
-    mutation, retention or active-use leases. Legacy Repo snapshot writers and
-    query coverage fail explicitly pending their consumer units.
+    Supported mutations use durable intents, byte CAS and one committed authority
+    cut. Graph validation runs outside writer-blocking fences. Legacy Repo writers
+    and query/index coverage still fail explicitly; active-use leases are separate.
 
     Args:
         base_dir (str or PathLike): Direct Store root to open or initialize.
@@ -101,8 +104,10 @@ class DirStore(Store):
         self._initialize_format(existing_only=_existing_only)
         self._store_uuid = self._read_file(self.store_format_path, StoreFormatRecord).store_uuid
         self._state_owner_closed = False
+        self._prepared_fact_owner = object()
         evidence = os.stat(self._base_dir)
         self._authority_evidence = (evidence.st_dev, evidence.st_ino)
+        authority.read_cut(self)
 
     @property
     def store_uuid(self):
@@ -131,6 +136,229 @@ class DirStore(Store):
         if record_family != "dryml-node-graph/v1":
             raise StoreCapabilityError(
                 f"{operation} uses a legacy Store consumer; format 4 requires Node/state-bucket APIs.")
+        if self._query_index_policy == "sqlite":
+            raise StoreCapabilityError("Explicit SQLite publication requires format-4 coverage, which is not integrated yet.")
+
+    def authority_cut(self):
+        """Return a coherent AuthorityRecord (UUID/epoch/pending), without graph IO.
+
+        Missing/incompatible authority raises StoreAuthorityError. This describes
+        buffered authority for ZipStore, not durable archive completion.
+        """
+        self._assert_state_owner_open()
+        with self.authority_read_fence():
+            return authority.read_cut(self)
+
+    def recover_authority(self):
+        """Classify persisted interrupted work; return replayable intent records.
+
+        Recovery is metadata-only, preserves authoritative files/staging, and
+        never captures/restores Objects or completes unexecuted transitions.
+        Missing/corrupt evidence or IO failure raises rather than claiming success.
+        """
+        self.preflight_publication("recover authority", record_family="dryml-node-graph/v1")
+        return authority.recover(self)
+
+    def acknowledge_mutation(self, mutation_id, epoch):
+        """Acknowledge exactly a captured classified UUID/cut; return current cut.
+
+        The owner must first incorporate its exact replay work and coverage.
+        Mismatched evidence raises StoreAuthorityError; IO failures propagate.
+        Later mutations are never acknowledged by this call.
+        """
+        self.preflight_publication("acknowledge mutation", record_family="dryml-node-graph/v1")
+        try:
+            return authority.acknowledge(self, mutation_id, epoch)
+        except (StoreAuthorityError, StoreRecordError, TypeError, ValueError):
+            raise
+        except BaseException as error:
+            cut, refs = None, ()
+            try:
+                cut = self.authority_cut()
+                record = self._read_file(os.path.join(self.base_dir, "mutations", mutation_id + ".record"), MutationIntentRecord)
+                if record is not None:
+                    refs = tuple(record.intent["confirmed"])
+            except Exception:
+                pass
+            if not isinstance(error, Exception):
+                error.mutation_id, error.cut = mutation_id, cut
+                error.confirmed_refs, error.index_disposition = refs, "repair_pending"
+                raise
+            raise authority.StoreMutationError(str(error), mutation_id, cut, refs) from error
+
+    def replay_mutation(self, mutation_id):
+        """Complete captured partial transitions without graph or lifecycle work.
+
+        mutation_id must name a classified pending intent in this Store. Returns
+        the repaired AuthorityRecord. Exact projection witnesses must still match;
+        later conflicting writers cause StoreCutChanged, never overwrite. Missing
+        owned staging or invalid staged payload fails explicitly. All validation
+        and payload authentication precede the writer fence. The repair is itself
+        journaled, then acknowledges only the original captured mutation/cut.
+        """
+        from .records import _uuid_value, _decode_authority_bytes, StateVariantManifest
+        import json
+        _uuid_value(mutation_id)
+        self.preflight_publication("replay mutation", record_family="dryml-node-graph/v1")
+        self.recover_authority()
+        captured = next((r for r in self.pending_mutations() if r.intent["mutation_id"] == mutation_id), None)
+        if captured is None or captured.intent["status"] == "pending":
+            raise StoreAuthorityError("Replay requires an exact classified pending mutation.")
+        data = captured.intent
+        def prepare():
+            if authority.read_cut(self).epoch != data["epoch"]:
+                raise StoreCutChanged("Repair cut is stale; later Store authority must be reconciled explicitly.")
+            observed, final = {}, {}
+            for row in data["projection"]:
+                observed[(row["path"], row["kind"])] = _decode_authority_bytes(row["value"])
+            for row in data["transitions"]:
+                final[(row["path"], row["kind"])] = _decode_authority_bytes(row["after"])
+            current = {}
+            for row in data["transitions"]:
+                key = (row["path"], row["kind"])
+                if key not in current:
+                    actual = authority._observed(self, row)
+                    if actual != observed[key]:
+                        raise StoreCutChanged("Later authority conflicts with captured repair evidence.")
+                    current[key] = actual
+            done = {key for key in current if current[key] == final[key]}
+            changes = []
+            initial = {}
+            for row in data["transitions"]:
+                initial.setdefault((row["path"], row["kind"]), row)
+            # Visibility after an interrupted native barrier is not a durable
+            # acknowledgement. Re-persist exact metadata and parent entries even
+            # when all desired bytes are already visible. Staged child content
+            # crossed its file/tree barriers before the native visibility move.
+            for key in current:
+                if key not in done:
+                    continue
+                path, kind = key
+                if kind == "file":
+                    value = current[key]
+                    if value is None:
+                        before = _decode_authority_bytes(initial[key]["before"])
+                        if before is not None:
+                            changes.append(PreparedChange(path, None, before))
+                            changes.append(PreparedChange(path, before, None))
+                    else:
+                        changes.append(PreparedChange(path, value, value))
+                elif kind == "variant":
+                    evidence = json.loads(current[key])
+                    manifest = StateVariantManifest.from_bytes(_decode_authority_bytes(evidence["manifest"]))
+                    self._authenticate_state_data(manifest, os.path.join(self.base_dir, path, "data"))
+                    for file_path in (path + "/manifest.record", path + "/availability.record",
+                                      path.rsplit("/", 1)[0] + "/def.pkl"):
+                        value = authority.raw(self, file_path)
+                        if value is None:
+                            raise StoreAuthorityError("Missing metadata required to persist recovered state.")
+                        changes.append(PreparedChange(file_path, value, value))
+            for row in data["transitions"]:
+                key = (row["path"], row["kind"])
+                if key in done:
+                    continue
+                before, after = (_decode_authority_bytes(row[n]) for n in ("before", "after"))
+                if current[key] == after:
+                    continue
+                if current[key] != before:
+                    raise StoreAuthorityError("Partial authority does not match a replayable transition.")
+                if row["kind"] != "file":
+                    stage = os.path.join(self.base_dir, row["staging"])
+                    if not os.path.isdir(stage):
+                        raise StoreAuthorityError("Recovery staging is missing; preserve intent and restage explicitly.")
+                    if row["kind"] == "variant":
+                        evidence = json.loads(after)
+                        manifest = StateVariantManifest.from_bytes(_decode_authority_bytes(evidence["manifest"]))
+                        if authority.variant_evidence(self, row["staging"]) != after:
+                            raise StoreAuthorityError("Recovery staging metadata changed.")
+                        self._authenticate_state_data(manifest, os.path.join(stage, "data"))
+                    else:
+                        path = os.path.join(self.base_dir, row["path"], "..", "manifest.record")
+                        manifest = self._read_file(os.path.normpath(path), StateVariantManifest)
+                        if manifest is None:
+                            raise StoreAuthorityError("Recovery data has no authoritative manifest.")
+                        self._authenticate_state_data(manifest, stage)
+                changes.append(PreparedChange(row["path"], before, after, row["staging"], row["kind"]))
+                current[key] = after
+            return changes, tuple(data["scopes"]) + ("replay:" + mutation_id,), None
+        # Conflict is not an invitation to recapture or reinterpret the old intent.
+        self._prepare_and_apply(prepare, retry_stale=False)
+        return self.acknowledge_mutation(mutation_id, data["epoch"])
+
+    def apply_prepared_mutation(self, facts):
+        """Apply Store-owned PreparedMutation facts; return (mutation UUID, cut).
+
+        Facts contain validated immutable bytes, affected scopes and exact CAS
+        witnesses; no callbacks or live graph values. Stale facts raise
+        StoreCutChanged before effects. Failed publication raises StoreMutationError
+        with confirmed references/cut and repair disposition. New work remains
+        pending until acknowledge_mutation confirms the exact incorporated cut;
+        callers can obtain replay data with pending_mutations. This seam is owned
+        by this Store handle and refuses another handle's prepared facts.
+        """
+        self.preflight_publication("apply prepared mutation", record_family="dryml-node-graph/v1")
+        return authority.apply(self, facts)
+
+    def pending_mutations(self):
+        """Return exact intent records captured under one short authority cut.
+
+        Records retain base/result cuts, scopes, expected transitions, confirmed
+        relative references and exact projection bytes for batch delta/coverage
+        consumers. Pending unclassified work is not a completeness certificate.
+        Missing/mismatched records raise StoreAuthorityError. No graph, payload,
+        SQL, application hook or repair work runs here.
+        """
+        self._assert_state_owner_open()
+        with self.authority_read_fence():
+            cut = authority.read_cut(self)
+            records = []
+            for identity in cut.pending:
+                record = self._read_file(os.path.join(self.base_dir, "mutations", identity + ".record"), MutationIntentRecord)
+                if (record is None or record.intent["mutation_id"] != identity
+                        or record.intent["store_uuid"] != cut.store_uuid):
+                    raise StoreAuthorityError("Missing or mismatched pending intent.")
+                records.append(record)
+            return tuple(records)
+
+    def _metadata_read(self):
+        return authority.detached_read(self)
+
+    def _relative(self, path):
+        return os.path.relpath(path, self.base_dir).replace(os.sep, "/")
+
+    def _prepared_file(self, path, record, *, mutable=False):
+        before = authority.raw(self, self._relative(path))
+        authority.observe(self, path, before)
+        after = None if record is None else record.to_bytes()
+        if before == after:
+            return None
+        if before is not None and not mutable:
+            raise StoreAuthorityError("Immutable Node metadata collision.")
+        return PreparedChange(self._relative(path), before, after)
+
+    def _prepare_and_apply(self, prepare, *, retry_stale=True):
+        # The preparation callable is strictly outside the Store writer fence.
+        # A bounded retry admits concurrent siblings without merging stale CAS.
+        for _ in range(8):
+            try:
+                self.recover_authority()
+                with self._metadata_read() as captured:
+                    changes, scopes, result = prepare()
+                    unique = []
+                    for change in changes:
+                        if change is not None and change not in unique:
+                            unique.append(change)
+                    facts = captured.batch(unique, scopes)
+                # The current automatic policy is explicitly nonpersistent.
+                # Keep publication/cut/ack in one short byte-only writer scope;
+                # the public prepared-facts seam deliberately leaves work pending.
+                authority.apply(self, facts, _acknowledge_nonpersistent=True)
+                return result
+            except StoreCutChanged:
+                if not retry_stale:
+                    raise
+                continue
+        raise StoreCutChanged("Store changed repeatedly; retry publication explicitly.")
 
     def _query_v3_inventory_capabilities(self):
         raise StoreCapabilityError("Format 4 Node authority requires the new query coverage contract.")
@@ -219,10 +447,6 @@ class DirStore(Store):
             raise StoreAuthorityError("Immutable Node metadata collision.")
         return existing
 
-    def _install_node_record(self, path, record):
-        if self._check_node_record(path, record) is None:
-            self._atomic_write(path, record.to_bytes())
-
     def install_creations(self, roots):
         """Install concrete roots using one shared metadata table; return digest tuple.
 
@@ -238,7 +462,7 @@ class DirStore(Store):
             block, records, prepared = self._prepare_node_roots(tuple(roots), "construction")
         except (ValueError, TypeError) as error:
             raise StoreAuthorityError("Invalid creation authority.") from error
-        with self.writer_lock():
+        def prepare():
             missing = {}
             for record, root in zip(records, prepared):
                 existing = self.read_creation(record.digest)
@@ -249,10 +473,13 @@ class DirStore(Store):
                     missing.setdefault(record.digest, (record, root))
                 elif not view_equal(existing, root, CREATION_VIEW):
                     raise StoreAuthorityError("Creation bucket header collision.")
+            changes = []
             if missing:
-                self._install_node_record(self._node_path("definitions/blocks", block.digest), block)
+                changes.append(self._prepared_file(self._node_path("definitions/blocks", block.digest), block))
                 for record, _ in missing.values():
-                    self._install_node_record(os.path.join(self._bucket_path(record.digest), "def.pkl"), record)
+                    changes.append(self._prepared_file(os.path.join(self._bucket_path(record.digest), "def.pkl"), record))
+            return changes, ("creation",), None
+        self._prepare_and_apply(prepare)
         return tuple(record.digest for record in records)
 
     def install_creation(self, root):
@@ -275,7 +502,7 @@ class DirStore(Store):
         metadata survives Store closure, unlike borrowed read sources.
         """
         self._assert_state_owner_open()
-        with self.authority_read_fence():
+        with self._metadata_read():
             record = self._read_creation_record(cdef_digest)
             return None if record is None else self._expand_node_root(record)
 
@@ -318,8 +545,9 @@ class DirStore(Store):
         stage = os.fspath(staging)
         data = os.path.join(stage, "data")
         try:
-            if set(os.listdir(stage)) != {"data"} or not stat.S_ISDIR(os.lstat(data).st_mode):
-                raise StoreAuthorityError("State staging must contain only its private data directory.")
+            entries = set(os.listdir(stage))
+            if entries not in ({"data"}, {"data", "manifest.record", "availability.record"}) or not stat.S_ISDIR(os.lstat(data).st_mode):
+                raise StoreAuthorityError("State staging must contain private data and only complete Store-prepared metadata.")
             block, (header,), (origin,) = self._prepare_node_roots((root,), "construction")
             files = self._state_inventory(data)
             codec_hash = StateVariantManifest.content_hash(codec, codec_version, interpretation, files)
@@ -327,10 +555,20 @@ class DirStore(Store):
             manifest = StateVariantManifest(key, codec_version, _json_bytes(interpretation), files)
             manifest.validate_payload(data)
             manifest_bytes = manifest.to_bytes()
+            incarnation = None
+            if entries != {"data"}:
+                staged_manifest = self._read_file(os.path.join(stage, "manifest.record"), StateVariantManifest)
+                incarnation = self._read_file(os.path.join(stage, "availability.record"), StateAvailabilityRecord)
+                if staged_manifest != manifest or incarnation is None or incarnation.key != key or incarnation.status != "published":
+                    raise StoreAuthorityError("Retry staging does not match exact prepared state evidence.")
         except (ValueError, TypeError) as error:
             raise StoreAuthorityError("Invalid codec/state/creation evidence.") from error
         target = os.path.dirname(self.state_data_path(key))
-        with self.writer_lock():
+        incarnation = incarnation or StateAvailabilityRecord(key, str(uuid4()))
+        # Fully stage the complete immutable child outside the writer fence.
+        self._write_state_stage_record(Path(stage, "manifest.record"), manifest_bytes)
+        self._write_state_stage_record(Path(stage, "availability.record"), incarnation.to_bytes())
+        def prepare():
             old_origin = self.read_creation(header.digest)
             if old_origin is not None and not view_equal(old_origin, origin, CREATION_VIEW):
                 raise StoreAuthorityError("Creation bucket header collision.")
@@ -340,37 +578,38 @@ class DirStore(Store):
                     raise StoreAuthorityError("State variant manifest collision.")
                 if old.available:
                     self._authenticate_state_data(old.manifest, self.state_data_path(key))
-                    shutil.rmtree(stage)
-                    return StateInstallation(old.state, False, self._state_durability)
+                    return [], ("state",), StateInstallation(old.state, False, self._state_durability)
+            changes = []
             if old_origin is None:
-                self._install_node_record(self._node_path("definitions/blocks", block.digest), block)
-                self._install_node_record(os.path.join(self._bucket_path(key.cdef_digest), "def.pkl"), header)
-            incarnation = StateAvailabilityRecord(key, str(uuid4()))
-            self._state_content_changed()
+                changes.append(self._prepared_file(self._node_path("definitions/blocks", block.digest), block))
+                changes.append(self._prepared_file(os.path.join(self._bucket_path(key.cdef_digest), "def.pkl"), header))
             if old is None:
-                self._write_state_stage_record(Path(stage, "manifest.record"), manifest_bytes)
-                self._write_state_stage_record(Path(stage, "availability.record"), incarnation.to_bytes())
-                self._filesystem(filesystem.publish_directory, stage, target)
+                expected = authority.variant_evidence(self, self._relative(stage))
+                changes.append(PreparedChange(self._relative(target), None, expected,
+                                              self._relative(stage), "variant"))
             else:
                 # Reclamation leaves immutable manifest/header history. Reinstall
                 # only private data, then replace its publication incarnation.
                 restored = os.path.join(target, "data")
                 if os.path.lexists(restored):
                     self._authenticate_state_data(manifest, restored)
-                self._atomic_write(os.path.join(target, "availability.record"),
-                                   replace(incarnation, status="prepared").to_bytes())
+                availability = os.path.join(target, "availability.record")
+                first = self._prepared_file(availability, replace(incarnation, status="prepared"), mutable=True)
+                changes.append(first)
                 if not os.path.lexists(restored):
-                    self._filesystem(filesystem.publish_directory, data, restored)
-                self._atomic_write(os.path.join(target, "availability.record"), incarnation.to_bytes())
-                shutil.rmtree(stage)
-        return StateInstallation(LocalState(key, origin), True, self._state_durability)
+                    changes.append(PreparedChange(self._relative(restored), None, b"directory",
+                                                  self._relative(data), "data"))
+                changes.append(PreparedChange(self._relative(availability), first.after,
+                                              incarnation.to_bytes()))
+            return changes, ("state", "creation"), StateInstallation(LocalState(key, origin), True, self._state_durability)
+        result = self._prepare_and_apply(prepare)
+        if os.path.isdir(stage):
+            shutil.rmtree(stage)
+        return result
 
     @property
     def _state_durability(self):
         return self.publication_capabilities.durability
-
-    def _state_content_changed(self):
-        pass
 
     @staticmethod
     def _write_state_stage_record(path, payload):
@@ -408,8 +647,8 @@ class DirStore(Store):
     def inspect_states(self, cdef_digest, *, available_only=False):
         """Return bucket history/availability without payload IO or Object construction.
 
-        Interprets the creation header once in one writer-serialized batch; sorted
-        direct variant metadata is detached before returning. available_only must
+        Interprets the creation header once outside short writer-blocking scopes;
+        exact cut/byte witnesses are revalidated before returning. available_only must
         be bool. Malformed/incompatible records raise StoreAuthorityError intact.
         This bounded-to-one-bucket inventory is not the later indexed paging API.
         """
@@ -417,12 +656,13 @@ class DirStore(Store):
         self._assert_state_owner_open()
         if type(available_only) is not bool:
             raise TypeError("available_only must be bool.")
-        with self.authority_read_fence():
+        with self._metadata_read() as captured:
             origin = self.read_creation(cdef_digest)
             if origin is None:
                 return ()
             result = []
-            for child in sorted(Path(self._bucket_path(cdef_digest)).iterdir()):
+            for name in captured.directory(self._relative(self._bucket_path(cdef_digest))):
+                child = Path(self._bucket_path(cdef_digest), name)
                 if child.name == "def.pkl":
                     continue
                 try:
@@ -451,7 +691,7 @@ class DirStore(Store):
         options = (destination is not None, codec is not None, codec_version is not None)
         if any(options) and (not all(options) or type(codec_version) is not int or codec_version < 1):
             raise TypeError("destination, codec and positive integer codec_version must be supplied together.")
-        with self.authority_read_fence():
+        with self._metadata_read():
             origin = self.read_creation(key.cdef_digest)
             descriptor = self._read_variant(key, origin)
             if descriptor is None or not descriptor.available:
@@ -486,7 +726,7 @@ class DirStore(Store):
         """
         self._assert_state_owner_open()
         key = self._anchor_key(object_id)
-        with self.authority_read_fence():
+        with self._metadata_read():
             anchor = self._read_file(self._node_path("declarations/anchors", key), DeclarationAnchorRecord)
             required = self._read_file(self._node_path("declarations/required", key), DeclarationRequirementRecord)
             if anchor is None and required is None:
@@ -554,8 +794,9 @@ class DirStore(Store):
         root/kind and errors follow Store.publish_node. Immutable preparation is
         outside the writer fence. All applicable declarations are checked before
         effects, using canonical projection evidence, not exact state-pinned graph
-        equality. This is the U07 prepared-facts seam, not a journal/index-complete
-        transaction. Partial IO errors preserve metadata for explicit recovery.
+        equality. Journal intent precedes effects; partial IO errors carry confirmed
+        references and repair evidence. Enabled SQLite coverage is refused before
+        effects pending its separate integration.
         """
         from ..node_views import OBJECT_PROJECTION_VIEW, view_equal
         self.preflight_publication("publish Node metadata", record_family="dryml-node-graph/v1")
@@ -563,7 +804,7 @@ class DirStore(Store):
         source = (kind, record.digest)
         membership = NodeMembershipRecord(kind, record.digest, tuple(i for i, _, _ in projections))
         membership.to_bytes()
-        with self.writer_lock():
+        def prepare():
             existing = self._read_membership(record.digest, kind)
             if existing is not None:
                 # Direct reading checks every required anchor even for a no-op.
@@ -589,22 +830,25 @@ class DirStore(Store):
                 if old_record.root_kind != kind or not NodePreparation((a,)).exact_equal(a, b, root):
                     raise StoreAuthorityError("Node root semantic collision.")
             self._check_node_record(self._node_path("definitions/blocks", block.digest), block)
-            if projections:
+            new_projections = any(anchor.projection.block_digest == pblock.digest for anchor in updates)
+            if new_projections:
                 self._check_node_record(self._node_path("definitions/blocks", pblock.digest), pblock)
-            self._install_node_record(self._node_path("definitions/blocks", block.digest), block)
-            if projections:
-                self._install_node_record(self._node_path("definitions/blocks", pblock.digest), pblock)
+            changes = []
             if old_record is None:
-                self._install_node_record(root_path, record)
+                changes.append(self._prepared_file(self._node_path("definitions/blocks", block.digest), block))
+            if new_projections and existing is None:
+                changes.append(self._prepared_file(self._node_path("definitions/blocks", pblock.digest), pblock))
+            if old_record is None:
+                changes.append(self._prepared_file(root_path, record))
             for anchor in updates:
                 key = self._anchor_key(anchor.object_id)
                 witness = DeclarationRequirementRecord(anchor.object_id, anchor.projection.digest)
                 old = self._read_file(self._node_path("declarations/anchors", key), DeclarationAnchorRecord)
-                if old != anchor:
-                    self._atomic_write(self._node_path("declarations/anchors", key), anchor.to_bytes())
-                self._install_node_record(self._node_path("declarations/required", key), witness)
-            self._install_node_record(self._node_path("membership/" + kind, record.digest), membership)
-            return old_record or record
+                changes.append(self._prepared_file(self._node_path("declarations/anchors", key), anchor, mutable=True))
+                changes.append(self._prepared_file(self._node_path("declarations/required", key), witness))
+            changes.append(self._prepared_file(self._node_path("membership/" + kind, record.digest), membership))
+            return changes, ("root", "membership", "declarations"), old_record or record
+        return self._prepare_and_apply(prepare)
 
     def _read_membership(self, digest, kind):
         if kind not in {"recipe", "saved"}:
@@ -623,7 +867,7 @@ class DirStore(Store):
         """
         from ..node_views import OBJECT_PROJECTION_VIEW, view_equal
         self._assert_state_owner_open()
-        with self.authority_read_fence():
+        with self._metadata_read():
             membership = self._read_membership(digest, kind)
             if membership is None:
                 return None
@@ -641,6 +885,134 @@ class DirStore(Store):
                 if not view_equal(node, self._expand_node_root(anchor.projection), OBJECT_PROJECTION_VIEW):
                     raise StoreAuthorityError("Published Node declaration conflicts with anchor.")
             return root
+
+    def _name_path(self, name):
+        from .records import _alias
+        _alias(name)
+        return os.path.join(self.base_dir, "names", name + ".record")
+
+    def read_node_name(self, name):
+        """Read one format-4 name and validate its explicit root membership.
+
+        name is a bounded path-safe string. Returns NodeNameRecord or None;
+        malformed/dangling names raise StoreAuthorityError. Validation is detached
+        and cut-revalidated; no payloads, Objects or index are accessed.
+        """
+        self._assert_state_owner_open()
+        with self._metadata_read():
+            record = self._read_file(self._name_path(name), NodeNameRecord)
+            if record is not None:
+                if record.name != name or self.read_node(record.root_digest, kind=record.root_kind) is None:
+                    raise StoreAuthorityError("Dangling or mismatched Node name authority.")
+            return record
+
+    def compare_and_set_node_name(self, record, *, expected):
+        """Journal a bounded name CAS to an already published Node root.
+
+        record and expected are NodeNameRecords (expected may be None for absent).
+        Returns the installed record. Mismatched CAS raises StoreAliasConflictError
+        before effects; malformed/dangling authority raises StoreAuthorityError.
+        An equal current name is an authoritative no-op. IO failures retain intent,
+        actual cut and confirmed publication evidence, without rollback.
+        """
+        from .store import StoreAliasConflictError
+        if not isinstance(record, NodeNameRecord) or (expected is not None and
+                (not isinstance(expected, NodeNameRecord) or expected.name != record.name)):
+            raise TypeError("Name CAS requires matching NodeNameRecords or expected=None.")
+        self.preflight_publication("name Node root", record_family="dryml-node-graph/v1")
+        def prepare():
+            if self.read_node_name(record.name) != expected:
+                raise StoreAliasConflictError("Node name CAS did not match current authority.")
+            if self.read_node(record.root_digest, kind=record.root_kind) is None:
+                raise StoreAuthorityError("Node name requires published root membership.")
+            return [self._prepared_file(self._name_path(record.name), record, mutable=True)], ("names",), record
+        return self._prepare_and_apply(prepare)
+
+    def delete_node_name(self, name, *, expected):
+        """Journal removal of one exact current name; return whether it existed.
+
+        name is path-safe; expected is its NodeNameRecord or None. CAS mismatch
+        raises StoreAliasConflictError. Only the name is removed; graph, state and
+        declaration history remain intact. IO errors preserve partial evidence.
+        """
+        from .store import StoreAliasConflictError
+        self._name_path(name)
+        if expected is not None and (not isinstance(expected, NodeNameRecord) or expected.name != name):
+            raise TypeError("Name deletion requires its expected NodeNameRecord.")
+        self.preflight_publication("delete Node name", record_family="dryml-node-graph/v1")
+        def prepare():
+            old = self.read_node_name(name)
+            if old != expected:
+                raise StoreAliasConflictError("Node name deletion CAS did not match.")
+            changes = [] if old is None else [self._prepared_file(self._name_path(name), None, mutable=True)]
+            return changes, ("names",), old is not None
+        return self._prepare_and_apply(prepare)
+
+    def rename_node_name(self, name, new_name, *, expected, expected_target=None):
+        """Journal exact source/target name CAS without deleting graph authority.
+
+        Names are path-safe strings; expected is the source NodeNameRecord and
+        expected_target is the destination record or None. Returns the new record.
+        Mismatches raise StoreAliasConflictError before effects. Interrupted rename
+        may leave both complete names; the journal classifies that honest cut.
+        """
+        from .store import StoreAliasConflictError
+        self._name_path(name)
+        self._name_path(new_name)
+        if not isinstance(expected, NodeNameRecord) or expected.name != name:
+            raise TypeError("Rename requires the exact expected source name.")
+        if expected_target is not None and (not isinstance(expected_target, NodeNameRecord)
+                                            or expected_target.name != new_name):
+            raise TypeError("Rename requires a matching expected target name.")
+        self.preflight_publication("rename Node name", record_family="dryml-node-graph/v1")
+        renamed = replace(expected, name=new_name)
+        def prepare():
+            if self.read_node_name(name) != expected:
+                raise StoreAliasConflictError("Rename source CAS did not match.")
+            if name == new_name:
+                return [], ("names",), expected
+            if self.read_node_name(new_name) != expected_target:
+                raise StoreAliasConflictError("Rename target CAS did not match.")
+            return [self._prepared_file(self._name_path(new_name), renamed, mutable=True),
+                    self._prepared_file(self._name_path(name), None, mutable=True)], ("names",), renamed
+        return self._prepare_and_apply(prepare)
+
+    def withdraw_node(self, digest, *, kind="recipe"):
+        """Withdraw explicit membership and only its declaration contributions.
+
+        digest/kind identify a published root. Returns True if removed, False for
+        absent or still-named roots. Immutable graphs, declaration requirements,
+        canonical anchors (including zero-source history), and all state data are
+        preserved. No retention/reclamation is performed. Corrupt authority raises
+        StoreAuthorityError; failed IO carries honest partial mutation evidence.
+        """
+        self.preflight_publication("withdraw Node membership", record_family="dryml-node-graph/v1")
+        self._read_membership(digest, kind)
+        def prepare():
+            membership = self._read_membership(digest, kind)
+            if membership is None:
+                return [], ("membership", "declarations"), False
+            self.read_node(digest, kind=kind)
+            with self._metadata_read() as captured:
+                for name in captured.directory("names"):
+                    if name.startswith(".dryml-removed-") and not name.endswith(".record"):
+                        continue
+                    if not name.endswith(".record"):
+                        raise StoreAuthorityError("Malformed Node name inventory.")
+                    record = self.read_node_name(name[:-7])
+                    if (record.root_kind, record.root_digest) == (kind, digest):
+                        return [], ("membership", "declarations"), False
+            changes = []
+            for identity in membership.identities:
+                anchor = self.read_declaration_anchor(identity)
+                sources = tuple(s for s in anchor.sources if s != (kind, digest))
+                cls = DeclarationAnchorRecord if sources else RetiredDeclarationAnchorRecord
+                updated = cls(anchor.object_id, anchor.projection, sources)
+                changes.append(self._prepared_file(self._node_path("declarations/anchors", self._anchor_key(identity)),
+                                                   updated, mutable=True))
+            changes.append(self._prepared_file(self._node_path("membership/" + kind, digest), None, mutable=True))
+            return changes, ("membership", "declarations"), True
+        return self._prepare_and_apply(prepare)
 
     @staticmethod
     def _filesystem(operation, *args, **kwargs):
@@ -696,6 +1068,18 @@ class DirStore(Store):
     def query_index_policy(self) -> QueryIndexPolicy:
         """Return the configured derived-index policy without making it authority."""
         return self._query_index_policy
+
+    @property
+    def mutation_index_disposition(self):
+        """Return the explicit current publication/index policy (str), without IO.
+
+        none/memory have no persistent maintenance obligation. auto is currently
+        nonpersistent because new coverage is unavailable; explicit sqlite refuses
+        publication before effects. No disposition certifies legacy index rows.
+        """
+        return {"none": "disabled", "memory": "memory",
+                "auto": "nonpersistent:auto-coverage-unavailable",
+                "sqlite": "unsupported:sqlite-coverage-unavailable"}[self._query_index_policy]
 
     @property
     def dryml_dir(self) -> str:
@@ -921,8 +1305,10 @@ class DirStore(Store):
     def writer_lock(self):
         """Serialize a multi-record Store authority transition.
 
-        The reentrant adapter lets record writers retain their own defensive
-        locking while Repo performs one declaration or claim compare-and-swap.
+        Only bounded byte/association checks, prepared installs and authority cuts
+        belong inside. Prepare graphs, invoke hooks/providers and authenticate
+        payloads before entry. Future key protection must precede this fence;
+        callers must not wrap high-level graph APIs in an externally held fence.
         """
         return interprocess_lock(self._writer_lock_path)
 
@@ -1011,14 +1397,25 @@ class DirStore(Store):
                 return
             # A non-empty root without the current gate is retired/incompatible;
             # do not create a new format marker over unknown authority.
-            if any(root.iterdir()):
+            entries = {entry.name for entry in root.iterdir()}
+            if entries == {"authority.record"}:
+                initial = self._read_file(os.path.join(self.base_dir, "authority.record"), AuthorityRecord)
+                if initial.epoch != 0 or initial.pending:
+                    raise StoreAuthorityError("Incomplete Store initialization has noninitial authority.")
+                self._atomic_write(self.store_format_path, StoreFormatRecord(store_uuid=initial.store_uuid).to_bytes())
+                return
+            if entries:
                 raise StoreAuthorityError("Store lacks current store-format.record; old or mixed authority is unsupported.")
-            self._atomic_write(self.store_format_path, StoreFormatRecord().to_bytes())
+            format_record = StoreFormatRecord()
+            self._atomic_write(os.path.join(self.base_dir, "authority.record"),
+                               AuthorityRecord(format_record.store_uuid).to_bytes())
+            self._atomic_write(self.store_format_path, format_record.to_bytes())
 
     def _read_file(self, path: str, record_type, *, preparation=None):
         try:
             mode = os.lstat(path).st_mode
         except FileNotFoundError:
+            authority.observe(self, path, None)
             return None
         if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
             raise StoreAuthorityError(f"Store record is not a regular file: {path!r}.")
@@ -1028,6 +1425,10 @@ class DirStore(Store):
         try:
             with open(path, "rb") as source:
                 payload = source.read(_MAX_RECORD_BYTES + 1)
+            authority.observe(self, path, payload)
+            if record_type is DeclarationAnchorRecord and payload.startswith(
+                    b"DRYML-METADATA/dryml-declaration-retired-anchor/1\n"):
+                record_type = RetiredDeclarationAnchorRecord
             if preparation is not None:
                 return record_type._from_bytes_prepared(payload, preparation)
             return record_type.from_bytes(payload)

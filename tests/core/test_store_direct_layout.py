@@ -28,8 +28,9 @@ def test_node_roots_use_direct_digest_paths_without_object_generations(tmp_path)
 
 @pytest.mark.parametrize("consumer", ("query", "rebuild"))
 def test_old_query_consumers_refuse_new_authority_without_inventory(tmp_path, monkeypatch, consumer):
-    store = DirStore(tmp_path / "store", query_index="sqlite")
-    store.publish_node(Definition(DirectLayoutObject).concretize())
+    writer = DirStore(tmp_path / "store", query_index="none")
+    writer.publish_node(Definition(DirectLayoutObject).concretize())
+    store = DirStore(writer.base_dir, query_index="sqlite")
     monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("legacy inventory"))
     action = store.query if consumer == "query" else store.rebuild_query_index
     with pytest.raises(StoreCapabilityError):
