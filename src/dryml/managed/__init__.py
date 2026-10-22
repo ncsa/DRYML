@@ -12,15 +12,24 @@ from .errors import (
     ManagedInterrupted,
     ManagedPublicationError,
     ManagedRecoveryError,
+    ManagedResultError,
     ManagedRerunRequiredError,
     ManagedStoreError,
 )
 from .identity import argument_digest, operation_digest
-from .model import InterruptRequestResult, ManagedStatus
+from .model import (InterruptRequestResult, ManagedStatus, ExecutionIdentity,
+                    InvocationResult, FailedInvocationResult)
+from .results import ResultReference, ResultSource
 from .context import ManagedContext
 
 __all__ = [
     "InterruptRequestResult",
+    "InvocationResult",
+    "FailedInvocationResult",
+    "ExecutionIdentity",
+    "ResultReference",
+    "ResultSource",
+    "ManagedResultError",
     "ManagedConfig",
     "ManagedContext",
     "ManagedConfigError",

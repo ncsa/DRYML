@@ -119,7 +119,7 @@ class Fold(Value[ResultT], Generic[ResultT]):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True, store_parameter="store")
+    @managed_operation(resumable=True, store_parameter="store")
     def compute(
             self, *, checkpoint_every: int = 1000, store=None,
             managed: ManagedContext) -> None:

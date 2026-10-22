@@ -39,7 +39,7 @@ class NestedResultValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(return_state_ref=True)
+    @managed_operation()
     def compute(self, *, managed) -> None:
         """Install the child's current value as this Artifact result."""
 

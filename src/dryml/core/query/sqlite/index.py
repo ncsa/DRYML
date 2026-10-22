@@ -74,6 +74,11 @@ _BUILD_CLAIM_STALE_SECONDS = 300.0
 _BUILD_CLAIM_WAIT_SECONDS = 30.0
 
 
+def _store_family_supported(family):
+    from ..authority import lifecycle_projection_supported
+    return family not in STORE_UNAVAILABLE_FAMILIES or lifecycle_projection_supported()
+
+
 def _store_row_digest(row):
     from ...store.records import _json_bytes
     family, source, key, payload = row
@@ -256,7 +261,7 @@ class SQLiteStoreQueryIndex:
             "SELECT family, supported, row_count, row_digest, dirty FROM store_projection_coverage"
         ).fetchall()
         if ({row[0] for row in coverage} != set(STORE_PROJECTION_FAMILIES)
-                or any(row[1] != int(row[0] not in STORE_UNAVAILABLE_FAMILIES)
+                or any(row[1] != int(_store_family_supported(row[0]))
                        or row[2] < 0 or len(row[3]) != 32 or row[4] for row in coverage)):
             raise QueryIndexDirty("Closed Store coverage contract is incomplete or changed.")
         guards = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='trigger' "
@@ -318,19 +323,21 @@ class SQLiteStoreQueryIndex:
     def projection_rows(self, family, *, refresh=False):
         """Read one certified format-4 relation as detached correlated byte rows.
 
-        ``family`` must be in coverage contract 1. ``refresh=False`` performs no
+        ``family`` must be in coverage contract 2. ``refresh=False`` performs no
         maintenance; True permits replay/rebuild before the short read cut. Returns
         sorted (source path, correlation key, canonical JSON bytes) tuples. Missing,
-        stale, pending or incomplete coverage raises QueryIndexDirty. Unimplemented
-        managed-lifecycle coverage raises QueryIndexUnavailable rather than
-        certify an empty relation. This is an index-level seam, not a Repo terminal.
+        stale, pending or incomplete coverage raises QueryIndexDirty. Lifecycle
+        coverage requires a complete registered owner reader; otherwise it raises
+        QueryIndexUnavailable. This is an index-level seam, not a Repo terminal.
         """
         if type(family) is not str or type(refresh) is not bool:
             raise TypeError("Projection reads require a string family and boolean refresh.")
         if family not in STORE_PROJECTION_FAMILIES:
             raise ValueError("Unknown Store projection family.")
         if family in STORE_UNAVAILABLE_FAMILIES:
-            raise QueryIndexUnavailable("Store projection owner is not integrated: " + family)
+            from ..authority import lifecycle_projection_supported
+            if not lifecycle_projection_supported():
+                raise QueryIndexUnavailable("Store projection owner is not integrated: " + family)
         if not self._store_projection:
             raise QueryIndexUnavailable("Format-4 projection requires its owning Store.")
         if refresh:
@@ -532,7 +539,7 @@ class SQLiteStoreQueryIndex:
                 raise QueryIndexDirty("Projection replay cut changed; retry metadata rebuild.")
         else:
             con.executemany("INSERT INTO store_projection_coverage VALUES (?, ?, 0, ?, 0)",
-                ((family, int(family not in STORE_UNAVAILABLE_FAMILIES), bytes(32))
+                ((family, int(_store_family_supported(family)), bytes(32))
                  for family in STORE_PROJECTION_FAMILIES))
         witnesses = {f: [n, int.from_bytes(d, "big")] for f, n, d in con.execute(
             "SELECT family, row_count, row_digest FROM store_projection_coverage")}

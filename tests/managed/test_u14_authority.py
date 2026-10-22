@@ -18,6 +18,7 @@ from dryml.managed import managed_operation
 from dryml.managed import identity as identities
 from dryml.managed.control import ControlSnapshot, ManagedControlStore
 from dryml.managed.errors import ManagedConflictError, ManagedControlError
+from dryml.managed.results import ResultReference
 
 
 class Dataset(Serializable):
@@ -212,7 +213,7 @@ def test_fresh_checkpoint_and_completion_cas_preserve_producer(tmp_path):
             build=lambda current: replace(current, generation=2, checkpoint=node))
         complete = control.transition_running_owner(identity.operation_id, owner=owner,
             run_id=owner.run_id, invocation_id=owner.invocation_id, expected_generation=checkpoint.generation,
-            build=lambda current: replace(current, generation=3, state="completed", final=node,
+            build=lambda current: replace(current, generation=3, state="completed", final=node, result_reference=ResultReference("f" * 64),
                 producer_invocation_id=owner.invocation_id))
         assert control.status(identity.operation_id).producer_invocation_id == owner.invocation_id
         assert complete.checkpoint.graph_equal(node)

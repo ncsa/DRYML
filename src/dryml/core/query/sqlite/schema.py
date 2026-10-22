@@ -20,7 +20,7 @@ from ..model import CANONICAL_QUERY_SEMANTICS_VERSION, FINGERPRINT_SCHEMA_VERSIO
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
 SQLITE_QUERY_INDEX_SCHEMA_VERSION = 10
-STORE_COVERAGE_VERSION = 1
+STORE_COVERAGE_VERSION = 2
 # Unimplemented owners are explicit capabilities, never certified empty relations.
 STORE_PROJECTION_FAMILIES = (
     "record", "recipe_root", "saved_root", "declaration", "creation",

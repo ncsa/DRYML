@@ -39,6 +39,7 @@ class ManagedContext:
         self._callbacks, self._is_resuming, self._store = callbacks, is_resuming, store
         self._active, self._busy, self._interrupted = True, False, False
         self._final = None
+        self._final_report = None
         self._failure_code = "method_error"
         self._checkpoint_error = None
 
@@ -228,7 +229,9 @@ class ManagedContext:
             from .runtime import _stores
             self.control_store.retention.adopt(str(UUID(intent.token)), _stores(self._control))
         else:
+            _checkpoint_boundary("final_capture_started")
             selected, report = _publish_checkpoint(self.state_repo, self._obj, store=self._store)
+            self._final_report = report
             _associate_state(self, selected, "final", report=report,
                              published=lambda: _checkpoint_boundary("final_state_published"))
         self._final = selected
@@ -252,7 +255,7 @@ class ManagedContext:
             return current
         self._control._fence(current, self.operation_id, self._admission,
             self.run_id, self.invocation_id, self.generation)
-        if current.state != "running":
+        if current.state not in {"running", "finalizing"}:
             raise ManagedConflictError("owner_conflict", "invocation is no longer running")
         return current
 
@@ -300,6 +303,13 @@ class ManagedContext:
                     self._transition(current, state="failed", failure_code=code)
             error.execution = (self.operation_id, self.run_id, self.invocation_id)
             error.checkpoint_state_ref = current.checkpoint
+            if current.state == "completed":
+                from .runtime import _invocation_result
+                error.invocation_result = _invocation_result(self._control, current, self.invocation_id, self.cleanup_report)
+            else:
+                from .model import FailedInvocationResult, ExecutionIdentity
+                error.failed_result = FailedInvocationResult(self._control.status(self.operation_id),
+                    ExecutionIdentity(self.operation_id, self.run_id, self.invocation_id, None), current.checkpoint)
         except Exception as recovery_error:
             error.recovery_error = recovery_error
 

@@ -443,23 +443,23 @@ class HookWindowValue(Pickleable):
 
         self.handoffs = 0
 
-    @managed_operation(return_state_ref=True)
+    @managed_operation()
     def complete(self, *, managed) -> None:
         """Return normally so injected publication windows are reachable."""
 
-    @managed_operation(return_state_ref=True)
+    @managed_operation()
     def fail(self, *, managed) -> None:
         """Fail in the workload body before final publication."""
 
         raise ValueError("body failed")
 
-    @managed_operation(return_state_ref=True)
+    @managed_operation()
     def warn(self, *, managed) -> None:
         """Return an unwanted value to exercise warning-filter failure."""
 
         return object()
 
-    @managed_operation(return_state_ref=True)
+    @managed_operation()
     def interrupt(self, *, managed) -> None:
         """Stop at a managed safe point before completion."""
 
@@ -492,6 +492,37 @@ def _crash_window_worker(store_root, state_ref, member, boundary, reached, relea
 
         context_module._checkpoint_boundary = checkpoint_boundary
         runtime_module._completion_boundary = completion_boundary
+        if boundary == "provisional_handoff":
+            original_retire = runtime_module._retire_publications
+            def retire(control, root):
+                if root.kind == "final":
+                    reached.set()
+                    release.recv()
+                return original_retire(control, root)
+            runtime_module._retire_publications = retire
+        if boundary in {"completion_cas", "completion_sql_committed"}:
+            from dryml.managed.control import ControlSnapshot
+            from dryml.managed.identity import operation_digest
+            operation_id = operation_digest(repo.describe(value), member)
+            control = ManagedControlStore(store, repo)
+            def stop_if_completed():
+                raw = control._read_optional(control._current_path(control._operation_path(operation_id)))
+                if raw is not None and ControlSnapshot.from_bytes(raw).state == "completed":
+                    reached.set()
+                    release.recv()
+            if boundary == "completion_cas":
+                original = ManagedControlStore._finish_projection
+                def finish(self, *args):
+                    stop_if_completed()
+                    return original(self, *args)
+                ManagedControlStore._finish_projection = finish
+            else:
+                index = store.open_query_index()
+                original = index._ack_store_projection
+                def ack(*args):
+                    stop_if_completed()
+                    return original(*args)
+                index._ack_store_projection = ack
         getattr(value, member)(managed=ManagedConfig(state_repo=store))
     finally:
         repo.close()
@@ -680,7 +711,15 @@ def test_spawned_crash_preserves_only_associated_checkpoint_or_final_state(
     store, value = _terminate_at_boundary(tmp_path, member, boundary)
     status = getattr(value, member).status(state_repo=store)
     assert (status.checkpoint is not None) is expected_checkpoint
-    assert (status.final is not None) is expected_final
+    assert status.final is None
+    if member == "complete":
+        before = CrashWindowValue.restores, CrashWindowValue.captures, CrashWindowValue.bodies
+        result = value.complete(managed=ManagedConfig(state_repo=store))
+        assert result.disposition == "completion_recorded"
+        assert result.current.state == "completed" and result.current.final is not None
+        assert (CrashWindowValue.restores, CrashWindowValue.captures, CrashWindowValue.bodies) == before
+        assert value.complete(managed=ManagedConfig(state_repo=store)).value == "complete"
+        return
     if boundary == "interrupted_transition":
         assert status.state == "interrupted"
     elif expected_final:
@@ -704,13 +743,13 @@ def test_spawned_callback_window_recovery_does_not_replay_observers(
         with control.admission(identity) as owner:
             assert owner.current.to_bytes() == before.to_bytes()
             assert (CrashWindowValue.restores, CrashWindowValue.captures, CrashWindowValue.bodies) == (0, 0, 0)
-        with pytest.raises(ManagedControlError, match="result_policy_not_integrated"):
-            value.checkpoint_then_return(managed=ManagedConfig(state_repo=recovered,
-                callbacks=[lambda *args: calls.append(args)]))
+        result = value.checkpoint_then_return(managed=ManagedConfig(state_repo=recovered,
+            callbacks=[lambda *args: calls.append(args)]))
+        assert result.value == "resumed"
         after = control.inspect(identity.operation_id)
         assert after.run_id == before.run_id and after.invocation_id != before.invocation_id
         assert after.checkpoint.graph_equal(before.checkpoint)
-        assert (CrashWindowValue.restores, CrashWindowValue.captures, CrashWindowValue.bodies) == (1, 0, 1)
+        assert (CrashWindowValue.restores, CrashWindowValue.captures, CrashWindowValue.bodies) == (1, 1, 1)
         assert value.value == 1
     finally:
         recovered.close(flush=False)
@@ -735,39 +774,36 @@ def test_private_post_publication_hook_is_not_called_before_completed_associatio
         with pytest.raises(ManagedInterrupted):
             value.interrupt(managed=config)
     elif window == "warning":
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", RuntimeWarning)
-            with pytest.raises(RuntimeWarning, match="discarded"):
-                value.warn(managed=config)
+        from dryml.managed import ManagedResultError
+        with pytest.raises(ManagedResultError):
+            value.warn(managed=config)
     elif window == "publication":
         monkeypatch.setattr(
-            runtime_module, "_publish_managed_state_result",
+            storage_module, "_publish_checkpoint",
             lambda *args, **kwargs: (_ for _ in ()).throw(OSError("publication failed")),
         )
         with pytest.raises(OSError, match="publication failed"):
             value.complete(managed=config)
     elif window == "validation":
         monkeypatch.setattr(
-            storage_module, "_validate_publication_closure",
+            storage_module, "_validate_selection",
             lambda *args, **kwargs: (_ for _ in ()).throw(OSError("validation failed")),
         )
-        with pytest.raises(RepoSaveError) as caught:
+        with pytest.raises(OSError, match="validation failed"):
             value.complete(managed=config)
-        assert str(caught.value.__cause__.__cause__) == "validation failed"
-        assert caught.value.report is not None
     else:
-        original = ManagedControlStore._transition_running_fields
+        original = ManagedControlStore.admit_prepared
         calls = 0
 
-        def fail_final_association(self, operation_id, **kwargs):
+        def fail_final_association(self, preparation, **kwargs):
             nonlocal calls
             calls += 1
-            if calls == 1:
+            if any(v.kind == "final" for v in preparation.proposed.intents):
                 raise OSError("association failed")
-            return original(self, operation_id, **kwargs)
+            return original(self, preparation, **kwargs)
 
         monkeypatch.setattr(
-            ManagedControlStore, "_transition_running_fields", fail_final_association,
+            ManagedControlStore, "admit_prepared", fail_final_association,
         )
         with pytest.raises(OSError, match="association failed"):
             value.complete(managed=config)
@@ -806,14 +842,60 @@ def test_deletion_at_publication_hook_fails_fresh_control_association(tmp_path, 
 
 
 def test_later_status_and_invocation_revalidate_deleted_completed_state(tmp_path):
-    """A successful event leaves no continuing authority for independent recovery."""
+    """Reclaimed final is historical metadata; missing value fails only lazy read."""
 
     store = DirStore(tmp_path / "state")
     repo = Repo(store)
     value = CrashWindowValue(repo=repo)
-    assert value.complete(managed=ManagedConfig(state_repo=repo)) == "complete"
-    shutil.rmtree(store._snapshot_path(value.last_state_ref.digest()))
-    with pytest.raises(ManagedRecoveryError):
-        value.complete.status(state_repo=repo)
-    with pytest.raises(ManagedRecoveryError):
-        value.complete(managed=ManagedConfig(state_repo=repo, rerun=True))
+    result = value.complete(managed=ManagedConfig(state_repo=repo))
+    assert result.value == "complete"
+    shutil.rmtree(store.state_data_path(result.final_state_ref.state.key))
+    assert value.complete.status(state_repo=repo).state == "completed"
+    assert value.complete(managed=ManagedConfig(state_repo=repo)).value == "complete"
+    from dryml.managed.results import result_path
+    from dryml.managed import ManagedResultError
+    os.unlink(result_path(store, result.result_reference.key))
+    replay = value.complete(managed=ManagedConfig(state_repo=repo))
+    assert replay.status.state == "completed"
+    with pytest.raises(ManagedResultError): replay.value
+
+
+@pytest.mark.parametrize("boundary,complete", [("result_installed", False), ("finalization_intent", False),
+    ("final_capture_started", False), ("provisional_handoff", True),
+    ("final_state_published", True), ("final_associated", True),
+    ("before_completion", True), ("completion_cas", True), ("completion_sql_committed", True),
+    ("completion_recorded", True)])
+def test_spawned_result_finalization_recovery_terminates_without_hooks(tmp_path, boundary, complete):
+    """Real owner loss preserves complete evidence; incomplete capture cannot invent final."""
+    store, live = _terminate_at_boundary(tmp_path, "complete", boundary)
+    counts = CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores
+    config = ManagedConfig(state_repo=store)
+    if boundary == "result_installed":
+        from dryml.managed import ManagedRerunRequiredError
+        with pytest.raises(ManagedRerunRequiredError): live.complete(managed=config)
+    elif boundary == "completion_recorded":
+        assert live.complete(managed=config).value == "complete"
+    else:
+        outcome = live.complete(managed=config)
+        assert outcome.disposition == ("completion_recorded" if complete else "finalization_incomplete")
+        assert outcome.current.state == ("completed" if complete else "failed")
+        if complete:
+            assert live.complete(managed=config).value == "complete"
+            assert outcome.current.result_ack.mutation_id is not None
+            for root in outcome.current.intents:
+                for publication in root.publications:
+                    assert store.retention.read(publication.retention_token).disposition == "released"
+    assert (CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores) == counts
+
+
+def test_spawned_incomplete_finalization_keeps_latest_then_separate_resume_restores(tmp_path):
+    store, live = _terminate_at_boundary(tmp_path, "checkpoint_then_return", "final_capture_started")
+    config = ManagedConfig(state_repo=store)
+    outcome = live.checkpoint_then_return(managed=config)
+    assert outcome.disposition == "finalization_incomplete" and outcome.current.checkpoint is not None
+    assert outcome.current.final is None and outcome.current.state == "failed"
+    assert (CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores) == (0, 0, 0)
+    result = live.checkpoint_then_return(managed=config)
+    assert result.value == "resumed" and result.execution.run_id == outcome.run_id
+    assert result.execution.invocation_id != outcome.invocation_id
+    assert (CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores) == (1, 1, 1)

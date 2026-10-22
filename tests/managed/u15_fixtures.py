@@ -10,6 +10,8 @@ from dryml.managed import ManagedConfig, managed_operation
 from dryml.managed.control import ControlIntent, ControlSnapshot, ManagedControlStore
 from dryml.managed.identity import AdmissionIdentity
 from dryml.managed import runtime
+from dryml.managed.results import publish_result
+from dryml.managed.result_codec import encode_result
 
 
 class Value(Pickleable):
@@ -57,6 +59,8 @@ def identity(control, live, *, descriptor=Value.run, amount=2):
 
 
 def seed(control, live, saved, *, state="failed", checkpoint=True, initial=None, descriptor=Value.run):
+    control.initialize()
+    reference = publish_result(control.control_store, encode_result(None)) if state == "completed" else None
     facts = identity(control, live, descriptor=descriptor)
     with control.admission(facts) as owner:
         intents = () if initial is None else (ControlIntent(
@@ -67,7 +71,7 @@ def seed(control, live, saved, *, state="failed", checkpoint=True, initial=None,
             checkpoint=saved if checkpoint else None,
             final=saved if state == "completed" else None,
             producer_invocation_id=owner.invocation_id if state == "completed" else None,
-            failure_code="method_error" if state == "failed" else None, intents=intents)
+            failure_code="method_error" if state == "failed" else None, intents=intents, result_reference=reference)
         return control.create_initial(snapshot, owner=owner)
 
 

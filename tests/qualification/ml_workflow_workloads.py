@@ -71,7 +71,7 @@ class _QualificationMetric(Value[float]):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True, store_parameter="store")
+    @managed_operation(resumable=True, store_parameter="store")
     def compute(self, *, store=None, managed: ManagedContext) -> None:
         """Evaluate the exact saved model over the exact saved test Dataset."""
 

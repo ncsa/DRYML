@@ -12,6 +12,7 @@ from dryml.core.utils.graph.path import Key, Parameter
 from dryml.core.store.retention import RetentionResource
 from dryml.managed.control import ControlHistory, ControlIntent, ControlSnapshot, StartPreparation, _PendingIntent
 from dryml.managed.errors import ManagedControlError
+from dryml.managed.results import ResultReference
 from tests.managed.test_u14_authority import Dataset, adapter, facts, receiver, running
 
 
@@ -38,7 +39,7 @@ def snapshot_with_history(control):
 def test_closed_current_roundtrip_and_lifecycle_cross_fields(tmp_path):
     control = adapter(tmp_path)
     snapshot = snapshot_with_history(control)
-    assert json.loads(snapshot.to_bytes())["version"] == 3
+    assert json.loads(snapshot.to_bytes())["version"] == 4
     assert ControlSnapshot.from_bytes(snapshot.to_bytes()) == snapshot
     duplicate = snapshot.to_bytes().replace(b'"schema"', b'"schema":"bad","schema"', 1)
     with pytest.raises(ManagedControlError): ControlSnapshot.from_bytes(duplicate)
@@ -153,7 +154,7 @@ def test_nested_unordered_wire_witness_is_lossless_and_replacement_discards_it(t
     node = unordered_saved_receiver()
     control, identity = adapter(tmp_path), facts(node)
     with control.admission(identity) as owner:
-        history = ControlHistory(owner.run_id, owner.invocation_id, 1, "completed", node, node)
+        history = ControlHistory(owner.run_id, owner.invocation_id, 1, "completed", node, node, ResultReference("f" * 64))
         intent = ControlIntent(uuid4().hex, owner.run_id, owner.invocation_id, 1,
                                "adopted", kind="initial", selection=node)
         snapshot = replace(running(identity, owner), checkpoint=node, history=(history,), intents=(intent,))
@@ -188,7 +189,7 @@ def test_nested_unordered_wire_witness_is_lossless_and_replacement_discards_it(t
         assert len({id(value.receiver) for value in independent}) == 3
         assert all(value.to_bytes() == payload for value in independent)
         completed = replace(snapshot, generation=2, state="completed", final=node,
-                            producer_invocation_id=owner.invocation_id)
+                            producer_invocation_id=owner.invocation_id, result_reference=ResultReference("f" * 64))
         final_bytes = completed.to_bytes()
         flip()
         restored_final = ControlSnapshot.from_bytes(final_bytes)
@@ -296,3 +297,22 @@ def test_incompatible_area_rejected_by_mutating_bootstrap_without_changes(tmp_pa
     with pytest.raises(ManagedControlError): control.initialize()
     assert path.read_bytes() == old
     assert tuple(Path(control.root).iterdir()) == (path,)
+
+
+@pytest.mark.parametrize("field", ["old_current", "old_root", "result", "result_ack", "provisional_ack"])
+def test_u17_nested_result_and_publication_versions_refuse_without_mutation(tmp_path, field):
+    from dryml.managed import ManagedConfig
+    from tests.managed.u16_fixtures import Value, setup
+    control, live = setup(tmp_path)
+    Value.action = lambda obj, ctx: 1
+    result = live.run(managed=ManagedConfig(state_repo=control.state_repo))
+    snapshot = control.inspect(result.execution.operation_id)
+    data = snapshot.to_data()
+    if field == "old_current": data["version"] = 3
+    elif field == "old_root": data["intents"][-1]["version"] = 2
+    elif field == "result": data["result_reference"]["version"] = 99
+    elif field == "result_ack": data["result_ack"]["version"] = 99
+    else: data["intents"][-1]["publications"][0]["version"] = 99
+    payload = json.dumps(data).encode()
+    with pytest.raises(ManagedControlError): ControlSnapshot.from_bytes(payload)
+    assert control.inspect(result.execution.operation_id).to_bytes() == snapshot.to_bytes()

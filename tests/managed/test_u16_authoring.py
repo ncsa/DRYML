@@ -63,13 +63,17 @@ def test_initial_is_explicit_exact_idempotent_and_immutable(tmp_path):
     assert raw is final and Value.captures == 2
 
 
-def test_public_body_executes_but_does_not_claim_result_completion(tmp_path):
+def test_public_body_returns_durable_invocation_result(tmp_path):
     control, live = setup(tmp_path)
-    Value.action = lambda obj, ctx: ctx.checkpoint()
-    with pytest.raises(ManagedControlError, match="result_policy_not_integrated"):
-        live.run(managed=ManagedConfig(state_repo=control.state_repo))
+    def body(obj, ctx):
+        saved = ctx.checkpoint()
+        ctx.final_state(saved)
+        return saved
+    Value.action = body
+    result = live.run(managed=ManagedConfig(state_repo=control.state_repo))
     status = live.run.status(state_repo=control.state_repo)
-    assert status.state == "failed" and status.checkpoint is not None
+    assert status.state == "completed" and status.checkpoint is not None
+    assert result.value.graph_equal(status.checkpoint)
     assert Value.bodies == Value.captures == 1
 
 
@@ -86,8 +90,8 @@ def test_direct_arguments_normalize_once_and_independent_nested_function_keeps_b
         return args(self, *a, **kw)
     monkeypatch.setattr(SignaturePlan, "prepare_bound", prepare_bound)
     monkeypatch.setattr(SignaturePlan, "_prepare_args", prepare_args)
-    with pytest.raises(ManagedControlError, match="result_policy_not_integrated"):
-        live.run(managed=ManagedConfig(state_repo=control.state_repo))
+    result = live.run(managed=ManagedConfig(state_repo=control.state_repo))
+    assert result.value == 3
     assert live.value == 3
     assert [kind for kind, plan in calls] == ["managed", "nested"]
     assert calls[0][1] is Wrapped.run.signature_plan() and calls[1][1] is not calls[0][1]

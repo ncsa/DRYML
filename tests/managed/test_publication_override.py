@@ -32,9 +32,9 @@ def test_declared_store_override_is_borrowed_and_governs_checkpoint(tmp_path, ov
     control = DirStore(tmp_path / "control", query_index="none")
     repo = Repo(source)
     value = OverrideValue(repo=repo)
-    with pytest.raises(ManagedControlError, match="result_policy_not_integrated"):
-        value.advance(4, store=other if override else None,
-            managed=ManagedConfig(state_repo=repo, control_store=control))
+    result = value.advance(4, store=other if override else None,
+        managed=ManagedConfig(state_repo=repo, control_store=control))
+    assert result.value is None
     status = value.advance.status(state_repo=repo, control_store=control)
     selected = other if override else source
     assert status.checkpoint is not None

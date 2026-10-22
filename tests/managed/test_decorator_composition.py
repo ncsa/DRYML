@@ -45,7 +45,8 @@ def _recording_wrapper(target):
         finally:
             receiver.events.append("finally")
         receiver.events.append("after")
-        return result + 10
+        from dryml.managed import InvocationResult
+        return result if isinstance(result, InvocationResult) else result + 10
 
     return wrapped
 
@@ -54,7 +55,9 @@ def _default_captured_wrapper(target):
     """Forward through an exact target retained in a function default."""
 
     def wrapped(*args, __target=target, **kwargs):
-        return __target(*args, **kwargs) + 1
+        from dryml.managed import InvocationResult
+        result = __target(*args, **kwargs)
+        return result if isinstance(result, InvocationResult) else result + 1
 
     return functools.wraps(target)(wrapped)
 
@@ -172,7 +175,7 @@ def test_all_decorator_orders_preserve_one_managed_boundary(
     assert (annotations[0].key, annotations[0].value) == (
         "test.composition", "present",
     )
-    assert subject.operation(3, managed=ManagedConfig(state_repo=repo)) == 3
+    assert subject.operation(3, managed=ManagedConfig(state_repo=repo)).value == 3
     assert calls and calls[0][0] is subject
     assert len(calls) == 1
     assert subject.operation.status(state_repo=repo).state == "completed"
@@ -187,7 +190,7 @@ def test_outer_wrapper_exposes_managed_controls_and_preserves_its_behavior(
 
     assert subject.operation.status(state_repo=repo).state == "not_started"
     assert inspect.signature(subject.operation).parameters["value"].annotation == "int"
-    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)) == 12
+    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)).value == 2
     assert subject.events == ["before", "body", "finally", "after"]
     assert subject.operation.status(state_repo=repo).state == "completed"
 
@@ -231,7 +234,7 @@ def test_managed_wrapper_function_handoff_runs_once_and_resets_after_failure(
     repo = Repo((DirStore(tmp_path / "state"),))
     subject = InnerFunctionManaged(repo=repo)
 
-    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)) == 12
+    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)).value == 12
     assert subject.events == ["before", "body", "finally", "after"]
     assert subject.operation.status(state_repo=repo).state == "completed"
 
@@ -292,7 +295,7 @@ def test_managed_wrapper_chain_preserves_every_wrapper_and_one_function_boundary
     repo = Repo((DirStore(tmp_path / "state"),))
     subject = ChainFunctionManaged(repo=repo)
 
-    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)) == 2
+    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)).value == 2
     assert subject.events == [
         "wrapper:before", "wrapper:before", "body", "wrapper:finally",
         "wrapper:finally",
@@ -356,7 +359,7 @@ def test_hidden_managed_finalization_accepts_default_captured_target(
 
     repo = Repo((DirStore(tmp_path / "state"),))
     subject = Subject(repo=repo)
-    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)) == 3
+    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)).value == 2
 
 
 def test_function_handoff_lease_expires_and_is_shared_once_across_context_copies(monkeypatch):

@@ -292,7 +292,7 @@ class StoreProjection:
 _CONTROL_PROJECTIONS = {}
 
 
-def register_control_projection(namespace, root, reader, *, validate=None):
+def register_control_projection(namespace, root, reader, *, validate=None, relations=None):
     """Install a narrow owner-metadata reader without importing a higher layer.
 
     namespace/root are normalized top-level/control-root strings; reader(path)
@@ -300,19 +300,29 @@ def register_control_projection(namespace, root, reader, *, validate=None):
     validate(Store) checks owner envelope metadata during detached capture, outside
     short fences. Returns None. Conflicting
     registrations raise StoreAuthorityError. Registration performs no Store IO and
-    grants no lifecycle-relation coverage: only generic record-byte projection is
-    enabled. Owners must journal changes before publication. A cold Core rebuild
+    relations(record), when supplied, yields complete typed (key, data) lifecycle
+    contributions for each owner record. Owners must journal changes before publication. A cold Core rebuild
     refuses an unregistered managed area rather than certify missing rows.
     """
     from ..store.records import _normalized_file_path
     _normalized_file_path(root)
-    if (type(namespace) is not str or "/" in namespace or not root.startswith(namespace + "/")
-            or not callable(reader) or (validate is not None and not callable(validate))):
+    if (type(namespace) is not str or "/" in namespace or not (root == namespace or root.startswith(namespace + "/"))
+            or not callable(reader) or (validate is not None and not callable(validate))
+            or relations is not None and not callable(relations)):
         raise StoreAuthorityError("Invalid control projection adapter.")
     existing = _CONTROL_PROJECTIONS.get(namespace)
-    if existing is not None and existing != (root, reader, validate):
+    if existing is not None and existing != (root, reader, validate, relations):
         raise StoreAuthorityError("Control projection adapter already registered.")
-    _CONTROL_PROJECTIONS[namespace] = root, reader, validate
+    _CONTROL_PROJECTIONS[namespace] = root, reader, validate, relations
+
+
+def lifecycle_projection_supported():
+    """Return whether registered owners supply complete lifecycle contributions.
+
+    No IO occurs. A cold/unregistered owner refuses lifecycle reads rather than
+    certifying an empty relation; Store capture separately guards its namespace.
+    """
+    return bool(_CONTROL_PROJECTIONS) and all(v[3] is not None for v in _CONTROL_PROJECTIONS.values())
 
 
 def projection_record_type(path):
@@ -324,7 +334,7 @@ def projection_record_type(path):
     import re
     from ..store import records as r
     from ..store import retention as t
-    for root, reader, _ in _CONTROL_PROJECTIONS.values():
+    for root, reader, _, _ in _CONTROL_PROJECTIONS.values():
         if path.startswith(root + "/"):
             return reader(path)
     uuid = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -449,7 +459,7 @@ def capture_store_projection(store, *, rebuild=False):
     from ..node_views import COMPATIBILITY_VIEW
 
     with store._metadata_read() as captured:
-        for _, _, validate in _CONTROL_PROJECTIONS.values():
+        for _, _, validate, _ in _CONTROL_PROJECTIONS.values():
             if validate is not None:
                 validate(store)
         receipts = store.pending_mutations()
@@ -472,7 +482,7 @@ def capture_store_projection(store, *, rebuild=False):
             if (os.path.exists(os.path.join(store.base_dir, "managed"))
                     and "managed" not in _CONTROL_PROJECTIONS):
                 raise StoreAuthorityError("Managed control projection adapter is not loaded; import its owner before rebuilding.")
-            for root, _, _ in _CONTROL_PROJECTIONS.values():
+            for root, _, _, _ in _CONTROL_PROJECTIONS.values():
                 def control_inventory(relative):
                     for name in captured.directory(relative):
                         path = relative + "/" + name
@@ -527,6 +537,10 @@ def capture_store_projection(store, *, rebuild=False):
             if value is None:
                 continue
             emit("record", path, "", value.to_data())
+            for root, _, _, relations in _CONTROL_PROJECTIONS.values():
+                if path.startswith(root + "/") and relations is not None:
+                    for key, data in relations(value):
+                        emit("lifecycle", path, key, data)
             if isinstance(value, r.NodeMetadataRecord):
                 if path != store._relative(store._node_metadata_path(value.scope, value.target_digest)):
                     raise StoreAuthorityError("Mismatched Node metadata projection address.")

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from dryml.core.node import Node
 from .control import ControlSnapshot
+from .results import ResultReference, ResultSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,4 +47,55 @@ class InterruptRequestResult:
     generation: int
 
 
-__all__ = ["ControlSnapshot", "InterruptRequestResult", "ManagedStatus"]
+@dataclass(frozen=True, slots=True)
+class ExecutionIdentity:
+    """Detached operation/run/current-caller/producer UUID metadata; no IO.
+
+    Strings are admitted by control/admission before construction. Replay preserves
+    run/producer and allocates invocation_id for its current caller.
+    """
+    operation_id: str
+    run_id: str
+    invocation_id: str
+    producer_invocation_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class InvocationResult:
+    """Detached successful metadata with a freshly reopened lazy ordinary value.
+
+    status is ManagedStatus, execution ExecutionIdentity, final_state_ref SavedNode,
+    result_reference ResultReference, source ResultSource, cleanup_report tuple.
+    Construction/inspection performs no IO and retains no Repo/Store/reader/lease.
+    value freshly validates authority and bytes on every access, raising
+    ManagedResultError for missing/corrupt/replaced sources without reexecution.
+    References retain metadata closure only, never private StateKey data grants.
+    """
+    status: ManagedStatus
+    execution: ExecutionIdentity
+    final_state_ref: Node
+    result_reference: ResultReference
+    source: ResultSource
+    cleanup_report: tuple = ()
+
+    @property
+    def value(self):
+        """Load the supported value under its own fresh validated source lifetime."""
+        return self.source.read(self.result_reference)
+
+
+@dataclass(frozen=True, slots=True)
+class FailedInvocationResult:
+    """Detached failed status/execution and optional recovery; no success value.
+
+    status/execution are owner-produced metadata; checkpoint_state_ref may be None.
+    Construction has no IO and makes no availability promise. Attached to raised
+    authored/finalization errors as failed_result for inspection after Repo closure.
+    """
+    status: ManagedStatus
+    execution: ExecutionIdentity
+    checkpoint_state_ref: Node | None
+
+
+__all__ = ["ControlSnapshot", "InterruptRequestResult", "ManagedStatus", "ExecutionIdentity",
+           "InvocationResult", "FailedInvocationResult"]

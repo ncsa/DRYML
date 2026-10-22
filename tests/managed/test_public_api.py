@@ -8,6 +8,8 @@ import sys
 
 
 _MANAGED_EXPORTS = {
+    "InvocationResult", "FailedInvocationResult", "ExecutionIdentity",
+    "ResultReference", "ResultSource", "ManagedResultError",
     "InterruptRequestResult",
     "ManagedConfig",
     "ManagedContext",

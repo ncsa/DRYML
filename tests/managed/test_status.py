@@ -9,6 +9,7 @@ import pytest
 from dryml.core.query.model import QueryIndexUnavailable
 from dryml.core.utils.graph.path import Parameter
 from dryml.managed import ManagedConfig
+from dryml.managed.results import ResultReference
 from dryml.managed.errors import ManagedControlError
 from tests.managed.test_control_codec import saved_receiver
 from tests.managed.test_u14_authority import Experiment, adapter, facts, receiver, running
@@ -27,7 +28,7 @@ def test_detached_status_and_replay_admission_after_checkpoint_reclamation(tmp_p
     identity = facts(node)
     with control.admission(identity) as producer:
         completed = replace(running(identity, producer), state="completed", checkpoint=node,
-                            final=node, producer_invocation_id=producer.invocation_id)
+                            final=node, producer_invocation_id=producer.invocation_id, result_reference=ResultReference("f" * 64))
         control.create_initial(completed, owner=producer)
     key = node.at((Parameter("dataset"),)).state.key
     assert control.control_store.delete_state(key).status == "removed"
@@ -55,23 +56,22 @@ def test_external_request_preconditions_and_dead_owner_are_read_only(tmp_path):
     assert control.inspect(identity.operation_id) == initial
 
 
-def test_legacy_runtime_explicit_refusal_precedes_work_or_publication(tmp_path):
+def test_actual_failed_body_retains_detached_failure_status(tmp_path):
     control = adapter(tmp_path)
     from tests.managed.test_u14_authority import Dataset
     obj = Experiment(Dataset(repo=control.state_repo), repo=control.state_repo)
-    with pytest.raises(ManagedControlError, match="lifecycle_not_integrated"):
+    with pytest.raises(AssertionError, match="foundation") as error:
         obj.run(managed=ManagedConfig(state_repo=control.state_repo))
-    assert not Path(control.root).exists()
-    assert obj.run.status(state_repo=control.state_repo).state == "not_started"
+    assert error.value.failed_result.status.state == "failed"
+    assert obj.run.status(state_repo=control.state_repo).state == "failed"
     assert obj.run.request_interrupt(state_repo=control.state_repo,
         expected_run_id=uuid4().hex).outcome == "not_running"
 
 
-def test_lifecycle_projection_does_not_claim_empty_supported_coverage(tmp_path):
+def test_lifecycle_projection_has_complete_registered_owner_coverage(tmp_path):
     control = adapter(tmp_path, index="sqlite")
     index = control.control_store.open_query_index()
-    with pytest.raises(QueryIndexUnavailable, match="not integrated"):
-        index.projection_rows("lifecycle", refresh=True)
+    assert index.projection_rows("lifecycle", refresh=True) == ()
 
 
 def test_completion_projection_error_retains_completion_and_mutation_cut(tmp_path, monkeypatch):
@@ -93,7 +93,7 @@ def test_completion_projection_error_retains_completion_and_mutation_cut(tmp_pat
                 control.transition_running_owner(identity.operation_id, owner=owner,
                     run_id=owner.run_id, invocation_id=owner.invocation_id, expected_generation=1,
                     build=lambda current: replace(current, generation=2, state="completed",
-                        final=node, producer_invocation_id=owner.invocation_id))
+                        final=node, producer_invocation_id=owner.invocation_id, result_reference=ResultReference("f" * 64)))
         assert error.value.mutation_id and error.value.cut.pending
         assert control.inspect(identity.operation_id).state == "completed"
     with control.admission(identity) as recovered:
@@ -113,6 +113,7 @@ def test_accepted_interrupt_preserves_phase_and_fences_completion(tmp_path, stat
         assert outcome == "requested" and requested.state == state
         with pytest.raises(ManagedConflictError, match="interrupted"):
             control.transition(identity.operation_id, replace(requested, state="completed",
-                generation=3, interrupt_request=None, final=node, producer_invocation_id=owner.invocation_id),
+                generation=3, interrupt_request=None, final=node, producer_invocation_id=owner.invocation_id,
+                result_reference=ResultReference("f" * 64)),
                 owner=owner, expected_generation=2, expected_run_id=owner.run_id,
                 expected_invocation_id=owner.invocation_id)

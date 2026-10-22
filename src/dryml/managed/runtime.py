@@ -1,7 +1,4 @@
-"""Metadata-first admission, authored execution and fenced state finalization.
-
-Durable ordinary-result delivery remains the result owner's integration boundary.
-"""
+"""Metadata-first managed execution, durable completion and zero-work replay."""
 
 from dataclasses import dataclass, replace
 from uuid import UUID, uuid4
@@ -9,7 +6,7 @@ from uuid import UUID, uuid4
 from .config import ManagedConfig, _ResolvedManagedConfig
 from .control import (ControlHistory, ControlIntent, ControlSnapshot, ManagedControlStore,
                       StartPreparation, _same_snapshot_bytes)
-from .errors import (ManagedControlError, ManagedConfigError, ManagedConflictError,
+from .errors import (ManagedConfigError, ManagedConflictError,
                      ManagedRecoveryError, ManagedRerunRequiredError)
 from .identity import AdmissionIdentity, _argument_digest_bound, operation_digest
 from .model import InterruptRequestResult
@@ -22,10 +19,10 @@ def invoke(descriptor, instance, args, managed, kwargs, *, on_raw_result=None):
     descriptor selects a checked declaration, instance a live Object, args/kwargs
     ordinary caller input, managed optional exact ManagedConfig. Arguments/defaults
     normalize once before ownership or restore. Execution injects ManagedContext
-    and enters the authored body. Until durable result integration, a normal return
-    raises result_policy_not_integrated before automatic final capture. Replay
-    raises the same error carrying detached admission metadata. Recovery returns a
-    detached disposition without execution. on_raw_result remains reserved for U17.
+    and returns InvocationResult after durable encoding/finalization/completion.
+    Replay returns detached metadata without body/restore/capture/return hooks.
+    Recovery returns a detached terminating disposition without execution.
+    on_raw_result is an optional execution delivery adapter, never replayed.
     Preparation errors preserve old current; hooks follow Core invalidation rules.
     """
     if managed is not None and type(managed) is not ManagedConfig:
@@ -48,10 +45,10 @@ def invoke(descriptor, instance, args, managed, kwargs, *, on_raw_result=None):
                 invocation_parameters=descriptor.bind_invocation_parameters(instance, args, kwargs))
         result = admit_execution(identity, descriptor, config,
             control, realize=lambda node: instance, execute=execute)
-        if result.disposition == "replay":
-            error = ManagedControlError("result_policy_not_integrated", "completed replay selected; durable result delivery is not integrated")
-            error.admission = result
-            raise error
+        if isinstance(result, AdmissionOutcome) and result.disposition == "replay":
+            return _invocation_result(control, result.current, result.invocation_id, result.cleanup_report)
+        if on_raw_result is not None and not isinstance(result, AdmissionOutcome):
+            return on_raw_result(result)
         return result
     finally:
         stores.close()
@@ -70,10 +67,7 @@ def _execute_authored(owner, current, live, resuming, descriptor, boundary, conf
         raw = _invoke_target(descriptor, live, args, context, kwargs, store=store,
                              invocation_parameters=invocation_parameters)
         context._safe_point()
-        if finish is None:
-            context._failure_code = "result_policy_not_integrated"
-            raise ManagedControlError("result_policy_not_integrated", "authored body returned; durable result delivery awaits U17")
-        result = finish(context, raw)
+        result = (_finish_result(context, raw, descriptor) if finish is None else finish(context, raw))
         # Even a result-owner callback cannot turn an accepted request into success.
         context._safe_point(allow_completed=True)
         return result
@@ -85,6 +79,79 @@ def _execute_authored(owner, current, live, resuming, descriptor, boundary, conf
         raise
     finally:
         context._deactivate()
+
+
+def _invocation_result(control, snapshot, caller, cleanup_report=()):
+    from .model import InvocationResult, ExecutionIdentity, ManagedStatus
+    from .results import source_descriptor
+    from .errors import ManagedResultError
+    if snapshot.state != "completed" or snapshot.result_reference is None:
+        raise ManagedResultError("missing_result_association", "completion lacks durable ordinary result metadata")
+    status = ManagedStatus(snapshot.state, snapshot.operation_id, snapshot.run_id,
+        snapshot.invocation_id, snapshot.generation, snapshot.checkpoint, snapshot.final,
+        False, None, snapshot.producer_invocation_id)
+    execution = ExecutionIdentity(snapshot.operation_id, snapshot.run_id, caller, snapshot.producer_invocation_id)
+    return InvocationResult(status, execution, snapshot.final, snapshot.result_reference,
+        source_descriptor(control.control_store), cleanup_report)
+
+
+def _finish_result(context, raw, descriptor):
+    from .result_codec import encode_result
+    from .results import publish_result, read_result_bytes
+    context._failure_code = "result_error"
+    value = descriptor.signature_plan().prepare_return(raw, repo=context.state_repo).deliver_return(
+        preserve_reference_data=True)
+    payload = encode_result(value)
+    reference, ack = publish_result(context.control_store, payload, return_ack=True)
+    _completion_boundary("result_installed")
+    current = context._safe_point()
+    current = context._transition(current, state="finalizing", result_reference=reference, result_ack=ack)
+    _completion_boundary("finalization_intent")
+    context._failure_code = "publication_error"
+    final = context._finalize_state()
+    _completion_boundary("final_associated")
+    current = context._safe_point()
+    read_result_bytes(context.control_store, reference)
+    _confirm_final(context._control, current)
+    _completion_boundary("before_completion")
+    current = context._safe_point()
+    # The independent CAS journals its OWN invalidation and ack, not the prior
+    # state receipt. A post-CAS index failure preserves completed authority.
+    current = context._transition(current, state="completed", final=final,
+        producer_invocation_id=context.invocation_id)
+    _completion_boundary("completion_recorded")
+    result = _invocation_result(context._control, current, context.invocation_id, context.cleanup_report)
+    hook = getattr(context._obj, "_managed_post_publication", None)
+    if hook is not None:
+        hook(final, context.state_repo, context._final_report)
+    return result
+
+
+def _confirm_final(control, current):
+    roots = [v for v in current.intents if v.kind == "final" and v.disposition == "adopted"]
+    if len(roots) != 1 or current.result_reference is None:
+        raise ManagedRecoveryError("incomplete_finalization", "final/result association is incomplete")
+    root = roots[0]
+    if current.result_ack is None:
+        raise ManagedRecoveryError("unconfirmed_result", "result publication lacks acknowledgement evidence")
+    from .results import result_path
+    current.result_ack.confirm(_stores(control), expected_path=control.control_store._relative(
+        result_path(control.control_store, current.result_reference.key)))
+    for publication in root.publications:
+        publication.confirm(_stores(control))
+    ledger = control.control_store.retention.read(str(UUID(root.token)))
+    if ledger is None or ledger.disposition != "adopted":
+        raise ManagedRecoveryError("unconfirmed_final", "final grants require confirmation")
+    _confirm_root(ledger, root.selection, resources=root.resources)
+    control.control_store.retention.adopt(ledger.token, _stores(control))
+    for store in _stores(control):
+        if store.authority_cut().pending:
+            raise ManagedRecoveryError("pending_finalization", "finalization prerequisites require exact acknowledgement")
+    return root.selection
+
+
+def _completion_boundary(stage):
+    """Private deterministic result/finalization crash and race boundary."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,18 +201,19 @@ def admit_execution(identity, descriptor, config, control, *, realize, execute):
         preparation = control.read_preparation(identity.operation_id)
         if preparation is not None and not preparation.settled:
             disposition, current = _settle_preparation(control, owner, preparation)
+            if current is not None and current.state == "finalizing":
+                disposition, current = _recover_finalization(control, owner, current)
             return AdmissionOutcome(disposition, None if current is None else current.run_id,
                                     owner.invocation_id, current, owner.cleanup_report)
         current = owner.current
         if owner.reconciled:
             disposition = "completion_recorded" if current is not None and current.state == "completed" else "projection_reconciled"
             if current is not None and current.state == "finalizing":
-                current = _fail_recovered_finalization(control, owner, current)
-                disposition = "finalization_incomplete"
+                disposition, current = _recover_finalization(control, owner, current)
             return AdmissionOutcome(disposition, None if current is None else current.run_id, owner.invocation_id, current)
         if current is not None and current.state == "finalizing":
-            current = _fail_recovered_finalization(control, owner, current)
-            return AdmissionOutcome("finalization_incomplete", current.run_id, owner.invocation_id, current)
+            disposition, current = _recover_finalization(control, owner, current)
+            return AdmissionOutcome(disposition, current.run_id, owner.invocation_id, current)
         if current is not None and not config.rerun:
             if current.argument_digest != identity.argument_digest:
                 raise ManagedRerunRequiredError("argument_mismatch", "changed ordinary arguments require explicit rerun")
@@ -219,7 +287,8 @@ def _prepare_run(control, owner, previous, selected, resuming):
     run_id = owner.run_id if previous is None or resuming else uuid4().hex
     generation = (0 if previous is None else previous.generation) + 1
     history = () if previous is None else previous.history + (ControlHistory(previous.run_id,
-        previous.invocation_id, previous.generation, previous.state, previous.checkpoint, previous.final),)
+        previous.invocation_id, previous.generation, previous.state, previous.checkpoint, previous.final,
+        previous.result_reference),)
     retained = () if previous is None else tuple(v for v in previous.intents if
         v.kind in {"initial", "durable", "root"})
     proposed = ControlSnapshot(identity.receiver, identity.member, identity.argument_digest,
@@ -234,6 +303,13 @@ def _settle_preparation(control, owner, preparation):
     owner.require_owner()
     operation_id = preparation.proposed.operation_id
     current = control.inspect(operation_id)
+    if (not preparation.settled and preparation.phase in {"prepared", "ready"}
+            and preparation.previous is not None and preparation.previous.state == "finalizing"
+            and preparation.proposed.state == "finalizing"
+            and _same_snapshot_bytes(current, preparation.previous)
+            and current.interrupt_request is None and owner.invocation_id != current.invocation_id):
+        preparation = _recover_final_association(control, owner, preparation)
+        current = control.inspect(operation_id)
     admitted = _same_snapshot_bytes(current, preparation.proposed) or _interrupted_successor(preparation.proposed, current)
     old = preparation.previous
     interrupted_old = _interrupted_successor(old, current)
@@ -255,6 +331,9 @@ def _settle_preparation(control, owner, preparation):
             if ledger is None or ledger.disposition != "adopted":
                 raise ManagedRecoveryError("unconfirmed_start", "admitted saved start requires confirmed grants")
             retention.adopt(token, _stores(control))
+        for root in settled.proposed.intents:
+            if root.token == settled.token:
+                _retire_publications(control, root)
         keep = {v.token for v in settled.proposed.intents}
         for intent in (() if old is None else old.intents):
             if intent.token not in keep and intent.kind in {"start", "latest", "final"}:
@@ -280,6 +359,42 @@ def _settle_preparation(control, owner, preparation):
     return ("run_admitted" if admitted else "preparation_abandoned"), current
 
 
+def _recover_final_association(control, owner, preparation):
+    from .results import read_result_bytes
+    from dryml.core.materialization import build_exact_state_load_plan
+    proposed = preparation.proposed
+    roots = [v for v in proposed.intents if v.kind == "final"]
+    if len(roots) != 1 or proposed.result_reference is None:
+        return preparation
+    root = roots[0]
+    ledger = control.control_store.retention.read(str(UUID(root.token)))
+    if ledger is None or ledger.disposition != "adopted":
+        return preparation
+    _confirm_root(ledger, root.selection, resources=root.resources)
+    read_result_bytes(control.control_store, proposed.result_reference)
+    build_exact_state_load_plan(control.state_repo, root.selection)
+    control.control_store.retention.adopt(ledger.token, _stores(control))
+    if preparation.phase == "prepared":
+        ready = replace(preparation, phase="ready", proposed=replace(proposed,
+            intents=tuple(replace(v, disposition="adopted") if v.token == root.token else v for v in proposed.intents)))
+        preparation = control.write_preparation(ready, owner=owner, expected=preparation)
+    control.recover_final_association(preparation, owner=owner)
+    return preparation
+
+
+def _retire_publications(control, root):
+    for publication in root.publications:
+        store = publication.confirm(_stores(control))
+        retention = store.retention
+        ledger = retention.read(publication.retention_token)
+        if ledger is None:
+            raise ManagedRecoveryError("missing_publication", "provisional publication ledger is absent")
+        if ledger.disposition == "prepared":
+            retention.abandon(ledger.token)
+        if retention.release(ledger.token, _stores(control)).disposition != "released":
+            raise ManagedRecoveryError("release_pending", "provisional publisher cleanup remains pending")
+
+
 def _associate_state(context, selected, kind, *, report=None, published=None):
     """Use the existing two-phase preparation journal for one root replacement."""
     from .storage import _validate_selection
@@ -291,8 +406,11 @@ def _associate_state(context, selected, kind, *, report=None, published=None):
     retention = context.control_store.retention
     token = uuid4().hex
     ledger = retention.prepare(str(UUID(token)), selected.exact_digest(), targets.items())
+    from .results import publication_ack
+    publications = () if report is None else tuple(publication_ack(v.store, v.mutation_id,
+        retention_token=v.retention_token) for v in report.publications)
     intent = ControlIntent(token, current.run_id, current.invocation_id,
-        current.generation + 1, "prepared", ledger.resources, kind, selected)
+        current.generation + 1, "prepared", ledger.resources, kind, selected, publications)
     replaced = {"latest", "start"} if kind == "latest" else {"final"} if kind == "final" else set()
     keep = tuple(v for v in current.intents if v.kind not in replaced)
     proposed = replace(current, generation=current.generation + 1,
@@ -305,14 +423,7 @@ def _associate_state(context, selected, kind, *, report=None, published=None):
     if report is not None:
         # Managed grants now protect all required keys; retire only these named
         # Core provisional publishers, never an independent user save root.
-        for publication in report.publications:
-            authority = publication.store.retention
-            pending = authority.read(publication.retention_token)
-            if pending.disposition == "prepared":
-                authority.abandon(pending.token)
-            released = authority.release(pending.token, _stores(context._control))
-            if released.disposition != "released":
-                raise ManagedRecoveryError("release_pending", "provisional publisher cleanup remains pending")
+        _retire_publications(context._control, intent)
     if published is not None:
         published()
         # A boundary is not a live availability witness. In particular, a custom
@@ -356,9 +467,27 @@ def _reclaim_resources(control, owner, resources):
                 owner.cleanup_report += ((resource.domain, key, outcome),)
 
 
+def _recover_finalization(control, owner, current):
+    from .results import read_result_bytes
+    if current.interrupt_request is not None:
+        proposed = replace(current, generation=current.generation + 1, state="interrupted",
+            invocation_id=owner.invocation_id, interrupt_request=None)
+        return "finalization_interrupted", control.transition(current.operation_id, proposed, owner=owner,
+            expected_generation=current.generation, expected_run_id=current.run_id,
+            expected_invocation_id=current.invocation_id)
+    roots = [v for v in current.intents if v.kind == "final" and v.disposition == "adopted"]
+    if current.result_reference is not None and len(roots) == 1:
+        # Complete associated evidence is confirmed freshly, without a live receiver
+        # or any normalization, return consumer, capture or restore hook.
+        read_result_bytes(control.control_store, current.result_reference)
+        final = _confirm_final(control, current)
+        from dryml.core.materialization import build_exact_state_load_plan
+        build_exact_state_load_plan(control.state_repo, final)
+        return "completion_recorded", control.complete_recovered(current, final, owner=owner)
+    return "finalization_incomplete", _fail_recovered_finalization(control, owner, current)
+
+
 def _fail_recovered_finalization(control, owner, current):
-    # U17 will supply complete result/final acknowledgement evidence. Until then
-    # there is no provable completion payload in this format to invent or recapture.
     proposed = replace(current, generation=current.generation + 1, state="failed",
         invocation_id=owner.invocation_id, interrupt_request=None, failure_code="incomplete_finalization")
     return control.transition(current.operation_id, proposed, owner=owner,

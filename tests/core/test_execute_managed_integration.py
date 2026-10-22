@@ -122,7 +122,7 @@ class StoreControlValue(Pickleable):
 
         self.value = 0
 
-    @managed_operation(return_state_ref=True, store_parameter="store")
+    @managed_operation(store_parameter="store")
     def advance(self, *, store: Store | None = None, managed) -> None:
         """Require the decoded Store control before mutating worker-local state."""
 

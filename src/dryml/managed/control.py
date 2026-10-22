@@ -26,9 +26,10 @@ from dryml.formats import canonical_json_bytes, canonical_json_load_bytes
 from dryml.locking import FileLock, interprocess_lock
 from dryml.paths import local_path_key
 
-from .errors import ManagedConfigError, ManagedConflictError, ManagedControlError
+from .errors import ManagedConfigError, ManagedConflictError, ManagedControlError, ManagedResultError
 from .identity import AdmissionIdentity, operation_digest, _receiver
 from .storage import OperationAdmission, OperationOwnership
+from .results import ResultReference, StoreAcknowledgement
 
 _MAX_BYTES = 1024 * 1024
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -124,6 +125,20 @@ def _node_equal(left, right):
     return evidence(left).graph_equal(evidence(right))
 
 
+def _result_reference(data):
+    try:
+        return None if data is None else ResultReference.from_data(data)
+    except ManagedResultError as error:
+        raise ManagedControlError("invalid_result_reference", "invalid nested result association") from error
+
+
+def _acknowledgement(data):
+    try:
+        return None if data is None else StoreAcknowledgement.from_data(data)
+    except ManagedResultError as error:
+        raise ManagedControlError("invalid_store_ack", "invalid nested publication acknowledgement") from error
+
+
 def _same_snapshot_bytes(left, right):
     # Logical graph equality cannot authenticate a persisted packet's placement.
     return left is right or left is not None and right is not None and left.to_bytes() == right.to_bytes()
@@ -138,7 +153,8 @@ class ControlHistory:
     raise ManagedControlError. This immutable value performs no payload IO, grants
     no retention and never recursively embeds earlier history. Equality compares
     exact logical Node graphs and retained construction, independent of newly
-    allocated handles/packet labels.
+    allocated handles/packet labels. result_reference is typed ResultReference,
+    required for completed history, and does not promise current value availability.
     """
     run_id: str
     invocation_id: str
@@ -146,6 +162,7 @@ class ControlHistory:
     state: str
     checkpoint: Node | None = None
     final: Node | None = None
+    result_reference: ResultReference | None = None
 
     def __post_init__(self):
         _uuid(self.run_id, "run_id"); _uuid(self.invocation_id, "invocation_id")
@@ -154,6 +171,9 @@ class ControlHistory:
             raise ManagedControlError("invalid_history", "unknown history state")
         if (self.state == "completed") != (self.final is not None):
             raise ManagedControlError("invalid_history", "only completed history requires final metadata")
+        if (self.result_reference is not None and type(self.result_reference) is not ResultReference
+                or self.state == "completed" and self.result_reference is None):
+            raise ManagedControlError("invalid_history", "completion history requires typed result metadata")
         for node in (self.checkpoint, self.final):
             if node is not None:
                 try:
@@ -163,28 +183,31 @@ class ControlHistory:
                     raise ManagedControlError("invalid_history", "history requires saved metadata") from error
 
     def to_data(self):
-        """Return closed history schema v1 primitives, without state reads/effects."""
-        return {"schema": "dryml-managed-history", "version": 1,
+        """Return closed history schema v2 primitives, without state reads/effects."""
+        return {"schema": "dryml-managed-history", "version": 2,
                 "run_id": self.run_id, "invocation_id": self.invocation_id,
                 "generation": self.generation, "state": self.state,
-                "checkpoint": _node_data(self.checkpoint), "final": _node_data(self.final)}
+                "checkpoint": _node_data(self.checkpoint), "final": _node_data(self.final),
+                "result_reference": None if self.result_reference is None else self.result_reference.to_data()}
 
     def __eq__(self, other):
         return (type(other) is ControlHistory
                 and (self.run_id, self.invocation_id, self.generation, self.state) ==
                     (other.run_id, other.invocation_id, other.generation, other.state)
                 and _node_equal(self.checkpoint, other.checkpoint)
-                and _node_equal(self.final, other.final))
+                 and _node_equal(self.final, other.final)
+                 and self.result_reference == other.result_reference)
 
     __hash__ = None
 
     @classmethod
     def from_data(cls, data):
         """Decode history mapping; incompatible nested metadata raises ManagedControlError."""
-        _closed(data, "dryml-managed-history", 1,
-                {"run_id", "invocation_id", "generation", "state", "checkpoint", "final"})
+        _closed(data, "dryml-managed-history", 2,
+                {"run_id", "invocation_id", "generation", "state", "checkpoint", "final", "result_reference"})
         return cls(data["run_id"], data["invocation_id"], data["generation"], data["state"],
-                   _node(data["checkpoint"], saved=True), _node(data["final"], saved=True))
+                   _node(data["checkpoint"], saved=True), _node(data["final"], saved=True),
+                   _result_reference(data["result_reference"]))
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -195,7 +218,8 @@ class ControlIntent:
     disposition is prepared/adopted/abandoned/release_pending/released, resources
     is a tuple of Core RetentionResource values. kind is root/initial/start/latest/
     final/durable; typed reasons require selection SavedNode metadata. Root intent
-    v2 explicitly rejects v1 nested input. Validation raises ManagedControlError.
+    v3 explicitly rejects v1/v2 nested input. publications contains exact typed
+    provisional-token/Store acknowledgement evidence. Validation raises ManagedControlError.
     Equality compares full resource values and exact logical selection graphs,
     including retained construction evidence,
     not packet labels or digests alone. This ledger authorizes no physical release
@@ -209,6 +233,7 @@ class ControlIntent:
     resources: tuple = ()
     kind: str = "root"
     selection: Node | None = None
+    publications: tuple[StoreAcknowledgement, ...] = ()
 
     def __post_init__(self):
         from dryml.core.store.retention import RetentionResource
@@ -229,14 +254,18 @@ class ControlIntent:
                 raise ManagedControlError("invalid_intent", "root selection requires saved metadata") from error
         if self.kind != "root" and self.selection is None:
             raise ManagedControlError("invalid_intent", "typed roots require saved selection metadata")
+        if (type(self.publications) is not tuple or len(self.publications) > 256
+                or any(type(v) is not StoreAcknowledgement or v.retention_token is None for v in self.publications)):
+            raise ManagedControlError("invalid_intent", "invalid provisional publication evidence")
 
     def to_data(self):
-        """Return closed intent v2 kind/selection evidence, without grant effects."""
-        return {"schema": "dryml-managed-root-intent", "version": 2, "token": self.token,
+        """Return closed intent v3 selection/publication evidence, without grant effects."""
+        return {"schema": "dryml-managed-root-intent", "version": 3, "token": self.token,
                 "run_id": self.run_id, "invocation_id": self.invocation_id,
                 "generation": self.generation, "disposition": self.disposition,
                 "resources": [value.to_data() for value in self.resources],
-                "kind": self.kind, "selection": _node_data(self.selection)}
+                "kind": self.kind, "selection": _node_data(self.selection),
+                "publications": [v.to_data() for v in self.publications]}
 
     def __eq__(self, other):
         return (type(other) is ControlIntent
@@ -244,7 +273,7 @@ class ControlIntent:
                      self.disposition, self.resources, self.kind) ==
                     (other.token, other.run_id, other.invocation_id, other.generation,
                      other.disposition, other.resources, other.kind)
-                and _node_equal(self.selection, other.selection))
+                 and _node_equal(self.selection, other.selection) and self.publications == other.publications)
 
     __hash__ = None
 
@@ -252,21 +281,22 @@ class ControlIntent:
     def from_data(cls, data):
         """Decode closed root intent mapping, rejecting incompatible resource versions."""
         from dryml.core.store.retention import RetentionResource
-        _closed(data, "dryml-managed-root-intent", 2,
-                {"token", "run_id", "invocation_id", "generation", "disposition", "resources", "kind", "selection"})
-        if type(data["resources"]) is not list:
+        _closed(data, "dryml-managed-root-intent", 3,
+                {"token", "run_id", "invocation_id", "generation", "disposition", "resources", "kind", "selection", "publications"})
+        if type(data["resources"]) is not list or type(data["publications"]) is not list:
             raise ManagedControlError("invalid_intent", "resources must be a list")
         try:
             return cls(data["token"], data["run_id"], data["invocation_id"], data["generation"],
                        data["disposition"], tuple(RetentionResource.from_data(v) for v in data["resources"]),
-                       data["kind"], _node(data["selection"], saved=True))
-        except (ValueError, TypeError, ManagedConfigError) as error:
+                       data["kind"], _node(data["selection"], saved=True),
+                       tuple(StoreAcknowledgement.from_data(v) for v in data["publications"]))
+        except (ValueError, TypeError, ManagedConfigError, ManagedResultError) as error:
             raise ManagedControlError("invalid_intent", "invalid affected resource metadata") from error
 
 
 @dataclass(frozen=True, slots=True, eq=False)
 class ControlSnapshot:
-    """Closed current-record v3 authority with detached receiver and saved metadata.
+    """Closed current-record v4 authority with detached receiver, state and result metadata.
 
     receiver is a bound concrete Node, member a declared identifier, argument_digest
     separate compatibility evidence, run_id stable run UUID, invocation_id current
@@ -282,6 +312,10 @@ class ControlSnapshot:
     private, nonserialized fact, not proof of external authority. Replacement drops
     that fact; every CAS still checks fresh persisted bytes and ownership/fences.
     Codec methods read no payloads and grant no retention.
+    result_reference is optional typed ResultReference and mandatory on completed
+    records. Finalizing retains it before automatic capture; failed/interrupted
+    records may preserve this evidence without claiming an ordinary success value.
+    result_ack is optional StoreAcknowledgement, confirmed freshly before completion.
     """
     receiver: Node
     member: str
@@ -297,6 +331,8 @@ class ControlSnapshot:
     failure_code: str | None = None
     history: tuple[ControlHistory, ...] = ()
     intents: tuple[ControlIntent, ...] = ()
+    result_reference: ResultReference | None = None
+    result_ack: StoreAcknowledgement | None = None
     _operation_id: str = field(init=False, repr=False)
     _source_bytes: bytes | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -307,6 +343,10 @@ class ControlSnapshot:
         _digest(self.argument_digest, "argument_digest")
         _uuid(self.run_id, "run_id"); _uuid(self.invocation_id, "invocation_id")
         _generation(self.generation)
+        if self.result_reference is not None and type(self.result_reference) is not ResultReference:
+            raise ManagedControlError("invalid_current", "result association requires typed metadata")
+        if self.result_ack is not None and type(self.result_ack) is not StoreAcknowledgement:
+            raise ManagedControlError("invalid_current", "result requires typed acknowledgement evidence")
         if type(self.state) is not str or self.state not in _STATES:
             raise ManagedControlError("invalid_current", "unknown lifecycle state")
         if self.interrupt_request is not None and (type(self.interrupt_request) is not tuple
@@ -319,7 +359,7 @@ class ControlSnapshot:
         if (self.state == "failed") != (self.failure_code is not None):
             raise ManagedControlError("invalid_current", "only failed current requires a failure code")
         if self.state == "completed":
-            if self.final is None or self.producer_invocation_id != self.invocation_id:
+            if self.final is None or self.producer_invocation_id != self.invocation_id or self.result_reference is None:
                 raise ManagedControlError("invalid_current", "completion requires final and producer invocation")
         elif self.final is not None or self.producer_invocation_id is not None:
             raise ManagedControlError("invalid_current", "noncompletion cannot claim final/producer")
@@ -360,7 +400,7 @@ class ControlSnapshot:
         return self._operation_id
 
     def to_data(self):
-        """Return detached current v3 primitives, preserving validated source packets.
+        """Return detached current v4 primitives, preserving validated source packets.
 
         Decoded records retain their original nested storage labels; new records
         encode valid Node packets. The returned mutable mapping is not retained.
@@ -368,7 +408,7 @@ class ControlSnapshot:
         """
         if self._source_bytes is not None:
             return _data(self._source_bytes)
-        return {"schema": "dryml-managed-current", "version": 3,
+        return {"schema": "dryml-managed-current", "version": 4,
                 "operation_id": self.operation_id, "receiver": _node_data(self.receiver),
                 "member": self.member, "argument_digest": self.argument_digest,
                 "run_id": self.run_id, "invocation_id": self.invocation_id,
@@ -376,7 +416,9 @@ class ControlSnapshot:
                 "interrupt_request": None if self.interrupt_request is None else list(self.interrupt_request),
                 "checkpoint": _node_data(self.checkpoint), "final": _node_data(self.final),
                 "producer_invocation_id": self.producer_invocation_id, "failure_code": self.failure_code,
-                "history": [v.to_data() for v in self.history], "intents": [v.to_data() for v in self.intents]}
+                "history": [v.to_data() for v in self.history], "intents": [v.to_data() for v in self.intents],
+                "result_reference": None if self.result_reference is None else self.result_reference.to_data(),
+                "result_ack": None if self.result_ack is None else self.result_ack.to_data()}
 
     def to_bytes(self):
         """Return validated source bytes or bounded canonical JSON for a new value.
@@ -399,8 +441,8 @@ class ControlSnapshot:
         data = _data(payload)
         fields = {"operation_id", "receiver", "member", "argument_digest", "run_id", "invocation_id",
                   "generation", "state", "interrupt_request", "checkpoint", "final",
-                  "producer_invocation_id", "failure_code", "history", "intents"}
-        _closed(data, "dryml-managed-current", 3, fields)
+                  "producer_invocation_id", "failure_code", "history", "intents", "result_reference", "result_ack"}
+        _closed(data, "dryml-managed-current", 4, fields)
         request = data["interrupt_request"]
         if request is not None and (type(request) is not list or len(request) != 2):
             raise ManagedControlError("invalid_current", "malformed interruption request")
@@ -412,7 +454,9 @@ class ControlSnapshot:
                      checkpoint=_node(data["checkpoint"], saved=True), final=_node(data["final"], saved=True),
                      producer_invocation_id=data["producer_invocation_id"], failure_code=data["failure_code"],
                      history=tuple(ControlHistory.from_data(v) for v in data["history"]),
-                     intents=tuple(ControlIntent.from_data(v) for v in data["intents"]))
+                      intents=tuple(ControlIntent.from_data(v) for v in data["intents"]),
+                      result_reference=_result_reference(data["result_reference"]),
+                      result_ack=_acknowledgement(data["result_ack"]))
         if result.operation_id != data["operation_id"] or (operation_id is not None and result.operation_id != operation_id):
             raise ManagedControlError("invalid_current", "operation projection does not match record/path identity")
         object.__setattr__(result, "_source_bytes", payload)
@@ -428,7 +472,8 @@ class ControlSnapshot:
                      other.producer_invocation_id, other.failure_code, other.history, other.intents)
                 and _node_equal(self.receiver, other.receiver)
                 and _node_equal(self.checkpoint, other.checkpoint)
-                and _node_equal(self.final, other.final))
+                 and _node_equal(self.final, other.final)
+                 and self.result_reference == other.result_reference and self.result_ack == other.result_ack)
 
     __hash__ = None
 
@@ -496,7 +541,7 @@ class StartPreparation:
             raise ManagedControlError("invalid_preparation", "invalid start preparation")
         old = self.previous
         if (self.proposed.generation != (0 if old is None else old.generation) + 1
-                or self.proposed.state != "running"
+                or self.proposed.state not in {"running", "finalizing"}
                 or old is not None and self.proposed.operation_id != old.operation_id):
             raise ManagedControlError("invalid_preparation", "preparation does not name adjacent operation authority")
 
@@ -769,6 +814,46 @@ class ManagedControlStore:
         if proposed is None: return None
         return self.transition(operation_id, proposed, owner=owner, expected_generation=expected_generation,
                                expected_run_id=run_id, expected_invocation_id=invocation_id)
+
+    def complete_recovered(self, expected, final, *, owner):
+        """Finish proven result/final evidence under a new recovery-only owner.
+
+        expected is an exact finalizing ControlSnapshot and final its associated
+        SavedNode, confirmed by the result owner before entry. Returns completed
+        metadata preserving original producer invocation. Fresh current bytes and
+        interrupt generation are CAS-checked; ambiguity/index failure propagates.
+        No hooks, payloads, grants or graph preparation run under short control.
+        """
+        self._require_owner(owner, expected.operation_id)
+        if (expected.state != "finalizing" or expected.interrupt_request is not None
+                or expected.result_reference is None
+                or not _same_snapshot_bytes(self.inspect(expected.operation_id), expected)):
+            raise ManagedConflictError("generation_conflict", "recovered completion was fenced")
+        proposed = replace(expected, generation=expected.generation + 1, state="completed",
+            final=final, producer_invocation_id=expected.invocation_id)
+        self._publish(expected, proposed)
+        return proposed
+
+    def recover_final_association(self, preparation, *, owner):
+        """CAS a fully proven finalizing preparation under recovery ownership.
+
+        preparation is an exact persisted ready StartPreparation with result and
+        adopted final evidence freshly confirmed by its owning runtime. Returns
+        proposed metadata, preserving producer identity. Changed bytes/interrupt
+        fence refuse; journal/index errors retain exact evidence. No hooks run.
+        """
+        proposed = preparation.proposed
+        self._require_owner(owner, proposed.operation_id)
+        persisted = self.read_preparation(proposed.operation_id)
+        if (preparation.phase != "ready" or preparation.settled or persisted is None
+                or persisted.to_bytes() != preparation.to_bytes()
+                or preparation.previous is None or preparation.previous.state != "finalizing"
+                or preparation.previous.interrupt_request is not None or proposed.state != "finalizing"
+                or proposed.result_reference is None
+                or not _same_snapshot_bytes(self.inspect(proposed.operation_id), preparation.previous)):
+            raise ManagedConflictError("generation_conflict", "recovered final association was fenced")
+        self._publish(preparation.previous, proposed)
+        return proposed
 
     def authorize_release(self, operation_id, token, *, owner, run_id, invocation_id, expected_generation):
         """Return exact release-pending ControlIntent after active owner/fence checks.
@@ -1076,6 +1161,19 @@ class ManagedControlStore:
 
 
 def _projection_reader(path):
+    result = re.fullmatch(r"managed/results/v1/([0-9a-f]{2})/([0-9a-f]{64})/current\.json", path)
+    if result is not None:
+        from .results import _ResultRecord
+        if result[1] != result[2][:2]:
+            raise ManagedControlError("invalid_result_path", "result shard differs")
+        class _SelectedResult:
+            @staticmethod
+            def from_bytes(payload):
+                record = _ResultRecord.from_bytes(payload)
+                if record.key != result[2]:
+                    raise ManagedControlError("invalid_result_path", "result address differs from bytes")
+                return record
+        return _SelectedResult
     start = re.fullmatch(r"managed/operations/v2/starts/v1/([0-9a-f]{2})/([0-9a-f]{64})/current\.json", path)
     if start is not None:
         if start[1] != start[2][:2]:
@@ -1108,11 +1206,25 @@ def _validate_projection_namespace(store):
 
 
 # Core accepts an owner-supplied reader, but never imports this lifecycle package.
-# Only operation/current-intent bytes are integrated; lifecycle relation coverage remains
-# explicitly unavailable until all owning association/result families are wired.
+# The owner supplies complete current/history/root/preparation/result contributions.
 from dryml.core.query.authority import register_control_projection
-register_control_projection("managed", "managed/operations/v2", _projection_reader,
-                            validate=_validate_projection_namespace)
+register_control_projection("managed", "managed", _projection_reader,
+                            validate=_validate_projection_namespace, relations=lambda record: _lifecycle_rows(record))
+
+
+def _lifecycle_rows(record):
+    if isinstance(record, ControlSnapshot):
+        yield "current", record.to_data()
+        for ordinal, history in enumerate(record.history):
+            yield "history:" + str(ordinal), history.to_data()
+        for intent in record.intents:
+            yield "root:" + intent.token, intent.to_data()
+        if record.result_reference is not None:
+            yield "result", record.result_reference.to_data()
+    elif isinstance(record, StartPreparation):
+        yield "preparation", record.to_data()
+    else:
+        yield "result-content", record.to_data()
 
 
 __all__ = ["ControlSnapshot", "ControlHistory", "ControlIntent", "ManagedControlStore"]

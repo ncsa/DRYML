@@ -422,7 +422,6 @@ class _Encoder:
                 "owner": self.value(owner, f"{path}.owner", depth + 1),
                 "member": member,
                 "resumable": value.resumable,
-                "return_state_ref": value.return_state_ref,
                 "store_parameter": value.store_parameter,
                 "invocation_parameters": dict(value._invocation_parameters),
             }
@@ -721,7 +720,7 @@ class _Decoder:
             "function": {"tag", "code", "name", "defaults", "kwdefaults", "annotations", "captures", "freevars"},
             "class": {"tag", "name", "bases", "namespace"},
             "instance": {"tag", "type", "fields"},
-            "managed_declaration": {"tag", "authored", "executable", "owner", "member", "resumable", "return_state_ref", "store_parameter", "invocation_parameters"},
+            "managed_declaration": {"tag", "authored", "executable", "owner", "member", "resumable", "store_parameter", "invocation_parameters"},
             "managed_composite": {"tag", "declaration", "outer", "owner", "member"},
             "managed_target": {"tag", "receiver", "declaration"},
             "managed_composite_target": {"tag", "receiver", "composite"},
@@ -802,7 +801,6 @@ class _Decoder:
                 if (
                         not isinstance(node["member"], str)
                         or type(node["resumable"]) is not bool
-                        or type(node["return_state_ref"]) is not bool
                         or (node["store_parameter"] is not None and type(node["store_parameter"]) is not str)
                         or not isinstance(node["invocation_parameters"], Mapping)
                         or not all(
@@ -1097,7 +1095,6 @@ class _Decoder:
             try:
                 declaration = ManagedOperation(
                     executable, resumable=node["resumable"],
-                    return_state_ref=node["return_state_ref"],
                     store_parameter=node["store_parameter"],
                 )
                 if node["invocation_parameters"]:

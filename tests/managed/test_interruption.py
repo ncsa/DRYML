@@ -74,25 +74,22 @@ def test_invalid_explicit_interrupt_cause_fails_before_checkpoint_mutation(tmp_p
 
 
 @pytest.mark.parametrize("before", [True, False])
-def test_interrupt_immediately_before_or_after_completion_CAS(tmp_path, before):
+def test_interrupt_immediately_before_or_after_completion_CAS(tmp_path, monkeypatch, before):
     control, live = setup(tmp_path)
     Value.action = lambda obj, ctx: ctx.final_state(ctx.checkpoint())
     requests = []
-    def finish(ctx, raw):
-        final = ctx._finalize_state()
-        if before:
-            requests.append(control.request_interrupt_if_running(ctx.operation_id)[0])
-        current = ctx._safe_point()
-        ctx._transition(current, state="completed", final=final, producer_invocation_id=ctx.invocation_id)
-        if not before:
-            requests.append(control.request_interrupt_if_running(ctx.operation_id)[0])
-        return final
+    from dryml.managed import runtime
+    def boundary(stage):
+        if stage == ("before_completion" if before else "completion_recorded"):
+            operation_id = live.run.status(state_repo=control.state_repo).operation_id
+            requests.append(control.request_interrupt_if_running(operation_id)[0])
+    monkeypatch.setattr(runtime, "_completion_boundary", boundary)
     if before:
         with pytest.raises(ManagedInterrupted):
-            enter(control, live, finish=finish)
+            live.run(managed=ManagedConfig(state_repo=control.state_repo))
         assert requests == ["requested"]
     else:
-        enter(control, live, finish=finish)
+        assert live.run(managed=ManagedConfig(state_repo=control.state_repo)).value is None
         assert requests == ["not_running"]
 
 

@@ -137,7 +137,7 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
         finally:
             iterator.close()
 
-    @managed_operation(resumable=True, return_state_ref=True, store_parameter="store")
+    @managed_operation(resumable=True, store_parameter="store")
     def compute(
             self, *, codec: CacheCodec, store=None, target_chunk_bytes: int | None = None,
             managed: ManagedContext) -> None:

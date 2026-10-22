@@ -60,7 +60,7 @@ class SavedTestDataValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Retain the bound test reference without materializing its payload."""
 
@@ -82,7 +82,7 @@ class ConstantValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Install one constant scalar result."""
 
@@ -104,7 +104,7 @@ class InitiallyReadyArtifact(Artifact):
 
         return True
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Record the one authored invocation required to establish authority."""
 
@@ -122,7 +122,7 @@ class NeverReadyArtifact(Artifact):
 
         return False
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Complete without installing a ready result, which U9 must reject."""
 
@@ -138,7 +138,7 @@ class RequiredComputeValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, required, *, managed) -> None:
         """Declare the preflight-rejected ordinary argument."""
 
@@ -175,7 +175,7 @@ class SavedModelValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Install the exact model reference as an inspectable scalar surrogate."""
 

@@ -263,7 +263,7 @@ class Experiment(Serializable):
         self.state = TrainState()
 
     @_experiment_train_wrapper
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def train(self, *, callbacks=None, observer_strict=False, managed) -> None:
         """Train and evaluate the exact terminal Experiment checkpoint.
 
@@ -558,8 +558,9 @@ class Experiment(Serializable):
             artifact_cls: Concrete Artifact class supplied by a resolved recipe.
 
         Raises:
-            TypeError: If ``compute`` is not a resumable managed operation returning
-                its final StateRef, or requires ordinary caller arguments.
+            TypeError: If ``compute`` is not a resumable managed operation or
+                requires ordinary caller arguments. Managed calls now return
+                InvocationResult; workflow-level consumption is integrated separately.
 
         Side Effects:
             Inspects the class declaration only; no receiver is constructed.
@@ -569,9 +570,9 @@ class Experiment(Serializable):
         descriptor = getattr(compute, "_descriptor", compute)
         if not isinstance(descriptor, ManagedOperation):
             raise TypeError(f"Artifact recipe {name!r} requires a managed compute operation.")
-        if not descriptor.resumable or not descriptor.return_state_ref:
+        if not descriptor.resumable:
             raise TypeError(
-                f"Artifact recipe {name!r} compute must be resumable and return its final StateRef."
+                f"Artifact recipe {name!r} compute must be resumable."
             )
         ordinary = (
             parameter for parameter in descriptor.author_signature.parameters.values()

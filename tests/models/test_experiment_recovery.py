@@ -55,7 +55,7 @@ class OrderedValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Record this receiver and fail only the configured initial invocation."""
 
@@ -124,7 +124,7 @@ class FailOnceValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Fail once, then install a complete terminal result on retry."""
 

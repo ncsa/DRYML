@@ -1,8 +1,8 @@
 # Managed Operations
 
-`dryml.managed` owns the lifecycle of state-mutating Object methods. Its **U16
-author lifecycle** supports explicit checkpoints, optional immutable initial state,
-exact final selection, detached replay selection, deterministic starts,
+`dryml.managed` owns the lifecycle of state-mutating Object methods. Its **U17
+durable-result lifecycle** supports explicit checkpoints, optional immutable initial state,
+exact final selection, detached completion replay, deterministic starts,
 two-phase rerun, resume, operation-scoped ownership, fenced control CAS, metadata
 history, and independent status/interruption control. Importing Core does not
 import managed, Execute, Dispatch, or optional frameworks.
@@ -12,18 +12,16 @@ import managed, Execute, Dispatch, or optional frameworks.
 The previous StateRef/current-v2 execution path is retired. A decorated direct call
 now validates ordinary arguments once, selects admission, prepares/restores a
 selected saved start and executes the authored body with `ManagedContext`.
-**Ordinary result delivery is not integrated yet.** A normal body return raises
-`ManagedControlError("result_policy_not_integrated", ...)` before automatic final
-capture and records failure with latest recovery preserved. Compatible completed
-calls select replay without
-receiver payload IO, then raise `result_policy_not_integrated` with detached
-`.admission` metadata until durable-result delivery is integrated. A pending-repair
+Normal success returns `InvocationResult`: `.value` is the durable ordinary return,
+`.final_state_ref` is historical SavedNode metadata, `.status` is detached status,
+and `.execution` distinguishes operation, run, current caller and producer IDs.
+Compatible completed calls replay this metadata without receiver payload IO or
+mutation, even on an older compatible live receiver. A pending-repair
 call returns an explicit `AdmissionOutcome`; that is reconciliation, not ordinary
 method success. Declarations retain their checked synchronous signature rules.
 
-This is not the completed managed runtime. U17 owns ordinary return normalization,
-durable result encoding, completion and replay delivery; U18
-owns model/artifact caller integration; U19 integrates the detached target into
+Model/Artifact workflow consumers are not qualified by this direct-call cutover.
+They require their later caller integration; U19 integrates the detached target into
 Core Execute transport. The new `start_from` policy is currently local admission
 policy, not a qualified model-wrapper or Core Execute transport capability.
 Acquiring low-level admission or constructing metadata alone does not retain
@@ -44,8 +42,9 @@ config = ManagedConfig(
     rerun=True,
     start_from=checkpoint_b,
 )
-# Authored execution/checkpoints work; normal result delivery still raises the
-# U17 integration error described above.
+result = experiment.train(epochs=20, managed=config)  # user-authored managed method
+value = result.value
+final = result.final_state_ref
 ```
 
 Supplying `start_from` without `rerun=True` fails with `start_requires_rerun`
@@ -83,7 +82,9 @@ its run/latest; incomplete finalization becomes a failure preserving latest;
 recorded completion is inspected without final payload reads. No receiver restore,
 capture, callback or body is replayed. A separate invocation must freshly prepare
 or restore for later work. There is no cross-invocation restore receipt. Complete
-result/final evidence acknowledgement belongs to U17's future result format.
+result/final evidence is confirmed idempotently and completed without normalizing
+again or replaying consumer hooks. An incomplete capture records failure and
+preserves latest recovery; a separate resumable invocation must restore freshly.
 
 ## Author checkpoint and selection controls
 
@@ -107,9 +108,9 @@ def train(self, epochs, *, managed):
     return {"epochs": epochs}
 ```
 
-The body above can publish checkpoints and select final state now. Its normal
-return still raises the documented result-integration error; it does not currently
-deliver an InvocationResult or claim completed authority.
+The body above returns an ordinary dictionary. Its caller receives InvocationResult
+after the dictionary, exact selected final, required grants and index prerequisites
+are confirmed and completion's own fenced mutation is acknowledged.
 
 `checkpoint(states=None, durable=False, initial=False)` uses Core's routed save
 batches. `states` accepts a partial StateSpec or rooted LocalState map: explicitly
@@ -139,13 +140,71 @@ Confirmed uncommitted association preparations settle without hooks before later
 work. Uncertain control/index work remains explicit recovery, not a success guess.
 Callbacks run outside capture reservations, Store writer and short control locks.
 
-The private result-owner handoff executes the authored body under the same owner,
-then lets U17 normalize/encode the ordinary value **before** requesting state
+The result owner executes the authored body under the same owner,
+then normalizes/encodes the ordinary value **before** requesting state
 finalization. It uses the explicit final unchanged, or captures once if no final
 was selected. Automatic final capture invokes zero checkpoint callbacks. An explicit
 terminal checkpoint selected as final therefore has one capture/one callback, with
-no second capture or callback at finalization. This internal seam is qualified by
-focused tests; public completion/result delivery remains U17 work.
+no second capture or callback at finalization. Owning return normalization runs
+once; separately nested `@function` calls keep their own boundaries. Replay runs
+ordinary argument normalization for compatibility but no return normalization.
+
+## Durable ordinary values and fresh lazy access
+
+The result grammar is closed:
+
+- Exact Python `None`, `bool`, `int`, `float`, `complex`, `str`, `bytes`.
+- Exact `list`, `tuple`, `dict`, `set`, `frozenset` recursively containing supported
+  values. Keys/set members must be admitted hashable values.
+- Nonobject NumPy scalars and exact `ndarray`, using the common explicit dtype
+  codec, including structured nonobject dtypes, shape, byte order and logical bytes.
+- Explicit immutable Core metadata: Definition/ConcreteDefinition/ConcreteNode,
+  ObjectId, StateKey, LocalState, IdentitySpec and StateSpec. Graph codecs preserve
+  sharing, quotation and retained construction and never materialize metadata.
+
+Containers retain distinct tags, dictionary insertion order, DAG aliases and scalar
+floating bits (including negative zero, infinities and NaN payloads). Cycles,
+arbitrary subclasses, custom/opaque values (including frozen summary dataclasses),
+callables, generators, live Objects/resources and object-dtype arrays are rejected.
+Return a supported container for a custom summary. There is no pickle/dill or
+resource fallback. The separate managed result codec defaults to an 8 MiB byte
+budget, 65,536 nodes/container entries, depth 80 and 262,144 integer bits;
+malformed tags, references, versions and bounds
+raise `ManagedResultError`. Unsupported returns fail before automatic final capture.
+
+Result bytes are immutable and content addressed at
+`managed/results/v1/<shard>/<sha256>/current.json` in the selected control Store.
+Their result kind/version/key is retained in current and history metadata. Result
+metadata embeds its complete metadata closure; references in a value **do not**
+grant retention of private StateKey data. State cleanup therefore does not prevent
+status, replay or value access while result bytes remain.
+
+InvocationResult retains only detached values and a `ResultSource` (canonical local
+DirStore path plus persistent UUID), never an open Repo/Store, connection, reader,
+lease or availability proof. Closing the original Repo or worker leaves status,
+IDs and reference inspection usable. Every `.value` access opens a **fresh** source,
+validates its UUID and result kind/version/key, protects the byte-read lifetime,
+checks the content hash and decodes anew. Missing/corrupt result bytes, an absent
+source or another Store installed at the same path raises `ManagedResultError`
+only on lazy access, with no reexecution. A prior decoded value cannot extend a
+stale source's validity. Unsupported source kinds have no serialization substitute.
+
+Completion replay preserves the original run and producer invocation, while
+allocating a fresh caller invocation. It runs no body, restore, capture, checkpoint
+callback, owning return normalization or `_managed_post_publication` consumer hook.
+That optional private consumer receives `(final_saved_node, borrowed_repo, report)`
+only after a new completion is acknowledged; `report` is None for selected finals.
+Its failure propagates while completion remains recorded and is never redelivered.
+The raised consumer error exposes detached `.invocation_result` metadata rather
+than a failed lifecycle projection.
+
+Uncaught authored/result errors retain execution IDs, optional
+`checkpoint_state_ref`, and detached `.failed_result` inspection. Publication or
+index ambiguity retains its authoritative mutation/cut evidence instead of
+pretending to contain an ordinary successful value. A committed completion whose
+own index projection fails remains completed, raises the explicit partial error,
+and withholds ordinary delivery. A later repair call terminates with
+`AdmissionOutcome("completion_recorded", ...)`; a subsequent call replays the value.
 
 Managed publication uses provisional internal Core grants, not a permanent user-save
 root for each checkpoint. Root association reuses the two-phase preparation journal:
@@ -283,11 +342,16 @@ guarantee that another safe point or checkpoint will occur.
 The selected control DirStore owns:
 
 - Area envelope: `dryml-managed`, **format 2**.
-- Current authority: `dryml-managed-current`, **record version 3**.
+- Current authority: `dryml-managed-current`, **record version 4**.
 - Pending authority: `dryml-managed-pending`, **record version 2**.
-- Version-1 named managed Node and history records.
-- Version-2 root intents with explicit kind and SavedNode selection evidence;
-  version-1 root intents are rejected without conversion.
+- Version-1 named managed Node records and version-2 history with result references.
+- Version-3 root intents with explicit kind, SavedNode selection and provisional
+  publication token/exact Store-ack evidence; earlier versions are rejected.
+- Version-1 Store acknowledgement evidence (UUID, exact mutation UUID and its own
+  journal epoch, plus optional provisional token), not a cached availability proof.
+  Finalizing current retains the typed result reference and its result publication
+  acknowledgement before automatic capture; associated final intents retain capture
+  and provisional evidence so recovery can finish token retirement without recapture.
 - Version-1 start/root-association preparation sidecars under
   `managed/operations/v2/starts/v1/<shard>/<operation>/current.json`, containing exact
   previous/proposed current metadata, the physical retention token, disposition
@@ -297,7 +361,7 @@ The selected control DirStore owns:
   operation-current state machine.
 - Nested `dryml-node-graph/v1` / identity-3 graph, reference and StateKey codecs.
 
-Area format 2 does **not** admit old current-record version 2. Every owning reader
+Area format 2 does **not** admit old current-record versions 2 or 3. Every owning reader
 rejects incompatible nested versions as well as old area/current/pending records,
 preserving source bytes. No old authority is automatically converted, deleted or
 overwritten. A pending replacement is reconciled only against its exact
@@ -320,12 +384,16 @@ checkpoint reclamation. Metadata existence alone neither protects state from
 deletion nor proves availability. Actual execution/restoration must establish
 those separate contracts at its own admission boundary.
 
-The managed-owned projection adapter journals current-record mutations and feeds
-their exact bytes to Core's generic `record` projection. Core never imports the
-managed owner. A cold rebuild with managed authority requires that owner adapter
-to be loaded; unsupported owners fail visibly. Full `lifecycle` relation coverage
-remains explicitly unavailable pending the owning association/result integrations;
-an empty relation is not advertised as supported coverage.
+The managed-owned projection adapter journals current, history, preparation,
+root/finalization associations and ordinary-result records and contributes typed
+`lifecycle` rows alongside Core's generic `record` projection. Core never imports
+the managed owner. Coverage contract 2 certifies the implemented families only when
+the complete owner reader is registered; a cold rebuild with managed authority
+requires that adapter. Pending invalidation blocks refresh-disabled reads, including
+negative/count consumers. Completion journals its **own** invalidation before CAS,
+releases control before SQL/coverage commit, and acknowledges that exact mutation
+afterward. Earlier final-state acknowledgements cannot cover completion. Repair is
+metadata-only and performs zero body/capture/restore/return/consumer-hook work.
 
 ## Worker diagnostics
 

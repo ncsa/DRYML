@@ -240,6 +240,7 @@ def unordered_run(tmp_path):
 
 def test_unordered_saved_rerun_then_resume_keeps_root_evidence(tmp_path, monkeypatch):
     from dryml.managed import runtime
+    from dryml.managed import ResultReference
     from dryml.managed.control import ControlIntent, ControlSnapshot
     from tests.managed.test_control_codec import force_fresh_handle_order
 
@@ -250,7 +251,8 @@ def test_unordered_saved_rerun_then_resume_keeps_root_evidence(tmp_path, monkeyp
                                 "adopted", kind="initial", selection=saved)
         old = control.create_initial(ControlSnapshot(facts.receiver, facts.member, facts.argument_digest,
             owner.run_id, owner.invocation_id, 1, "completed", final=saved,
-            producer_invocation_id=owner.invocation_id, intents=(initial,)), owner=owner)
+            producer_invocation_id=owner.invocation_id, intents=(initial,),
+            result_reference=ResultReference("f" * 64)), owner=owner)
     def fail(owner, current, obj, resuming):
         assert not resuming and current.initial.graph_equal(saved)
         raise ValueError("execution seam")

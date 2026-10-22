@@ -8,22 +8,18 @@ import types
 from dataclasses import replace
 
 from dryml.annotations import attach_annotation, own_annotations
-from dryml.core.reference_values import StateRef
 
 from .config import ManagedConfig
 from .errors import ManagedConfigError, ManagedDeclarationError
 
 
-def managed_operation(*, resumable: bool = False, return_state_ref: bool = False,
+def managed_operation(*, resumable: bool = False,
                       store_parameter: str | None = None):
     """Create a checked descriptor for one synchronous managed instance method.
 
     Args:
         resumable: Exact bool declaring whether a later lifecycle may resume from
             an associated Object-state checkpoint.
-        return_state_ref: Exact bool selecting an invocation-captured final
-            ``StateRef`` result instead of the method body's result. The body must
-            explicitly annotate its return as ``None``.
         store_parameter: Optional keyword-only parameter name whose ``None`` or
             ``Store`` value selects this invocation's publication authority.
 
@@ -40,7 +36,7 @@ def managed_operation(*, resumable: bool = False, return_state_ref: bool = False
         invoke the authored method and creates no lifecycle authority.
     """
 
-    if type(resumable) is not bool or type(return_state_ref) is not bool:
+    if type(resumable) is not bool:
         raise ManagedDeclarationError(message="resumable must be an exact bool")
     if store_parameter is not None and (
             type(store_parameter) is not str or not store_parameter.isidentifier()):
@@ -50,7 +46,7 @@ def managed_operation(*, resumable: bool = False, return_state_ref: bool = False
         """Validate and retain one exact native method function."""
 
         return ManagedOperation(
-            target, resumable=resumable, return_state_ref=return_state_ref,
+            target, resumable=resumable,
             store_parameter=store_parameter,
         )
 
@@ -65,8 +61,6 @@ class ManagedOperation:
             ``managed`` parameter.
         resumable: Exact declaration flag required for ordinary unfinished resume;
             a usable latest recovery checkpoint is also mandatory.
-        return_state_ref: Exact declaration flag selecting a final StateRef result
-            after successful publication and completion association.
         store_parameter: Optional declared keyword-only Store control excluded from
             ordinary call identity and used only for publication selection.
 
@@ -87,7 +81,6 @@ class ManagedOperation:
     __dryml_function_participant__ = _FUNCTION_DECLARATION_PARTICIPANT
 
     def __init__(self, target: object, *, resumable: bool,
-                 return_state_ref: bool = False,
                  store_parameter: str | None = None):
         """Create a statically checked declaration without evaluating annotations."""
 
@@ -104,7 +97,6 @@ class ManagedOperation:
         self._executable = executable
         self._function_handoff_owner = handoff_owner
         self._resumable = resumable
-        self._return_state_ref = return_state_ref
         self._store_parameter = store_parameter
         self._invocation_parameters: dict[str, str] = {}
         self._author_signature = _native_signature(authored)
@@ -128,11 +120,6 @@ class ManagedOperation:
                 raise ManagedDeclarationError(
                     message="store_parameter must name a keyword-only parameter with None default"
                 )
-        if return_state_ref and not _is_none_annotation(
-                self._author_signature.return_annotation):
-            raise ManagedDeclarationError(
-                message="return_state_ref requires an explicit None return annotation"
-            )
         self._instance_parameter = parameters[0].name
         self._signature_plan = None
         self._member: str | None = None
@@ -159,12 +146,6 @@ class ManagedOperation:
         """Return the author-declared exact resume capability."""
 
         return self._resumable
-
-    @property
-    def return_state_ref(self) -> bool:
-        """Return whether successful calls expose their captured final StateRef."""
-
-        return self._return_state_ref
 
     @property
     def store_parameter(self) -> str | None:
@@ -521,9 +502,8 @@ class _BoundOperation:
             ManagedConfigError: If config or normalized ordinary arguments are
                 unsupported.
             ManagedError: If selected lifecycle authority cannot be used safely.
-            ManagedControlError: With ``result_policy_not_integrated`` after a
-                normal authored return or compatible replay while U17 durable
-                ordinary-result/completion delivery awaits integration.
+            ManagedResultError: If a normalized result is outside the closed
+                durable grammar; failure precedes automatic final capture.
 
         Side Effects:
             Validates ordinary arguments once, prepares/restores a selected saved
@@ -534,8 +514,8 @@ class _BoundOperation:
 
         Returns:
             A detached reconciliation disposition when pending authority required
-            repair; it never falls through into body execution. Ordinary success
-            and lazy result values await the U17 integration.
+             repair; it never falls through into body execution. Successful calls
+             and compatible replay return detached InvocationResult with lazy value.
         """
 
         if managed is not None and type(managed) is not ManagedConfig:
@@ -861,6 +841,7 @@ def _native_signature(target: types.FunctionType) -> inspect.Signature:
 def _bound_signature(descriptor: ManagedOperation) -> inspect.Signature:
     """Project a caller signature that replaces injected context with config policy."""
 
+    from .model import InvocationResult
     author_signature = descriptor.author_signature
     parameters = list(author_signature.parameters.values())[1:]
     projected = []
@@ -870,21 +851,8 @@ def _bound_signature(descriptor: ManagedOperation) -> inspect.Signature:
         projected.append(parameter)
     return author_signature.replace(
         parameters=projected,
-        return_annotation=(StateRef if descriptor.return_state_ref else author_signature.return_annotation),
+        return_annotation=InvocationResult,
     )
-
-
-def _is_none_annotation(annotation: object) -> bool:
-    """Accept only native or canonical postponed spellings of explicit ``None``."""
-
-    if annotation is None:
-        return True
-    if type(annotation) is not str:
-        return False
-    text = annotation.strip()
-    while len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
-        text = text[1:-1].strip()
-    return text == "None"
 
 
 def _managed_member_names(cls: type) -> set[str]:
