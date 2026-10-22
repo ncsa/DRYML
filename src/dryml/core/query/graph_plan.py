@@ -14,6 +14,22 @@ def graph_candidate_ids(
         domain: DefinitionDomain | None,
         *,
         stats: QueryStats | None = None) -> set[DefinitionId]:
+    """Return a conservative candidate superset from a legacy graph catalog.
+
+    Args:
+        catalog: Existing complete in-memory/posting graph index.
+        selector_graph: Compiled constraints and optional exact Node residual.
+        domain: Optional explicit legacy catalog membership restriction.
+        stats: Optional mutable diagnostics receiving candidate/scan evidence.
+    Returns:
+        Candidate IDs only. The caller must verify ``exact_residual``; postings
+        never establish Node alias, facet or Generator-support acceptance.
+    Raises:
+        Exception: Catalog/domain failures propagate rather than becoming misses.
+    Side Effects:
+        Reads the supplied catalog, updates diagnostics; never materializes or
+        accesses private state. Source completeness belongs to its owning caller.
+    """
     if selector_graph is None:
         universe_ids = domain.all_ids() if domain is not None else catalog.all_definition_ids()
         if stats is not None:
@@ -24,6 +40,8 @@ def graph_candidate_ids(
         universe_ids = domain.all_ids() if domain is not None else catalog.all_definition_ids()
         if stats is not None:
             stats.candidate_count = len(universe_ids)
+            stats.scan_required = True
+            stats.scan_reason = "; ".join(selector_graph.residual_reasons) or "selector graph requires exact scan fallback"
         return set(universe_ids)
 
     anchor = _choose_anchor(catalog, selector_graph)

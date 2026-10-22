@@ -213,6 +213,13 @@ def _query_match(
     if isinstance(selector, Selector):
         selector = selector.root
 
+    from ..node import Node
+    from ..selector import QueryPredicate
+    if isinstance(selector, (Node, QueryPredicate)):
+        from .node_pattern import _PreparedPredicate
+        return _PreparedPredicate(QueryPredicate(selector), strict=strict,
+                                  class_match=class_match).matches(target)
+
     from ..selector import ObjectSelector
 
     if isinstance(selector, ObjectSelector):
@@ -899,6 +906,22 @@ class _V3Restriction:
     kind: str
     value: Any
     scope: Any | None = None
+    prepared: Any = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self):
+        if self.kind != "sel":
+            return
+        from ..node import Node
+        from ..selector import QueryPredicate
+        from ..generator import GeneratorSelector
+        from .node_pattern import _PreparedPredicate
+        selector = self.value
+        if isinstance(selector, Selector):
+            if isinstance(selector.root, Node):
+                object.__setattr__(self, "prepared", _PreparedPredicate(
+                    QueryPredicate(selector.root), strict=selector.strict, class_match=selector.cls_policy))
+        elif isinstance(selector, (Node, QueryPredicate, GeneratorSelector)):
+            object.__setattr__(self, "prepared", _PreparedPredicate(QueryPredicate(selector)))
 
 
 def _same_v3_scope(left, right) -> bool:
@@ -1241,7 +1264,7 @@ class IdentityQuery:
         independent storage or metadata eligibility. ``None`` is a no-op.
 
         Args:
-            value: Definition, complete CDef, Selector, ObjectSelector,
+            value: Node, QueryPredicate, complete CDef, Selector, ObjectSelector,
                 GeneratorSelector, exact ObjectRef or StateRef, or ``None``.
 
         Returns:
@@ -1261,9 +1284,9 @@ class IdentityQuery:
         from ..definition import ConcreteDefinition, Definition
         from ..generator import GeneratorSelector
         from ..reference_values import ObjectRef, StateRef
-        from ..selector import ObjectSelector, Selector, _contains_state_selector
+        from ..selector import ObjectSelector, Selector, QueryPredicate, _contains_state_selector
 
-        if not isinstance(value, (Definition, ConcreteDefinition, Selector, ObjectSelector, GeneratorSelector, ObjectRef, StateRef)):
+        if not isinstance(value, (Definition, ConcreteDefinition, Selector, QueryPredicate, ObjectSelector, GeneratorSelector, ObjectRef, StateRef)):
             raise TypeError("IdentityQuery.sel requires a Definition, selector, generator, or exact reference.")
         selector_root = (
             value.root if isinstance(value, Selector)
@@ -2974,6 +2997,9 @@ class IdentityQuery:
             return self._source_evidence(restriction.value) in evidence.sources
         if restriction.kind == "sel":
             selector = restriction.value
+            if restriction.prepared is not None:
+                target = value.definition if isinstance(value, (ObjectRef, StateRef)) else value
+                return restriction.prepared.matches(target, generator_budget=generator_budget)
             if isinstance(selector, ObjectSelector):
                 return _object_selector_matches(selector, value)
             if isinstance(selector, ObjectRef):

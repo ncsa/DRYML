@@ -165,3 +165,100 @@ def test_v3_producers_and_exports_replace_the_retired_query_surface(tmp_path):
     assert not hasattr(repo_query.take(1), "refine")
     assert not hasattr(core, "ContainmentEdgePolicy")
     assert not hasattr(query, "ContainmentEdgePolicy")
+
+
+def test_node_pattern_correlates_facets_on_the_same_occurrence():
+    """A matching identity elsewhere cannot satisfy a state-constrained child."""
+    from dryml.core import LocalState, StateKey
+    from dryml.core.query.query import _query_match
+
+    creation = Definition(LookupStatefulLeaf, "child").concretize()
+    state = LocalState(StateKey(creation.creation_digest(), "pkl-" + "a" * 64), creation)
+    identity = ObjectId(("selected",))
+    child = Definition(LookupStatefulLeaf, name="child").with_identity(identity).with_state(state)
+    pattern = Definition(LookupRoot, child=child)
+    positive = Definition(LookupRoot, child=child.copy_graph(), unrelated=Definition().with_identity(ObjectId(("other",))))
+    negative = Definition(LookupRoot, child=child.without_identity(), unrelated=child.without_state().copy_graph())
+    match = lambda target: _query_match(pattern, target, strict=False, class_match="exact")
+    assert match(positive)
+    assert not match(negative)
+    assert not match(Definition(LookupRoot, child=child.without_state()))
+
+
+def test_explicit_predicate_absence_boolean_and_local_state_domain():
+    """Absence is independent of omitted facets, wildcard presence and negation."""
+    from dryml.core import AnyValue, Missing, LocalState, QueryPredicate, StateKey
+    from dryml.core.query.model import QueryDomainError
+
+    creation = Definition(LookupStatefulLeaf, "child").concretize()
+    state = LocalState(StateKey(creation.creation_digest(), "pkl-" + "a" * 64), creation)
+    bare = Definition(LookupStatefulLeaf, name="child")
+    selected = bare.with_state(state).with_identity(ObjectId(("donor",)))
+    missing = QueryPredicate.absent("state")
+    assert missing.matches(bare)
+    assert not missing.matches(selected)
+    assert QueryPredicate(bare).matches(selected)
+    assert (~missing & bare).matches(selected)
+    assert (missing | selected).matches(bare)
+    assert QueryPredicate(Definition(name=AnyValue())).matches(bare)
+    assert not QueryPredicate(Definition(name=AnyValue())).matches(Definition())
+    assert QueryPredicate(Definition()).matches(Definition())
+    assert QueryPredicate(Definition(name=Missing())).matches(Definition())
+    assert not QueryPredicate(Definition(name=Missing())).matches(bare)
+    assert QueryPredicate(bare.with_state(state)).compile(domain="local_state").matches(state)
+    assert QueryPredicate.absent("state").compile(domain="local_state").matches(state) is False
+    other_bucket = LocalState(StateKey("b" * 64, state.key.codec_hash), creation)
+    assert not QueryPredicate(bare.with_state(state)).compile(domain="local_state").matches(other_bucket)
+    with pytest.raises(QueryDomainError, match="occurrence"):
+        (missing | selected).compile(domain="local_state")
+    assert QueryPredicate(selected).compile(domain="occurrence").matches(selected)
+
+
+def test_node_pattern_compiler_retains_visible_exact_residual_without_effects(monkeypatch):
+    """Legacy postings cannot certify negatives for unsupported Node facets."""
+    from dryml.core import QueryPredicate
+    from dryml.core.node import Node
+    from dryml.core.query.graph_plan import graph_candidate_ids
+    from dryml.core.query.model import QueryStats
+    from dryml.core.query.selector_graph import compile_selector_graph
+
+    pattern = Definition(LookupStatefulLeaf, name="child").with_identity(ObjectId(("selected",)))
+    counts = dict.fromkeys(("construction", "allocation", "capture", "io", "defaults"), 0)
+    def forbidden(kind):
+        def fail(*args, **kwargs):
+            counts[kind] += 1
+            pytest.fail(kind)
+        return fail
+    monkeypatch.setattr(Node, "concretize", forbidden("defaults"))
+    monkeypatch.setattr(ObjectId, "__init__", forbidden("allocation"))
+    monkeypatch.setattr(LookupStatefulLeaf, "__init__", forbidden("construction"))
+    monkeypatch.setattr(Repo, "save_object", forbidden("capture"))
+    monkeypatch.setattr(DirStore, "read_definition_record", forbidden("io"))
+    monkeypatch.setattr(DirStore, "read_state", forbidden("io"))
+    compiled = compile_selector_graph(pattern)
+    assert compiled.requires_scan and compiled.residual_reasons
+    assert compiled.exact_residual.matches(pattern.copy_graph())
+    assert not compiled.exact_residual.matches(pattern.without_identity())
+    class Catalog:
+        def all_definition_ids(self):
+            return {1, 2}
+    stats = QueryStats()
+    assert graph_candidate_ids(Catalog(), compiled, None, stats=stats) == {1, 2}
+    assert stats.scan_required and stats.scan_reason
+    assert QueryPredicate(pattern).matches(pattern.copy_graph())
+    assert counts == dict.fromkeys(counts, 0)
+
+
+def test_node_predicates_refine_fixed_metadata_without_source_capture_or_recompilation(monkeypatch):
+    """Fixed recipe metadata can qualify the semantics before format-4 source cutover."""
+    import dryml
+    from dryml.core import IdentitySet, QueryPredicate, IntRange
+    from dryml.core.query.node_pattern import _PreparedPredicate
+    first = Definition(LookupLeaf, "first").concretize()
+    second = Definition(LookupLeaf, "second").concretize()
+    fixed = IdentitySet((first, second))
+    predicate = QueryPredicate(Definition(name="first")) | Definition(name=IntRange(1, 2))
+    selected = fixed.query().sel(predicate)
+    assert dryml.QueryPredicate is QueryPredicate is query.QueryPredicate
+    monkeypatch.setattr(_PreparedPredicate, "__init__", lambda *a, **k: pytest.fail("pattern recompiled per candidate"))
+    assert selected.one().graph_equal(first)

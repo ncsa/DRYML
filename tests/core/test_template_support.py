@@ -98,6 +98,12 @@ def test_support_selector_enforces_correlated_and_hidden_finite_products():
 
     assert selector.matches(Definition(SupportModel, 64, scale=2, product=128))
     assert not selector.matches(Definition(SupportModel, 32, scale=2, product=128))
+    from dryml.core import QueryPredicate
+    predicate = QueryPredicate.support(selector._generator)
+    false_positive = Definition(SupportModel, 32, scale=2, product=128)
+    assert selector.prefilter.matches(false_positive)
+    assert not predicate.matches(false_positive)
+    assert predicate.matches(Definition(SupportModel, 64, scale=2, product=128))
 
     hidden = Definition(SupportModel, product=Par("width") * Par("scale"))
     hidden_selector = Generator(
@@ -171,6 +177,9 @@ def test_hidden_wide_support_exceeding_budget_is_not_approximated():
 
     with pytest.raises(ParameterizationLimitError):
         selector.matches(Definition(SupportModel, product=8))
+    from dryml.core import QueryPredicate
+    with pytest.raises(ParameterizationLimitError):
+        QueryPredicate.support(selector._generator, max_assignments=8).matches(Definition(SupportModel, product=8))
 
 
 def test_support_never_hides_invalid_branches_or_unavailable_exact_proofs():
@@ -185,6 +194,9 @@ def test_support_never_hides_invalid_branches_or_unavailable_exact_proofs():
     unsupported = Generator(unindexed, {"width": UnindexedDomain()}).support_selector()
     with pytest.raises(UnsupportedGeneratorVerificationError):
         unsupported.matches(Definition(SupportModel, product=2))
+    from dryml.core import QueryPredicate
+    with pytest.raises(UnsupportedGeneratorVerificationError):
+        (QueryPredicate(Definition()) | QueryPredicate(unsupported)).matches(Definition(SupportModel, product=2))
 
 
 def test_generation_preserves_facets_aliases_and_rejects_incompatible_selected_state():
@@ -213,7 +225,8 @@ def test_generation_preserves_facets_aliases_and_rejects_incompatible_selected_s
     assert changed.state is state and changed.object_id == identity
     with pytest.raises(ValueError, match="incompatible"):
         state.validate_for(changed, codec="pickle")
-    with pytest.raises(TypeError, match="facets"):
+    from dryml.core.repo import RepoLoadError
+    with pytest.raises(RepoLoadError, match="codec"):
         left.build()
     selector = generator.support_selector()
     assert selector.matches(first) and selector.matches(second)
@@ -250,3 +263,7 @@ def test_nested_node_choices_use_exact_facets_without_process_handle_membership(
     assert not selector.matches(Definition(SupportParent, first.without_identity()))
     persisted = type(selector).from_data(selector.to_data())
     assert persisted.matches(Definition(SupportParent, first.copy_graph()))
+    from dryml.core import QueryPredicate
+    predicate = QueryPredicate.from_data(QueryPredicate.support(generator).to_data())
+    assert predicate.matches(Definition(SupportParent, first.copy_graph()))
+    assert not predicate.matches(Definition(SupportParent, first.without_identity()))

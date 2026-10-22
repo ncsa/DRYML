@@ -50,6 +50,28 @@ def _state_hash(char):
     return "pkl-" + char * 64
 
 
+def test_node_query_concrete_recipe_omits_facets_but_quoted_checkpoint_is_exact():
+    """Recipe anchors do not pin identities; quotation retains exact saved data."""
+    from dryml.core import LocalState, QueryPredicate, StateKey
+    creation = Definition(ProjectionLeaf, 2).concretize()
+    state = LocalState(StateKey(creation.creation_digest(), _state_hash("a")), creation)
+    candidate = creation.with_identity(ObjectId(("selected",))).with_state(state)
+    assert QueryPredicate(creation).matches(candidate)
+    assert QueryPredicate(Definition(value=2)).matches(candidate)
+    assert not QueryPredicate(Definition(recipe=creation.quote())).matches(
+        Definition(recipe=candidate.quote()))
+    assert not QueryPredicate(Definition(child=creation, recipe=creation.quote())).matches(
+        Definition(child=candidate, recipe=candidate.quote()))
+    assert not QueryPredicate(candidate).matches(creation)
+    changed = candidate.without_state()
+    assert candidate.object_projection_equal(changed)
+    assert not QueryPredicate(candidate.quote().value).matches(changed)
+    categorical = candidate.categorical(drop=("value",))
+    assert categorical.object_id == candidate.object_id and categorical.state == candidate.state
+    assert QueryPredicate(categorical).matches(candidate)
+    assert not QueryPredicate(categorical).matches(creation)
+
+
 def _state_ref(value, namespace, state_hash):
     definition = Definition(ProjectionLeaf, value).concretize()
     object_ref = ObjectRef(definition, {GraphPath(): ObjectId((namespace,))})

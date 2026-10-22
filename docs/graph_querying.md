@@ -1,5 +1,81 @@
 # Graph Querying
 
+## Node Pattern Semantics (U12)
+
+Ordinary selection accepts a naked `Node` authored with `Definition(...)`.
+The semantic compiler and detached metadata matcher are available now. **Format-4
+Repo/Store query inventory, selective lowering and source cuts are not integrated
+yet (U13).** Source-backed terminals still visibly refuse the legacy inventory
+contract. The Query V3 source/terminal descriptions below retain that older
+contract; they are not a claim of format-4 execution coverage.
+
+Only supplied constraints participate. Query preparation does not concretize,
+fill defaults, construct an Object, allocate an ObjectId, capture state, or read
+state data. A soft Node omits unconstrained constructor parameters. A
+ConcreteNode anchors its complete concrete recipe and topology, without making
+unspecified identity/state facets into absence constraints. Supplied ObjectId and
+LocalState facets must match **the same corresponding occurrence**. LocalState
+identity includes its full `(cdef_digest, codec_hash)` key and creation evidence,
+never a donor ObjectId.
+
+Shared Node handles require shared candidate nodes; independently authored equal
+Nodes require independent nodes. Mat and Ref roles remain distinct; explicit Mat
+wrappers and direct materializing children are equivalent. Quotation is exact
+configuration, including its state/identity pins and omissions. Unordered graph
+members use a whole-assignment witness, including joins outside the set.
+`categorical(...)` can explicitly weaken recipe fields while retaining facets,
+aliases and roles. Existing `Match` leaves remain supported; a runtime
+`Satisfies` callable is not executed or serialized during graph preparation.
+
+Use `QueryPredicate` only for the additional closed forms:
+
+```text
+predicate = Node
+          | predicate & predicate | predicate | predicate | ~predicate
+          | QueryPredicate.absent("identity" | "state", path=...)
+          | QueryPredicate.support(generator, max_assignments=...)
+```
+
+```python
+from dryml.core import Definition, QueryPredicate
+
+pattern = Definition(Model, width=64)  # omitted fields stay unconstrained
+predicate = QueryPredicate(pattern) & ~QueryPredicate.absent("state")
+matcher = predicate.compile()         # reusable pure graph preparation
+matches = matcher.matches(candidate_node)
+```
+
+`absent` requires an existing Node endpoint and constrains just that facet.
+Omitting a facet is unconstrained; `AnyValue()` requires a present constructor
+field; `Missing()` requires an absent constructor field. None is a wildcard for
+exact missing state. Use `&`, `|`, `~`; Python truth testing raises TypeError.
+Boolean evaluation does not hide unavailable exact support proofs in later
+branches. Support applies a conservative prefilter followed by a correlated
+assignment witness with the captured proof cap; bounds alone never accept.
+
+`compile(domain="local_state")` evaluates descriptor metadata against its
+creation evidence and exact state selection. It rejects donor-identity constraints
+even in negated or otherwise masked branches. To constrain an actual donor,
+select its relationship endpoint explicitly and match that Node with
+`domain="occurrence"`. This endpoint mode does not discover relationships or
+manufacture identity/state combinations. Generic `domain="node"` accepts recipe,
+identified and saved graph metadata; it does not assert membership in any Store
+domain. Source-domain counts, availability and retained/publication membership
+remain separate source contracts for U13.
+
+`to_data()` / `from_data()` use the closed
+`dryml-node-query-predicate` v1 family with one shared authenticated Node graph.
+It preserves boolean forms, typed paths, aliases, fixed facets, Match leaves and
+built-in `UniformIntRange` / `UniformFromSet` domains. Runtime Generator providers
+are nonportable and rejected. Decoding never resolves targets or executes code.
+
+Legacy `Selector`, `GeneratorSelector`, and reference selectors remain explicit
+adapters. Legacy posting compilation retains an exact prepared residual and
+visible reasons; unsupported facet/predicate coverage requires scan fallback or
+refusal. Candidate IDs alone cannot certify Node acceptance or source completeness.
+
+## Retained Query V3 Source Contract
+
 Query V3 has one composable identity universe. `Repo.query()` captures identity
 knowledge from connected Stores and retained caches; `Store.query()` captures one
 Store's authority. Construction is inert. Restrictions and terminals inspect

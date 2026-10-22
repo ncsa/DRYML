@@ -356,6 +356,8 @@ class GeneratorSelector:
             Objects, or persists data.
             Graph-valued choices use bounded finite witness enumeration, never
             process-local Node handle equality as portable membership evidence.
+            Final assignments use the ordinary prepared Node matcher, including
+            unordered alias joins and exact quotation constraints.
         """
 
         return self._matches(target, _AssignmentBudget(self._max_assignments))
@@ -396,7 +398,9 @@ class GeneratorSelector:
             generated = _project_selector_definition_roles(
                 self._generator._definition_for(assignments)
             )
-            if generated.match(target, strict=True, cls_policy="exact") and _topology_matches(generated, target):
+            from .query.node_pattern import _PreparedPredicate
+            from .selector import QueryPredicate
+            if _PreparedPredicate(QueryPredicate(generated), strict=True, class_match="exact").matches(target):
                 matched = True
         return matched
 
@@ -651,79 +655,6 @@ def _project_selector_definition_roles(
     if not isinstance(result, Node):
         raise AssertionError("Generator selector projection must retain its Node root")
     return result
-
-
-def _topology_matches(generated: Definition, target: Definition | ConcreteDefinition) -> bool:
-    """Require a two-way correspondence between generated and candidate nodes."""
-
-    from .cdef_identity import cdef_node_key
-    from .factory import FactorySpec
-    from .links import DefLink
-    from .node import Node, _Facets, _facet_equal, _semantic_equal
-    from .node_prepare import NodePreparation
-
-    prepared_left = NodePreparation((generated,))
-    prepared_right = NodePreparation((target,))
-
-    generated_to_target: dict[tuple[str, int], tuple[str, int]] = {}
-    target_to_generated: dict[tuple[str, int], tuple[str, int]] = {}
-
-    def node_key(value: object) -> tuple[str, int] | None:
-        if isinstance(value, Node):
-            return "node", id(value._view)
-        if isinstance(value, ConcreteDefinition):
-            return "cdef", id(cdef_node_key(value))
-        if isinstance(value, Definition):
-            return "definition", id(value)
-        return None
-
-    def definition_values(value: Definition | ConcreteDefinition) -> Mapping[str, object]:
-        try:
-            return value.parameters
-        except TypeError as error:
-            raise UnsupportedGeneratorVerificationError(
-                "exact topology verification needs available supplied parameter names"
-            ) from error
-
-    def visit(left: object, right: object) -> bool:
-        while isinstance(left, DefLink) and left.kind.value == "materialize":
-            left = left.target
-        while isinstance(right, DefLink) and right.kind.value == "materialize":
-            right = right.target
-        left_key, right_key = node_key(left), node_key(right)
-        if left_key is not None or right_key is not None:
-            if left_key is None or right_key is None:
-                return False
-            if left_key in generated_to_target:
-                return generated_to_target[left_key] == right_key
-            if right_key in target_to_generated:
-                return False
-            left_node = prepared_left.nodes[prepared_left._slot(left)]
-            right_node = prepared_right.nodes[prepared_right._slot(right)]
-            supplied = left_node._facets if isinstance(left_node, Node) else _Facets()
-            candidate = right_node._facets if isinstance(right_node, Node) else _Facets()
-            if any(a is not None and not _facet_equal(a, b) for a, b in (
-                    (supplied.object_id, candidate.object_id), (supplied.state, candidate.state))):
-                return False
-            generated_to_target[left_key] = right_key
-            target_to_generated[right_key] = left_key
-            left_values = definition_values(left)
-            right_values = definition_values(right)
-            return all(
-                name in right_values and visit(value, right_values[name])
-                for name, value in left_values.items()
-            )
-        if isinstance(left, DefLink):
-            return isinstance(right, DefLink) and _semantic_equal(left, right, topology=True, facets=True)
-        if isinstance(left, FactorySpec) and isinstance(right, FactorySpec):
-            return len(left.args) == len(right.args) and all(visit(a, b) for a, b in zip(left.args, right.args)) and all(name in right.kwargs and visit(value, right.kwargs[name]) for name, value in left.kwargs.items())
-        if isinstance(left, Mapping) and isinstance(right, Mapping):
-            return all(name in right and visit(value, right[name]) for name, value in left.items())
-        if isinstance(left, (list, tuple, FrozenList, FrozenTuple)) and isinstance(right, (list, tuple, FrozenList, FrozenTuple)):
-            return len(left) == len(right) and all(visit(a, b) for a, b in zip(left, right))
-        return True
-
-    return visit(generated, target)
 
 
 def _provider_bounds(provider: Distribution, root: str) -> tuple[int | float, int | float] | None:

@@ -570,3 +570,24 @@ def test_occurrence_metadata_preflight_does_not_admit_or_project_scope_holders(t
     assert result.one() == target
     assert result.sources(target) == frozenset((IdentityQuery._source_evidence(producer),))
     assert query.targets().explain(analyze=True).verified_count == 3
+def test_node_pattern_alias_partition_roles_and_exact_quotation():
+    """Independent equal Nodes stay independent across Mat/Ref and quote barriers."""
+    from dryml.core import Definition, Mat, Ref, QueryPredicate, AnyValue, SKIP_ARGS
+
+    child = Definition(value=2)
+    shared = Definition(first=Mat(child), second=Ref(child))
+    independent = Definition(first=Mat(Definition(value=2)), second=Ref(Definition(value=2)))
+    assert QueryPredicate(shared).matches(shared.copy_graph())
+    assert not QueryPredicate(shared).matches(independent)
+    assert not QueryPredicate(independent).matches(shared)
+    assert not QueryPredicate(shared).matches(Definition(first=Ref(child), second=Mat(child)))
+    assert not QueryPredicate(Definition(recipe=child.quote())).matches(
+        Definition(recipe=Definition(value=2, extra=3).quote()))
+    a, b = Definition(value=2), Definition(value=2)
+    unordered = Definition(children={a, b}, selected=a)
+    assert QueryPredicate(unordered).matches(unordered.copy_graph())
+    assert not QueryPredicate(unordered).matches(Definition(children={a, b}, selected=Definition(value=2)))
+    assert QueryPredicate(Definition(value=AnyValue())).matches(Definition(value=Ref(a)))
+    assert QueryPredicate(Definition(value=AnyValue())).matches(Definition(value=a.quote()))
+    assert not QueryPredicate(Definition(value=Definition(SKIP_ARGS).quote())).matches(
+        Definition(value=Definition().quote()))

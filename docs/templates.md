@@ -19,9 +19,10 @@ without materializing or saving their graphs.
 Substitution, remapping, and generation retain fixed node-local ObjectId and
 LocalState selections, sharing, and Ref/quotation boundaries. Independent equal
 Nodes remain independent. Changing a recipe never silently discards a selected
-state: `LocalState.validate_for(...)` rejects incompatible configuration. Existing
-V2 Repo construction/persistence boundaries still reject unsupported Node facets
-before construction; this authoring cutover does not implement their realization.
+state: `LocalState.validate_for(...)` rejects incompatible configuration. Explicit
+`Node.build()` now preflights selected local state before realization (U11).
+The query semantic compiler is available independently; format-4 query source
+inventory and selective lowering still await U13.
 
 Node handle `==` is occurrence/view identity. Use `graph_equal(...)` to compare
 exact graphs, including facets and alias partitions, or `recipe_equal(...)` for
@@ -164,7 +165,7 @@ the original template's loose selector. Use a partial `Definition` to constrain
 only the experiment fields of interest, or
 `Definition(Experiment, SKIP_ARGS)` to select all Experiment definitions.
 
-Query counts depend on the selected identity domain. `.cdefs().count()` counts
+The retained V3 query contract counts by the selected identity domain. `.cdefs().count()` counts
 distinct definitions, `.state_refs().count()` counts saved snapshots, and
 `.state_refs().object_projection().count()` counts distinct realized object
 graphs across those snapshots. Repeated runs of one definition can create
@@ -178,6 +179,22 @@ prove membership. An unavailable finite proof raises
 `UnsupportedGeneratorVerificationError`; bounded grid and proof operations
 raise `ParameterizationLimitError` rather than returning partial results.
 
+`QueryPredicate.support(generator, max_assignments=...)` captures this same
+exact proof as an explicit predicate. Compose it with Node patterns, `&`, `|`,
+`~`, and `QueryPredicate.absent("state" | "identity", path=...)`. Ordinary Node
+patterns need no mandatory Selector wrapper. Matching retains supplied facets,
+alias partitions, Mat/Ref roles and exact quoted configuration; it never binds
+omitted defaults. A loose range/prefilter false positive must still pass the
+correlated assignment witness. Unsupported runtime-provider proofs and exhausted
+caps remain visible errors, including inside boolean composition.
+
+Explicit predicate persistence uses the new `dryml-node-query-predicate` v1
+family, embedding the existing authenticated Node codec rather than an opaque
+provider payload. Built-in range and ordered-choice domains remain typed;
+arbitrary runtime providers are refused. The full predicate and its graph-valued
+choices share a Node table. These semantic APIs work against detached metadata;
+they do not claim format-4 Repo/Store query-source integration.
+
 Only immutable built-in distributions are portable selector data. A
 `GeneratorSelector` keeps the established `dryml-template` v1
 `template-selector` payload tag and canonical bytes for compatible definitions.
@@ -190,8 +207,9 @@ legacy expressions retain `dryml-definition-expression` v1. Both families have
 bounded, closed, canonical decoding. Incompatible versions and malformed packets
 fail without rewriting the input; legacy readers do not reinterpret new facets.
 A Generator and arbitrary runtime
-providers are intentionally nonportable. GeneratorSelector works with Repo
-queries and save routing while retaining exact witness verification.
+providers are intentionally nonportable. The legacy GeneratorSelector adapter
+retains exact witness verification; its historical Repo query/save-routing
+consumers do not establish format-4 query support.
 
 Symbolic Definitions and providers operate on trusted DRYML code and values.
 They are not a sandbox or safe-deserialization boundary.

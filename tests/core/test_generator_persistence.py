@@ -94,3 +94,29 @@ def test_node_generator_selector_round_trip_keeps_fixed_facets_and_support():
     assert restored.matches(candidate)
     assert not restored.matches(candidate.without_identity())
     assert restored.to_data() == data
+
+
+def test_closed_node_query_predicate_codec_preserves_boolean_support_and_facets():
+    """Portable predicates use the Node family and reject runtime providers."""
+    from dryml.core import ObjectId, QueryPredicate, UniformFromSet
+    source = Definition(PortableGeneratorLeaf, Par("width")).with_identity(ObjectId(("query",)))
+    predicate = QueryPredicate.support(Generator(source, {"width": UniformFromSet((2, 4))})) & ~QueryPredicate.absent("identity")
+    data = json.loads(json.dumps(predicate.to_data()))
+    assert data["schema"] == "dryml-node-query-predicate" and data["version"] == 1
+    restored = QueryPredicate.from_data(data)
+    assert restored.matches(source.sub(width=2))
+    assert not restored.matches(source.sub(width=True))
+    assert not restored.matches(source.sub(width=3))
+    assert not restored.matches(source.sub(width=2).without_identity())
+    assert restored.to_data() == data
+    runtime = QueryPredicate.support(Generator(Definition(PortableGeneratorLeaf, Par("width")), {"width": RuntimeDistribution()}))
+    with pytest.raises(ParameterizationError, match="nonportable"):
+        runtime.to_data()
+    with pytest.raises((ValueError, ParameterizationError)):
+        QueryPredicate.from_data({**data, "version": True})
+    child = Definition(PortableGeneratorLeaf, 2)
+    quoted = QueryPredicate(Definition(child=child, recipe=child.quote()))
+    decoded = QueryPredicate.from_data(json.loads(json.dumps(quoted.to_data())))
+    assert decoded.value.kwargs["child"] is decoded.value.kwargs["recipe"].value
+    assert decoded.value.kwargs["recipe"].value.args == (2,)
+    assert decoded.matches(quoted.value.copy_graph())

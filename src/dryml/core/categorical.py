@@ -39,7 +39,8 @@ def project_categorical_definition(
     values must be named. Exact CDefs instead use their persisted parameter
     records directly, without resolving their class. The result is always an
     existing ``Definition`` with skipped positional spelling and preserves the
-    source class reference unless ``drop_class`` is requested.
+    source class reference unless ``drop_class`` is requested. Node facets and
+    occurrence sharing survive recipe weakening; quotation remains exact data.
 
     Args:
         defn: An Object, Definition, or ConcreteDefinition source graph.
@@ -340,6 +341,10 @@ class _Projection:
                     }
                 cls = None if self.drop_class else _selector_class(value.cls)
                 result = Definition._from_prepared_parameters(cls, parameters)
+                from .node import Node, _init_node
+                if isinstance(value, Node):
+                    _init_node(result, source=value)
+                    object.__setattr__(result, "_construction", None)
                 self.memo[key] = result
                 return result
             finally:
@@ -372,7 +377,7 @@ class _Projection:
                 return result
             finally:
                 self.active_values.remove(id(value))
-        if kind is NodeKind.DEFLINK and value.is_finalized:
+        if kind is NodeKind.DEFLINK:
             key = ("deflink", id(value))
             if key in self.memo:
                 return self.memo[key]
@@ -380,7 +385,9 @@ class _Projection:
                 raise CycleError("categorical link projection")
             self.active_values.add(id(value))
             try:
-                result = DefLink.finalized(value.kind, self.transform(value.target))
+                target = self.transform(value.target)
+                result = (DefLink.finalized(value.kind, target) if value.is_finalized
+                          else DefLink.assertion(value.kind, target))
                 self.memo[key] = result
                 return result
             finally:

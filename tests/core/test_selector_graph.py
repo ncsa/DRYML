@@ -76,15 +76,20 @@ def test_nested_exact_cdef_creates_exact_node():
     assert child_node.exact_definition == child.definition
 
 
-def test_two_equal_selector_occurrences_remain_distinct_nodes():
+def test_selector_occurrence_handles_preserve_shared_and_independent_nodes():
     child_selector = Definition(SelectorLeaf, SKIP_ARGS)
     selector = Definition(SelectorParent, [child_selector, child_selector])
 
     graph = compile_selector_graph(selector)
 
     assert graph is not None
-    assert len(graph.nodes) == 3
+    assert len(graph.nodes) == 2
+    assert len({edge.child for edge in graph.edges}) == 1
     assert {str(edge.path) for edge in graph.edges} == {"$.args[0][0]", "$.args[0][1]"}
+    independent = compile_selector_graph(Definition(SelectorParent, [
+        Definition(SelectorLeaf, SKIP_ARGS), Definition(SelectorLeaf, SKIP_ARGS)]))
+    assert len(independent.nodes) == 3
+    assert len({edge.child for edge in independent.edges}) == 2
 
 
 def test_nested_exact_cdef_inside_set_has_path_edge():
