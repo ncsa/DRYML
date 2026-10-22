@@ -1,4 +1,4 @@
-"""Closed v1.1 envelope construction and validation."""
+"""Closed v1.1 envelopes and separately framed versioned JSON metadata."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any
 from .canonical import canonical_json_bytes, json_ready
 from .errors import EnvelopeError
 from .ids import CONTRACT_VERSION, verify_semantic_id
+import json
 
 _FIELDS = frozenset({"contract_version", "schema", "kind", "payload", "id", "metadata"})
 
@@ -94,4 +95,61 @@ def _envelope_bounds(bounds: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-__all__ = ["make_envelope", "validate_envelope"]
+def encode_metadata_frame(schema: str, version: int, data: Mapping[str, Any]) -> bytes:
+    """Frame a closed metadata mapping without executing a pickle codec.
+
+    Args:
+        schema: ASCII, path-free family name.
+        version: Positive exact integer family version.
+        data: JSON-compatible family authority; the owning decoder validates fields.
+    Returns:
+        bytes: Versioned frame followed by canonical JSON.
+    Raises:
+        EnvelopeError: If the family/version or JSON representation is invalid.
+    Side Effects:
+        None; this is distinct from the v1.1 envelope/semantic-ID contract.
+    """
+    if (type(schema) is not str or not schema.isascii() or not schema
+            or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in schema)
+            or type(version) is not int or version < 1):
+        raise EnvelopeError("invalid metadata frame family/version")
+    try:
+        payload = canonical_json_bytes(data, max_depth=128, max_nodes=1_000_000,
+                                       max_entries=100_000, max_string=16 * 1024 * 1024)
+    except ValueError as error:
+        raise EnvelopeError("invalid metadata JSON") from error
+    return f"DRYML-METADATA/{schema}/{version}\n".encode("ascii") + payload
+
+
+def decode_metadata_frame(data: bytes, *, schema: str, version: int,
+                          max_bytes: int = 16 * 1024 * 1024) -> dict[str, Any]:
+    """Decode one exact bounded metadata frame, rejecting duplicate/trailing JSON.
+
+    Args:
+        data: Complete framed bytes from trusted metadata authority.
+        schema: Required family name.
+        version: Required exact integer version.
+        max_bytes: Maximum accepted complete frame size.
+    Returns:
+        dict: Fresh primitive metadata mapping; owner validates its closed schema.
+    Raises:
+        EnvelopeError: For incompatible frames, size, malformed or noncanonical JSON.
+    Side Effects:
+        Allocates primitive values only, without deserialization hooks or IO.
+    """
+    prefix = f"DRYML-METADATA/{schema}/{version}\n".encode("ascii")
+    if type(data) is not bytes or len(data) > max_bytes or not data.startswith(prefix):
+        raise EnvelopeError("unsupported or malformed metadata frame")
+    try:
+        payload = data[len(prefix):]
+        result = json.loads(payload)
+        if type(result) is not dict or canonical_json_bytes(
+                result, max_depth=128, max_nodes=1_000_000,
+                max_entries=100_000, max_string=16 * 1024 * 1024) != payload:
+            raise ValueError("noncanonical metadata JSON")
+        return result
+    except (ValueError, TypeError, RecursionError, UnicodeError) as error:
+        raise EnvelopeError("malformed or noncanonical metadata JSON") from error
+
+
+__all__ = ["make_envelope", "validate_envelope", "encode_metadata_frame", "decode_metadata_frame"]

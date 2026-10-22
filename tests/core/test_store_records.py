@@ -290,30 +290,22 @@ def test_prepared_state_ref_keeps_every_path_and_object_id_check():
             _prepared_read(repo, changed, StateRefRecord)
 
 
-def test_plain_repo_definition_reads_explicitly_reach_preparation(tmp_path):
-    """Plain structural authority inspection benefits while public Store reads validate."""
-    from dryml.core import Repo
+def test_legacy_definition_records_are_not_admitted_by_current_stores(tmp_path):
+    """The process-local V2 codec is not format-4 persistent authority."""
     from dryml.core.store.dir import DirStore
-    from dryml.core.store.store import StoreAuthorityError
-    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
+    from dryml.core.store.store import StoreAuthorityError, StoreCapabilityError
 
     store = DirStore(tmp_path / "store", query_index="none")
     record = DefinitionRecord(Definition(MappingRecordObject, {"value": 1}).concretize())
-    store.write_definition_record(record)
-    repo = Repo(store)
-    assert repo.has_cdef_light(record.definition)
-    with exact_work_counts() as counts:
-        assert repo.has_cdef_light(record.definition)
-    assert counts["decode_cdef_graph"] == 0 and counts["_realize_prepared_graph"] == 1
-    assert store._can_reuse_exact_validation()
-    with exact_work_counts() as counts:
-        assert store.read_definition_record(record.digest) is not None
-    assert counts["decode_cdef_graph"] == 1
-    replacement = DefinitionRecord(Definition(MappingRecordObject, {"value": 2}).concretize())
-    Path(store._definition_path(record.digest)).write_bytes(replacement.to_bytes())
-    with pytest.raises(StoreAuthorityError, match="direct path"):
-        repo.has_cdef_light(record.definition)
-    assert not repo._validation_evidence._pending
+    with pytest.raises(StoreCapabilityError, match="legacy"):
+        store.write_definition_record(record)
+    assert not Path(store._definition_path(record.digest)).exists()
+    path = Path(store._definition_path(record.digest))
+    path.parent.mkdir(parents=True)
+    path.write_bytes(record.to_bytes())
+    with pytest.raises(StoreAuthorityError, match="Legacy nested"):
+        store.read_definition_record(record.digest)
+    assert path.read_bytes() == record.to_bytes()
 
 
 def _isolate_records_decoder_code(monkeypatch):
@@ -345,36 +337,30 @@ def _reject_records_decoder(monkeypatch, override, original):
 @pytest.mark.parametrize("override", ["alias", "code"])
 @pytest.mark.parametrize("phase", ["cold", "warm", "cleared"])
 def test_records_decoder_override_remains_authoritative(tmp_path, monkeypatch, override, phase):
-    """Public Store and light Repo reads obey the actual decoder after warming."""
+    """Remaining process-local V2 readers obey their decoder after warming."""
     from dryml.core import Repo
     import dryml.core.store.records as records
-    from dryml.core.store.dir import DirStore
-    from dryml.core.store.store import StoreAuthorityError
 
-    store = DirStore(tmp_path / "store", query_index="none")
     record = DefinitionRecord(Definition(MappingRecordObject, {"value": 1}).concretize())
-    store.write_definition_record(record)
+    source = record.to_bytes()
     original = (_isolate_records_decoder_code(monkeypatch) if override == "code"
                 else records.decode_cdef_graph)
-    repo = Repo(store)
+    repo = Repo()
     if phase != "cold":
-        assert repo.has_cdef_light(record.definition)
+        _prepared_read(repo, source)
         assert repo._validation_evidence._resident
     if phase == "cleared":
         repo.clear_cache(strong=False, weak=False)
         assert repo._validation_evidence.accounted_bytes == 0
     retained = tuple(repo._validation_evidence._resident.values())
     _reject_records_decoder(monkeypatch, override, original)
-    assert store._can_reuse_exact_validation()
 
     with pytest.raises(StoreRecordError, match="graph authority") as error:
         DefinitionRecord.from_bytes(record.to_bytes())
     assert str(error.value.__cause__) == "records decoder policy rejects graph"
-    with pytest.raises(StoreAuthorityError, match="graph authority"):
-        store.read_definition_record(record.digest)
     for _ in range(2):
-        with pytest.raises(StoreAuthorityError, match="graph authority"):
-            repo.has_cdef_light(record.definition)
+        with pytest.raises(StoreRecordError, match="graph authority"):
+            _prepared_read(repo, source)
         assert tuple(repo._validation_evidence._resident.values()) == retained
         assert not repo._validation_evidence._pending
 
@@ -384,17 +370,13 @@ def test_records_decoder_delegate_never_retains_custom_policy(tmp_path, monkeypa
     """Successful wrappers stay uncached when policy changes without rebinding."""
     from dryml.core import Repo
     import dryml.core.store.records as records
-    from dryml.core.store.dir import DirStore
-    from dryml.core.store.store import StoreAuthorityError
     from tests.core.test_exact_load_metadata_evidence import exact_work_counts
 
-    store = DirStore(tmp_path / "store", query_index="none")
     record = DefinitionRecord(Definition(MappingRecordObject, {"value": 1}).concretize())
     source = record.to_bytes()
-    store.write_definition_record(record)
-    repo = Repo(store)
+    repo = Repo()
     if phase != "cold":
-        assert repo.has_cdef_light(record.definition)
+        _prepared_read(repo, source)
     if phase == "cleared":
         repo.clear_cache(strong=False, weak=False)
     retained = tuple(repo._validation_evidence._resident.values())
@@ -413,14 +395,14 @@ def test_records_decoder_delegate_never_retains_custom_policy(tmp_path, monkeypa
         calls.clear()
         with exact_work_counts() as counts:
             assert _prepared_read(repo, source)._prepared is None
-            assert repo.has_cdef_light(record.definition)
+            assert _prepared_read(repo, source)._prepared is None
         assert len(calls) == 2
         assert counts["_realize_prepared_graph"] == 0
         assert tuple(repo._validation_evidence._resident.values()) == retained
         assert not repo._validation_evidence._pending
     rejecting = True
-    with pytest.raises(StoreAuthorityError, match="graph authority"):
-        repo.has_cdef_light(record.definition)
+    with pytest.raises(StoreRecordError, match="graph authority"):
+        _prepared_read(repo, source)
 
 
 @pytest.mark.parametrize("kind", ["source", "atom", "quote"])

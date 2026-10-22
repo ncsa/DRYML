@@ -71,8 +71,10 @@ def test_spawned_bootstrap_serializes_root_creation_and_format_publication(tmp_p
         second.join(20)
 
     assert first.exitcode == second.exitcode == 0
-    expected = StoreFormatRecord().to_bytes()
-    assert [outcomes.get(timeout=2) for _ in range(2)] == [("ok", expected)] * 2
+    results = [outcomes.get(timeout=2) for _ in range(2)]
+    expected = results[0][1]
+    assert results == [("ok", expected)] * 2
+    assert StoreFormatRecord.from_bytes(expected).format_version == 4
     readers = [DirStore(root) for _ in range(3)]
     assert [Path(store.store_format_path).read_bytes() for store in readers] == [expected] * 3
     assert {entry.name for entry in Path(root).iterdir()} == {"store-format.record"}
@@ -97,7 +99,7 @@ def test_failed_initial_format_publication_leaves_an_empty_root_recoverable(tmp_
     assert root.is_dir()
     assert tuple(root.iterdir()) == ()
     store = DirStore(root)
-    assert Path(store.store_format_path).read_bytes() == StoreFormatRecord().to_bytes()
+    assert StoreFormatRecord.from_bytes(Path(store.store_format_path).read_bytes()).store_uuid == store.store_uuid
 
 
 def test_nonempty_ungated_store_fails_without_mutation(tmp_path):

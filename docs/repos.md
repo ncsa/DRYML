@@ -7,6 +7,60 @@ trusted DRYML inputs; supported shared use is same-host use on a local filesyste
 with the documented locking, atomic-replace, and SQLite semantics. Distributed
 filesystems and cross-host coordination are unsupported.
 
+## Current Format-4 Store Primitives And Consumer Boundary
+
+New built-in Stores use format 4 with a persistent Store UUID and authenticated
+identity-3 Node metadata. Existing format-3 Stores are rejected intact; there is
+no automatic conversion. The Store-owned APIs currently available are:
+
+- `install_creation(root)` / `install_creations(roots)`: install normalized
+  construction metadata, returning creation digests. A batch shares one Node
+  table; a header is neither an independently published recipe nor available state.
+- `install_state(root, staging, codec=..., codec_version=..., interpretation=...)`:
+  authenticate an owned `create_local_state_staging()` allocation's private `data/`
+  and install/reuse its full StateKey variant. The receipt contains detached
+  `state`, `installed`, and `durability`. Same-CDef/hash captures reuse one directory;
+  equal codec content in different CDef buckets is independent. On failure,
+  preserve authoritative metadata and inspectable partial work; an unconsumed
+  staging allocation can be explicitly discarded by its allocating Store.
+- `read_creation(cdef_digest)` / `inspect_states(cdef_digest, available_only=False)`:
+  read detached creation/history metadata without Objects or payload IO.
+  Inspection interprets one bucket once within a coherent batch. It is a complete
+  single-bucket inventory, not the later indexed/paged discovery interface.
+- `read_state(key, destination=None, codec=None, codec_version=None)`: context-managed fresh validated
+  data source. When supplied together, destination/codec/positive codec version are admitted before
+  payload IO. Only `source.data_directory` is lent to a codec; framework metadata
+  siblings are outside it. Context exit or Store closure expires the source.
+  Detached metadata remains inspectable. No cleanup lease/retention is implied.
+- `publish_node(root, kind="recipe"|"saved")` / `read_node(digest, kind=...)`:
+  explicit independent metadata publication/read. Saved roots require complete
+  facets. Required ObjectId anchors compare canonical projections, so state-pin
+  changes can contribute multiple saved roots to one declaration. Configuration
+  conflicts, malformed evidence and missing established anchors fail explicitly.
+  Publishing saved metadata does not automatically publish a recipe root.
+
+These APIs supply installation/read primitives and a prepared-facts seam for the
+next journal unit. They do **not** claim journal/index-complete public mutations,
+retention, active-use leases, or integrated Repo/managed save/load. Legacy Repo
+snapshot/declaration writers explicitly raise `StoreCapabilityError` on format 4;
+legacy Query V3 / SQLite coverage is likewise refused before inventory or index
+repair. Enabling a SQLite policy does not make old coverage valid. The remaining
+consumer documentation below describes the existing interfaces awaiting their
+owning cutover; its snapshot-based workflows are not currently supported against
+new built-in format-4 Stores.
+New consumer preflight must declare `record_family="dryml-node-graph/v1"`; the
+operation's human-readable diagnostic name does not select a persistent format.
+
+DirStore installation primitives return after native filesystem content and
+directory persistence barriers. ZipStore's corresponding receipt is explicitly
+buffered; only successful archive `commit()` establishes durable completion.
+Failed commits propagate and retain dirty evidence; closing discards the buffered
+view. File-like ZipStores permit v4 reads but refuse writable publication.
+
+See [Formats](formats.md#store-format-4-cdef-owned-state-and-metadata-readers) for
+record families, physical layout and failure rules. Repo and managed integration
+must consume these Store APIs rather than form or mutate bucket paths.
+
 ## Saving With Routing
 
 `Repo.save_object()`, `Repo.save()`, `Object.save()`, and module-level

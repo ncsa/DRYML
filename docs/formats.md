@@ -79,7 +79,8 @@ definition and ObjectRef association as graph-aware shared-table values. This
 preserves recursive state-weakened selectors, directly constructed exact pins,
 and their occurrence/ObjectId bindings without nested rooted exports. Node graph
 transport does not admit these query values as legacy CDef/Store authority.
-The legacy V2 reference data layout and Store consumers are unchanged.
+The legacy V2 reference data layout remains separate; it is not admitted as
+format-4 Store authority.
 
 Readers reject unknown fields/tags, invalid slots/block references, unused
 declarations, bad authentication, incompatible CDef identity/key versions and
@@ -89,12 +90,115 @@ The new reader performs metadata allocation only, with explicit enum/extension
 dtype type codecs resolving those value types; it does not materialize targets,
 read private state or open Stores.
 
-This delivers shared Node encoding and exact preparation. Creation/compatibility
-policy, Store v4 state buckets, reference consumer cutovers and managed format
-changes are later integration work. The existing formats below remain the live
-Store/managed formats; identity 3 here does not claim those cutovers have occurred.
+Creation/compatibility policies use the same preparation/encoding. The format-4
+Store primitives below consume these blocks. Repo/reference consumer integration,
+the mutation journal, new query coverage, active-use leases and managed-format
+cutovers remain separate work; the primitives do not claim those completion gates.
 
-### Existing Store V3 And CDef V2 Consumers
+### Store Format 4: CDef-Owned State And Metadata Readers
+
+New DirStores have a `store-format.record` containing exact integer
+`format_version=4`, `identity_version=3`, and a fresh persistent canonical
+`store_uuid`. Reopening preserves that UUID. Existing format-3 (and older/future)
+Stores are rejected before authority effects. There is no conversion or dual
+reader. The format gate retains its closed trusted Store-record frame; the new
+Node/state families use canonical JSON frames:
+`DRYML-METADATA/<kind>/1\n<canonical-json>`.
+
+Every new record, including nested records, requires its exact `kind`, integer
+`version=1`, `domain="<kind>/v1"`, and integer `identity_version=3`. Families are
+separately named: `dryml-state-key`, `dryml-node-blocks`, `dryml-node-root`,
+`dryml-state-variant`, `dryml-state-availability`, `dryml-node-membership`,
+`dryml-declaration-anchor`, and `dryml-declaration-required`. Legacy
+`local-state-manifest` v2/v3, V2 definitions and old reference records do not pass
+these readers, even beneath a forged current Store marker. Duplicate/noncanonical
+JSON, extra fields, trailing data, incompatible nested versions/domains, bad
+authentication and path/semantic-key mismatches are errors, never repair inputs.
+
+```text
+store-format.record
+definitions/blocks/<hh>/<block-digest>.record  # shared Node tables and values
+definitions/roots/<hh>/<recipe-key>.record    # compact recipe root view
+graphs/<hh>/<saved-key>.record                # compact exact saved root view
+states/<first-two-cdef-hex>/<cdef-digest>/
+  def.pkl                                   # compact construction root view
+  <codec>-<content-digest>/
+    manifest.record                         # full StateKey + codec/inventory
+    availability.record                     # publication UUID and status
+    data/...                                # only codec-private files
+membership/{recipe,saved}/<hh>/<root-key>.record
+declarations/{anchors,required}/<hh>/<object-id-address>.record
+```
+
+`def.pkl` is framed root-view metadata, not arbitrary pickle. It names a shared
+block digest, authenticated table/slot, required creation-view policy, key format
+and expected exact semantic key. One `install_creations()` batch exports one
+shared Node table for its roots; headers do not embed descendant graph blobs.
+Readers authenticate shared blocks through `node_codec`, validate the selected
+semantic policy and carried creation digest, and return detached metadata.
+Equivalent block placement does not change creation identity or replace an
+existing semantically equal header. Conflicting headers raise an authority error.
+
+The StateKey is `(cdef_digest, codec_hash)`; addressing uses the carried strings,
+without hashing or discovering a graph. CodecHash uses `dryml-codec-content/v1`
+and authenticates codec identity, positive integer codec version, canonical JSON
+interpretation metadata, normalized sorted file inventory, sizes and file hashes.
+ObjectIds, creation digest, producer identity, time and Store paths are excluded.
+Same-full-key installations reuse one variant; equal codec bytes under distinct
+CDefs remain independently installed and available. Codecs receive only `data/`.
+
+Metadata knowledge, explicit recipe/saved membership and available data are
+different facts. A header alone publishes neither local state nor root membership.
+Manifests, headers and shared blocks remain inspectable when `data/` is missing.
+Availability requires a validated full-key publication record with `published`
+status plus a real data directory, not eager byte integrity or future retention.
+Reinstallation has a fresh incarnation: `prepared` status prevents an interrupted
+data reinstall from advertising completion. A retry authenticates already visible
+same-key data before publishing its new incarnation.
+
+`inspect_states()` is a direct **single-bucket inventory**, not indexed paging. It
+decodes the CDef once under one writer-serialized batch, reads no payload bytes,
+and constructs no Objects. `read_state()` validates fresh header/manifest/data
+evidence, optionally validates destination/codec/codec-version compatibility before payload IO,
+and lends only private data within an owner-checked context. Context exit or Store
+closure invalidates the borrowed source; detached LocalState/manifest metadata
+survives. This is not an active-use or retention lease.
+
+`publish_node()` validates ObjectId-addressed declaration anchors using canonical
+`dryml-object-projection/v2` evidence and source contributions, then publishes
+explicit membership last. Legal state-pin changes share an anchor; configuration
+conflicts fail before publication effects. A separate immutable declaration witness
+makes an established missing anchor an authority error, including when a new
+source would otherwise appear to declare a fresh identity. Published-root reads
+also validate their required anchor/source associations. Metadata-only construction
+installation does not declare the identities present in its constructor evidence.
+
+These are native-durable DirStore installation primitives, **not journal/index-
+complete Store mutations**. The prepared root/block/projection seam belongs to the
+later journal integration. Legacy Repo snapshot writers, Query V3 and persistent
+SQLite coverage explicitly refuse format 4 rather than write old nested records
+or report an empty/current index. Repo consumers must use Store-owned APIs when
+integrated; they must not manipulate bucket paths.
+
+ZipStore has the same logical tree in one buffered extraction. State installation
+receipts say `durability="buffered"`; durable archive completion requires a
+successful `commit()`. Archive conflicts/barrier failures propagate and retain
+dirty/partial evidence. Closing discards the extraction and expires borrowed
+sources. File-like ZipStores are read sources only and refuse writable publication.
+Archive-open baseline hashes and inode evidence come from the same open file as
+the extraction, so a concurrent atomic archive replacement cannot rebase an old
+extracted view. Unpublished `.staging/` files are excluded from archive commit.
+Publication capabilities explicitly distinguish `durable`, `buffered`, `read-only`
+and undeclared durability; `require_durable()` refuses a buffered completion claim.
+New consumer preflight passes `record_family="dryml-node-graph/v1"` independently
+of its diagnostic operation name; omitted/legacy families fail before hooks.
+
+### Historical Store V3 / Remaining CDef V2 Consumer Codecs
+
+The following describes the old Store family for contrast and the codecs still
+used by consumers awaiting their cutover. **New built-in Stores neither open V3
+authority nor publish this layout.** Standalone legacy codec admission is not
+current Store admission.
 
 CDef V2 graph records contain deterministic graph-local labels, class references,
 fully bound parameters, and stateful-role bits. `ObjectRef` records add canonical
@@ -114,7 +218,7 @@ and reference identity without loading Objects or state. Store authority records
 continue to use their separate trusted dill frame; `StateRef.to_data()` alone is
 a token-neutral Python record and is not promised to be JSON-compatible.
 
-DirStore format v3 publishes a `store-format.record`, digest-sharded
+DirStore format v3 previously published a `store-format.record`, digest-sharded
 DefinitionRecords, explicit `stored-roots/` membership records, declarations,
 claims, aliases, lineage/current-metadata records, and complete snapshot
 directories. A snapshot is authoritative only when

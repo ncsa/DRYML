@@ -14,11 +14,11 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import tempfile
 from threading import RLock
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 from ... import filesystem
 from .dir import DirStore, _REMOVED_ENTRY_PREFIX, _EXACT_READERS, _EXACT_READER_NAMES
-from .records import StoreFormatRecord, StoreRecordError
+from .records import StoreFormatRecord, StoreRecordError, _MAX_RECORD_BYTES
 from ...locking import interprocess_lock
 from .store import StoreAuthorityError, StorePublicationCapabilities
 
@@ -34,7 +34,8 @@ class ZipStoreConflictError(StoreAuthorityError):
 class ZipStore(DirStore):
     """Expose current logical records through one buffered archive transaction.
 
-    Path-backed archives publish by atomically replacing a complete sibling zip
+    Format-4 Node/state installation receipts are explicitly buffered. Path-backed
+    archives publish by atomically replacing a complete sibling zip
     after comparing the archive bytes observed at open.  File-like destinations
     remain readable but explicitly reject writable authority because they cannot
     make the required replacement guarantee.
@@ -77,6 +78,8 @@ class ZipStore(DirStore):
         self._close_pending = False
         self._initializing = True
         self._file_like = _is_file_like(zip_dest)
+        self._archive_baseline = None
+        self._archive_evidence = None
         try:
             if _existing_only:
                 if self._file_like:
@@ -89,8 +92,6 @@ class ZipStore(DirStore):
             self._tmp.cleanup()
             raise
         self._initializing = False
-        self._archive_baseline = None if self._file_like else self._archive_identity()
-        self._archive_evidence = None if self._file_like else self._physical_archive_evidence()
         self._closed_handle = False
 
     @classmethod
@@ -122,8 +123,11 @@ class ZipStore(DirStore):
     def publication_capabilities(self) -> StorePublicationCapabilities:
         """Return buffered-transaction guarantees or explicit file-like refusal."""
         if self._file_like:
-            return StorePublicationCapabilities(False, False, False, False, False)
-        return StorePublicationCapabilities(True, True, True, True, True)
+            return StorePublicationCapabilities(False, False, False, False, False, "read-only")
+        return StorePublicationCapabilities(True, True, True, True, True, "buffered")
+
+    def _state_content_changed(self):
+        self._archive_dirty = True
 
     @property
     def _archive_path(self) -> str:
@@ -178,6 +182,8 @@ class ZipStore(DirStore):
                 if archive.testzip() is not None:
                     raise StoreAuthorityError("ZipStore archive is malformed.")
                 try:
+                    if archive.getinfo("store-format.record").file_size > _MAX_RECORD_BYTES:
+                        raise StoreAuthorityError("ZipStore format gate is oversized.")
                     format_bytes = archive.read("store-format.record")
                 except KeyError as error:
                     raise StoreAuthorityError("ZipStore archive lacks current Store authority.") from error
@@ -199,9 +205,26 @@ class ZipStore(DirStore):
         if not present:
             return
         try:
-            with zipfile.ZipFile(source, "r") as archive:
-                self._validate_archive_members(archive)
-                archive.extractall(self._tmp.name)
+            with (nullcontext(source) if self._file_like else open(source, "rb")) as stream:
+                if not self._file_like:
+                    # Baseline and extraction must refer to the same open inode:
+                    # a cooperating commit may atomically replace the pathname.
+                    evidence = os.fstat(stream.fileno())
+                    self._archive_evidence = (evidence.st_dev, evidence.st_ino)
+                    digest = hashlib.sha256()
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+                    self._archive_baseline = digest.hexdigest()
+                    stream.seek(0)
+                with zipfile.ZipFile(stream, "r") as archive:
+                    self._validate_archive_members(archive)
+                    try:
+                        if archive.getinfo("store-format.record").file_size > _MAX_RECORD_BYTES:
+                            raise StoreAuthorityError("ZipStore format gate is oversized.")
+                        StoreFormatRecord.from_bytes(archive.read("store-format.record"))
+                    except (KeyError, StoreRecordError) as error:
+                        raise StoreAuthorityError("ZipStore archive has incompatible Store authority.") from error
+                    archive.extractall(self._tmp.name)
         except zipfile.BadZipFile as error:
             raise StoreAuthorityError("ZipStore archive is malformed.") from error
 
@@ -218,15 +241,16 @@ class ZipStore(DirStore):
             StoreCapabilityError: If inherited publication guarantees fail.
 
         Side Effects:
-            Serializes same-handle mutation and marks initialized archive state
-            dirty after inherited durable publication succeeds.
+            Serializes same-handle mutation and conservatively marks initialized
+            archive state dirty before attempting publication, including failures
+            after visibility but before a durability barrier returns.
         """
 
         self._assert_open()
         with self.transaction_fence():
-            super()._atomic_write(path, payload)
             if not self._initializing:
                 self._archive_dirty = True
+            super()._atomic_write(path, payload)
 
     def mark_query_index_dirty(self, cdef=None, *, metadata_target=None) -> str | None:
         """Publish a scoped dirty marker within this archive transaction.
@@ -302,9 +326,13 @@ class ZipStore(DirStore):
 
         Distinct open handles can hold buffered views with the same archive path
         but different baselines. They must therefore be fenced independently.
+        Read-only file-like extractions are immutable authority views and have a
+        read fence even though writable-publication capabilities are refused.
         """
 
         self._assert_open()
+        if self._file_like:
+            return f"{self.catalog_key()}:transaction:{id(self)}"
         return f"{super().authority_fence_key()}:transaction:{id(self)}"
 
     def writer_lock(self):
@@ -371,7 +399,10 @@ class ZipStore(DirStore):
     def publish_snapshot(
             self, reference, *, evidence, annotations=None, local_states,
             children=None, _before_annotation_write=None):
-        """Publish a v3 snapshot in this extraction and mark the archive dirty.
+        """Refuse unmigrated V3 snapshot publication on this format-4 transaction.
+
+        StoreCapabilityError precedes publication effects; the following arguments
+        retain the legacy consumer interface pending its owning cutover.
 
         Args:
             reference: Exact StateRef to install.
@@ -455,7 +486,7 @@ class ZipStore(DirStore):
             self._assert_open()
             if not self._archive_dirty:
                 return
-            self.preflight_publication("commit ZipStore")
+            self.preflight_publication("commit ZipStore", record_family="dryml-node-graph/v1")
             destination = self._archive_path
             directory = os.path.dirname(destination) or "."
             fd, temporary = tempfile.mkstemp(prefix=".dryml-store-", suffix=".zip", dir=directory)
@@ -463,7 +494,7 @@ class ZipStore(DirStore):
             try:
                 with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
                     for root, dirs, files in os.walk(self.base_dir):
-                        dirs[:] = sorted(dirs)
+                        dirs[:] = sorted(name for name in dirs if root != self.base_dir or name != ".staging")
                         for name in sorted(files):
                             path = os.path.join(root, name)
                             relative_parts = Path(os.path.relpath(path, self.base_dir)).parts
@@ -511,12 +542,15 @@ class ZipStore(DirStore):
             for name, value in _EXACT_READERS[DirStore].items()
         )
 
-    def preflight_publication(self, operation: str, *, local_state: bool = False) -> None:
+    def preflight_publication(self, operation: str, *, local_state: bool = False,
+                              record_family: str | None = None) -> None:
         """Validate inherited publication capabilities on an open transaction.
 
         Args:
             operation: Human-readable operation used in capability failures.
             local_state: Whether local payload publication is required.
+            record_family: Explicit consumer contract; format 4 requires
+                ``dryml-node-graph/v1`` rather than legacy implicit admission.
 
         Returns:
             ``None`` when publication is supported.
@@ -530,7 +564,7 @@ class ZipStore(DirStore):
         """
 
         self._assert_open()
-        super().preflight_publication(operation, local_state=local_state)
+        super().preflight_publication(operation, local_state=local_state, record_family=record_family)
 
     def _read_file(self, path, record_type, *, preparation=None):
         """Read one record only while this extracted transaction remains live."""

@@ -162,8 +162,8 @@ def test_unsupported_fence_is_not_replaced_by_validation_memo(tmp_path, monkeypa
 def test_zip_cut_keeps_extractions_distinct_and_checks_cached_liveness(tmp_path, fixed_snapshot_environment):
     """Equal archive names never imply equal transaction views or live handles."""
     first = ZipStore(tmp_path / "store.zip")
-    writer = Repo(first)
-    state = writer.save_object(ArchiveRoot(repo=writer))
+    from dryml.core import Definition
+    state = first.publish_node(Definition(ArchiveRoot).concretize())
     first.commit()
     second = ZipStore.open_existing(tmp_path / "store.zip")
     repo = Repo([first, second])
@@ -172,14 +172,12 @@ def test_zip_cut_keeps_extractions_distinct_and_checks_cached_liveness(tmp_path,
             assert first._can_reuse_exact_validation()
             assert second._can_reuse_exact_validation()
             assert first.authority_fence_key() != second.authority_fence_key()
-            assert first._cut_snapshot_key(cut, state.digest()) != second._cut_snapshot_key(cut, state.digest())
-            assert cut.snapshot(first, state.digest())[0].state_ref == state
-            assert cut.snapshot(second, state.digest())[0].state_ref == state
-            assert len(cut.snapshots) == 2
+            assert first._cut_snapshot_key(cut, state.digest) != second._cut_snapshot_key(cut, state.digest)
+            assert first.read_node(state.digest).graph_equal(second.read_node(state.digest))
             second.close()
             assert os.path.isdir(second.base_dir)
             with pytest.raises(RuntimeError, match="closed"):
-                cut.snapshot(second, state.digest())
+                second.read_node(state.digest)
         assert not os.path.exists(second.base_dir)
     finally:
         first.close()
@@ -192,7 +190,8 @@ def test_exact_inputs_and_captured_selections_precede_fence_admission(tmp_path, 
 
     store = DirStore(tmp_path / "store", query_index="none")
     repo = Repo(store)
-    state = repo.save_object(ArchiveRoot(repo=repo))
+    from dryml.core import Definition, ObjectRef, StateRef
+    state = StateRef(ObjectRef(Definition(ArchiveRoot).concretize(), {}), {})
     detached = DirStore(tmp_path / "detached", query_index="none")
     attempts = []
 

@@ -1,8 +1,8 @@
 """Logical Store authority interface independent from backend paths.
 
-Current Stores persist immutable definitions, declarations, claims, complete
-snapshot directories, and mutable references. Local-state payloads are valid
-only within the snapshot directory that publishes their exact StateRef.
+Format-4 Stores distinguish shared Node metadata, independent root memberships,
+ObjectId projection anchors, historical manifests and CDef-owned state bytes.
+Legacy reference consumer interfaces remain explicit cutover boundaries.
 """
 
 from __future__ import annotations
@@ -79,6 +79,9 @@ class StorePublicationCapabilities:
         writer_serialization: Whether cooperating writers serialize mutation.
         same_store_staging: Whether local-state staging is on the publication
             backend's own atomicity domain.
+        durability: ``durable`` for direct publication, ``buffered`` for extracted
+            archive publication, ``read-only`` for read sources, or ``unspecified``
+            for custom backends that have not declared this completion boundary.
     """
 
     writable: bool
@@ -86,6 +89,22 @@ class StorePublicationCapabilities:
     atomic_replace: bool
     writer_serialization: bool
     same_store_staging: bool
+    durability: str = "unspecified"
+
+    def __post_init__(self):
+        if self.durability not in {"durable", "buffered", "read-only", "unspecified"}:
+            raise ValueError("Unknown Store publication durability capability.")
+
+    def require_durable(self, operation: str) -> None:
+        """Require immediate durable publication, refusing buffered/unknown backends.
+
+        operation names the caller's boundary. Raises StoreCapabilityError before
+        effects unless writable guarantees and direct durability are declared.
+        Archive callers instead use their explicit successful commit boundary.
+        """
+        self.require_writable(operation)
+        if self.durability != "durable":
+            raise StoreCapabilityError(f"{operation} requires durable publication, not {self.durability} authority.")
 
     def require_writable(self, operation: str, *, local_state: bool = False) -> None:
         """Fail closed unless this backend supports ``operation`` publication."""
@@ -126,12 +145,69 @@ class LocalStateSource:
     eagerly_validated: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class StateDescriptor:
+    """Detached historical state metadata, with availability observed at one read.
+
+    state is a LocalState; manifest is a StateVariantManifest; available is current
+    publication plus directory presence, not byte integrity or future protection;
+    incarnation is the publication UUID, or None before publication. Metadata
+    remains usable after Store closure. Construction has no side effects.
+    """
+
+    state: object
+    manifest: object
+    available: bool
+    incarnation: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class StateInstallation:
+    """Receipt for a state installation primitive, not a journal/index completion.
+
+    state is the detached LocalState, installed distinguishes reuse from new data,
+    and durability is durable for DirStore or buffered for ZipStore until commit.
+    A receipt confers no lease or retention. Construction performs no IO.
+    """
+
+    state: object
+    installed: bool
+    durability: str
+
+
+@dataclass(slots=True)
+class StateReadSource:
+    """Private data borrowed within Store.read_state, never a portable selection.
+
+    The directory is accessible only inside the context and while its Store is
+    open. manifest and state are detached metadata. Closure/context exit raises
+    RuntimeError on directory access. This lifetime is not a U09 cleanup lease.
+    """
+
+    store: object
+    state: object
+    manifest: object
+    _directory: str
+    _active: bool = True
+
+    def __reduce__(self):
+        raise TypeError("Borrowed state sources cannot be serialized; transport detached LocalState metadata.")
+
+    @property
+    def data_directory(self):
+        """Return only codec-private data/ (str); fail after context/owner closure."""
+        self.store._assert_state_owner_open()
+        if not self._active:
+            raise RuntimeError("State read source context has expired.")
+        return self._directory
+
+
 class Store(ABC):
-    """Backend-neutral authority contract for complete snapshot-local records.
+    """Backend-neutral authority contract for metadata and private state sources.
 
     Backends own public record/metadata readers, local source lifetimes, and
     capability failures. Optional protected read-cut seams preserve those public
-    paths by default; explicit backend opt-in may share successful evidence under
+    paths by default; explicit legacy backend opt-in may share evidence under
     a retained Repo cut, but cannot establish cross-operation payload validity.
     """
 
@@ -140,9 +216,121 @@ class Store(ABC):
     def publication_capabilities(self) -> StorePublicationCapabilities:
         """Return the backend's declared current publication guarantees."""
 
-    def preflight_publication(self, operation: str, *, local_state: bool = False) -> None:
-        """Validate writable publication semantics before a caller invokes hooks."""
+    def preflight_publication(self, operation: str, *, local_state: bool = False,
+                              record_family: str | None = None) -> None:
+        """Validate publication capability before hooks, with explicit format intent.
+
+        operation is a diagnostic name; local_state requests staging guarantees.
+        record_family names a consumer's persistent contract. Built-in format-4
+        Stores require ``dryml-node-graph/v1``; an omitted family identifies an
+        unmigrated consumer. Returns None or raises StoreCapabilityError without
+        authority effects. Custom Stores retain their own family admission policy.
+        """
         self.publication_capabilities.require_writable(operation, local_state=local_state)
+
+    def install_creation(self, root):
+        """Install normalized creation metadata and return its digest (str).
+
+        root is a ConcreteNode/CDef. Does not publish state, root membership or
+        identity declarations. Invalid/incompatible authority raises
+        StoreAuthorityError; unsupported backends raise StoreCapabilityError.
+        """
+        raise StoreCapabilityError("Store does not support identity-3 creation metadata.")
+
+    def install_creations(self, roots):
+        """Install creation roots in one shared Node table; return digest tuple.
+
+        roots is an iterable of concrete roots. Validation precedes publication;
+        failure may leave installed immutable metadata but never replaces it.
+        Unsupported backends raise StoreCapabilityError.
+        """
+        raise StoreCapabilityError("Store does not support identity-3 creation metadata.")
+
+    def read_creation(self, cdef_digest):
+        """Expand validated bucket metadata to a detached ConcreteNode or None.
+
+        cdef_digest is a carried lowercase digest. No private data is read.
+        Malformed closure/association raises StoreAuthorityError; an unsupported
+        backend raises StoreCapabilityError. This confers no availability.
+        """
+        raise StoreCapabilityError("Store does not support identity-3 creation metadata.")
+
+    def state_data_path(self, key):
+        """Derive backend-private data location from StateKey without graph work.
+
+        Returns a path for supported directory-backed implementations; this is
+        addressing only, not availability, validation or a borrowed read lifetime.
+        Repo/managed consumers use read_state instead. Unsupported backends raise
+        StoreCapabilityError; malformed keys raise TypeError.
+        """
+        raise StoreCapabilityError("Store does not expose state data addressing.")
+
+    def install_state(self, root, staging, *, codec, codec_version, interpretation):
+        """Authenticate owned staging and install/reuse one complete StateKey.
+
+        root is concrete creation evidence, staging an owned allocation from
+        create_local_state_staging, codec a name, codec_version a positive int,
+        interpretation a JSON mapping. Returns StateInstallation. Codec content
+        is confined to staging/data. Invalid evidence raises StoreAuthorityError;
+        unsupported publication raises StoreCapabilityError. I/O errors propagate
+        and may follow visibility; this primitive is not journal/index completion.
+        """
+        raise StoreCapabilityError("Store does not support state buckets.")
+
+    def inspect_states(self, cdef_digest, *, available_only=False):
+        """Return detached StateDescriptors for one carried creation digest.
+
+        Reads metadata/presence only, interpreting same-bucket creation once per
+        fenced batch. Header-only buckets return (). Malformed records raise
+        StoreAuthorityError; unsupported backends raise StoreCapabilityError.
+        No Objects or payload bytes are loaded; no future availability is promised.
+        """
+        raise StoreCapabilityError("Store does not support state bucket inspection.")
+
+    def read_state(self, key, *, destination=None, codec=None, codec_version=None):
+        """Borrow a StateReadSource context for one full StateKey.
+
+        destination, codec name and positive integer codec_version optionally
+        validate compatibility/admission before payload IO and must be supplied
+        together. Metadata and every private byte
+        are validated anew. Missing/malformed/incompatible state raises
+        StoreAuthorityError. The source expires on context exit or Store closure;
+        this read lifetime does not implement active-use leases/retention.
+        Unsupported backends raise StoreCapabilityError.
+        """
+        raise StoreCapabilityError("Store does not support state bucket sources.")
+
+    def publish_node(self, root, *, kind="recipe"):
+        """Install identity-3 root metadata, anchors and explicit membership.
+
+        root is a Node/CDef, kind is recipe or saved. Saved roots must have complete
+        facets. Returns its NodeRootRecord, buffered in ZipStore. ObjectId anchors
+        compare canonical projections, permitting state-pin changes. Missing or
+        conflicting required anchors raise StoreAuthorityError before membership.
+        This metadata primitive does not claim journal/index/retention completion;
+        unsupported backends raise StoreCapabilityError. IO failures can leave
+        safely inspectable partial metadata.
+        """
+        raise StoreCapabilityError("Store does not support identity-3 root publication.")
+
+    def read_node(self, digest, *, kind="recipe"):
+        """Return a detached published Node or None, validating required anchors.
+
+        digest is the carried semantic root key; kind is recipe or saved. Reads
+        shared metadata/membership only. Corrupt/missing required authority raises
+        StoreAuthorityError; unsupported backends raise StoreCapabilityError.
+        Does not load payloads, construct Objects or change authority.
+        """
+        raise StoreCapabilityError("Store does not support identity-3 root readers.")
+
+    def read_declaration_anchor(self, object_id):
+        """Return a validated ObjectId-addressed anchor or None for a new identity.
+
+        Established missing/incompatible projection authority raises
+        StoreAuthorityError; unsupported backends raise StoreCapabilityError.
+        Reads metadata only and does not create declarations or load Objects.
+        """
+        raise StoreCapabilityError("Store does not support declaration anchors.")
 
     def _query_v3_inventory_capabilities(self) -> StoreInventoryCapabilities:
         """Return private broad-inventory coverage for Query V3 source capture.
