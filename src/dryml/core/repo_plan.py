@@ -310,7 +310,18 @@ class SnapshotAction:
 
 @dataclass(slots=True)
 class SavePlan:
-    """Preflighted capture and exact projection evidence for one StateRef."""
+    """Retained live bindings and pure Node preparation for one logical save.
+
+    graph/binding/actions/snapshots retain exact live occurrences and routes;
+    object_ref/object_ids adapt the pre-cutover live identity interface. node is
+    the sole Node realization carrier, not a second StateRef state map.
+    preparation owns the final shared export and observable work counts;
+    capture_counts detaches earlier creation-key work without retaining a second
+    graph owner. No field proves current Store availability or grants a lease.
+    Construct through build_save_plan; validation/capture/publication failures
+    raise RepoSaveError at their owning operations. Preparation itself performs
+    no hooks, payload IO, construction, ObjectId allocation or publication.
+    """
 
     graph: ConcreteDefinitionGraph
     binding: RuntimeGraphBinding
@@ -319,6 +330,9 @@ class SavePlan:
     nodes: tuple[Object, ...]
     object_ref: object
     object_ids: tuple[object, ...]
+    node: object = None
+    preparation: object = None
+    capture_counts: Mapping = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,10 +387,21 @@ class SavePublication:
             work such as commit.
         object_id: Exact ObjectId for stateful path work, or ``None`` when no
             ObjectId applies.
-        state_ref: Exact snapshot identity when it is available, or ``None``.
+        state_ref: Planned SavedNode metadata, or ``None``. Confirmed graph
+            authority is listed separately in StoreReport.snapshots.
         phase: Closed publication phase, including separate membership and claim
             boundaries.
         status: ``completed``, ``failed``, ``unattempted``, or ``uncertain``.
+        store_uuid: Exact destination authority UUID.
+        cut: Observed AuthorityRecord; never a cross-Store transaction cut.
+        mutation_id: Exact journal mutation UUID, or None before an intent.
+        index_disposition: Complete or repair_pending for the combined batch.
+        retention_token: Target-local owner token; provisional/uncertain grants
+            must not be retired without owner-fenced resolution.
+        state_keys: Authoritatively confirmed available full keys at read-back.
+        planned_state_keys: All intended target-local full keys, including failures.
+        protected_state_keys: Subset of state_keys confirmed with this batch's
+            matching owner intent and physical grants. Only these qualify recovery.
 
     ``completed`` means the named Store boundary has authoritative read-back
     evidence, even if its enclosing call later raises. ``failed`` has definitive
@@ -391,28 +416,38 @@ class SavePublication:
     store: Store
     path: GraphPath | None
     object_id: ObjectId | None
-    state_ref: StateRef | None
+    state_ref: object | None
     phase: PublicationPhase
     status: PublicationStatus
+    store_uuid: str | None = None
+    cut: object = None
+    mutation_id: str | None = None
+    index_disposition: str | None = None
+    retention_token: str | None = None
+    state_keys: tuple = ()
+    planned_state_keys: tuple = ()
+    protected_state_keys: tuple = ()
 
 
 @dataclass(frozen=True, slots=True)
 class SavedSnapshot:
-    """One immutable independently confirmed exact snapshot.
+    """One immutable independently confirmed exact saved-graph metadata root.
 
     Args:
-        state_ref: Confirmed exact root or child StateRef.
+        state_ref: Confirmed exact root or child SavedNode (historical field name).
         stores: Ordered snapshot-record destinations that confirmed this StateRef.
         required_stores: Ordered sufficient connected Store dependencies for
-            exact recovery.
+            protected exact recovery at reconciliation, or empty when incomplete.
 
     Per-object snapshots can require external connected Stores. A closure-mode
-    root destination instead contains a self-contained complete root closure.
+    root destination instead contains a self-contained complete root closure on
+    success. Confirmed metadata alone does not prove payload availability; an
+    empty required_stores never certifies recovery, including on partial failure.
     This live inspection record is neither portable configuration nor persistent
     authority.
     """
 
-    state_ref: StateRef
+    state_ref: object
     stores: tuple[Store, ...]
     required_stores: tuple[Store, ...]
 
@@ -423,9 +458,11 @@ class StoreReport:
 
     Args:
         target_stores: Ordered selected root snapshot Stores.
-        state_stores: Confirmed local-state Stores by canonical graph path.
-        required_stores: One deterministic sufficient connected recovery set.
-        snapshots: Fully confirmed independently published root/child snapshots.
+        state_stores: Confirmed available local-state Stores by canonical path;
+            protection is reported separately in publications.
+        required_stores: One deterministic sufficient connected recovery set,
+            or empty when the root closure was not confirmed protected.
+        snapshots: Confirmed root/child metadata, each separately recovery-qualified.
         publications: Every planned publication unit and its observed status.
 
     Constructor inputs are detached into tuples and an immutable mapping. A
@@ -1023,6 +1060,8 @@ def build_save_plan(
         # An exact imported seed may have no live payload binding, but its
         # materializing subtree still needs its selected StateRef projection.
         add_snapshot(action.path, action.definition, None)
+    from .node import _as_node_view
+    node = _as_node_view(value.definition).with_realization(identities=reference.objects)
     return SavePlan(
         graph=binding.graph,
         binding=binding,
@@ -1031,6 +1070,7 @@ def build_save_plan(
         nodes=tuple(nodes),
         object_ref=reference,
         object_ids=tuple(reference.objects.values()),
+        node=node,
     )
 
 
@@ -1118,10 +1158,6 @@ def build_routed_save_plan(repo, plan: SavePlan, context, *, store=None) -> Rout
 _CODEC_RE = re.compile(r"^[A-Za-z0-9]{1,32}$")
 
 
-class _SourceSelectionError(ValueError):
-    """Reject an invalid source selector before any destination publication."""
-
-
 def _validate_codecs(actions: Iterable[SaveAction]) -> None:
     """Validate every selected developer codec before any serializer runs."""
     for action in actions:
@@ -1130,27 +1166,6 @@ def _validate_codecs(actions: Iterable[SaveAction]) -> None:
         codec = getattr(action.obj, "state_codec", None)
         if not isinstance(codec, str) or not _CODEC_RE.fullmatch(codec):
             raise _save_error(action.path, "state_codec must match [A-Za-z0-9]{1,32}")
-
-
-def _manifest_files(data_dir: str) -> tuple[tuple[str, int, str], ...]:
-    """Return the exhaustive regular payload manifest for a staging data tree."""
-    files: list[tuple[str, int, str]] = []
-    for root, directories, names in os.walk(data_dir, followlinks=False):
-        for directory in directories:
-            path = os.path.join(root, directory)
-            if os.path.islink(path) or not os.path.isdir(path):
-                raise ValueError(f"unsupported payload directory entry {path!r}")
-        for name in names:
-            path = os.path.join(root, name)
-            if os.path.islink(path) or not os.path.isfile(path):
-                raise ValueError(f"unsupported payload file entry {path!r}")
-            digest = hashlib.sha256()
-            with open(path, "rb") as source:
-                for block in iter(lambda: source.read(1024 * 1024), b""):
-                    digest.update(block)
-            relative = os.path.relpath(path, data_dir).replace(os.sep, "/")
-            files.append((relative, os.path.getsize(path), digest.hexdigest()))
-    return tuple(sorted(files))
 
 
 def _seed_state_refs(definition: ConcreteDefinition) -> dict[GraphPath, tuple[ConcreteDefinition, str]]:
@@ -1209,16 +1224,6 @@ def _unique_stores(stores: Iterable[Any]) -> tuple[Any, ...]:
     return tuple(result)
 
 
-def _has_completed_claim(store, lease, state_ref) -> bool:
-    """Return whether an initial claim survived as this exact completed receipt."""
-
-    claim = store.read_claim_record(lease.object_ref.digest())
-    return (
-        claim is not None and claim.generation == lease.generation
-        and claim.status == "completed" and claim.state_ref_digest == state_ref.digest()
-    )
-
-
 def _has_complete_local_states(store, state_ref, sources) -> bool:
     """Return whether an exact snapshot retains every selected local payload."""
 
@@ -1242,530 +1247,406 @@ def _supports_annotation_phase_callback(store) -> bool:
     ))
 
 
-def _prepare_snapshot_local_state(obj: Object, definition: ConcreteDefinition, store: Store, path: GraphPath):
-    """Serialize one payload into owned staging without publishing shared authority."""
+@dataclass(frozen=True)
+class NodeSaveBatch:
+    """Detached shared graph and exact state inputs for one Store publication.
 
-    from .store.records import DefinitionRecord, LocalStateManifest
+    block/roots/creations/projections are immutable Node records plus their pure
+    semantic handles. states contains (manifest, owned staging or None) pairs;
+    None requires currently installed authenticated data. token is an owner UUID,
+    graph_digest the logical saved root, names NodeNameRecords. provisional keeps
+    the owner ledger prepared for a later association. This value grants no
+    authority or lease; only its target Store may validate and publish it.
+    creation_sources carries Store-owned detached metadata witnesses from explicit
+    selection reads. Current-cut and byte revalidation may reuse interpreted
+    headers after the borrowed data context expires; this never extends payload
+    validity, source lifetime or key protection.
+    """
 
-    stage = store.create_local_state_staging()
-    reservation = getattr(obj, "_save_load_reservation", None)
-    if reservation is None or not reservation.acquire(blocking=False):
-        store.discard_local_state_staging(stage)
-        raise _save_error(path, "local state is already reserved by save or restore")
+    block: object
+    roots: tuple
+    creations: tuple
+    projections: tuple
+    states: tuple
+    token: str
+    graph_digest: str
+    names: tuple = ()
+    provisional: bool = False
+    creation_sources: tuple = ()
+
+
+def _save_graph_records(saved, roots, origins, previous):
+    from .node import _all_nodes
+    from .node_prepare import NodePreparation
+    from .node_views import creation_cdef, object_projection
+    from .node_codec import encode_node_graph
+    from .store.records import NodeBlockRecord, NodeRootRecord, _json_bytes
+
+    projected = object_projection(saved)
+    projections = {}
+    for node in _all_nodes(projected):
+        if node.object_id is None:
+            continue
+        previous_node = projections.get(node.object_id)
+        if previous_node is not None and not previous_node.graph_equal(node):
+            from .repo import RepoSaveError
+            raise RepoSaveError("Conflicting ObjectId declarations within the saved graph.")
+        projections[node.object_id] = node
+    recipe = creation_cdef(saved)
+    entries = [("saved", node) for node in roots]
+    entries += [("recipe", recipe)]
+    entries += [("construction", node) for node in origins]
+    entries += [("projection", node) for node in projections.values()]
+    prepared = NodePreparation((node for _, node in entries), previous=previous)
+    packet = encode_node_graph(prepared)
+    views = packet.pop("views")
+    block = NodeBlockRecord(_json_bytes(packet))
+    records = []
+    for (kind, node), view in zip(entries, views):
+        policy = {"construction": "dryml-creation-cdef/v1",
+                  "projection": "dryml-object-projection/v2"}.get(kind, "exact")
+        view.update(view=policy, expected_key=prepared.semantic_key(node, policy=policy).decode("ascii"))
+        records.append((NodeRootRecord(block.digest, kind, _json_bytes(view)), node))
+    return block, records, prepared
+
+
+def _confirmed_batch_keys(target, batch):
+    """Return (available keys, protected subset) from one validated local cut."""
+    from .store.retention import RetentionGrantRecord, _grant_path
+
+    result = []
+    protected = []
     try:
-        data_dir = os.path.join(os.fspath(stage), "data")
-        obj.save_state_to_dir(data_dir, codec=obj.state_codec)
-        record = DefinitionRecord(definition)
-        definition_bytes = record.to_bytes()
-        Path = __import__("pathlib").Path
-        Path(stage, "def.pkl").write_bytes(definition_bytes)
-        manifest = LocalStateManifest(
-            obj.state_codec, record.graph_hash, record.digest,
-            hashlib.sha256(definition_bytes).hexdigest(), _manifest_files(data_dir),
-            obj.deferred_state_payload_paths(data_dir, codec=obj.state_codec),
-        )
-        Path(stage, "manifest.record").write_bytes(manifest.to_bytes())
-        source = store.prepare_local_state(stage, manifest)
-        obj._last_state_hash = manifest.state_hash
-        return source
-    except BaseException as error:
-        store.discard_local_state_staging(stage)
-        if isinstance(error, (KeyboardInterrupt, SystemExit)):
-            raise
-        raise _save_error(path, "snapshot-local state preparation failed", error) from error
-    finally:
-        reservation.release()
+        with target._metadata_read():
+            origins = {r.digest: n for r, n in batch.creations}
+            for manifest, _ in batch.states:
+                descriptor = target._read_variant(manifest.key, origins[manifest.key.cdef_digest])
+                if descriptor is not None and descriptor.available and descriptor.manifest == manifest:
+                    result.append(manifest.key)
+            intent = target.retention.read(batch.token)
+            keys = tuple(sorted((m.key for m, _ in batch.states),
+                                key=lambda k: (k.cdef_digest, k.codec_hash)))
+            if (intent is None or intent.disposition not in {"prepared", "adopted"}
+                    or intent.graph_digest != batch.graph_digest
+                    or len(intent.resources) != 1
+                    or intent.resources[0].domain != target.retention_domain
+                    or intent.resources[0].keys != keys):
+                return tuple(result), ()
+            grant = RetentionGrantRecord(target.retention_domain, batch.token, batch.graph_digest, keys) if keys else None
+            for key in result:
+                if target._read_file(_grant_path(target, key, grant), RetentionGrantRecord) == grant:
+                    protected.append(key)
+    except Exception:
+        return (), ()
+    return tuple(result), tuple(protected)
+
+
+def _ready_save_batch(pending, confirmed_keys, required_keys):
+    """Prefer resolved closures, then safely prepared mutually dependent batches.
+
+    Store grouping can introduce cycles absent from the live Object DAG. Owned
+    staging and the already acquired complete key-lease set permit local batch
+    publication in such a component; only later protected-provider reconciliation
+    can qualify its metadata for recovery. Prune targets blocked by failed keys
+    transitively so this fallback cannot attempt their dependent associations.
+    """
+    local = [{m.key for m, _ in batch.states} for _, batch, _ in pending]
+    for index, (_, batch, _) in enumerate(pending):
+        if required_keys[id(batch)] <= local[index] | confirmed_keys:
+            return index
+    viable = list(range(len(pending)))
+    while viable:
+        possible = confirmed_keys.union(*(local[index] for index in viable))
+        remaining = [index for index in viable if required_keys[id(pending[index][1])] <= possible]
+        if remaining == viable:
+            return viable[0]
+        viable = remaining
+    return None
 
 
 def execute_routed_save_plan(
-        repo, routed: RoutedSavePlan, *, deep_capture: bool = False,
-        report_stores: bool = False, late_publications=(), snapshot_observer=None,
-        annotations=None, source_store=None, source_stores=None):
-    """Publish one routed graph through complete v3 snapshot directories.
+        repo, routed, *, states=None, main=False, alias=None,
+        report_stores=False, annotations=None, source_store=None,
+        source_stores=None, snapshot_observer=None, deep_capture=False,
+        provisional=False):
+    """Capture remaining distinct live nodes once and publish format-4 batches.
 
-    Payload bytes remain private staging until ``Store.publish_snapshot`` atomically
-    installs the StateRef, placement, captured metadata, and local payload tree.
-    The ledger deliberately records snapshot-local payload completion only after
-    the directory read-back succeeds.
-    Closure placement completes all retained descendant claims in dependency
-    order after enclosing membership, reporting their exact StateRef projections
-    without requiring independently published child directories.
+    states is a partial rooted StateSpec/LocalState map. Explicit selections are
+    compatibility/availability checked before hooks; plain saves never infer reuse
+    from receipts. Destinations are retained by routed. Each Store gets one shared
+    table, full-key variants and protected graph membership in one journal/index
+    batch. Returns SavedNode, optionally paired with StoreReport. Failures raise
+    RepoSaveError with per-target confirmed/uncertain evidence; independent targets
+    continue. Prepared local batches may publish across aggregate Store cycles;
+    recovery sets and live receipts qualify only after every required full key
+    has a confirmed protected provider. Incomplete metadata never advances a
+    receipt. No graph preparation, hook or payload authentication runs under a
+    Store writer fence. Buffered durable ownership and unsupported metadata feeds
+    fail explicitly before capture. Repair uses Store journal APIs, never capture.
     """
+    from contextlib import ExitStack
+    import shutil
+    from .node import require_saved
+    from .node_views import creation_cdef
+    from .state_values import LocalState, StateKey
+    from .store.records import StateVariantManifest, NodeNameRecord, _json_bytes
+    from .repo import RepoSaveError
 
-    from .metadata import LineageMetadata, SaveAnnotations, SnapshotCapture
-    from .reference_values import StateRef
-    from .repo import MetadataConflictError, RepoSaveError
-    from .snapshot_capture import capture_snapshot
-    from .store.records import DefinitionRecord
-
-    plan, context = routed.plan, routed.context
-    if annotations is not None and not isinstance(annotations, SaveAnnotations):
-        raise TypeError("annotations must be a SaveAnnotations or None.")
+    plan = routed.plan
+    root_obj = plan.binding.roots[0].obj
+    targets = _unique_stores(s for values in routed.destinations.values() for s in values)
+    if annotations is not None:
+        from .metadata import SaveAnnotations
+        if not isinstance(annotations, SaveAnnotations):
+            raise TypeError("annotations must be a SaveAnnotations or None.")
+        raise StoreCapabilityError("Node save annotation/lifecycle metadata feeds are not integrated.")
+    if snapshot_observer is not None:
+        raise StoreCapabilityError("Node save lifecycle observation coverage is not integrated.")
+    if any(getattr(node, "_claim_lease", None) or getattr(node, "_pending_claim_dependencies", ()) for node in plan.nodes):
+        raise StoreCapabilityError("Legacy construction-claim publication requires the Node materialization cutover.")
+    if any(action.state_hash is not None for action in plan.actions):
+        raise StoreCapabilityError("Legacy exact-reference seed publication requires the Node materialization cutover.")
+    for target in targets:
+        target.preflight_save_batch()
+    from .node import _owned_nodes
+    from .node_prepare import NodePreparation
+    selected = plan.node.with_realization(states={p: None for p, _ in _owned_nodes(plan.node)})
+    selected = selected.with_realization(states=states)
+    selected_map = dict(selected.state_spec().items())
+    actions = {action.path: action for action in plan.actions}
+    for path, state in selected_map.items():
+        if path not in actions:
+            raise ValueError("Selected state is outside the live stateful ownership closure.")
+        state.validate_for(selected.at(path), codec=actions[path].obj.state_codec)
+    _validate_codecs(plan.actions)
     if source_store is not None:
-        if not isinstance(source_store, Store) or not any(
-                candidate is source_store for candidate in context.stores):
-            raise ValueError("source_store must be an already-connected Store handle.")
+        if not isinstance(source_store, Store):
+            raise TypeError("source_store must be a Store.")
+        if source_store not in routed.context.stores:
+            raise ValueError("State source Store must be connected.")
     if source_stores is not None and not isinstance(source_stores, Mapping):
         raise TypeError("source_stores must be a mapping or None.")
-    if source_stores is not None:
-        for reference, selected in source_stores.items():
-            if not isinstance(reference, StateRef) or not isinstance(selected, Store):
-                raise TypeError("source_stores must map StateRefs to connected Store handles.")
-            if not any(candidate is selected for candidate in context.stores):
-                raise ValueError("source_stores must contain only connected Store handles.")
-            candidate = selected.read_snapshot_metadata(reference.digest())
-            if candidate is None or candidate.state_ref != reference:
-                raise KeyError(reference.digest())
-    _validate_codecs(plan.actions)
-    destinations = _unique_stores(
-        store for values in routed.destinations.values() for store in values
-    )
-    for store in destinations:
-        store.preflight_publication("routed snapshot save", local_state=True)
-        if (
-                any(candidate is store for candidate in routed.root_destinations)
-                and annotations is not None
-                and (annotations.object is not None or annotations.state is not None)
-                and not _supports_annotation_phase_callback(store)):
-            raise StoreCapabilityError(
-                "Save-time annotations require exact publication phase callbacks."
-            )
-    claims = repo._preflight_routed_claims(plan, routed)
-    ledger = _PublicationLedger(routed.root_destinations)
-    source_by_path = {}
-    state_stores = {action.path: [] for action in plan.actions}
-    snapshots = []
-    state_ref = None
-    claims_by_path = {action.path: lease for lease, action in claims}
-    root_action = next(action for action in plan.snapshots if not action.path)
-    snapshot_actions = plan.snapshots if routed.graph_mode == "per-object" else (root_action,)
-    publication_indexes = {}
-    claim_indexes = {}
-    # Freeze every possible boundary before serializer hooks run.  StateRef
-    # projections do not exist until capture completes, so the ledger fills them
-    # in atomically below once the exact root receipt is known.
-    for action in snapshot_actions:
-        for store in routed.destinations[action.path]:
-            indexes = {
-                phase: ledger.plan(store, action.path, action.obj, None, phase)
-                for phase in ("definition", "state", "snapshot", "membership")
-            }
-            projection_object = (
-                plan.object_ref if not action.path else plan.object_ref.at(action.path)
-            )
-            indexes["lineage"] = {
-                path: ledger.plan(
-                    store, action.path.join(path), action.obj, None, "lineage",
-                    object_id=(projection_object if not path else projection_object.at(path)).object_id,
-                )
-                for path in dict.fromkeys((GraphPath(), *projection_object.objects))
-            }
-            if not action.path and annotations is not None:
-                if annotations.object is not None:
-                    indexes["object_metadata"] = ledger.plan(
-                        store, action.path, action.obj, None, "object_metadata",
-                    )
-                if annotations.state is not None:
-                    indexes["state_metadata"] = ledger.plan(
-                        store, action.path, action.obj, None, "state_metadata",
-                    )
-            lease = claims_by_path.get(action.path)
-            if lease is not None and store is lease.store:
-                indexes["claim"] = ledger.plan(store, action.path, action.obj, None, "claim")
-                claim_indexes[id(lease)] = indexes["claim"]
-            publication_indexes[id(store), action.path] = indexes
-    for lease, action in claims:
-        if id(lease) not in claim_indexes:
-            claim_indexes[id(lease)] = ledger.plan(
-                lease.store, action.path, action.obj, None, "claim",
-            )
-    for phase, stores in late_publications:
-        if phase not in PUBLICATION_PHASES:
-            raise ValueError(f"Unsupported late publication phase: {phase!r}.")
-        for store in stores:
-            ledger.plan(store, None, None, None, phase)
-    seed_sources = {}
-    embedded_snapshots = {}
-    for outer, embedded in _embedded_state_refs(plan.binding.roots[0].definition):
-        selected_embedded_source = (
-            source_stores.get(embedded) if source_stores is not None else None
-        )
-        embedded_candidates = (
-            (selected_embedded_source,) if selected_embedded_source is not None
-            else tuple(
-                candidate for candidate in (source_store, *context.stores)
-                if candidate is not None
-            )
-        )
-        matches = []
-        for candidate in embedded_candidates:
-            try:
-                sources = {
-                    path: candidate.open_local_state(embedded, path)
-                    for path in embedded.states
-                }
-                metadata = candidate.read_snapshot_metadata(embedded.digest())
-            except Exception:
-                continue
-            if metadata is not None:
-                matches.append((sources, metadata))
-        if matches:
-            snapshot_sources, snapshot_metadata = matches[0]
-            if any(metadata != snapshot_metadata for _, metadata in matches[1:]):
-                raise MetadataConflictError(
-                    "Connected Stores disagree about embedded snapshot evidence."
-                )
-            for path, source in snapshot_sources.items():
-                seed_sources[outer.join(path)] = source
-            embedded_snapshots[embedded.digest()] = (
-                embedded, snapshot_sources, snapshot_metadata,
-            )
-    try:
-        for action in plan.actions:
-            if action.state_hash is not None:
-                source = seed_sources.get(action.path)
-                if source is None or source.manifest.state_hash != action.state_hash:
-                    raise _save_error(action.path, "embedded StateRef lacks snapshot-local source authority")
-                source_by_path[action.path] = source
-            else:
-                source_by_path[action.path] = _prepare_snapshot_local_state(
-                    action.obj, action.definition, routed.destinations[action.path][0], action.path,
-                )
-        # Every destination must reject an unsupported deferred manifest before
-        # any snapshot authority is installed, even when staging used another route.
-        for destination in destinations:
-            for source in source_by_path.values():
-                destination._validate_local_state_source_for_publication(source)
-        state_ref = StateRef(plan.object_ref, {
-            path: source.manifest.state_hash for path, source in source_by_path.items()
-        })
-        ledger.set_state_ref(state_ref)
-        if source_stores is not None:
-            expected_sources = {
-                state_ref,
-                *(embedded for _, embedded in _embedded_state_refs(
-                    plan.binding.roots[0].definition
-                )),
-            }
-            if any(reference not in expected_sources for reference in source_stores):
-                raise _SourceSelectionError(
-                    "source_stores contains a StateRef outside the saved snapshot closure."
-                )
-        # Existing complete evidence wins before any environment observation. A
-        # source selection is authority input, independent of destination routes.
-        selected_sources = {}
-        if source_stores is not None:
-            for reference, selected in source_stores.items():
-                candidate = selected.read_snapshot_metadata(reference.digest())
-                selected_sources[reference] = selected
-        mapped_root = selected_sources.get(state_ref)
-        if source_store is not None and mapped_root is not None and mapped_root is not source_store:
-            raise ValueError("source_store and source_stores select different root Stores.")
-        selected_root = source_store or mapped_root
-        evidence = None
-        with repo._authority_read_fences(context.stores):
-            if selected_root is not None:
-                evidence = selected_root.read_snapshot_metadata(state_ref.digest())
-                if evidence is None or evidence.state_ref != state_ref:
-                    raise KeyError(state_ref.digest())
-            else:
-                for store in context.stores:
-                    candidate = store.read_snapshot_metadata(state_ref.digest())
-                    if candidate is None:
-                        continue
-                    if candidate.state_ref != state_ref:
-                        raise RepoSaveError("StateRef digest collision has incompatible snapshot authority.")
-                    if evidence is not None and evidence != candidate:
-                        raise MetadataConflictError("Connected Stores disagree about snapshot evidence.")
-                    evidence = candidate
-        if evidence is None:
-            evidence = capture_snapshot(plan, observer=snapshot_observer)
-
-        # A parent association can only name already complete child snapshots.
-        snapshot_actions = tuple(sorted(
-            snapshot_actions, key=lambda item: len(item.path), reverse=True,
-        ))
-        if routed.graph_mode == "closure":
-            # A closure target cannot retain an uncommitted historical Store as
-            # the only authority for an embedded exact seed. Copy each complete
-            # seed snapshot before publishing the enclosing root snapshot.
-            for embedded, sources, metadata in embedded_snapshots.values():
-                records = tuple(
-                    DefinitionRecord(node.definition)
-                    for node in ConcreteDefinitionGraph.from_root(embedded.definition).nodes()
-                )
-                for store in routed.root_destinations:
-                    for record in records:
-                        store.write_definition_record(record, stored_root=False)
-                    store.publish_snapshot(
-                        embedded, evidence=metadata, local_states=sources,
-                    )
-        for action in snapshot_actions:
-            if routed.graph_mode == "per-object":
-                # Each snapshot owns only its direct state. Descendant state is
-                # supplied by exact child projections, never a shared pool.
-                projection = state_ref if not action.path else state_ref.at(action.path)
-                selected_sources = ({GraphPath(): source_by_path[action.path]}
-                                    if action.path in source_by_path else {})
-                child_actions = [
-                    candidate for candidate in plan.snapshots
-                    if candidate.path.startswith(action.path) and candidate.path != action.path
-                    and not any(
-                        other.path != candidate.path
-                        and other.path != action.path
-                        and candidate.path.startswith(other.path)
-                        and other.path.startswith(action.path)
-                        for other in plan.snapshots
-                    )
-                ]
-                children = {
-                    candidate.path.relative_to(action.path): state_ref.at(candidate.path)
-                    for candidate in child_actions
-                }
-                lineage = {}
-                for path in (*projection.object.objects, GraphPath()):
-                    expected = projection.object if not path else projection.object.at(path)
-                    captured = evidence.lineages.get(action.path.join(path))
-                    lineage[path] = (
-                        captured if captured is not None and captured.object_ref == expected
-                        else LineageMetadata(expected, "unknown", None)
-                    )
-                snapshot_evidence = SnapshotCapture(
-                    lineage, evidence.saved_at, evidence.environment, evidence.environment_status,
-                    evidence.requirements, evidence.requirements_status,
-                    evidence.requirements_coverage, evidence.diagnostics,
-                ) if isinstance(evidence, SnapshotCapture) else evidence
-            else:
-                projection, selected_sources, snapshot_evidence, children = state_ref, source_by_path, evidence, {}
-            for store in routed.destinations[action.path]:
-                indexes = publication_indexes[id(store), action.path]
-                definition_index = indexes["definition"]
-                state_index = indexes["state"]
-                snapshot_index = indexes["snapshot"]
-                membership_index = indexes["membership"]
-                lineage_indexes = indexes["lineage"]
-                object_metadata_index = indexes.get("object_metadata")
-                state_metadata_index = indexes.get("state_metadata")
-                record = DefinitionRecord(projection.definition)
-                attempted = set()
-                definition_records = tuple(
-                    DefinitionRecord(node.definition)
-                    for node in ConcreteDefinitionGraph.from_root(projection.definition).nodes()
-                )
+    source_stores = {} if source_stores is None else dict(source_stores)
+    if any(not isinstance(key, StateKey) or not isinstance(store, Store) for key, store in source_stores.items()):
+        raise TypeError("source_stores must map full StateKeys to Store handles.")
+    if set(source_stores) - {s.key for s in selected_map.values()}:
+        raise ValueError("source_stores contains a key outside the explicit state selection.")
+    if any(s not in routed.context.stores for s in source_stores.values()):
+        raise ValueError("State source Stores must be connected.")
+    source_by_key = {}
+    staged = []
+    publications, snapshots, state_stores = [], [], {}
+    saved = None
+    with ExitStack() as lifetime:
+        # Source contexts protect explicit selections through copying/publication.
+        # Acquire the entire source key set in global order before borrowing.
+        candidates = {state.key: tuple(s for s in
+                      ((source_stores.get(state.key) or source_store),)
+                      if s is not None) or routed.context.stores
+                      for state in selected_map.values()}
+        lifetime.enter_context(state_use_leases((s, key) for key, stores in candidates.items() for s in stores))
+        for source in _unique_stores(s for stores in candidates.values() for s in stores):
+            requested = [key for key, stores in candidates.items() if source in stores and key not in source_by_key]
+            if requested:
+                borrowed = lifetime.enter_context(source.read_states(requested))
+                source_by_key.update(borrowed)
+        for state in selected_map.values():
+            if state.key not in source_by_key:
+                raise RepoSaveError("Explicit selected state is unavailable in the connected source scope.")
+            if source_by_key[state.key].state != state:
+                raise RepoSaveError("Selected state creation authority conflicts with its source.")
+            if source_by_key[state.key].manifest.codec_version != 1:
+                raise RepoSaveError("Selected state codec version is not admitted by the live destination.")
+        # Source leases cannot be grown with destination keys discovered by capture.
+        # Borrowed bytes are copied to owned staging before releasing that set.
+        try:
+            states_by_path = {}
+            origins = [creation_cdef(plan.node.at(action.path)) for action in plan.actions]
+            origin_preparation = NodePreparation(origins)
+            payloads = {}
+            for action, origin in zip(plan.actions, origins):
+                reused = selected_map.get(action.path)
+                if reused is not None:
+                    states_by_path[action.path] = reused
+                    payloads[reused.key] = source_by_key[reused.key]
+                    continue
+                target = routed.destinations[action.path][0]
+                stage = target.create_local_state_staging()
+                staged.append((target, stage))
+                lock = action.obj._save_load_reservation
+                if not lock.acquire(blocking=False):
+                    raise _save_error(action.path, "local state is already reserved by save or restore")
                 try:
-                    attempted.add(definition_index)
-                    for definition_record in definition_records:
-                        store.write_definition_record(definition_record, stored_root=False)
-                    if not ledger.confirm(
-                            definition_index,
-                            lambda store=store, records=definition_records: all(
-                                store.read_definition_record(item.digest) is not None
-                                for item in records
-                            ),
-                    ):
-                        raise RepoSaveError("Definition publication did not survive read-back.")
-                    if isinstance(snapshot_evidence, SnapshotCapture):
-                        resolved_lineages = {
-                            path: (
-                                existing
-                                if lineage.creation_status == "unknown"
-                                and (existing := store.read_lineage_metadata(lineage.object_ref)) is not None
-                                else lineage
-                            )
-                            for path, lineage in snapshot_evidence.lineages.items()
-                        }
-                        snapshot_evidence = SnapshotCapture(
-                            resolved_lineages, snapshot_evidence.saved_at,
-                            snapshot_evidence.environment, snapshot_evidence.environment_status,
-                            snapshot_evidence.requirements, snapshot_evidence.requirements_status,
-                            snapshot_evidence.requirements_coverage, snapshot_evidence.diagnostics,
-                        )
-                    for path, lineage in snapshot_evidence.lineages.items():
-                        lineage_index = lineage_indexes[path]
-                        attempted.add(lineage_index)
-                        store.write_lineage_metadata(lineage)
-                        if not ledger.confirm(
-                            lineage_index,
-                            lambda store=store, lineage=lineage:
-                            store.read_lineage_metadata(lineage.object_ref) == lineage,
-                        ):
-                            raise RepoSaveError("Lineage publication did not survive read-back.")
-                    attempted.update((state_index, snapshot_index))
-
-                    def begin_annotation_write(scope):
-                        attempted.add(
-                            object_metadata_index if scope == "object"
-                            else state_metadata_index
-                        )
-
-                    publication_arguments = {
-                        "evidence": snapshot_evidence,
-                        "annotations": annotations if not action.path else None,
-                        "local_states": selected_sources,
-                        "children": children,
-                    }
-                    if _supports_annotation_phase_callback(store):
-                        publication_arguments["_before_annotation_write"] = begin_annotation_write
-                    published_metadata = store.publish_snapshot(
-                        projection, **publication_arguments,
-                    )
-                    if annotations is not None and not action.path:
-                        if annotations.object is not None:
-                            if not ledger.confirm(
-                                    object_metadata_index,
-                                    lambda store=store, projection=projection, annotations=annotations:
-                                    store.read_metadata(projection.object) == annotations.object,
-                            ):
-                                raise RepoSaveError("Object metadata publication did not survive read-back.")
-                        if annotations.state is not None:
-                            if not ledger.confirm(
-                                    state_metadata_index,
-                                    lambda store=store, projection=projection, annotations=annotations:
-                                    store.read_metadata(projection) == annotations.state,
-                            ):
-                                raise RepoSaveError("State metadata publication did not survive read-back.")
-                    # The first root installation is the capture winner for later
-                    # replicas. They copy its immutable captured mappings instead
-                    # of rereading their own current annotations.
-                    if not action.path:
-                        evidence = published_metadata
-                        snapshot_evidence = published_metadata
-                    if not ledger.confirm(
-                            state_index,
-                            lambda store=store, projection=projection, selected_sources=selected_sources:
-                            _has_complete_local_states(store, projection, selected_sources),
-                    ):
-                        raise RepoSaveError("Snapshot payload publication did not survive read-back.")
-                    if not ledger.confirm(
-                            snapshot_index,
-                            lambda store=store, projection=projection: store.read_state_ref_record(projection.digest()) is not None,
-                        ):
-                            raise RepoSaveError("Snapshot publication did not survive read-back.")
-                    attempted.add(membership_index)
-                    store.write_definition_record(record, stored_root=True)
-                    if not ledger.confirm(
-                            membership_index,
-                            lambda store=store, record=record: store.read_stored_root_record(record.digest) is not None,
-                    ):
-                        raise RepoSaveError("Snapshot membership did not survive read-back.")
-                    claim_work = (
-                        claims if routed.graph_mode == "closure"
-                        else tuple(
-                            (lease, claim_action) for lease, claim_action in claims
-                            if claim_action.path == action.path
-                        )
-                    )
-                    for lease, claim_action in claim_work:
-                        if store is not lease.store:
-                            continue
-                        claim_projection = (
-                            state_ref if not claim_action.path
-                            else state_ref.at(claim_action.path)
-                        )
-                        claim_index = claim_indexes[id(lease)]
-                        attempted.add(claim_index)
-                        repo._mark_initial_state_ref_complete(claim_projection, store, lease)
-                        if not ledger.confirm(
-                                claim_index,
-                                lambda store=store, lease=lease, claim_projection=claim_projection:
-                                _has_completed_claim(store, lease, claim_projection),
-                        ):
-                            raise RepoSaveError("Initial snapshot claim did not survive read-back.")
-                        repo._clear_completed_routed_claim(plan, lease)
+                    data = os.path.join(os.fspath(stage), "data")
+                    action.obj.save_state_to_dir(data, codec=action.obj.state_codec)
+                    files = target._state_inventory(data)
+                    interpretation = {"deferred_paths": list(action.obj.deferred_state_payload_paths(data, codec=action.obj.state_codec))}
+                    codec_hash = StateVariantManifest.content_hash(action.obj.state_codec, 1, interpretation, files)
+                    creation_key = origin_preparation.semantic_key(origin, policy="dryml-creation-cdef/v1")
+                    digest = hashlib.sha256(b"dryml-creation-cdef/v1\0" + creation_key).hexdigest()
+                    key = StateKey(digest, codec_hash)
+                    manifest = StateVariantManifest(key, 1, _json_bytes(interpretation), files)
+                    action.obj._last_state_hash = key.codec_hash
+                    local = LocalState(key, origin)
+                    states_by_path[action.path] = local
+                    payloads.setdefault(key, (target, stage, manifest))
                 except BaseException as error:
-                    if definition_index in attempted:
-                        ledger.failed(
-                            definition_index,
-                            lambda store=store, records=definition_records: all(
-                                store.read_definition_record(item.digest) is not None
-                                for item in records
-                            ),
-                        )
-                    for path, lineage_index in lineage_indexes.items():
-                        if lineage_index in attempted:
-                            lineage = snapshot_evidence.lineages[path]
-                            ledger.failed(
-                                lineage_index,
-                                lambda store=store, lineage=lineage:
-                                store.read_lineage_metadata(lineage.object_ref) == lineage,
-                            )
-                    if state_index in attempted:
-                        ledger.failed(
-                            state_index,
-                            lambda store=store, projection=projection, selected_sources=selected_sources:
-                            _has_complete_local_states(store, projection, selected_sources),
-                        )
-                    if snapshot_index in attempted:
-                        ledger.failed(
-                            snapshot_index,
-                            lambda store=store, projection=projection:
-                            store.read_state_ref_record(projection.digest()) is not None,
-                        )
-                    if object_metadata_index in attempted:
-                        ledger.failed(
-                            object_metadata_index,
-                            lambda store=store, projection=projection, annotations=annotations:
-                            store.read_metadata(projection.object) == annotations.object,
-                        )
-                    if state_metadata_index in attempted:
-                        ledger.failed(
-                            state_metadata_index,
-                            lambda store=store, projection=projection, annotations=annotations:
-                            store.read_metadata(projection) == annotations.state,
-                        )
-                    if membership_index in attempted:
-                        ledger.failed(
-                            membership_index,
-                            lambda store=store, record=record:
-                            store.read_stored_root_record(record.digest) is not None,
-                        )
-                    for lease, claim_action in claims:
-                        claim_index = claim_indexes[id(lease)]
-                        claim_projection = (
-                            state_ref if not claim_action.path
-                            else state_ref.at(claim_action.path)
-                        )
-                        if claim_index not in attempted:
+                    if not isinstance(error, Exception):
+                        raise
+                    raise _save_error(action.path, "snapshot-local state preparation failed", error) from error
+                finally:
+                    lock.release()
+            saved = require_saved(plan.node.with_realization(states=states_by_path))
+            roots = [saved] if routed.graph_mode == "closure" else [saved.at(a.path) for a in plan.snapshots]
+            all_origins = list({state.key.cdef_digest: state.creation_cdef for state in states_by_path.values()}.values())
+            plan.capture_counts = MappingProxyType(dict(origin_preparation.counts))
+            block, records, plan.preparation = _save_graph_records(saved, roots, all_origins, origin_preparation)
+            saved_records = records[:len(roots)]
+            recipe_record = records[len(roots)]
+            creation_records = records[len(roots) + 1:len(roots) + 1 + len(all_origins)]
+            projection_records = records[len(roots) + 1 + len(all_origins):]
+            root_record = next(record for record, node in saved_records if node is saved)
+            batches = []
+            for target in targets:
+                local_paths = [a.path for a in plan.actions if target in routed.destinations[a.path]]
+                local_keys = tuple(dict.fromkeys(states_by_path[p].key for p in local_paths))
+                installs = []
+                for key in local_keys:
+                    source = payloads[key]
+                    if not isinstance(source, tuple) and source.store is target:
+                        installs.append((source.manifest, None))
+                        continue
+                    if isinstance(source, tuple):
+                        owner, stage, manifest = source
+                        data = os.path.join(os.fspath(stage), "data")
+                    else:
+                        manifest, data = source.manifest, source.data_directory
+                    # Stage once per distinct full key and target, never per snapshot.
+                    if not isinstance(source, tuple) or owner is not target:
+                        stage = target.create_local_state_staging()
+                        staged.append((target, stage))
+                        shutil.copytree(data, os.path.join(stage, "data"), dirs_exist_ok=True)
+                    installs.append((manifest, stage))
+                chosen = [(record, node) for record, node in saved_records
+                          if target in (routed.root_destinations if routed.graph_mode == "closure" else
+                                        routed.destinations[plan.snapshots[roots.index(node)].path])]
+                if target in routed.root_destinations:
+                    chosen.append(recipe_record)
+                names = []
+                if target in routed.root_destinations:
+                    if alias is not None:
+                        names.append(NodeNameRecord(alias, "saved", root_record.digest))
+                    if main:
+                        names.append(NodeNameRecord("main", "recipe", recipe_record[0].digest))
+                user_root = _json_bytes([root_record.digest, sorted((k.cdef_digest, k.codec_hash) for k in local_keys),
+                                         sorted((r.root_kind, r.digest) for r, _ in chosen)]).decode("ascii")
+                token = str(uuid.uuid4()) if provisional else str(uuid.uuid5(uuid.UUID(target.store_uuid), "dryml-user-root/v1:" + user_root))
+                old_intent = target.retention.read(token)
+                if old_intent is not None and old_intent.disposition != "adopted":
+                    token = str(uuid.uuid4())
+                batch = NodeSaveBatch(block, tuple(chosen), tuple(creation_records), tuple(projection_records),
+                                      tuple(installs), token, root_record.digest, tuple(names), provisional,
+                                      tuple(source_by_key.values()))
+                batches.append((target, batch, local_paths))
+            # Every explicit source has now been detached into owned staging.
+            lifetime.close()
+            errors = []
+            lease_targets = [(target, manifest.key) for target, batch, _ in batches for manifest, _ in batch.states]
+            from .store.retention import state_leases
+            recovery = any(target.save_batch_needs_recovery(batch) for target, batch, _ in batches)
+            lease_scope = state_leases(lease_targets, exclusive=True, blocking=False) if recovery else state_use_leases(lease_targets)
+            with lease_scope as acquired:
+                if not acquired:
+                    raise RepoSaveError("State recovery is in-use; retry after active leases end.")
+                validate_retained_save_plan(plan, root_obj)
+                pending = list(batches)
+                confirmed_provider_keys = set()
+                required_keys = {
+                    id(batch): {s.key for record, node in batch.roots if record.root_kind == "saved"
+                                for _, s in node.state_spec().items()}
+                    for _, batch, _ in batches}
+                while pending:
+                    ready = _ready_save_batch(pending, confirmed_provider_keys, required_keys)
+                    if ready is None:
+                        for target, batch, _ in pending:
+                            publications.append(SavePublication(target, None, None, saved, "snapshot", "unattempted",
+                                                target.store_uuid, retention_token=batch.token,
+                                                planned_state_keys=tuple(m.key for m, _ in batch.states)))
+                        errors.append(RepoSaveError("Dependent save targets were not attempted; required state publication is incomplete."))
+                        break
+                    target, batch, local_paths = pending.pop(ready)
+                    try:
+                        identity, cut = target.publish_save_batch(batch)
+                    except BaseException as error:
+                        identity, cut = getattr(error, "mutation_id", None), getattr(error, "cut", None)
+                        status = "uncertain" if identity else "failed"
+                        errors.append(error)
+                    else:
+                        status = "completed"
+                    confirmed_keys, protected_keys = _confirmed_batch_keys(target, batch)
+                    confirmed_provider_keys.update(protected_keys)
+                    publications.append(SavePublication(
+                        target, None, None, saved, "snapshot", status, target.store_uuid, cut,
+                        identity, "complete" if status == "completed" else "repair_pending",
+                        batch.token, confirmed_keys, tuple(m.key for m, _ in batch.states), protected_keys))
+                    # Read-back may prove authority even when projection acknowledgement failed.
+                    for record, node in batch.roots:
+                        if record.root_kind != "saved":
                             continue
-                        ledger.failed(
-                            claim_index,
-                            lambda store=lease.store, lease=lease, claim_projection=claim_projection:
-                            _has_completed_claim(store, lease, claim_projection),
-                        )
-                    _raise_publication_failure(error, ledger.report(state_stores, (), snapshots))
-                for path in selected_sources:
-                    state_stores.setdefault(action.path.join(path), []).append(store)
-                snapshots.append(SavedSnapshot(projection, (store,), (store,)))
-            if action.path and action.obj is not None:
-                action.obj._last_state_ref = projection
-        root_complete = [item for item in snapshots if item.state_ref == state_ref]
-        if not root_complete:
-            raise RepoSaveError("Root snapshot placement was not completed.", report=ledger.report(state_stores, (), snapshots))
-        plan.binding.roots[0].obj._last_state_ref = state_ref
-        repo._num_saves += 1
-        required = _unique_stores(
-            [
-                *(store for saved in snapshots for store in saved.required_stores),
-                *(source.store for source in seed_sources.values()
-                  if routed.graph_mode != "closure"),
-            ]
-        )
-        result = (state_ref, ledger.report(state_stores, required, snapshots))
-        return result if report_stores else state_ref
-    except BaseException as error:
-        if state_ref is not None:
-            for lease, action in claims:
-                projection = state_ref if not action.path else state_ref.at(action.path)
-                if _has_completed_claim(lease.store, lease, projection):
-                    repo._clear_completed_routed_claim(plan, lease)
-        _raise_publication_failure(error, ledger.report(state_stores, (), snapshots))
-    finally:
-        for source in source_by_path.values():
-            if os.path.commonpath((
-                    os.path.realpath(os.fspath(source.handle)),
-                    os.path.realpath(getattr(source.store, "_staging_root", "")),
-            )) == os.path.realpath(getattr(source.store, "_staging_root", "")):
-                source.store.discard_local_state_staging(source.handle)
+                        try:
+                            confirmed = target.read_node(record.digest, kind="saved")
+                        except Exception:
+                            confirmed = None
+                        if confirmed is not None:
+                            snapshots.append(SavedSnapshot(node, (target,), ()))
+                    for path in local_paths:
+                        if states_by_path[path].key in confirmed_keys:
+                            state_stores.setdefault(path, []).append(target)
+                    if errors and not isinstance(errors[-1], Exception):
+                        for waiting, waiting_batch, _ in pending:
+                            publications.append(SavePublication(waiting, None, None, saved, "snapshot", "unattempted",
+                                                waiting.store_uuid, retention_token=waiting_batch.token,
+                                                planned_state_keys=tuple(m.key for m, _ in waiting_batch.states)))
+                        break
+                # Reconcile while the complete target key set is still leased.
+                # Local root adoption protects only that Store's exact resources;
+                # saved metadata can outlive remote payloads and is not a receipt.
+                providers = {}
+                for publication in publications:
+                    for key in publication.protected_state_keys:
+                        providers.setdefault(key, []).append(publication.store)
+                sufficient = []
+                for snapshot in snapshots:
+                    required = list(snapshot.stores)
+                    complete = True
+                    for _, state in snapshot.state_ref.state_spec().items():
+                        options = providers.get(state.key, ())
+                        complete &= bool(options)
+                        if not any(store in options for store in required) and options:
+                            required.append(options[0])
+                    sufficient.append(replace(snapshot, required_stores=_unique_stores(required) if complete else ()))
+                root_snapshot = next((s for s in sufficient if s.state_ref is saved), None)
+                required = () if root_snapshot is None else root_snapshot.required_stores
+                report = StoreReport(routed.root_destinations, state_stores, required, sufficient, publications)
+                qualified_nodes = {id(s.state_ref) for s in sufficient if s.required_stores}
+                for action in plan.snapshots:
+                    node = saved.at(action.path)
+                    if action.obj is not None and (required or id(node) in qualified_nodes):
+                        action.obj._last_state_ref = node
+            if errors:
+                failure = errors[-1] if not isinstance(errors[-1], Exception) else errors[0]
+                _raise_publication_failure(failure, report)
+            if root_snapshot is None or not required:
+                raise RepoSaveError("Saved graph publication could not be confirmed at read-back.", report=report)
+            repo._num_saves += 1
+            return (saved, report) if report_stores else saved
+        finally:
+            for owner, stage in staged:
+                # An ambiguous journal may still need these exact staged resources.
+                if any(p.status != "completed" and p.mutation_id for p in publications):
+                    owner.release_local_state_staging(stage)
+                else:
+                    owner.discard_local_state_staging(stage)
 
 
 def _raise_publication_failure(error: BaseException, report: StoreReport) -> None:
@@ -1776,7 +1657,7 @@ def _raise_publication_failure(error: BaseException, report: StoreReport) -> Non
     if isinstance(error, (KeyboardInterrupt, SystemExit)):
         error.report = report
         raise error
-    if isinstance(error, (MetadataConflictError, _SourceSelectionError)):
+    if isinstance(error, MetadataConflictError):
         raise error
     if isinstance(error, RepoSaveError):
         if error.report is None:

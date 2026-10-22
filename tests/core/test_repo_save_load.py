@@ -21,6 +21,12 @@ from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord, MainRefRecord
 from dryml.core.store.zip import ZipStore
 from dryml.runtime.errors import RuntimeTransitionError
+from dryml.core.node import Node
+from dryml.core.node_prepare import NodePreparation
+
+
+def saved_digest(node):
+    return NodePreparation((node,)).digest(node, domain="dryml-saved-root/v1")
 
 
 class SaveLoadValue(Serializable):
@@ -164,19 +170,18 @@ with closing(Repo({str(tmp_path / store_name)!r})) as repo:
     assert loaded.returncode == 0, loaded.stderr
 
 
-def test_public_save_returns_state_ref_and_publishes_local_state(tmp_path):
+def test_public_save_returns_saved_node_and_publishes_local_state(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     obj = SaveLoadValue(10, repo=repo)
 
     state = obj.save(repo=repo, main=False)
 
-    assert isinstance(state, StateRef)
-    assert state.object == obj.object_ref
-    assert store.read_state_ref_record(state.digest()).state_ref == state
-    path, state_hash = next(iter(state.states.items()))
-    assert path in state.object.objects
-    assert store.validate_local_state(state, path).state_hash == state_hash
+    assert isinstance(state, Node)
+    assert dict(state.identity_spec().items()) == dict(obj.object_ref.objects)
+    assert store.read_node(saved_digest(state), kind="saved").graph_equal(state)
+    with store.read_state(state.state.key) as source:
+        assert Path(source.data_directory, "value.txt").read_text() == "10"
 
 
 def test_save_publishes_state_ref_before_main_and_object_alias(tmp_path, monkeypatch):
@@ -184,22 +189,25 @@ def test_save_publishes_state_ref_before_main_and_object_alias(tmp_path, monkeyp
     repo = Repo(store)
     obj = SaveLoadValue(10, repo=repo)
     calls = []
-    publish_snapshot = store.publish_snapshot
-    write_main = store.write_main_ref
-    write_alias = store.write_object_alias
-
-    monkeypatch.setattr(store, "publish_snapshot", lambda *args, **kwargs: (calls.append("state"), publish_snapshot(*args, **kwargs))[1])
-    monkeypatch.setattr(store, "write_main_ref", lambda record: (calls.append("main"), write_main(record))[1])
-    monkeypatch.setattr(store, "write_object_alias", lambda record: (calls.append("alias"), write_alias(record))[1])
+    original = store._atomic_write
+    def record_writes(path, payload):
+        if "/graphs/" in str(path):
+            calls.append("state")
+        if str(path).endswith("/names/main.record"):
+            calls.append("main")
+        if str(path).endswith("/names/latest.record"):
+            calls.append("alias")
+        return original(path, payload)
+    monkeypatch.setattr(store, "_atomic_write", record_writes)
 
     state = repo.save_object(obj, main=True, alias="latest")
 
-    assert calls == ["state", "main", "alias"]
+    assert calls[0] == "state" and set(calls) == {"state", "main", "alias"}
     assert repo.main_def.graph_equal(obj.definition)
-    assert store.read_main_ref() == MainRefRecord(DefinitionRecord(obj.definition).digest)
-    alias = store.read_object_alias("latest")
-    assert isinstance(alias.object_ref, ObjectRef)
-    assert alias.object_ref == state.object
+    main = store.read_node_name("main")
+    assert store.read_node(main.root_digest, kind="recipe").graph_equal(obj.definition)
+    alias = store.read_node_name("latest")
+    assert alias.root_kind == "saved" and alias.root_digest == saved_digest(state)
 
 
 def test_shared_nodes_save_once_and_equal_independent_nodes_stay_distinct(tmp_path):
@@ -211,7 +219,7 @@ def test_shared_nodes_save_once_and_equal_independent_nodes_stay_distinct(tmp_pa
     shared_state = SaveLoadNode([shared, shared], repo=repo).save(repo=repo, main=False)
 
     assert SaveLoadValue.saves == 1
-    assert len(shared_state.states) == 1
+    assert len(shared_state.state_spec()) == 1
 
     SaveLoadValue.saves = 0
     first = SaveLoadValue("same", repo=repo)
@@ -219,7 +227,7 @@ def test_shared_nodes_save_once_and_equal_independent_nodes_stay_distinct(tmp_pa
     independent_state = SaveLoadNode([first, second], repo=repo).save(repo=repo, main=False)
 
     assert SaveLoadValue.saves == 2
-    assert len(independent_state.states) == 2
+    assert len(independent_state.state_spec()) == 2
 
 
 def test_explicit_store_save_copies_reusable_state_into_its_closure(tmp_path):
@@ -230,10 +238,12 @@ def test_explicit_store_save_copies_reusable_state_into_its_closure(tmp_path):
     child_state = repo.save_object(child, store=source)
     root = SaveLoadNode(child, repo=repo)
 
-    copied_state, copied_report = repo.save_object(root, store=copied, report_stores=True)
-    copied_path = next(path for path, object_id in copied_state.object.objects.items() if object_id == child.object_id)
+    child_path = next(path for path, object_id in root.object_ref.objects.items() if object_id == child.object_id)
+    copied_state, copied_report = repo.save_object(root, states={child_path: child_state.state}, store=copied, report_stores=True)
+    copied_path = next(path for path, object_id in copied_state.identity_spec().items() if object_id == child.object_id)
     assert copied_report.required_stores == (copied,)
-    assert copied.validate_local_state(copied_state, copied_path)
+    with copied.read_state(copied_state.at(copied_path).state.key) as borrowed:
+        assert Path(borrowed.data_directory, "value.txt").read_text() == "child"
 
 def test_failed_local_state_save_never_publishes_a_state_ref(tmp_path):
     store = DirStore(tmp_path / "store")
@@ -246,7 +256,8 @@ def test_failed_local_state_save_never_publishes_a_state_ref(tmp_path):
     assert obj._last_state_hash is None
     assert not (tmp_path / "store" / "snapshots").exists()
     staging = tmp_path / "store" / ".staging"
-    assert not staging.exists() or not any(staging.iterdir())
+    assert not staging.exists() or {p.name for p in staging.iterdir()} <= {".leases"}
+    assert not store._staging_leases
 
 
 def test_orchestrator_guard_rejects_live_save_before_publication(tmp_path):
@@ -399,7 +410,7 @@ def test_direct_layout_has_no_retired_object_or_generation_paths(tmp_path):
 
     paths = {path.name for path in Path(store.base_dir).rglob("*")}
 
-    assert store.read_state_ref_record(state.digest()).state_ref == state
+    assert store.read_node(saved_digest(state), kind="saved").graph_equal(state)
     assert "objects" not in paths
     assert ".state-generations" not in paths
     assert ".state-current.pkl" not in paths

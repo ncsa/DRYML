@@ -466,20 +466,23 @@ class Object(metaclass=Dryml):
         return self._object_ref
 
     @property
-    def last_state_ref(self) -> "StateRef | None":
-        """Return this object's last fully published top-level StateRef receipt.
+    def last_state_ref(self):
+        """Return this object's last confirmed saved-graph receipt, without IO.
 
         Returns:
-            The immutable exact StateRef most recently published for this object
-            as a top-level graph root or requested by an exact top-level load, or
-            ``None`` when no such receipt has completed.
+            The immutable SavedNode most recently published for this object
+            with a confirmed protected recovery closure, directly or within a
+            saved graph, or requested by an exact top-level load. Returns ``None``
+            when no such receipt has completed. Incomplete publication preserves
+            the previous receipt even when new saved metadata is confirmed.
 
         Raises:
             None. This read-only property never performs Store access.
 
         Side Effects:
             None. The receipt is runtime metadata and does not establish that the
-            current live state still matches the returned snapshot.
+            current live state still matches the returned snapshot or that its
+            payloads remain available after explicit retention release/cleanup.
         """
 
         return self._last_state_ref
@@ -523,6 +526,7 @@ class Object(metaclass=Dryml):
             repo=None,
             main=True,
             *,
+            states=None,
             store=None,
             alias: str | None = None,
             deep_capture: bool = False,
@@ -530,29 +534,29 @@ class Object(metaclass=Dryml):
             graph_mode: str | None = None,
             report_stores: bool = False,
             source_store=None, source_stores=None, annotations=None):
-        """Publish this graph as an immutable exact StateRef.
+        """Publish this graph as an immutable SavedNode with user retention.
 
         Args:
             repo: Repository or Store authority used for publication.
+            states: Optional partial StateSpec or rooted LocalState map; explicit
+                selections skip capture and other distinct stateful nodes capture once.
             main: Whether to update the target Store's structural main reference
                 after StateRef publication succeeds.
             store: Optional explicit whole-graph closure Store. It bypasses
                 routing, placement, and replication for this save.
-            alias: Optional object alias to update after StateRef publication.
-            deep_capture: Whether to serialize every owned Serializable node.
+            alias: Optional saved-Node name in the same publication batch.
+            deep_capture: Retained spelling; every unselected node already captures.
             match_mode: Optional ``"first"`` or ``"all"`` routing override.
             graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
                 override local to this save.
             report_stores: Whether to also return the selected Store report.
-            source_store: Optional connected Store selecting existing complete root
-                capture evidence independently of destination routing.
-            source_stores: Optional mapping from exact root or embedded StateRefs
-                to connected complete source Stores.
-            annotations: Optional SaveAnnotations whole-map replacements for the
-                root current ObjectRef and/or StateRef mappings.
+            source_store: Optional connected Store for explicit local-state sources.
+            source_stores: Optional full-StateKey/connected-Store source overrides.
+            annotations: Requested metadata feed; currently explicitly unsupported
+                before capture, including an explicitly empty mapping.
 
         Returns:
-            The published ``StateRef``, or it paired with a ``StoreReport``.
+            The published SavedNode, or it paired with a StoreReport.
 
         Raises:
             RepoSaveError: If routing, immutable publication, or a later
@@ -565,11 +569,13 @@ class Object(metaclass=Dryml):
                 evidence conflicts before publication.
 
         Side Effects:
-            Publishes immutable StateRef authority and installs that StateRef as
-            this top-level object's last-state receipt before later derived-index,
-            main-reference, or alias updates. A later update failure propagates
-            while the completed receipt remains available. Explicit annotations use
-            Store-local LWW current updates and never rewrite captured annotations.
+            Delegates shared-block/state-bucket publication, physical protection,
+            membership, names and enabled projection to Repo.save_object's batch.
+            Receipts advance only for confirmed protected recovery closures and
+            can survive partial/index failure. Incomplete metadata alone does not
+            advance them. Requested annotation
+            feeds and buffered durable ownership currently raise StoreCapabilityError
+            before capture. A plain later save captures again; receipts are historical.
 
         Concurrency:
             The delegated Repo save retains one configuration snapshot and keeps
@@ -581,7 +587,7 @@ class Object(metaclass=Dryml):
 
         with materialization_admission(operation="object_save"):
             return save_object(
-                self, repo=repo, main=main, store=store, alias=alias,
+                self, repo=repo, main=main, states=states, store=store, alias=alias,
                 deep_capture=deep_capture, match_mode=match_mode,
                 graph_mode=graph_mode,
                 source_store=source_store, source_stores=source_stores,

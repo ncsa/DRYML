@@ -362,11 +362,14 @@ def test_graph_work_never_runs_under_store_fence(tmp_path, monkeypatch):
 def test_legacy_consumers_refuse_without_inventory_or_authority_effects(tmp_path):
     store = indexed_store(tmp_path / "store")
     before = store.authority_cut()
-    for action in (store.query, lambda: store.write_definition_record(DefinitionRecord(creation())),
-                   lambda: Repo(store).save_object(IndexedObject())):
+    for action in (store.query, lambda: store.write_definition_record(DefinitionRecord(creation()))):
         with pytest.raises(StoreCapabilityError, match="not integrated|legacy Store consumer"):
             action()
     assert store.authority_cut() == before and not Path(store.base_dir, "mutations").exists()
+    saved = Repo(store).save_object(IndexedObject())
+    assert saved.state is None
+    assert len(store.open_query_index().projection_rows("saved_root", refresh=False)) == 1
+    assert not store.authority_cut().pending
 
 
 def test_zip_projection_policy_stays_buffered_nonpersistent_until_archive_commit(tmp_path):

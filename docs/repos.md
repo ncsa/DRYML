@@ -1,6 +1,6 @@
 # Repos and Stores
 
-`Repo` coordinates live Object realizations, exact StateRef persistence, and one
+`Repo` coordinates live Object realizations, saved Node persistence, and one
 or more connected Stores. A Repo is local process authority, not a transport or
 security boundary. Store data, definitions, symbols, and serialized payloads are
 trusted DRYML inputs; supported shared use is same-host use on a local filesystem
@@ -46,18 +46,18 @@ no automatic conversion. The Store-owned APIs currently available are:
 Supported mutations are journaled under one Store authority cut and synchronously
 maintain enabled SQLite schema-10/coverage-1 projections before complete success.
 DirStore also supplies physical grants and active-use leases as described below.
-Integrated Repo/managed save/load remains a separate consumer boundary. Legacy
-Repo snapshot/declaration writers explicitly raise
-`StoreCapabilityError` on format 4; legacy Query V3 views/coverage are likewise
-refused. `none`/`memory` have no persistent-maintenance obligation; `auto` uses
+Ordinary Repo saves now use the format-4 Node/state-bucket pipeline described
+below. Node materialization/load, managed lifecycle and Query V3 remain separate
+consumer boundaries; legacy snapshot/declaration writers and Query V3 coverage
+are explicitly refused. `none`/`memory` have no persistent-maintenance obligation; `auto` uses
 usable SQLite and declares nonpersistent fallback only for optional-backend
 unavailability. Explicit `sqlite` never falls back. One persistent destination
 and compatible settings are bound per Store authority domain before mutation;
 conflicting enabled handles are refused. `store.mutation_index_disposition`
 reports policy, not readiness. The remaining
-consumer documentation below describes the existing interfaces awaiting their
-owning cutover; its snapshot-based workflows are not currently supported against
-new built-in format-4 Stores.
+legacy consumer documentation after the current-format sections describes
+interfaces awaiting their owning cutover; snapshot-directory workflows are not
+supported against built-in format-4 Stores.
 New consumer preflight must declare `record_family="dryml-node-graph/v1"`; the
 operation's human-readable diagnostic name does not select a persistent format.
 
@@ -66,6 +66,119 @@ directory persistence barriers. ZipStore's corresponding receipt is explicitly
 buffered; only successful archive `commit()` establishes durable completion.
 Failed commits propagate and retain dirty evidence; closing discards the buffered
 view. File-like ZipStores permit v4 reads but refuse writable publication.
+
+### Ordinary Save, Explicit Reuse And Routing
+
+`Repo.save_object(obj, states=None, ...)`, `Repo.save(obj, states=None, ...)`,
+`obj.save(...)` and the global `save_object(...)` return a **SavedNode**: the same
+immutable ConcreteNode carrier with complete required identities and local-state
+facets. `saved.at(path).state` is a detached `LocalState` carrying its full
+`StateKey`. `saved.state_spec()` is a rooted, alias-preserving reusable selection
+map. There is no separately authoritative StateRef state map in this save path.
+
+```python
+first = repo.save(obj)
+later = repo.save(obj)                      # fresh capture, even if unchanged
+reused = repo.save(obj, states=first.state_spec())  # no selected-node capture
+description = repo.describe(obj)            # retained construction/identity only
+```
+
+`states` also accepts a partial mapping from typed GraphPaths to LocalStates.
+Unspecified distinct live stateful nodes capture **once** per logical save;
+shared aliases do not capture twice and independent equal nodes do not merge.
+Selected states are checked for creation/configuration/codec compatibility and
+current source availability before any capture hook. Missing selections fail
+explicitly. `source_store` selects a connected source; `source_stores` accepts
+full-StateKey-to-connected-Store overrides. Same-bucket source batches interpret
+their header once at a validated cut. A previous receipt is historical evidence,
+never automatic permission to reuse mutable live state. `deep_capture` remains an
+accepted spelling; ordinary saves already capture every unselected node.
+
+Capture receives only an empty codec-private staging `data/`. Content identity
+includes codec version, interpretation, inventory and bytes. An unchanged capture
+can discover the same full key and reuse its installed directory without copying
+it; explicit same-Store reuse needs no staging copy. Equal content in different
+creation buckets remains separate. New saved identity/state facets do not alter
+retained construction pins, and automatically allocated IDs do not become
+retroactive construction constraints.
+
+Routing retains one configuration/source view for the entire save. `store=`
+selects one whole-graph closure; `SaveRouting` preserves first/all matching and
+per-object/closure placement. Per-object placement publishes compact child saved
+roots at their destinations, without copying child bytes into parent snapshots.
+Resolved dependencies publish first where possible. An acyclic live Object graph
+may induce a cycle between whole-Store batches, including A → B → A. Prepared
+local batches can publish in that case: all target keys are leased together and
+each batch protects its own physical resources before local membership. This does
+not yet certify cross-Store recovery. A target blocked by failed providers, or
+transitively dependent on such a target, remains **unattempted**; independent
+targets continue. Recovery sets and live receipts qualify only after all required
+full keys have confirmed available, physically protected providers.
+
+One shared Node table and compact saved/recipe/creation/projection views are
+prepared for the save. Each destination batches installed variants, physical
+grants, declaration anchors, memberships and names through its Store journal.
+`alias=` names the saved graph and `main=True` names the independently published
+recipe root in that same batch. Ready enabled indexes perform one coalesced SQL
+projection commit before complete return. An identical saved graph with the same
+existing user root/names is an authoritative no-op: another plain capture still
+runs, but no authority epoch or SQL write is added. Disabled/memory indexing
+creates no persistent sidecar. Initial/stale-index maintenance is separate setup
+work, admitted before capture.
+
+Ordinary saves currently require the durable DirStore retained-batch seam.
+ZipStore still supports buffered low-level primitives, but its lack of durable
+owner grants makes ordinary retained save explicitly unsupported **before
+capture**. Requested annotation or lifecycle-observer feeds are likewise refused
+before capture; no empty metadata-coverage claim is made. New SavedNode load is
+validated and explicitly refused before construction/restore until the owning
+materialization cutover. These boundaries do not add Store-v3 migration.
+
+### Retained User Roots And Partial Save Reports
+
+A normal save creates a user-owned retained graph root. Each target's exact
+owner intent names its full keys and staging resources; physical provisional
+grants precede local graph membership and lease release. A complete target-local
+user association adopts the intent; it does not assert external payload
+availability. Repeated identical publication reuses the adopted user-root
+token; a new attempt never resurrects an abandoned/retired token. The Core batch
+seam also admits provisional publication for a later lifecycle owner, without
+creating an adopted permanent user-save reason. Managed association policy is
+not implemented by this seam.
+
+`report_stores=True` returns `(saved, StoreReport)`. `RepoSaveError.report`
+preserves partial cross-Store outcomes. Each combined batch publication reports
+Store UUID, authority cut, mutation UUID, index disposition, retention token,
+confirmed available `state_keys`, their physically protected subset
+`protected_state_keys`, and `planned_state_keys`. An available key without the
+matching owner intent and physical grant does not qualify recovery. `state_ref` is the
+historical field name for its planned SavedNode; `snapshots` lists independently
+confirmed saved graph metadata, which can outlive payload availability. Each
+snapshot's `required_stores` is a sufficient protected recovery set at
+reconciliation, or empty for an incomplete closure. The report's top-level
+`required_stores` applies to the root graph. Available but unprotected bytes remain
+visible in `state_keys`/`state_stores` without becoming a complete recovery claim.
+A confirmed graph can survive index/replica failure and become `obj.last_state_ref`
+only when its entire closure has qualified protected providers. An incomplete root
+preserves the previous receipt. Reconciliation and receipt updates run before the
+operation releases its complete target-key lease set; uncertain grants are not
+retired on error. None of these facts turns partial or uncertain work into
+successful completion. Cancellation retains its original exception identity and
+partial report, including when an earlier independent target already failed;
+remaining targets are unattempted.
+
+Repair a failed index with `store.open_query_index().maintain_store()`. For an
+authority-partial save, reconnect the exact Store and call
+`store.repair_save_batch(publication.mutation_id, publication.retention_token)`.
+Repair uses the persisted journal and owned staging, never another capture.
+It serializes on the owner token, rejects abandoned/retired intents, acquires
+independent nonblocking exclusive key leases and refuses missing staging or a
+conflicting later cut. An uncertain grant remains protective until owner-fenced
+resolution. To retire a completed ordinary user root, release each target-local
+token from its report through that Store's retention authority. Releasing a root
+does not itself delete payloads. Provisional roots require conclusive abandonment
+before release. Withdrawing/reinstalling an identical key uses a separate
+exclusive phase, never an upgrade of held shared leases.
 
 ### Physical Retention And Active Use
 

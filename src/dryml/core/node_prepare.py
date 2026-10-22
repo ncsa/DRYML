@@ -415,12 +415,14 @@ class NodePreparation:
         except KeyError:
             raise ValueError("Node is outside this preparation's table.") from None
 
-    def _fact(self, slot):
-        if slot in self._facts:
-            self._facts.move_to_end(slot)
-            return self._facts[slot]
+    def _fact(self, slot, policy=None):
+        policy = self.view.name if policy is None else policy
+        cache_key = slot if policy == self.view.name else (policy, slot)
+        if cache_key in self._facts:
+            self._facts.move_to_end(cache_key)
+            return self._facts[cache_key]
         children = self._children[slot]
-        facts = {child: self._fact(child) for child in children}
+        facts = {child: self._fact(child, policy) for child in children}
         row = self._rows[slot]
         scalars = {}
         def charge():
@@ -445,12 +447,27 @@ class NodePreparation:
             labels = {child: index for index, child in enumerate(ordered)}
             topology = _bytes([_value_signature(row, lambda child: labels[child], scalars, charge),
                                [facts[child][1].decode("ascii") for child in ordered]])
-        envelope = _bytes([EXACT_KEY_VERSION, self.view.name, value,
+        envelope = _bytes([EXACT_KEY_VERSION, policy, value,
                            self._schemes[slot], _digest("dryml-node-topology/v1", topology.hex())])
         self.counts["hashes"] += 1
         fact = value, envelope, {}, evidence
-        self._remember(slot, fact)
+        self._remember(cache_key, fact)
         return fact
+
+    def semantic_key(self, node, *, policy):
+        """Key an already transformed root under a named policy in this owner.
+
+        node must belong to this table; policy is a nonempty domain string. The
+        caller supplies the normalized creation/projection view, rather than
+        asking this method to transform it. Returns canonical bytes, caching
+        policy-qualified facts within this owner's existing bounded budget.
+        Invalid policy/foreign handles raise ValueError. No discovery, graph
+        copying, IO or external validation occurs; work is included in counts.
+        """
+        if type(policy) is not str or not policy or "\0" in policy:
+            raise ValueError("A nonempty semantic policy is required.")
+        with self._lock:
+            return self._fact(self._slot(node), policy)[1]
 
     def exact_key(self, node):
         """Return canonical v1 key bytes for a prepared Node; reject foreign handles.

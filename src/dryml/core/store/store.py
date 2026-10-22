@@ -190,6 +190,8 @@ class StateReadSource:
     manifest: object
     _directory: str
     _active: bool = True
+    _metadata_evidence: object = None
+    _metadata_owner: object = None
 
     def __reduce__(self):
         raise TypeError("Borrowed state sources cannot be serialized; transport detached LocalState metadata.")
@@ -231,6 +233,60 @@ class Store(ABC):
         growing a held key set requires release/reacquire and fresh validation.
         """
         raise StoreCapabilityError("Store does not support active StateKey leases.")
+
+    def preflight_save_batch(self):
+        """Admit retained Node save batches before capture, or raise capability error.
+
+        Returns None. Implementations must support journaled state/graph/grant
+        installation and synchronous enabled projection, including protection
+        before association. This base refusal has no effects.
+        """
+        raise StoreCapabilityError("Store does not support retained Node save batches.")
+
+    def read_states(self, keys):
+        """Borrow a full-key batch with one creation interpretation per bucket/cut.
+
+        keys is an iterable of StateKeys. The context yields a key/StateReadSource
+        mapping containing available keys only; absent/withdrawn keys are omitted,
+        malformed or corrupt authority raises StoreAuthorityError. Sources expire
+        on exit. Native ordered leases protect all requested keys. Unsupported
+        implementations raise StoreCapabilityError before reading payloads.
+        """
+        raise StoreCapabilityError("Store does not support grouped state sources.")
+
+    def publish_save_batch(self, batch):
+        """Publish one prepared Node save, returning (mutation UUID, authority cut).
+
+        batch is the owning Repo's detached NodeSaveBatch. Validation, payload
+        authentication and graph preparation precede writer fences. Installs,
+        grants, memberships, declarations and names share one journal/projection
+        commit. Protection and owner adoption concern target-local resources;
+        published graph metadata does not certify external payload availability.
+        Repo separately qualifies protected recovery closures across targets.
+        Partial failures preserve exact journal and provisional-root
+        evidence. Unsupported backends raise StoreCapabilityError before effects.
+        """
+        raise StoreCapabilityError("Store does not support retained Node save batches.")
+
+    def repair_save_batch(self, mutation_id, token):
+        """Replay an exact failed save under fresh owner/grant authority.
+
+        UUID mutation_id/token come from SavePublication. Returns repaired cut;
+        abandoned/retired tokens, missing staging, conflicting cuts or active use
+        fail explicitly. No capture or hooks run. Unsupported backends raise
+        StoreCapabilityError before effects.
+        """
+        raise StoreCapabilityError("Store does not support retained Node save repair.")
+
+    def save_batch_needs_recovery(self, batch):
+        """Inspect availability metadata to schedule an exclusive save phase.
+
+        batch is NodeSaveBatch. Returns bool, not a lease or future proof. A changed
+        availability cut must still be rejected/revalidated during publication;
+        callers never upgrade held shared leases. Unsupported backends raise
+        StoreCapabilityError without effects.
+        """
+        raise StoreCapabilityError("Store does not support Node save recovery scheduling.")
 
     def delete_state(self, key):
         """Immediately try private-data reclamation; return StateRemovalOutcome.

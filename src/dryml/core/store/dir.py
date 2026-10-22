@@ -249,6 +249,9 @@ class DirStore(Store):
         serializes on its intent token; grant repair requires the owning
         protect/release handshake instead of generic replay.
         """
+        return self._replay_mutation_impl(mutation_id)
+
+    def _replay_mutation_impl(self, mutation_id):
         from .records import _uuid_value, _decode_authority_bytes, StateVariantManifest
         import json
         _uuid_value(mutation_id)
@@ -447,7 +450,7 @@ class DirStore(Store):
             raise StoreAuthorityError("Immutable Node metadata collision.")
         return PreparedChange(self._relative(path), before, after)
 
-    def _prepare_and_apply(self, prepare, *, retry_stale=True):
+    def _prepare_and_apply(self, prepare, *, retry_stale=True, return_receipt=False):
         # The preparation callable is strictly outside the Store writer fence.
         # A bounded retry admits concurrent siblings without merging stale CAS.
         for _ in range(8):
@@ -465,7 +468,7 @@ class DirStore(Store):
                 identity, cut = authority.apply(self, facts, _acknowledge_nonpersistent=index is None)
                 if index is not None:
                     self._complete_index_mutation(index, identity, cut)
-                return result
+                return (identity, self.authority_cut()) if return_receipt else result
             except StoreCutChanged:
                 if not retry_stale:
                     raise
@@ -474,6 +477,265 @@ class DirStore(Store):
 
     def _query_v3_inventory_capabilities(self):
         raise StoreCapabilityError("Format 4 Node authority requires the new query coverage contract.")
+
+    def preflight_save_batch(self):
+        """Admit durable format-4 retained saves before capture; return None.
+
+        Requires native grants/staging and the configured projection destination.
+        Buffered owners and unavailable explicit indexes raise before hooks.
+        """
+        self.publication_capabilities.require_durable("user retained graph save")
+        self.preflight_publication("Node save batch", local_state=True,
+                                   record_family="dryml-node-graph/v1")
+        index = self.open_query_index()
+        if index is not None:
+            index.maintain_store()
+
+    def repair_save_batch(self, mutation_id, token):
+        """Replay one failed save under its owner-token and exclusive-key fences.
+
+        mutation_id and token are UUIDs from SavePublication. Only the exact
+        prepared/adopted local owner intent and matching per-key grants are
+        admitted; abandonment/retirement fences repair permanently. Returns the
+        repaired cut, without capture/hooks. Missing staging, newer conflicting
+        authority or active use raises StoreAuthorityError with evidence intact.
+        Index-only failures may instead use the index's maintain_store method.
+        """
+        from .records import _decode_authority_bytes
+        from .retention import RetentionIntentRecord, RetentionGrantRecord
+        self.publication_capabilities.require_durable("repair retained graph save")
+        self.preflight_publication("repair Node save batch", record_family="dryml-node-graph/v1")
+        with self.retention._fence(token):
+            self.recover_authority()
+            record = next((r for r in self.pending_mutations() if r.intent["mutation_id"] == mutation_id), None)
+            if record is None:
+                raise StoreAuthorityError("No pending save mutation names this repair.")
+            changes = record.intent["transitions"]
+            path = "retention/intents/" + token + ".record"
+            intents = [RetentionIntentRecord.from_bytes(_decode_authority_bytes(row["after"]))
+                       for row in changes if row["path"] == path and row["after"] is not None]
+            if not intents or intents[0].owner_domain != self.retention_domain:
+                raise StoreAuthorityError("Mutation does not belong to this save owner token.")
+            intended = intents[0]
+            actual = self.retention.read(token)
+            if actual is not None and (actual.disposition not in {"prepared", "adopted"}
+                                       or actual.resources != intended.resources or actual.graph_digest != intended.graph_digest):
+                raise StoreAuthorityError("Save repair was abandoned, retired or replaced.")
+            if len(intended.resources) != 1 or intended.resources[0].domain != self.retention_domain:
+                raise StoreAuthorityError("Save repair requires its exact target-local resource ledger.")
+            resource = intended.resources[0]
+            grant = RetentionGrantRecord(self.retention_domain, token, intended.graph_digest, resource.keys) if resource.keys else None
+            for row in changes:
+                if row["path"].startswith("retention/intents/") and row["path"] != path:
+                    raise StoreAuthorityError("Save repair cannot acquire another owner intent.")
+                if "/grants/" in row["path"]:
+                    if row["after"] is None or RetentionGrantRecord.from_bytes(_decode_authority_bytes(row["after"])) != grant:
+                        raise StoreAuthorityError("Save repair contains a foreign or retiring grant.")
+            with self._replay_staging(changes):
+                with self.state_leases(resource.keys, exclusive=True, blocking=False) as acquired:
+                    if not acquired:
+                        raise StoreAuthorityError("Save repair is in-use; retry after active leases end.")
+                    return self._replay_mutation_impl(mutation_id)
+
+    @contextmanager
+    def read_states(self, keys):
+        """Borrow authenticated available full keys, grouping headers at one cut.
+
+        Returns a context yielding a key/StateReadSource dict. Missing/withdrawn
+        keys are omitted; malformed evidence or payloads raise StoreAuthorityError.
+        Sources retain ordered leases and expire on exit. No graph preparation or
+        payload authentication runs under the short metadata validation fence.
+        """
+        keys = tuple(dict.fromkeys(keys))
+        sources = {}
+        with self.state_leases(keys):
+            try:
+                with self._metadata_read() as captured:
+                    origins = {digest: self.read_creation(digest) for digest in dict.fromkeys(k.cdef_digest for k in keys)}
+                    for key in keys:
+                        origin = origins[key.cdef_digest]
+                        descriptor = self._read_variant(key, origin)
+                        if descriptor is None or not descriptor.available:
+                            continue
+                        data = self.state_data_path(key)
+                        self._authenticate_state_data(descriptor.manifest, data)
+                        sources[key] = StateReadSource(self, descriptor.state, descriptor.manifest, data,
+                                                       _metadata_evidence=captured, _metadata_owner=self._prepared_fact_owner)
+                yield sources
+            finally:
+                for source in sources.values():
+                    source._active = False
+
+    def publish_save_batch(self, batch):
+        """Install a NodeSaveBatch in one journal/projection commit.
+
+        Full-key leases must already cover batch.states in global Store/key order.
+        Metadata comparison, owned staging validation and payload authentication
+        run in detached preparation, never in writer fences. Returns mutation UUID
+        and acknowledged cut. Each new key gets a physical provisional grant
+        before membership, then an adopted user root unless batch.provisional.
+        That owner root covers only this Store's exact resources, not external
+        payload availability; Repo qualifies complete recovery after all targets.
+        Partial writes preserve prepared intents/grants and exact replay evidence;
+        no failed or ambiguous publication authorizes automatic retirement.
+        Withdrawn keys explicitly require a separate exclusive recovery phase.
+        """
+        from ..repo_plan import NodeSaveBatch
+        from ..node_prepare import NodePreparation
+        from ..node_views import CREATION_VIEW, OBJECT_PROJECTION_VIEW, view_equal
+        from .retention import (RetentionIntentRecord, RetentionResource,
+                                RetentionGrantRecord, RetentionPendingRecord, _grant_path, _held, _key_address)
+        if not isinstance(batch, NodeSaveBatch):
+            raise TypeError("Node publication requires NodeSaveBatch.")
+        self.preflight_save_batch()
+        keys = tuple(sorted((m.key for m, _ in batch.states), key=lambda k: (k.cdef_digest, k.codec_hash)))
+        if any(_key_address(self, key) not in dict(_held()) for key in keys):
+            raise StoreAuthorityError("Node save requires active ordered full-key leases.")
+        manifests = {}
+        for manifest, stage in batch.states:
+            if manifest.key in manifests:
+                raise StoreAuthorityError("Node batch repeats a full StateKey.")
+            manifests[manifest.key] = manifest
+            if stage is not None:
+                self._require_staging_owner(stage)
+                self._authenticate_state_data(manifest, os.path.join(stage, "data"))
+                self._write_state_stage_record(Path(stage, "manifest.record"), manifest.to_bytes())
+                availability = StateAvailabilityRecord(manifest.key, str(uuid4()))
+                self._write_state_stage_record(Path(stage, "availability.record"), availability.to_bytes())
+            availability = self._read_file(os.path.join(os.path.dirname(self.state_data_path(manifest.key)), "availability.record"), StateAvailabilityRecord)
+            if availability is not None and (availability.status != "published" or not os.path.isdir(self.state_data_path(manifest.key))):
+                if not dict(_held()).get(_key_address(self, manifest.key)):
+                    raise StoreAuthorityError("Withdrawn state requires an independent exclusive publication phase.")
+                state_retention.settle_interrupted_publication(self, manifest.key)
+                state_retention.detach_withdrawn_data(self, manifest.key)
+        staging = tuple((self._require_staging_owner(stage), self._staging_owner(self._require_staging_owner(stage)))
+                        for _, stage in batch.states if stage is not None)
+        resource = RetentionResource(self.retention_domain, keys, staging)
+        intent = RetentionIntentRecord(self.retention_domain, batch.token, batch.graph_digest, (resource,))
+        grant = RetentionGrantRecord(self.retention_domain, batch.token, batch.graph_digest, keys) if keys else None
+        intent_path = os.path.join(self.base_dir, "retention", "intents", batch.token + ".record")
+        pending_path = os.path.join(self.base_dir, "retention", "pending.record")
+
+        def prepare():
+            previous_intent = self._read_file(intent_path, RetentionIntentRecord)
+            if previous_intent is not None:
+                if (previous_intent.disposition != "adopted" or previous_intent.graph_digest != intent.graph_digest
+                        or len(previous_intent.resources) != 1 or previous_intent.resources[0].domain != self.retention_domain
+                        or previous_intent.resources[0].keys != keys):
+                    raise StoreAuthorityError("Save publication token already exists; reconcile its owning intent.")
+            pending = self._read_file(pending_path, RetentionPendingRecord) or RetentionPendingRecord()
+            prepared_pending = RetentionPendingRecord(pending.tokens + (batch.token,))
+            changes = [] if previous_intent is not None else [self._prepared_file(pending_path, prepared_pending, mutable=True),
+                       self._prepared_file(intent_path, intent)]
+            changes.append(self._prepared_file(self._node_path("definitions/blocks", batch.block.digest), batch.block))
+            origins = {}
+            evidence = {source.state.key.cdef_digest: source for source in batch.creation_sources
+                        if source.store is self and source._metadata_owner is self._prepared_fact_owner}
+            validated = set()
+            current_cut = authority.read_cut(self)
+            for header, node in batch.creations:
+                source = evidence.get(header.digest)
+                proof = None if source is None else source._metadata_evidence
+                if proof is not None and proof.cut == current_cut:
+                    if id(proof) not in validated:
+                        with self.authority_read_fence():
+                            proof.validate()
+                        validated.add(id(proof))
+                    old = source.state.creation_cdef
+                else:
+                    old = self.read_creation(header.digest)
+                if old is not None and not view_equal(old, node, CREATION_VIEW):
+                    raise StoreAuthorityError("Creation bucket header collision.")
+                origins[header.digest] = old or node
+                if old is None:
+                    changes.append(self._prepared_file(os.path.join(self._bucket_path(header.digest), "def.pkl"), header))
+            for manifest, stage in batch.states:
+                key = manifest.key
+                origin = origins.get(key.cdef_digest)
+                if origin is None:
+                    raise StoreAuthorityError("State has no prepared creation header.")
+                target = os.path.dirname(self.state_data_path(key))
+                old = self._read_variant(key, origin)
+                if old is not None:
+                    if old.manifest != manifest:
+                        raise StoreAuthorityError("State manifest collision.")
+                    if old.available:
+                        self._authenticate_state_data(manifest, self.state_data_path(key))
+                    else:
+                        if stage is None or not dict(_held()).get(_key_address(self, key)):
+                            raise StoreAuthorityError("Withdrawn state requires owned staging and independent exclusive recovery.")
+                        availability_path = os.path.join(target, "availability.record")
+                        incarnation = StateAvailabilityRecord(key, str(uuid4()))
+                        first = self._prepared_file(availability_path, replace(incarnation, status="prepared"), mutable=True)
+                        changes.append(first)
+                        changes.append(PreparedChange(self._relative(self.state_data_path(key)), None, b"directory",
+                                                       self._relative(os.path.join(stage, "data")), "data"))
+                        changes.append(PreparedChange(self._relative(availability_path), first.after, incarnation.to_bytes()))
+                else:
+                    if stage is None:
+                        raise StoreAuthorityError("Selected installed state is unavailable.")
+                    changes.append(PreparedChange(self._relative(target), None,
+                                   authority.variant_evidence(self, self._relative(stage)), self._relative(stage), "variant"))
+                if grant is not None:
+                    changes.append(self._prepared_file(_grant_path(self, key, grant), grant))
+            # Merge all source contributions before writing each identity anchor.
+            contributions = {}
+            for record, node in batch.roots:
+                ids = tuple(n.object_id for n in self._publication_identities(node))
+                ids = tuple(dict.fromkeys(ids))
+                for identity in ids:
+                    contributions.setdefault(identity, []).append((record.root_kind, record.digest))
+            for projection, node in batch.projections:
+                identity = node.object_id
+                if identity not in contributions:
+                    continue
+                old = self.read_declaration_anchor(identity)
+                if old is not None:
+                    if not view_equal(self._expand_node_root(old.projection), node, OBJECT_PROJECTION_VIEW):
+                        raise StoreAuthorityError("ObjectId declaration projection conflicts with existing anchor.")
+                    projection = old.projection
+                sources = tuple(sorted(set((() if old is None else old.sources) + tuple(contributions[identity]))))
+                anchor = DeclarationAnchorRecord(identity, projection, sources)
+                key = self._anchor_key(identity)
+                changes.append(self._prepared_file(self._node_path("declarations/anchors", key), anchor, mutable=True))
+                changes.append(self._prepared_file(self._node_path("declarations/required", key),
+                               DeclarationRequirementRecord(identity, projection.digest)))
+            for record, node in batch.roots:
+                kind = record.root_kind
+                root_path = self._node_path("graphs" if kind == "saved" else "definitions/roots", record.digest)
+                old = self._read_file(root_path, NodeRootRecord)
+                if old is not None:
+                    previous = self._expand_node_root(old)
+                    if not NodePreparation((previous,)).exact_equal(previous, NodePreparation((node,)), node):
+                        raise StoreAuthorityError("Node root semantic collision.")
+                else:
+                    changes.append(self._prepared_file(root_path, record))
+                identities = tuple(dict.fromkeys(n.object_id for n in self._publication_identities(node)))
+                changes.append(self._prepared_file(self._node_path("membership/" + kind, record.digest),
+                               NodeMembershipRecord(kind, record.digest, identities)))
+            for name in batch.names:
+                changes.append(self._prepared_file(os.path.join(self.base_dir, "names", name.name + ".record"), name, mutable=True))
+            if not batch.provisional and previous_intent is None:
+                changes.append(PreparedChange(self._relative(intent_path), intent.to_bytes(),
+                                              replace(intent, disposition="adopted").to_bytes()))
+                changes.append(PreparedChange(self._relative(pending_path), prepared_pending.to_bytes(), pending.to_bytes()))
+            return changes, ("state", "creation", "root", "membership", "declarations", "names", "retention"), None
+        return self._prepare_and_apply(prepare, return_receipt=True)
+
+    def save_batch_needs_recovery(self, batch):
+        """Return whether exact availability requires a separate exclusive phase.
+
+        Reads only full-key availability/presence under a detached revalidated
+        metadata cut. Does not hash graphs, authenticate data, acquire key leases
+        or mutate authority. Publication freshly checks this scheduling evidence.
+        """
+        with self._metadata_read():
+            for manifest, _ in batch.states:
+                key = manifest.key
+                record = self._read_file(os.path.join(os.path.dirname(self.state_data_path(key)), "availability.record"), StateAvailabilityRecord)
+                if record is not None and (record.status != "published" or not os.path.isdir(self.state_data_path(key))):
+                    return True
+            return False
 
     def query(self):
         """Refuse legacy query coverage until the format-4 query consumer cutover.

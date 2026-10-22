@@ -1052,6 +1052,14 @@ class Repo:
             # Main remains a structural reference in current Store authority.
             if len(self.stores) > 0:
                 for store in self.stores:
+                    from .store.store import StoreCapabilityError
+                    try:
+                        node_main = store.read_node_name("main")
+                    except StoreCapabilityError:
+                        node_main = None
+                    if node_main is not None:
+                        self.main_def = store.read_node(node_main.root_digest, kind=node_main.root_kind)
+                        break
                     main = store.read_main_ref()
                     if main is None:
                         continue
@@ -1721,7 +1729,9 @@ class Repo:
 
         Returns:
             A call-owned Repo with independent memory caches and query federation
-            disabled from opening or registering persistent indexes.
+            disabled from independently opening/registering persistent indexes.
+            Store-owned save mutations still maintain enabled projection before
+            complete return; a borrowed view cannot bypass Store coherence.
 
         Side Effects:
             Does not close, commit, or otherwise take ownership of caller Stores
@@ -4076,6 +4086,7 @@ class Repo:
             self,
             obj,
             *,
+            states=None,
             main: bool = False,
             store=None,
             alias: str | None = None,
@@ -4091,33 +4102,34 @@ class Repo:
             _save_context=None,
             _snapshot_observer=None,
             _commit_stores=()):
-        """Publish one live graph as immutable local states and a StateRef.
+        """Publish one live graph as a format-4 SavedNode and retained user root.
 
         Args:
             obj: Root object whose graph is saved.
+            states: Optional partial StateSpec or rooted path/LocalState map.
+                Explicit compatible available selections skip capture; all other
+                distinct live stateful nodes capture once on every plain save.
             main: Whether its concrete definition becomes the main reference.
             store: Optional whole-graph closure target Store. It bypasses routing
                 and replication for this save.
-            alias: Optional object alias written after StateRef publication.
-            deep_capture: Whether every owned Serializable node is serialized.
+            alias: Optional saved-Node name in the same Store batch.
+            deep_capture: Retained spelling; plain saves already capture every
+                stateful node without an explicit state selection.
             match_mode: Optional ``"first"`` or ``"all"`` routing override.
             graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
                 override. Both overrides are local to this save.
             report_stores: Whether to return an ephemeral StoreReport.
-            source_store: Optional connected Store selecting existing complete
-                root evidence and payload authority when copies are ambiguous.
-            source_stores: Optional exact StateRef-to-connected-Store mapping for
-                independently ambiguous routed child sources.
-            annotations: Optional SaveAnnotations whole-map replacements for the
-                root ObjectRef and StateRef. ``None`` at either scope means no
-                explicit current write; an empty mapping is a present value.
+            source_store: Optional connected Store for selected local-state sources.
+            source_stores: Optional full-StateKey/connected-Store source overrides.
+            annotations: Currently unsupported; a present value raises
+                StoreCapabilityError before capture rather than omitting metadata.
             _capture_memo: Private retained capture memo. It is accepted for
                 internal state-operation compatibility and does not alter routing.
             reservation: Optional active exact graph reservation reused by an
                 enclosing state operation; callers normally omit this.
 
         Returns:
-            The complete StateRef, or ``(StateRef, StoreReport)`` when requested.
+            The complete SavedNode, or ``(SavedNode, StoreReport)`` when requested.
 
         Raises:
             TypeError: If ``alias`` or a supplied mode has the wrong type.
@@ -4128,19 +4140,18 @@ class Repo:
                 write-once snapshot evidence disagree.
 
         Side Effects:
-            Publishes every local state and the enclosing StateRef before main or
-            object-alias references can change. Configured per-object saves also
-            publish exact child StateRef projections at their selected Stores.
-            A completed StateRef and claim
-            remain authoritative if later derived-index or mutable-reference
-            registration fails; completed live claim metadata is still cleared.
-            Once that authority is complete, installs the StateRef as ``obj``'s
-            read-only last-state receipt before any derived index, main, or alias
-            update that may later raise.
-            Captures environment, requirement, lineage, and selected current
-            annotation evidence once for each new snapshot. Explicit annotation
-            mappings then become Store-local whole-map LWW current authority;
-            retries never refresh an already-complete captured view.
+            Captures outside writer fences. Each destination journals shared Node
+            blocks, CDef-owned state variants, provisional physical grants,
+            declaration anchors, memberships and names in one batch. Enabled
+            projection acknowledges that cut before complete return. Confirmed
+            graph metadata remains in partial reports after failure; last_state_ref
+            advances only after its full closure has confirmed protected providers.
+            Incomplete recovery preserves the prior receipt. Prepared local batches
+            support alternating Store routes without splitting the per-Store commit.
+            Durable user retention is established before association; uncertain
+            grants are preserved. Buffered/custom backends lacking this seam and
+            requested unimplemented metadata feeds fail before capture. Loading
+            these Node values belongs to the later materialization cutover.
 
         Concurrency:
             Retains one routing/default/Store-order view, preserves declaration
@@ -4190,7 +4201,6 @@ class Repo:
                 try:
                     lease = getattr(obj, "_claim_lease", None)
                     from .repo_plan import (
-                        _unique_stores,
                         build_routed_save_plan,
                         execute_routed_save_plan,
                         _register_retained_save_plan,
@@ -4200,26 +4210,12 @@ class Repo:
                     routed = build_routed_save_plan(
                         self, plan, context, store=selected_store,
                     )
-                    index_destinations = _unique_stores(
-                        destination
-                        for destinations in routed.destinations.values()
-                        for destination in destinations
-                    )
-                    late_publications = []
-                    if not self._state_io:
-                        late_publications.append(("index", index_destinations))
-                    if main:
-                        late_publications.append(("main", routed.root_destinations))
-                    if alias is not None:
-                        late_publications.append(("alias", routed.root_destinations))
-                    if _commit_stores:
-                        late_publications.append(("commit", tuple(_commit_stores)))
                     result = execute_routed_save_plan(
                         self,
                         routed,
+                        states=states, main=main, alias=alias,
                         deep_capture=deep_capture,
                         report_stores=True,
-                        late_publications=tuple(late_publications),
                         snapshot_observer=_snapshot_observer,
                         annotations=annotations, source_store=source_store,
                         source_stores=source_stores,
@@ -4234,53 +4230,27 @@ class Repo:
                     obj._claim_lease = None
                 obj._pending_claim_dependencies = ()
                 obj._claim_leases = ()
-                # StateRef publication is authoritative; only then may the derived
-                # query index expose this root. A registration failure leaves the
-                # Store authority intact and the sidecar explicitly dirty.
-                if not self._state_io:
-                    roots_by_store = defaultdict(list)
-                    state_refs_by_store = defaultdict(list)
-                    for snapshot in report.snapshots:
-                        for destination in snapshot.stores:
-                            roots_by_store[destination].append(snapshot.state_ref.definition)
-                            state_refs_by_store[destination].append(snapshot.state_ref)
-                    for index_store in roots_by_store:
-                        report = _record_late_publication(
-                            report, store=index_store, phase="index", state_ref=state_ref,
-                            operation=lambda index_store=index_store: self._query_index.register_saved_graph(
-                                plan.graph,
-                                {index_store: tuple(roots_by_store[index_store])},
-                                {index_store: tuple(state_refs_by_store[index_store])},
-                            ),
-                            checker=lambda index_store=index_store: not getattr(
-                                index_store, "query_index_is_dirty", lambda: False
-                            )(),
-                        )
                 if main:
-                    main_record = MainRefRecord(DefinitionRecord(obj.definition).digest)
-                    for root_store in report.target_stores:
-                        report = _record_late_publication(
-                            report, store=root_store, phase="main", state_ref=state_ref,
-                            operation=lambda root_store=root_store, main_record=main_record: root_store.write_main_ref(main_record),
-                            checker=lambda root_store=root_store, main_record=main_record: root_store.read_main_ref() == main_record,
-                        )
                     self.main_def = obj.definition
-                if alias is not None:
-                    from .store.records import ObjectAliasRecord
-
-                    alias_record = ObjectAliasRecord(alias, state_ref.object)
-                    for root_store in report.target_stores:
-                        report = _record_late_publication(
-                            report, store=root_store, phase="alias", state_ref=state_ref,
-                            operation=lambda root_store=root_store, alias_record=alias_record: root_store.write_object_alias(alias_record),
-                            checker=lambda root_store=root_store, alias_record=alias_record: root_store.read_object_alias(alias) == alias_record,
-                        )
                 return (state_ref, report) if report_stores else state_ref
+
+    def describe(self, obj):
+        """Return a ConcreteNode realization view from retained live construction.
+
+        obj is a usable live Object. The result carries existing identities and
+        explicit construction pins, never newly captured state or a last-save
+        receipt. Missing/invalid retained bindings raise RepoSaveError; unsupported
+        inputs raise TypeError. This performs pure graph preparation only, with no
+        construction, payload IO, publication or ObjectId allocation.
+        """
+        from .repo_plan import build_save_plan
+        return build_save_plan(self, obj).node
 
     def save(
             self,
             obj: Object,
             *,
+            states=None,
             main: bool = False,
             store=None,
             alias: str | None = None,
@@ -4289,10 +4259,12 @@ class Repo:
             graph_mode: str | None = None,
             report_stores: bool = False,
             source_store=None, source_stores=None, annotations=None):
-        """Publish one object graph and flush its Repo.
+        """Publish a retained SavedNode through save_object and flush its Repo.
 
         Args:
             obj: Live Object root whose retained runtime graph will be saved.
+            states: Optional rooted partial StateSpec/path-to-LocalState assignments;
+                only the remaining distinct live stateful nodes capture.
             main: Whether to update the target Store's main-definition reference.
             store: Explicit whole-graph closure Store or Store specification.
             alias: Optional Store-local ObjectRef alias to update after publication.
@@ -4301,15 +4273,13 @@ class Repo:
             graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
                 override local to this save.
             report_stores: Whether to pair the StateRef with a StoreReport.
-            source_store: Optional connected Store selecting existing complete
-                root evidence and payload authority when copies are ambiguous.
-            source_stores: Optional exact StateRef-to-connected-Store mapping for
-                independently ambiguous routed child sources.
-            annotations: Optional SaveAnnotations whole-map replacements for root
-                ObjectRef and StateRef current mappings.
+            source_store: Optional connected Store for explicit local-state sources.
+            source_stores: Optional full-StateKey/connected-Store source overrides.
+            annotations: Requested metadata feed; currently explicitly unsupported
+                before capture, including an explicitly empty mapping.
 
         Returns:
-            The immutable StateRef, or ``(StateRef, StoreReport)`` when
+            The immutable SavedNode, or ``(SavedNode, StoreReport)`` when
             ``report_stores`` is true.
 
         Raises:
@@ -4321,14 +4291,9 @@ class Repo:
             ValueError: If no writable target Store can be selected or a mode is unsupported.
 
         Side Effects:
-            Publishes immutable definition, local-state, root-membership, and
-            StateRef authority, optionally updates main/alias refs, then flushes
-            every configured Store after successful publication. The completed
-            top-level StateRef becomes the live root's last-state receipt before
-            any derived index, main-reference, or alias update can fail.
-            Snapshot capture and explicit current-annotation writes have the same
-            semantics as :meth:`save_object`; successful buffered Stores are then
-            committed by this wrapper.
+            Uses save_object's one-batch publication, index and retention contract,
+            then flushes configured Stores. Requested annotation feeds and buffered
+            durable ownership currently raise StoreCapabilityError before capture.
 
         Concurrency:
             Store publication and initial-claim completion use writer locks and
@@ -4342,7 +4307,7 @@ class Repo:
             selected_store = self._ensure_store(store)
             with self._retain_save_context() as context:
                 result = self.save_object(
-                    obj, main=main, store=selected_store, alias=alias,
+                    obj, states=states, main=main, store=selected_store, alias=alias,
                     deep_capture=deep_capture, match_mode=match_mode,
                     graph_mode=graph_mode,
                     source_store=source_store, source_stores=source_stores,
@@ -4907,6 +4872,11 @@ class Repo:
         class_manifest=None,
     ):
         from dryml.runtime import materialization_admission
+        from .node import Node, _owned_nodes
+        from .store.store import StoreCapabilityError
+
+        if any(n.object_id is not None or n.state is not None for _, n in _owned_nodes(cdef)):
+            raise StoreCapabilityError("Node identity/state materialization is not integrated yet.")
 
         with materialization_admission(operation="repo_materialize_cdef"):
             if memo is None:
@@ -5036,6 +5006,8 @@ class Repo:
             A structural live Object.
 
         Raises:
+            StoreCapabilityError: Before construction if a Node has identity/state
+                facets requiring the later Node materialization cutover.
             TypeError: If ``x`` is an exact reference or unsupported root type.
             RepoLoadError: If no connected Store has the structural authority.
 
@@ -5044,6 +5016,11 @@ class Repo:
             by :meth:`load_state_ref`.
         """
         from .reference_values import ObjectRef, StateRef, StateSelectorRef
+
+        from .node import Node, _all_nodes
+        from .store.store import StoreCapabilityError
+        if isinstance(x, Node) and any(n.object_id is not None or n.state is not None for n in _all_nodes(x)):
+            raise StoreCapabilityError("Node identity/state materialization is not integrated yet.")
 
         if isinstance(x, (ObjectRef, StateRef, StateSelectorRef)):
             raise TypeError("Repo.load_object is structural; use build_object_ref or load_state_ref for exact references.")
@@ -5088,6 +5065,8 @@ class Repo:
             topology.
 
         Raises:
+            StoreCapabilityError: After metadata completeness validation, before
+                effects, for new SavedNode inputs awaiting materialization cutover.
             RepoLoadError: If exact authority preflight, including selected
                 snapshot or local payload authority, construction, or restore
                 fails. No fresh partial cache entry is published.
@@ -5111,6 +5090,11 @@ class Repo:
         from .materialization import build_exact_state_load_plan, execute_exact_state_load_plan
         from .reference_values import StateRef
 
+        from .node import Node, require_saved
+        from .store.store import StoreCapabilityError
+        if isinstance(state_ref, Node):
+            require_saved(state_ref)
+            raise StoreCapabilityError("SavedNode loading is not integrated yet.")
         if not isinstance(state_ref, StateRef):
             raise TypeError("load_state_ref requires a StateRef.")
         with materialization_admission(operation="repo_load_state_ref"):
@@ -5350,8 +5334,21 @@ class Repo:
             self._evict_live(node)
 
     def load(self, cdef: ConcreteDefinition, *, cache: CachePolicy = "weak") -> Object:
-        from dryml.runtime import materialization_admission
+        """Load legacy structural authority; validate/refuse SavedNode materialization.
 
+        cdef is a structural CDef or a supplied Node; cache is the existing cache
+        policy. Returns a structural Object for supported legacy authority. A Node
+        must be saved-complete, then raises StoreCapabilityError until the owning
+        materialization cutover. Incomplete Nodes raise ValueError before Store
+        reads, construction or restore. Legacy load failures raise RepoLoadError.
+        """
+        from dryml.runtime import materialization_admission
+        from .node import Node, require_saved
+        from .store.store import StoreCapabilityError
+
+        if isinstance(cdef, Node):
+            require_saved(cdef)
+            raise StoreCapabilityError("SavedNode loading is not integrated yet.")
         with materialization_admission(operation="repo_load"):
             return self.load_object(cdef, cache=cache)
 
@@ -6053,6 +6050,7 @@ def save_object(
         obj,
         repo=None,
         *,
+        states=None,
         main=False,
         store=None,
         alias: str | None = None,
@@ -6061,10 +6059,12 @@ def save_object(
         graph_mode: str | None = None,
         report_stores: bool = False,
         source_store=None, source_stores=None, annotations=None):
-    """Publish one Object graph through its current immutable StateRef boundary.
+    """Publish one Object graph through Repo.save_object's SavedNode boundary.
 
     Args:
         obj: Live Object graph root to publish.
+        states: Optional partial StateSpec or rooted LocalState assignments;
+            explicit selections skip capture and other distinct nodes capture once.
         repo: Optional Repo or Store authority used for publication.
         main: Whether to update the target Store's main definition after StateRef
             authority is complete.
@@ -6075,15 +6075,13 @@ def save_object(
         graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
             override local to this save.
         report_stores: Whether to return a StoreReport with the StateRef.
-        source_store: Optional connected Store selecting existing complete root
-            capture evidence independently of destination routing.
-        source_stores: Optional mapping from exact root or embedded StateRefs to
-            connected complete source Stores.
-        annotations: Optional SaveAnnotations whole-map replacements for root
-            current ObjectRef and/or StateRef metadata.
+        source_store: Optional connected Store for explicit local-state sources.
+        source_stores: Optional full-StateKey/connected-Store source overrides.
+        annotations: Requested metadata feed; currently explicitly unsupported
+            before capture, including an explicitly empty mapping.
 
     Returns:
-        The complete StateRef, or ``(StateRef, StoreReport)`` when requested.
+        The complete SavedNode, or ``(SavedNode, StoreReport)`` when requested.
 
     Raises:
         RepoSaveError: If bindings, claims, local state, or StateRef publication
@@ -6095,11 +6093,10 @@ def save_object(
             conflicts before publication.
 
     Side Effects:
-        Publishes immutable graph state and installs the completed StateRef as
-        ``obj.last_state_ref`` before derived index, main, or alias work. Later
-        failures propagate without clearing that valid receipt. Explicit
-        annotations use Store-local current-metadata LWW updates and never mutate
-        a preexisting captured snapshot view.
+        Delegates one-batch state/graph/name/index publication and user retention
+        to Repo.save_object. Partial failures preserve confirmed saved graphs and
+        provisional grants. Unsupported requested annotation feeds and buffered
+        durable ownership fail before capture.
 
     Lifetime and Concurrency:
         A supplied Repo/Store remains borrowed. When this convenience creates a
@@ -6123,7 +6120,7 @@ def save_object(
             selected_store = sub_repo._ensure_store(store)
             with sub_repo._retain_save_context() as context:
                 result = sub_repo.save_object(
-                    obj, main=main, store=selected_store, alias=alias,
+                    obj, states=states, main=main, store=selected_store, alias=alias,
                     deep_capture=deep_capture, match_mode=match_mode,
                     graph_mode=graph_mode,
                     source_store=source_store, source_stores=source_stores,
