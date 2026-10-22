@@ -215,7 +215,7 @@ def test_explicit_selection_and_definition_strengthening_guards(tmp_path):
     with pytest.raises(SignatureError, match="topology"):
         plan.prepare_args((cdef,), {}, repo=repo, selections={"value": unrelated})
 
-    assert _plan(Ref[ConcreteDefinition]).prepare_args((Definition(SignatureCounter, 1),), {}).authority["value"] == cdef
+    assert _plan(Ref[ConcreteDefinition]).prepare_args((Definition(SignatureCounter, 1),), {}).authority["value"].graph_equal(cdef)
     with pytest.raises(SignatureError, match="unavailable"):
         _plan(Ref[ConcreteDefinition]).prepare_args((Definition(SignatureCounter),), {})
 

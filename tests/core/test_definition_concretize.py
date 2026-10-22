@@ -145,3 +145,24 @@ def test_object_build_from_def_1():
         base_msg='Test').build()
 
     assert obj.definition.parameters["kwargs"]["base_msg"] == "Test"
+
+
+def test_query_omissions_survive_ref_and_generation_while_concretization_fills_defaults(monkeypatch):
+    """Pure boundaries preserve omissions and normalization never allocates IDs."""
+
+    from dryml.core import Generator, Node, ObjectId, Par, Ref, UniformFromSet
+    from dryml.core.signatures import compile_signature
+
+    definition = Definition(objects.TestClass4, x=Par("x"), test="fixed")
+    generated = Generator(definition, {"x": UniformFromSet((10,))}).grid()[0]
+    assert "discriminator" not in generated.parameters
+
+    def receive(value: Ref[Node]):
+        return value
+
+    assert compile_signature(receive).prepare_args((generated,), {}).deliver_args()[0][0] is generated
+    monkeypatch.setattr(ObjectId, "__init__", lambda *a, **k: (_ for _ in ()).throw(AssertionError("allocated ID")))
+    concrete = generated.concretize()
+    assert concrete.parameters["discriminator"] is None
+    assert concrete.object_id is None
+    assert "discriminator" not in generated.parameters

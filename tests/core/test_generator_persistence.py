@@ -78,3 +78,19 @@ def test_retired_template_generation_exports_and_module_are_absent():
     assert not hasattr(dryml, "TemplateSelector")
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("dryml.core.template_selector")
+
+
+def test_node_generator_selector_round_trip_keeps_fixed_facets_and_support():
+    """New selector persistence retains Node constraints with exact witness proof."""
+
+    from dryml.core import ObjectId, UniformFromSet
+
+    source = Definition(PortableGeneratorLeaf, Par("width")).with_identity(ObjectId(("selector",)))
+    selector = Generator(source, {"width": UniformFromSet((2, 4))}).support_selector()
+    data = selector.to_data()
+    restored = GeneratorSelector.from_data(data)
+    candidate = source.sub(width=2)
+    assert restored._generator.definition.graph_equal(source)
+    assert restored.matches(candidate)
+    assert not restored.matches(candidate.without_identity())
+    assert restored.to_data() == data

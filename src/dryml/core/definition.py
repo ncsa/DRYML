@@ -10,7 +10,7 @@ import sys
 from collections.abc import Mapping
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Callable, Iterator, TypeAlias, TypeVar
+from typing import Annotated, Any, Callable, Iterator, TypeAlias, TypeVar, TYPE_CHECKING
 
 from .utils.stable_hash import stable_int_hash, stable_hash_function
 from .cdef_identity import (
@@ -34,6 +34,10 @@ from .canonical import (
 from .symbol import ImportRef, SourceSpec, maybe_symbol_ref, resolve_symbol
 from .bound_args import BoundArguments, validate_canonical_bound_arguments
 from .node import Node, _init_node, _coalesce, concretize_node
+
+if TYPE_CHECKING:
+    from .object import Object
+    from .repo import Repo
 
 # Special value to skip args
 SKIP_ARGS = object()
@@ -189,8 +193,8 @@ class Definition(Node, DefInterface, Mapping):
     Definition preserves omission: its ``parameters`` mapping contains only
     supplied values and never applies constructor defaults. It can therefore
     represent partial selector or search-space intent as well as a construction
-    recipe. ``concretize()`` produces a fully bound exact V2
-    ``ConcreteNode`` when its class and values are materializable. Equality and
+    recipe. ``concretize()`` produces a fully bound normalized ``ConcreteNode``
+    when its class and values are materializable. Equality and
     hashing identify this occurrence/view; ``recipe_equal`` and ``graph_equal``
     compare semantic structure. Identity/state facets use the Node binding API,
     independently of any constructor parameters with those names.
@@ -515,7 +519,7 @@ class Definition(Node, DefInterface, Mapping):
         return self.quote()
 
     def concretize(self, repo: "Repo | None"=None) -> Any:
-        """Convert this expression to a fully bound canonical V2 CDef.
+        """Convert this expression to a fully bound normalized ConcreteNode.
 
         Args:
             repo: Optional repository used to resolve supported definition
@@ -686,6 +690,9 @@ class Definition(Node, DefInterface, Mapping):
             Supplied Definition/CDef values retain construction structure and
             exact references retain their identities; live Object bindings are
             lowered to ObjectRefs without traversing their graphs.
+            Fixed ObjectId/LocalState facets and the alias partition survive the
+            rewrite. A changed recipe does not drop incompatible selected state;
+            current-use validation remains the consuming boundary's responsibility.
 
         Raises:
             ParameterizationError: If bindings are invalid, unknown, or contain a
@@ -755,7 +762,8 @@ class Definition(Node, DefInterface, Mapping):
             traverse_refs: Whether to enter Ref-carried Definition quotation data.
 
         Returns:
-            A new Definition with unchanged root-relative parameter paths.
+            A new Definition with unchanged root-relative parameter paths, exact
+            identity/state selections, sharing, and Ref/quotation boundaries.
 
         Raises:
             ParameterizationError: If roots, namespaces, mappings, or traversal
@@ -1463,7 +1471,7 @@ def freeze(value: Any) -> Any:
 
 
 def _structural_value_equal(left: Any, right: Any) -> bool:
-    from .freeze import FrozenDict, FrozenList, FrozenNDArray, FrozenSet, FrozenTuple
+    from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
     from .links import DefLink
     from .quoted import QuotedDef, SelectorSpec
     from .selector import Selector

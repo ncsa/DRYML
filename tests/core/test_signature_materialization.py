@@ -113,6 +113,29 @@ def test_mat_definition_applies_defaults_and_cdef_is_structural():
     assert structural.deliver_args()[0][0].definition is cdef
 
 
+def test_typed_mat_target_owns_one_normalization_and_rejects_unresolved_before_hooks(monkeypatch):
+    """Mat[Object subclass] checks its target and never constructs active symbols."""
+
+    from dryml.core import Par
+    from dryml.core.errors import UnresolvedDefinitionError
+
+    repo = Repo()
+    BoundaryValue.constructions = 0
+    unresolved = _single(Mat[BoundaryValue]).prepare_args((Definition(BoundaryValue, Par("value")),), {}, repo=repo)
+    with pytest.raises(UnresolvedDefinitionError):
+        unresolved.deliver_args()
+    assert BoundaryValue.constructions == 0
+    with pytest.raises(SignatureError):
+        _single(Mat[BoundaryValue]).prepare_args((Definition(BoundaryPair, 1, 2),), {}, repo=repo)
+    with monkeypatch.context() as pure_selection:
+        pure_selection.setattr(Definition, "concretize", lambda *a, **k: pytest.fail("selection concretized early"))
+        defaulted = _single(Mat[BoundaryValue]).prepare_args((Definition(BoundaryValue),), {}, repo=repo)
+    assert defaulted.authority["value"].parameters == {}
+    delivered = defaulted.deliver_args()[0][0]
+    assert delivered.value == 3
+    assert BoundaryValue.constructions == 1
+
+
 def test_mat_preserves_cross_root_and_container_sharing_under_never(tmp_path):
     """One selected StateRef stays one object across roots and container aliases."""
 

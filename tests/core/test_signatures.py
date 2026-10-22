@@ -558,3 +558,30 @@ def test_compiled_mode_projection_and_one_shot_errors_are_bounded() -> None:
     with pytest.raises(SignatureError) as raised:
         plan.prepare_return(1).deliver_args()
     assert "object at" not in str(raised.value)
+
+
+def test_reference_union_rejects_incomparable_identity_and_state_deliveries(monkeypatch):
+    """Independent capability alternatives cannot use the retired strength ladder."""
+
+    from dryml.core import IdentitySpec, LocalState, ObjectId, Serializable, StateKey, StateSpec
+
+    concrete = Definition(Serializable).concretize()
+    state = LocalState(StateKey(concrete.creation_digest(), "pickle-" + "c" * 64), concrete)
+    selected = concrete.with_identity(ObjectId(("union",))).with_state(state)
+    monkeypatch.setattr(Repo, "save_object", lambda *a, **k: pytest.fail("automatic save"))
+    for annotation in (Ref[IdentitySpec | StateSpec], Ref[StateSpec | IdentitySpec]):
+        with pytest.raises(SignatureError, match="incomparable"):
+            _plan(annotation).prepare_args((selected,), {})
+
+
+def test_automatic_live_reference_never_captures_a_saved_refinement(monkeypatch):
+    """An unsaved live Object yields existing identity, never manufactured state."""
+
+    from dryml.core import SavedNode, Serializable
+
+    live = Serializable()
+    monkeypatch.setattr(Repo, "save_object", lambda *a, **k: pytest.fail("automatic save"))
+    assert _plan(Ref[AutoRef]).prepare_args((live,), {}).deliver_args()[0][0] == live.object_ref
+    with pytest.raises(SignatureError, match="unavailable"):
+        _plan(Ref[SavedNode]).prepare_args((live,), {})
+    assert live.last_state_ref is None

@@ -15,12 +15,12 @@ from typing import Any, TYPE_CHECKING
 from .template import _contains_template_value
 
 if TYPE_CHECKING:
-    from .definition import Definition
+    from .node import Node
 
 
 def authoring_helper(
     *,
-    author_definition: Callable[[Mapping[str, Any]], Definition],
+    author_definition: Callable[[Mapping[str, Any]], Node],
     should_author: Callable[[Mapping[str, Any]], bool] | None = None,
     validate_known_arguments: Callable[[Mapping[str, Any]], None] | None = None,
     normalize_concrete: bool = False,
@@ -28,7 +28,7 @@ def authoring_helper(
     """Decorate a helper with explicit inert authoring and concrete call paths.
 
     Args:
-        author_definition: Callback building one Definition from a read-only
+        author_definition: Callback building one Node from a read-only
             named argument mapping, including defaults and variadic collections.
             It must not invoke or materialize the graph being authored.
         should_author: Optional callback returning an exact bool from that same
@@ -44,13 +44,13 @@ def authoring_helper(
 
     Returns:
         A decorator preserving the target's signature, name, documentation, and
-        wrapped relationship. The decorated helper returns the authored Definition
+        wrapped relationship. The decorated helper returns the authored Node
         or the concrete target's result without interpreting workload keywords as
         decorator controls. Concrete calls retain their original call spelling.
 
     Raises:
         TypeError: If a policy is invalid, call binding fails, the predicate does
-            not return an exact bool, or the builder does not return a Definition.
+            not return an exact bool, or the builder does not return a Node.
         ValueError: If the target's Python signature is unavailable.
         Exception: Propagates validator, builder, concrete target, and optional
             signature-normalization failures without fallback to another branch.
@@ -97,10 +97,10 @@ def authoring_helper(
             if validate_known_arguments is not None:
                 validate_known_arguments(arguments)
             result = author_definition(arguments)
-            from .definition import Definition
+            from .node import Node
 
-            if not isinstance(result, Definition):
-                raise TypeError("author_definition must return a Definition")
+            if not isinstance(result, Node):
+                raise TypeError("author_definition must return a Definition or ConcreteNode (Node)")
             return result
 
         return wrapped

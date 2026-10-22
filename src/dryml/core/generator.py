@@ -22,6 +22,7 @@ from .errors import (
 )
 from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from .template import Expr, Par, _snapshot_parameters
+from .node import Node
 
 
 _MAX_GRID_RESULTS = 4_096
@@ -78,10 +79,11 @@ def _provider_value(provider: Distribution, root: str, index: int) -> object:
 
 
 class Generator:
-    """Capture exact Distribution coverage for an immutable symbolic Definition.
+    """Capture exact Distribution coverage for an immutable Node description.
 
     Args:
-        definition: Definition whose active roots are generated.
+        definition: Node whose active roots are generated; an already normalized
+            ConcreteNode can serve as a fixed zero-root description.
         distributions: Mapping from every active root to one Distribution.
         traverse_refs: Whether Ref-carried Definition quotation data participates
             in coverage and substitution.
@@ -93,17 +95,19 @@ class Generator:
 
     Construction captures providers but never samples them, resolves targets,
     invokes factories, materializes Objects, or persists provider state.
+    Generated descriptions preserve exact identity/state facets and sharing. They
+    do not acquire normalization, identities or saved completeness automatically.
     """
 
     def __init__(
             self,
-            definition: Definition,
+            definition: Node,
             distributions: Mapping[str, Distribution],
             /,
             *,
             traverse_refs: bool = False) -> None:
-        if not isinstance(definition, Definition):
-            raise ParameterizationError("Generator requires a Definition")
+        if not isinstance(definition, Node):
+            raise ParameterizationError("Generator requires a Definition or ConcreteNode (Node)")
         if not isinstance(distributions, Mapping):
             raise ParameterizationError("Generator distributions must be a mapping")
         if type(traverse_refs) is not bool:
@@ -129,8 +133,8 @@ class Generator:
         self._validate_known_choices()
 
     @property
-    def definition(self) -> Definition:
-        """Return the immutable Definition captured without static substitution."""
+    def definition(self) -> Node:
+        """Return the immutable Node captured without static substitution."""
 
         return self._definition
 
@@ -140,14 +144,15 @@ class Generator:
 
         return self._distributions
 
-    def sample(self, rng: random.Random | None = None) -> Definition:
+    def sample(self, rng: random.Random | None = None) -> Node:
         """Sample every provider in sorted fully-qualified root order.
 
         Args:
             rng: Optional caller-owned random generator advanced for this draw.
 
         Returns:
-            A symbolically resolved Definition containing no Distribution.
+            A symbolically resolved Node containing no Distribution, preserving
+            supplied facets and alias partitions without filling omitted defaults.
 
         Raises:
             ParameterizationError: If the RNG, provider, or sampled value is
@@ -171,14 +176,15 @@ class Generator:
                 raise ParameterizationError("distribution sampling failed", root=name) from error
         return self._definition_for(assignments)
 
-    def grid(self, *, max_results: int = _MAX_GRID_RESULTS) -> tuple[Definition, ...]:
+    def grid(self, *, max_results: int = _MAX_GRID_RESULTS) -> tuple[Node, ...]:
         """Enumerate finite provider support in sorted mixed-radix root order.
 
         Args:
             max_results: Positive cap no greater than 4,096.
 
         Returns:
-            Every symbolically resolved generated Definition.
+            Every symbolically resolved generated Node, with fixed facets and
+            sharing retained and no implicit construction or identity allocation.
 
         Raises:
             ParameterizationLimitError: If finite support exceeds the cap.
@@ -235,12 +241,14 @@ class Generator:
                 if active != expected:
                     raise ParameterizationError("known distribution value introduces uncovered active roots", root=name)
 
-    def _definition_for(self, assignments: Mapping[str, object]) -> Definition:
+    def _definition_for(self, assignments: Mapping[str, object]) -> Node:
         """Apply one complete provider assignment and enforce resolution."""
 
-        bound = self._definition.sub(sub_dict=assignments, traverse_refs=self._traverse_refs)
+        from .template import _contains_expression
+
+        bound = self._definition.sub(sub_dict=assignments, traverse_refs=self._traverse_refs) if isinstance(self._definition, Definition) else self._definition
         active = _snapshot_parameters(bound, traverse_refs=self._traverse_refs)
-        if active or not bound.is_resolved:
+        if active or _contains_expression(bound):
             raise UnresolvedDefinitionError("generator assignment left active expressions")
         return bound
 
@@ -292,7 +300,11 @@ class GeneratorSelector:
         return self._prefilter
 
     def to_data(self) -> dict[str, object]:
-        """Encode immutable built-in domains as ``dryml-template`` v1 data.
+        """Encode immutable built-in domains as closed v1 selector data.
+
+        Returns:
+            Legacy ``dryml-template`` data for compatible descriptions, otherwise
+            ``dryml-node-template`` with one shared authenticated Node graph.
 
         Raises:
             ParameterizationError: If a provider is not portable built-in data.
@@ -309,7 +321,7 @@ class GeneratorSelector:
         """Decode a portable exact selector directly into Definition state.
 
         Args:
-            data: Closed ``dryml-template`` v1 selector data.
+            data: Closed legacy or Node-family v1 selector data.
 
         Returns:
             A GeneratorSelector without target import, construction, or sampling.
@@ -331,7 +343,7 @@ class GeneratorSelector:
 
         Returns:
             ``True`` only when the candidate has one exact Distribution
-            assignment and matching symbolic graph topology.
+            assignment and matching symbolic graph topology and fixed facets.
 
         Raises:
             UnsupportedGeneratorVerificationError: If exact proof is unavailable.
@@ -342,6 +354,8 @@ class GeneratorSelector:
             May invoke provider membership, cardinality, and indexed-value
             methods. It never samples, resolves recipe targets, materializes
             Objects, or persists data.
+            Graph-valued choices use bounded finite witness enumeration, never
+            process-local Node handle equality as portable membership evidence.
         """
 
         return self._matches(target, _AssignmentBudget(self._max_assignments))
@@ -415,6 +429,11 @@ class GeneratorSelector:
         def record(parameter: Par, value: object) -> None:
             if parameter.path or parameter.name not in self._generator.distributions:
                 return
+            if _has_graph_choice(value):
+                # Process-local handle equality is not a portable membership
+                # proof. Enumerate graph-valued support and verify its complete
+                # correlated witness, including facets and alias partitions.
+                return
             prior = found.get(parameter.name, _MISSING)
             found[parameter.name] = value if prior is _MISSING else (
                 prior if _structural_value_equal(prior, value) else _INCONSISTENT
@@ -472,6 +491,26 @@ _INCONSISTENT = object()
 _UNKNOWN = object()
 
 
+def _has_graph_choice(value):
+    from .template import _template_children
+    from .quoted import QuotedDef
+    from .links import DefLink
+
+    seen = set()
+    def visit(current):
+        if isinstance(current, (Node, ConcreteDefinition)):
+            return True
+        if id(current) in seen:
+            return False
+        seen.add(id(current))
+        if isinstance(current, QuotedDef):
+            return visit(current.value)
+        if isinstance(current, DefLink):
+            return visit(current.target)
+        return any(visit(child) for child in _template_children(current))
+    return visit(value)
+
+
 class _AssignmentBudget:
     """Bound cumulative finite-support work for one verification terminal."""
 
@@ -502,6 +541,7 @@ def _project_selector_definition_roles(
     from .links import DefLink
     from .quoted import QuotedDef
     from .signatures import compile_signature
+    from .node import _clone
 
     memo: dict[int, object] = {}
 
@@ -572,8 +612,8 @@ def _project_selector_definition_roles(
                 and all(kwargs[name] is item for name, item in current.kwargs.items())
                 and len(kwargs) == len(current.kwargs)
             )
-            result = current if unchanged else Definition._from_symbolic_parts(
-                current.cls, None, kwargs
+            result = current if unchanged else _clone(
+                current, None, kwargs, current._facets, reset_construction=True
             )
         elif isinstance(current, FactorySpec):
             projected_args = tuple(project(item) for item in current.args)
@@ -608,8 +648,8 @@ def _project_selector_definition_roles(
         return result
 
     result = project(value)
-    if not isinstance(result, Definition):
-        raise AssertionError("Generator selector projection must retain its Definition root")
+    if not isinstance(result, Node):
+        raise AssertionError("Generator selector projection must retain its Node root")
     return result
 
 
@@ -619,11 +659,18 @@ def _topology_matches(generated: Definition, target: Definition | ConcreteDefini
     from .cdef_identity import cdef_node_key
     from .factory import FactorySpec
     from .links import DefLink
+    from .node import Node, _Facets, _facet_equal, _semantic_equal
+    from .node_prepare import NodePreparation
+
+    prepared_left = NodePreparation((generated,))
+    prepared_right = NodePreparation((target,))
 
     generated_to_target: dict[tuple[str, int], tuple[str, int]] = {}
     target_to_generated: dict[tuple[str, int], tuple[str, int]] = {}
 
     def node_key(value: object) -> tuple[str, int] | None:
+        if isinstance(value, Node):
+            return "node", id(value._view)
         if isinstance(value, ConcreteDefinition):
             return "cdef", id(cdef_node_key(value))
         if isinstance(value, Definition):
@@ -651,6 +698,13 @@ def _topology_matches(generated: Definition, target: Definition | ConcreteDefini
                 return generated_to_target[left_key] == right_key
             if right_key in target_to_generated:
                 return False
+            left_node = prepared_left.nodes[prepared_left._slot(left)]
+            right_node = prepared_right.nodes[prepared_right._slot(right)]
+            supplied = left_node._facets if isinstance(left_node, Node) else _Facets()
+            candidate = right_node._facets if isinstance(right_node, Node) else _Facets()
+            if any(a is not None and not _facet_equal(a, b) for a, b in (
+                    (supplied.object_id, candidate.object_id), (supplied.state, candidate.state))):
+                return False
             generated_to_target[left_key] = right_key
             target_to_generated[right_key] = left_key
             left_values = definition_values(left)
@@ -660,7 +714,7 @@ def _topology_matches(generated: Definition, target: Definition | ConcreteDefini
                 for name, value in left_values.items()
             )
         if isinstance(left, DefLink):
-            return True
+            return isinstance(right, DefLink) and _semantic_equal(left, right, topology=True, facets=True)
         if isinstance(left, FactorySpec) and isinstance(right, FactorySpec):
             return len(left.args) == len(right.args) and all(visit(a, b) for a, b in zip(left.args, right.args)) and all(name in right.kwargs and visit(value, right.kwargs[name]) for name, value in left.kwargs.items())
         if isinstance(left, Mapping) and isinstance(right, Mapping):
@@ -704,11 +758,22 @@ def _loose_selector(value: Definition, *, traverse_refs: bool = False):
     from .params import AnyValue
     from .quoted import QuotedDef
     from .selector import Selector
+    from .node import _clone
 
+    if isinstance(value, ConcreteDefinition):
+        return Selector(value, cls_policy="exact")
     if not isinstance(value, Definition):
         raise ParameterizationError("loose_selector requires a Definition root")
 
+    memo = {}
+
     def project(current: object) -> object:
+        marker = id(current)
+        if marker not in memo:
+            memo[marker] = project_value(current)
+        return memo[marker]
+
+    def project_value(current: object) -> object:
         if current is _UNKNOWN:
             return _UNKNOWN
         if isinstance(current, Expr):
@@ -731,7 +796,7 @@ def _loose_selector(value: Definition, *, traverse_refs: bool = False):
         if isinstance(current, Definition):
             args = None if current.args is None else FrozenTuple(AnyValue() if (item := project(arg)) is _UNKNOWN else item for arg in current.args)
             kwargs = FrozenDict((name, item) for name, arg in current.kwargs.items() if (item := project(arg)) is not _UNKNOWN)
-            return Definition._from_symbolic_parts(current.cls, args, kwargs)
+            return _clone(current, args, kwargs, current._facets, reset_construction=True)
         if isinstance(current, Mapping):
             return FrozenDict((name, item) for name, arg in current.items() if (item := project(arg)) is not _UNKNOWN)
         if isinstance(current, (list, FrozenList)):

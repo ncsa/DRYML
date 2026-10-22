@@ -1,7 +1,7 @@
 # Symbolic Definitions And Generation
 
-`Definition` is DRYML's one immutable construction-description value, for both
-resolved and symbolic authoring. It can contain `Par` and supported arithmetic or
+`Definition(...)` authors an immutable `Node` construction-description graph, for
+both resolved and symbolic authoring. It can contain `Par` and supported arithmetic or
 repetition expressions without resolving a target, applying defaults, calling a
 factory, materializing an Object, or saving anything. `Definition.names` reports
 active roots in authored first-occurrence order. `Definition.is_resolved` means
@@ -16,6 +16,16 @@ Dataset or model Definition/CDef values supplied through bindings retain their
 construction-value types rather than becoming mappings. Exact ObjectRef/StateRef
 bindings retain their identities, while live Object bindings lower to ObjectRefs
 without materializing or saving their graphs.
+Substitution, remapping, and generation retain fixed node-local ObjectId and
+LocalState selections, sharing, and Ref/quotation boundaries. Independent equal
+Nodes remain independent. Changing a recipe never silently discards a selected
+state: `LocalState.validate_for(...)` rejects incompatible configuration. Existing
+V2 Repo construction/persistence boundaries still reject unsupported Node facets
+before construction; this authoring cutover does not implement their realization.
+
+Node handle `==` is occurrence/view identity. Use `graph_equal(...)` to compare
+exact graphs, including facets and alias partitions, or `recipe_equal(...)` for
+recipe-only comparison.
 
 ```python
 from dryml.core import Definition, Generator, Par, UniformFromSet
@@ -44,8 +54,12 @@ roots, and sampled results that leave expressions active fail. Bind static
 values with `Definition.sub(...)` before creating a Generator. Providers are
 stored by sorted fully-qualified root name, preserving deterministic RNG draw
 and grid order. Generator construction does not sample, resolve targets,
-construct Objects, or persist providers. `sample()` and `grid()` return only
-resolved Definitions and are all-or-error at their provider boundary.
+construct Objects, or persist providers. `sample()` and `grid()` return resolved
+Node descriptions and are all-or-error at their provider boundary. They do not
+fill omitted defaults, allocate identities, or capture state. A ConcreteNode can
+be supplied as a fixed zero-root generator and is returned unchanged. Explicit
+`concretize()` binds construction defaults without allocating ObjectIds; the
+original query/generation description retains its omissions.
 
 ## Authoring Helpers
 
@@ -76,7 +90,7 @@ unexpected arguments fail before policies run. These are the supported controls:
 
 | Control | Responsibility |
 | --- | --- |
-| `author_definition` | Required callback returning an inert Definition from the bound mapping. It must not construct or materialize the described graph. |
+| `author_definition` | Required callback returning an inert Node (Definition or ConcreteNode) from the bound mapping. The exact returned handle and its facets are retained. It must not construct or materialize the described graph. |
 | `should_author` | Optional exact-bool predicate on the mapping. The default detects soft Definitions and Expr values through supported containers, factory arguments, and Mat links, while preserving Ref/quotation barriers. Exact references alone do not select authoring. |
 | `validate_known_arguments` | Optional authoring-only validator called before the builder. Reject known literal errors; defer expression-dependent checks to graph binding. |
 | `normalize_concrete` | Exact bool, default false. Opt into core `function` argument/return normalization on the concrete path only. |
@@ -100,22 +114,25 @@ core does not import those consumer packages.
 
 ## Receiving Roles
 
-`Mat[Definition]`, `Ref[Definition]`, and bare `Template` are receiving roles,
+`Mat[T]`, `Ref[Node]`, and bare `Template` are receiving roles,
 not alternate construction-value types.
 
 | Receiving annotation | Accepts | Delivers | Active-expression rule |
 | --- | --- | --- | --- |
-| `Mat[Definition]` | materializing Definition structure | materialized Object | After activated roles establish quotation barriers, materializing structure must be resolved before CDef, Repo, target, cache, or Store effects. |
-| `Ref[Definition]` | selected Definition | Definition | The selected authored Definition must be resolved; constructor completeness is not tested. |
-| `Template` or `Template[Definition]` | symbolic or resolved Definition, including compatible `Ref(definition)` | Definition | Symbolic content is inert quotation data. |
+| `Mat[T]`, with T an Object class | compatible live Object or construction description | live T | After activated roles establish quotation barriers, active construction must be resolved before materialization effects. Legacy `Mat[Definition]`/`Mat[ConcreteDefinition]` remain available. |
+| `Ref[Node]` | selected Node metadata | Node | Symbolically resolved; no defaults or constructor-completeness check. |
+| `Ref[ConcreteNode]` | normalized Node metadata | same ConcreteNode | Requires normalization already present; no implicit concretization. |
+| `Ref[SavedNode]` | normalized, saved-complete Node metadata | same ConcreteNode handle | Uses `require_saved`; neither capture nor availability is implied. |
+| `Template` or `Template[Node]` | symbolic or resolved Node, including compatible `Ref(node)` | same Node | Future recipe is inert quotation data. |
 
-Bare `Template` is exactly shorthand for `Template[Definition]`. It cannot be
-instantiated, has no other subscription target, and is not a runtime recipe
+Bare `Template` is shorthand for `Template[Node]`; `Template[Definition]` is
+retained as an equivalent authoring spelling. It cannot be instantiated, has no
+other subscription target, and is not a runtime recipe
 value. Role admission is delayed until the annotated boundary is activated. An
 authored outer Definition can therefore remain structurally unresolved because a
 nested Template slot carries an active expression, while materialization of that
 outer Definition succeeds because the nested recipe is quotation data. The same
-outer Definition supplied to `Ref[Definition]` is rejected without inspecting the
+outer Definition supplied to `Ref[Node]` (or retained `Ref[Definition]`) is rejected without inspecting the
 outer constructor roles.
 
 `Ref(definition)` records a lossless non-materializing assertion and does not
@@ -127,8 +144,9 @@ they are delivered as `QuotedDef` only through an explicit `Ref[QuotedDef]` role
 ## Experiment Artifact Mappings
 
 `Experiment.artifacts` accepts only `Mapping[str, Template] | None`, with
-`Mapping[str, Template[Definition]]` as the equivalent long spelling. Each value
-is admitted separately as a Template-role Definition. Keys must be nonempty
+`Mapping[str, Template[Node]]` as the equivalent long spelling; the Definition
+spelling is also retained. Each value is admitted separately as a Template-role
+Node. Keys must be nonempty
 strings; lists, tuples, singleton recipes, nested mappings, non-Definition
 values, and non-string keys fail before training effects. At the activated
 Experiment boundary, entries are ordered by `canonical_key_bytes`; that canonical
@@ -153,16 +171,25 @@ graphs across those snapshots. Repeated runs of one definition can create
 multiple object graphs; checkpoints can create multiple states of one object.
 
 `Generator.support_selector()` returns `GeneratorSelector`, which proves exact
-finite support including linked roots, arithmetic, ordering, and construction
-graph topology. Conservative provider bounds may reject a candidate but never
+finite support including linked roots, arithmetic, ordering, fixed identity/state
+facets, and construction graph topology. Graph-valued choices use bounded finite
+witness enumeration rather than process-local handle membership. Conservative provider bounds may reject a candidate but never
 prove membership. An unavailable finite proof raises
 `UnsupportedGeneratorVerificationError`; bounded grid and proof operations
 raise `ParameterizationLimitError` rather than returning partial results.
 
 Only immutable built-in distributions are portable selector data. A
 `GeneratorSelector` keeps the established `dryml-template` v1
-`template-selector` payload tag and canonical bytes for compatible definitions;
-it decodes directly to Definition-based state. A Generator and arbitrary runtime
+`template-selector` payload tag and canonical bytes for compatible definitions.
+Descriptions requiring Node-only evidence explicitly select the separate
+`dryml-node-template` v1 family, retaining that kind and embedding one authenticated
+`dryml-node-graph/v1` packet. The description and domain choices share one table,
+so cross-choice aliases, facets, roles, and retained construction evidence survive
+decoding. Node expression quotations use this same family when needed; compatible
+legacy expressions retain `dryml-definition-expression` v1. Both families have
+bounded, closed, canonical decoding. Incompatible versions and malformed packets
+fail without rewriting the input; legacy readers do not reinterpret new facets.
+A Generator and arbitrary runtime
 providers are intentionally nonportable. GeneratorSelector works with Repo
 queries and save routing while retaining exact witness verification.
 

@@ -14,16 +14,32 @@ operation to activate them.
 
 `Ref[T]` selects and delivers reference or quotation data. `Mat[T]` selects the
 same authority but asks the caller-provided Repo to realize it. `Template` is a
-third fixed role, shorthand for `Template[Definition]`: it accepts symbolic or
-resolved Definitions as inert quotation data and delivers a plain Definition.
+third fixed role, shorthand for `Template[Node]`: it accepts symbolic or
+resolved Nodes as inert quotation data and delivers the same immutable handle.
+`Template[Definition]` remains an equivalent authoring spelling.
 `Ref(value)` and
 `Mat(value)` are assertions, not conversion requests: an opposing assertion fails
 before selection. An unannotated slot is `Mat` by default. Scalars and a directly
 supplied live `Object` continue to pass through naturally, while an unannotated
 `Definition`, `ConcreteDefinition`, `ObjectRef`, or `StateRef` is materialized.
 
-Supported exact targets are `Definition`, `ConcreteDefinition`, `ObjectRef`,
-`StateRef`, `Object`, `QuotedDef`, `Selector`, and `SelectorSpec` where applicable.
+Supported reference metadata targets include `Node`, `ConcreteNode`, and
+`SavedNode`. `Ref[Node]` requires symbolically resolved metadata, preserving
+constructor omissions and exact facets. `Ref[ConcreteNode]` additionally requires
+already normalized construction structure; it never normalizes a soft input.
+`SavedNode` is an `Annotated` completeness refinement, not another runtime wrapper:
+`Ref[SavedNode]` runs `require_saved` and returns the same handle. Completeness
+does not assert payload availability or current-use state compatibility.
+
+`Ref[IdentitySpec]` and `Ref[StateSpec]` deliver independent partial facet maps as
+metadata, extracting the materializing ownership closure from a supplied Node.
+They do not capture or allocate missing facets. Retained exact targets are
+`Definition`, `ConcreteDefinition`, `ObjectRef`, `StateRef`, `Object`, `QuotedDef`,
+`Selector`, and `SelectorSpec` where applicable. `Mat[T]` accepts an Object class
+(including a subclass), validates the target class, and leaves the one owning
+aggregate Repo boundary to concretize/materialize it. `Mat[Node]` and its
+refinements are invalid metadata targets; legacy `Mat[Definition]` and
+`Mat[ConcreteDefinition]` remain available for existing consumers.
 Exact requests deliver that exact authority: a `StateRef` supplied to
 `Ref[ObjectRef]` delivers its `ObjectRef`, for example. `Ref[AutoRef]` retains an
 incoming reference kind; for a live Object it selects CDef for an entirely
@@ -40,16 +56,21 @@ automatic input saving or materialization during construction, readiness, value
 access, and result restoration. Fold's managed compute boundary deliberately
 materializes that reference through its selected state Repo.
 
-Same-role unions such as `Ref[ConcreteDefinition | ObjectRef | StateRef]` select
-the strictest reachable authority independent of member order. Ambiguous
-strengthening fails instead of falling back. Nullable forms are flat:
+Same-role unions use a capability partial order, independent of member order.
+For example, `Ref[Node | ConcreteNode | SavedNode]` selects the uniquely available
+maximal refinement, preserving the selected handle and facets. Independent
+identity/state alternatives such as `Ref[IdentitySpec | StateSpec]` are ambiguous
+when both deliveries are available and raise `SignatureError`; neither dimension
+is silently preferred or discarded. Retained legacy compound-reference unions
+are comparable by their actual guarantees. Ambiguous strengthening fails instead
+of falling back. Nullable forms are flat:
 `Ref[ObjectRef | None]` and `Ref[ObjectRef] | None` accept a plain `None`;
 distributed forms such as `Ref[ConcreteDefinition] | Ref[ObjectRef] | None` are
 equivalent. Only plain `None` may appear outside role branches, and opposing value
 wrappers still conflict before the nullable branch is considered. `Ref[None]` does
 not compile. Ref/Mat forms are top-level only. Nested roles such as
 `list[Ref[ObjectRef]]`, container targets, mixed Ref/Mat unions, incomparable data
-unions, and Object-subclass annotations fail with `SignatureError`.
+unions, and Ref Object-subclass annotations fail with `SignatureError`.
 
 `QuotedDef` and `SelectorSpec` are expression data. Use `Ref[QuotedDef]`,
 `Ref[Selector]`, or `Ref[SelectorSpec]` to wrap, unwrap, or deliver them without
@@ -61,21 +82,25 @@ interpretation. Query indexing and matching treat these constructor markers as t
 quotation payloads rather than as graph boundaries.
 
 `Template` is annotation vocabulary, not a runtime recipe value: `Template(...)`,
-`Ref[Template]`, and subscriptions other than `Template[Definition]` are invalid.
-The three Definition boundaries are deliberately distinct: `Ref[Definition]`
-delivers only a symbolically resolved Definition without testing constructor
-completeness; `Mat[Definition]` admits role-normalized materializing structure
-before CDef, Repo, target, cache, or Store effects; and `Template` leaves symbolic
+`Ref[Template]`, and subscriptions other than `Template[Node]` and its retained
+Definition spelling are invalid. The three boundaries are deliberately distinct:
+Ref Node metadata is symbolically resolved without filling defaults; Mat admits
+role-normalized construction before materialization effects; and Template leaves symbolic
 content inert. A compatible `Ref(definition)` assertion records caller intent but
 cannot bypass the receiving role's expression rule.
 
-Fresh `Ref[Definition]` and `Template` constructor values persist as a Ref link
+Fresh `Ref[Node]`, retained `Ref[Definition]`, and Template constructor values persist as a Ref link
 to `QuotedDef`. This preserves expression data, including bounded parameter and
 arithmetic expressions, without making it a CDef graph edge. Direct `QuotedDef`
 and `Ref[QuotedDef]` remain the explicit wrapper-preserving local-data APIs.
+Node-only expression data uses the closed `dryml-node-template` v1 family with
+the existing authenticated Node graph codec; compatible legacy expression data
+retains its v1 family. Existing V2 Repo/Store boundaries reject unsupported Node
+identity/state facets rather than losing them. This signature cutover does not
+implement Node facet realization or a Store migration.
 
 The only nested Template grammar is `Mapping[str, Template]` (or the equivalent
-`Mapping[str, Template[Definition]]`), optionally unioned with `None`. Activated
+`Mapping[str, Template[Node]]`, including the retained Definition spelling), optionally unioned with `None`. Activated
 normalization validates string keys, orders entries by `canonical_key_bytes`, and
 admits every value independently. Lists, tuples, nested mappings, non-string
 keys, and nested Ref/Mat forms are rejected.

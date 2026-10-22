@@ -319,16 +319,16 @@ def _active_parameters(value: object) -> tuple[Par, ...]:
 
 
 class Template:
-    """Annotation-only shorthand for a symbolic :class:`Definition` slot.
+    """Annotation-only shorthand for an inert future :class:`Node` recipe.
 
-    ``Template`` is equivalent to ``Template[Definition]`` at an activated
-    signature boundary. It accepts a symbolic or resolved Definition through Ref
-    authority, persists it as ``QuotedDef`` data, and delivers a Definition
+    ``Template`` is equivalent to ``Template[Node]`` at an activated
+    signature boundary. It accepts a symbolic or resolved Node through Ref
+    authority, persists it as ``QuotedDef`` data, and delivers the same Node
     without materializing it.
 
     Raises:
         TypeError: If called as a runtime value or subscribed with anything other
-            than exactly ``Definition``.
+            than exactly ``Node`` or the retained ``Definition`` authoring spelling.
 
     Side Effects:
         None. This marker creates no recipe value and never resolves a target.
@@ -339,16 +339,16 @@ class Template:
 
     @classmethod
     def __class_getitem__(cls, target):
-        """Return the fixed symbolic Definition role annotation.
+        """Return the fixed inert Node role annotation.
 
         Args:
-            target: The exact ``Definition`` class.
+            target: Exact ``Node`` or retained ``Definition`` authoring spelling.
 
         Returns:
             The same passive annotation role as bare ``Template``.
 
         Raises:
-            TypeError: If ``target`` is not exactly ``Definition``.
+            TypeError: If ``target`` is not exactly ``Node`` or ``Definition``.
 
         Side Effects:
             None. Subscription creates annotation metadata only and does not
@@ -358,11 +358,12 @@ class Template:
         from typing import Annotated
 
         from .definition import Definition
+        from .node import Node
         from .signatures import _Role
 
-        if target is not Definition:
-            raise TypeError("Template supports only the exact Definition target.")
-        return Annotated[Definition, _Role("template")]
+        if target not in (Node, Definition):
+            raise TypeError("Template supports only the exact Node target (or exact Definition authoring spelling).")
+        return Annotated[Node, _Role("template")]
 
 def _is_definition_value(value: object, *, include_authority: bool = False) -> bool:
     """Recognize inert authoring inputs, optionally including exact authority.
@@ -536,6 +537,7 @@ def _snapshot_parameters(value: object, *, traverse_refs: bool) -> tuple[Par, ..
 
     found: list[Par] = []
     seen: set[int] = set()
+    prepared = _prepare_symbolic_nodes(value)
 
     def visit(current: object) -> None:
         if isinstance(current, Par):
@@ -554,7 +556,7 @@ def _snapshot_parameters(value: object, *, traverse_refs: bool) -> tuple[Par, ..
         children = _template_children(current)
         if not children:
             return
-        marker = id(current)
+        marker = _symbolic_marker(current, prepared)
         if marker in seen:
             return
         seen.add(marker)
@@ -563,6 +565,41 @@ def _snapshot_parameters(value: object, *, traverse_refs: bool) -> tuple[Par, ..
 
     visit(value)
     return tuple(found)
+
+
+def _prepare_symbolic_nodes(value):
+    """Own one shared occurrence table for symbolic Node analysis/rewriting."""
+    from .node import Node
+    from .node_prepare import NodePreparation
+
+    return NodePreparation((value,)) if isinstance(value, Node) else None
+
+
+def _symbolic_marker(value, prepared):
+    from .node import Node
+
+    if prepared is not None and isinstance(value, Node):
+        return ("node", prepared._identity_slots.get(value._view, value._view))
+    return id(value)
+
+
+def _rebuild_symbolic_node(node, args, parameters, *, fresh=False):
+    """Retain exact facets while invalidating changed construction evidence."""
+    from .bound_args import BoundArguments
+    from .definition import ConcreteDefinition
+    from .node import Node, _clone
+
+    if isinstance(node, Node):
+        result = _clone(node, args, parameters, node._facets, reset_construction=True)
+        if fresh:
+            token = object()
+            object.__setattr__(result, "_occurrence", token)
+            if isinstance(result, ConcreteDefinition):
+                object.__setattr__(result, "_node_id", token)
+        return result
+    return ConcreteDefinition._from_bound_record(
+        node.cls, BoundArguments(parameters.items()), stateful_role=node._stateful_role,
+    )
 
 
 def _validate_distribution_free(value: object) -> None:
@@ -699,13 +736,13 @@ def _rewrite_template_value(
 ) -> object:
     """Perform one memoized copy-on-write traversal over pre-selected values."""
 
-    from .bound_args import BoundArguments
     from .cdef_graph import EdgeKind
     from .definition import ConcreteDefinition, Definition
     from .factory import FactorySpec
     from .links import DefLink
 
     memo: dict[int, object] = {}
+    prepared = _prepare_symbolic_nodes(value)
 
     def rewrite(current: object) -> object:
         if isinstance(current, Par):
@@ -773,7 +810,7 @@ def _rewrite_template_value(
             memo[marker] = result
             return result
         if isinstance(current, ConcreteDefinition):
-            marker = id(current)
+            marker = _symbolic_marker(current, prepared)
             if marker in memo:
                 return memo[marker]
             parameters = FrozenDict(
@@ -782,15 +819,11 @@ def _rewrite_template_value(
             unchanged = all(
                 parameters[key] is item for key, item in current.parameters.items()
             )
-            result = current if unchanged else ConcreteDefinition._from_bound_record(
-                current.cls,
-                BoundArguments(parameters.items()),
-                stateful_role=current._stateful_role,
-            )
+            result = current if unchanged else _rebuild_symbolic_node(current, None, parameters)
             memo[marker] = result
             return result
         if isinstance(current, Definition):
-            marker = id(current)
+            marker = _symbolic_marker(current, prepared)
             if marker in memo:
                 return memo[marker]
             args = None if current.args is None else FrozenTuple(rewrite(item) for item in current.args)
@@ -799,7 +832,7 @@ def _rewrite_template_value(
                 (args is None and current.args is None)
                 or (args is not None and all(new is old for new, old in zip(args, current.args)))
             ) and all(kwargs[key] is value for key, value in current.kwargs.items())
-            result = current if unchanged else Definition._from_symbolic_parts(current.cls, args, kwargs)
+            result = current if unchanged else _rebuild_symbolic_node(current, args, kwargs)
             memo[marker] = result
             return result
         if isinstance(current, Mapping):
@@ -858,7 +891,6 @@ class _ExpressionBudget:
 def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> object:
     """Evaluate resolved expression leaves with one cumulative expansion budget."""
 
-    from .bound_args import BoundArguments
     from .definition import ConcreteDefinition, Definition
     from .cdef_graph import EdgeKind
     from .factory import FactorySpec
@@ -866,6 +898,7 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
 
     budget = _ExpressionBudget()
     memo: dict[int, object] = {}
+    prepared = _prepare_symbolic_nodes(value)
 
     def evaluate(current: object, depth: int = 0) -> object:
         if isinstance(current, Par):
@@ -969,17 +1002,18 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
                 return DefLink.finalized(current.kind, target)
             return DefLink.assertion(current.kind, target)
         if isinstance(current, ConcreteDefinition):
+            marker = _symbolic_marker(current, prepared)
+            if marker in memo:
+                return memo[marker]
             parameters = FrozenDict(
                 (key, evaluate(item, depth))
                 for key, item in current.parameters.items()
             )
             if all(parameters[key] is item for key, item in current.parameters.items()):
                 return current
-            return ConcreteDefinition._from_bound_record(
-                current.cls,
-                BoundArguments(parameters.items()),
-                stateful_role=current._stateful_role,
-            )
+            result = _rebuild_symbolic_node(current, None, parameters)
+            memo[marker] = result
+            return result
         if isinstance(current, FactorySpec):
             marker = id(current)
             if marker in memo:
@@ -993,7 +1027,7 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
             memo[marker] = result
             return result
         if isinstance(current, Definition):
-            marker = id(current)
+            marker = _symbolic_marker(current, prepared)
             if marker in memo:
                 return memo[marker]
             args = None if current.args is None else FrozenTuple(evaluate(item, depth) for item in current.args)
@@ -1001,8 +1035,8 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
             result = current if (
                 (args is None and current.args is None)
                 or (args is not None and all(new is old for new, old in zip(args, current.args)))
-            ) and all(kwargs[key] is item for key, item in current.kwargs.items()) else Definition._from_symbolic_parts(
-                current.cls, args, kwargs
+            ) and all(kwargs[key] is item for key, item in current.kwargs.items()) else _rebuild_symbolic_node(
+                current, args, kwargs
             )
             memo[marker] = result
             return result
@@ -1048,7 +1082,6 @@ def _evaluate_template_value(value: object, *, traverse_refs: bool = False) -> o
 def _copy_template_construction_value(value: object, memo: dict[int, object]) -> object:
     """Copy owned construction nodes while leaving explicit reference boundaries exact."""
 
-    from .bound_args import BoundArguments
     from .definition import ConcreteDefinition, Definition
     from .cdef_graph import EdgeKind
     from .factory import FactorySpec
@@ -1075,11 +1108,7 @@ def _copy_template_construction_value(value: object, memo: dict[int, object]) ->
             (key, _copy_template_construction_value(item, memo))
             for key, item in value.parameters.items()
         )
-        result = ConcreteDefinition._from_bound_record(
-            value.cls,
-            BoundArguments(parameters.items()),
-            stateful_role=value._stateful_role,
-        )
+        result = _rebuild_symbolic_node(value, None, parameters, fresh=True)
         memo[marker] = result
         return result
     if isinstance(value, Definition):
@@ -1090,7 +1119,7 @@ def _copy_template_construction_value(value: object, memo: dict[int, object]) ->
             (key, _copy_template_construction_value(item, memo))
             for key, item in value.kwargs.items()
         )
-        result = Definition._from_symbolic_parts(value.cls, args, kwargs)
+        result = _rebuild_symbolic_node(value, args, kwargs, fresh=True)
         memo[marker] = result
         return result
     if isinstance(value, FactorySpec):
