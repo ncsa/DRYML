@@ -2,7 +2,9 @@
 
 The reservation registry is intentionally independent of Store identity. Store
 locks protect durable authority, while this module prevents two cooperating
-threads in one process from mutating the same retained live graph at once.
+threads in one process from performing overlapping state IO on the same retained
+live graph at once. These reservations protect actual capture/restore/reuse work;
+they are not an execution-lifetime exclusion rule for managed logical operations.
 """
 
 from __future__ import annotations
@@ -55,7 +57,8 @@ if hasattr(os, "register_at_fork"):
 class StateGraphReservation(AbstractContextManager):
     """One active process/thread lease over an exact live state graph.
 
-    Instances are created only by :meth:`Repo.reserve_state_graph`. The lease
+    Instances are created only by :meth:`Repo.reserve_state_graph` for state IO,
+    not to claim an entire managed execution lifetime. The lease
     covers the root's immutable ObjectRef, every stateful ObjectId, and the
     exact live nodes observed during preflight. ``release()`` is idempotent for
     the owning process and thread; inherited or foreign callers cannot release

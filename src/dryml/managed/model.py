@@ -1,61 +1,48 @@
-"""Immutable public value projections for managed lifecycle APIs."""
-
-from __future__ import annotations
+"""Immutable metadata-only managed status and interruption result projections."""
 
 from dataclasses import dataclass
-
-from dryml.core.reference_values import StateRef
-
+from dryml.core.node import Node
 from .control import ControlSnapshot
 
 
 @dataclass(frozen=True, slots=True)
 class ManagedStatus:
-    """Immutable projection of one selected managed operation authority.
+    """Selected authority projection, with no private-data availability promise.
 
-    Args:
-        state: One lifecycle state: ``not_started``, ``running``, ``interrupted``,
-            ``failed``, or ``completed``.
-        operation_id: Stable operation digest.
-        attempt_id: Current attempt identifier, or ``None`` before a start.
-        generation: Monotonic authority generation.
-        checkpoint_state_ref: Last associated checkpoint, if any.
-        final_state_ref: Completed state, if any.
-        interruption_requested: Whether current authority records a request.
-        failure_code: Static failure code, if current authority is failed.
-
-    Side Effects:
-        None. Managed reads selected lifecycle authority into this value.
+    state/operation_id identify lifecycle and stable operation; run_id and
+    invocation_id are distinct UUID hex or None before admission. generation is
+    the authority fence. checkpoint/final are detached SavedNodes or None;
+    interruption_requested is bool, failure_code optional static text, and
+    producer_invocation_id identifies historical completion rather than a later
+    replay caller. Construction returns an immutable value, performs no IO or
+    retention, and imposes no additional validation beyond its owning reader.
     """
-
     state: str
     operation_id: str
-    attempt_id: str | None
+    run_id: str | None
+    invocation_id: str | None
     generation: int
-    checkpoint_state_ref: StateRef | None
-    final_state_ref: StateRef | None
+    checkpoint: Node | None
+    final: Node | None
     interruption_requested: bool
     failure_code: str | None
+    producer_invocation_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class InterruptRequestResult:
-    """Immutable result of a cooperative interruption request.
+    """Immutable outcome of selected run/invocation/generation request admission.
 
-    Args:
-        outcome: One of ``requested``, ``already_requested``, ``not_running``, or
-            ``stale_attempt``.
-        operation_id: Stable operation digest addressed by the request.
-        attempt_id: Attempt observed while processing the request, if any.
-        generation: Committed authority generation observed by the request.
-
-    Side Effects:
-        None. Managed publishes and reports the selected request outcome.
+    outcome is requested/already_requested/not_running/stale_run/stale_invocation/
+    stale_generation/changed; operation_id is stable. run_id/invocation_id are the
+    observed UUIDs or None, generation is the observed fence or zero. Construction
+    performs no IO or validation; the control reader owns field admission. This
+    value promises request acceptance only, not checkpointing or cancellation.
     """
-
     outcome: str
     operation_id: str
-    attempt_id: str | None
+    run_id: str | None
+    invocation_id: str | None
     generation: int
 
 

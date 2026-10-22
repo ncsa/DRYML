@@ -93,7 +93,8 @@ read private state or open Stores.
 Creation/compatibility policies use the same preparation/encoding. The format-4
 Store APIs below consume these blocks through their mutation journal.
 Store-owned query coverage and active-use leases consume the same authority;
-Repo/reference consumer integration and managed-format cutovers remain separate work.
+managed control consumes this family as documented below, with lifecycle execution
+integration separately owned by the later managed units.
 
 ### Store Format 4: CDef-Owned State And Metadata Readers
 
@@ -619,17 +620,28 @@ part of the fixture commitment.
 
 Managed lifecycle control is separate bounded canonical-JSON authority in the
 caller-selected control DirStore. Its records are independently versioned:
-`dryml-managed` v1 is the format gate, `dryml-managed-current` v2 is the current
-generation snapshot, and `dryml-managed-pending` v1 is a replacement intent.
-They contain operation/attempt identity, lifecycle state, interruption request,
-Store/ObjectId ownership evidence, and associated checkpoint/final StateRef
-digests. They never contain Object payloads, Repo handles, portable Repo
-definitions, or a Python continuation.
+`dryml-managed` **format 2** is the area gate, `dryml-managed-current` **record 3**
+is current generation authority, and `dryml-managed-pending` **record 2** identifies
+exact previous/proposed generation and byte fingerprints. Area format 2 explicitly
+rejects old current-record version 2 and the retired operation namespace.
+Current records contain detached receiver Node metadata, projection-plus-member
+operation identity, separate ordinary-argument evidence, run/invocation/producer
+UUIDs, generation, lifecycle state, targeted interruption, saved checkpoint/final
+metadata, and bounded history/resource-intent evidence. Named managed Node,
+history and root-intent records use their own version 1; nested Node graph,
+reference and StateKey versions are validated independently. No Object payload,
+Repo handle, portable Repo definition or Python continuation is stored.
 
-Control publication uses short same-host locks and atomic replacement. Pending
+One nonblocking operation-lifetime lock is independent of short same-host control
+locks. Journal invalidation precedes short CAS; classification, projection/SQL and
+acknowledgement follow control release. Generic current-record projection is
+integrated; full lifecycle-relation coverage remains explicitly unavailable.
+Status validates historical metadata without opening private state. Pending
 intents and replacement snapshots are written as same-directory temporary files
 before publication. POSIX publication syncs the parent directory; the Windows
 adapter syncs regular files and atomic replacement without claiming unsupported
 directory-descriptor fsync. Unsupported, malformed, incomplete, unreadable, or
 pending control authority fails reconciliation rather than becoming a fabricated
-status. There is no compatibility reader.
+status. Old authority is preserved unchanged; there is no compatibility reader or
+automatic conversion. See [Managed Operations](managed_operations.md) for U14's
+foundation boundary and the later start/checkpoint/result/transport integrations.

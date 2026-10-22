@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import math
+from dataclasses import dataclass, field
 
 from dryml.core.reference_values import ObjectId, ObjectRef, StateRef
+from dryml.core.node import Node
 
 from .errors import ManagedConfigError
 
-_OPERATION_DOMAIN = b"dryml-managed-operation-v1\x00"
+_OPERATION_DOMAIN = b"dryml-managed-operation-v2\x00"
 _ARGUMENT_DOMAIN = b"dryml-managed-arguments-v1\x00"
 _MAX_DEPTH = 16
 _MAX_VALUES = 4096
@@ -19,11 +21,11 @@ _MAX_INT_BITS = 256
 _MAX_TEXT_BYTES = 64 * 1024
 
 
-def operation_digest(object_ref: ObjectRef, member: str) -> str:
-    """Return the stable digest for one exact ObjectRef and managed member.
+def operation_digest(receiver: Node, member: str) -> str:
+    """Return canonical object-projection-plus-member identity within an authority.
 
     Args:
-        object_ref: Exact immutable ObjectRef of the method receiver graph.
+        receiver: Detached concrete Node receiver, with required ObjectIds bound.
         member: Exact non-empty Python member name recorded by the descriptor.
 
     Returns:
@@ -36,22 +38,84 @@ def operation_digest(object_ref: ObjectRef, member: str) -> str:
         None. Arguments, stores, and config choices do not affect this identifier.
     """
 
-    if type(object_ref) is not ObjectRef:
-        raise ManagedConfigError(message="operation object_ref must be an exact ObjectRef")
+    _receiver(receiver)
     _validate_member(member)
-    return _operation_digest_from_object_ref_digest(object_ref.digest(), member)
+    return _operation_digest_from_projection(receiver.object_projection_digest(), member)
 
 
-def _operation_digest_from_object_ref_digest(object_ref_digest: str, member: str) -> str:
+def _operation_digest_from_projection(projection_digest: str, member: str) -> str:
     """Return the operation identity from already validated control components.
 
     This internal helper keeps control persistence on the same canonical encoding
-    as :func:`operation_digest` without constructing an ObjectRef from a digest.
+    as :func:`operation_digest` without constructing or realizing a receiver.
     """
 
     return hashlib.sha256(
-        _OPERATION_DOMAIN + _atom(b"object-ref", object_ref_digest.encode("ascii")) + _atom(b"member", member.encode("utf-8"))
+        _OPERATION_DOMAIN + _atom(b"object-projection/v2", projection_digest.encode("ascii")) + _atom(b"member", member.encode("utf-8"))
     ).hexdigest()
+
+
+def _receiver(receiver):
+    from dryml.core.definition import ConcreteNode
+    from dryml.core.node import _owned_nodes
+    if not isinstance(receiver, ConcreteNode):
+        raise ManagedConfigError(message="managed receiver must be detached concrete Node metadata")
+    identities = set()
+    for _, node in _owned_nodes(receiver, strict=True):
+        if node._stateful_role and node.object_id is None:
+            raise ManagedConfigError(message="managed receiver requires bound stateful ObjectIds")
+        if node.object_id is not None:
+            if node.object_id in identities:
+                raise ManagedConfigError(message="independent managed receiver Nodes cannot share an ObjectId")
+            identities.add(node.object_id)
+        if node.state is not None:
+            try:
+                node.state.validate_for(node, codec=node.state.codec)
+            except (ValueError, TypeError) as error:
+                raise ManagedConfigError(message="managed receiver has incompatible selected state metadata") from error
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionIdentity:
+    """Detached metadata-only admission facts shared by direct and transport callers.
+
+    receiver is concrete Node metadata, member is the selected declared identifier,
+    and argument_digest is separate normalized ordinary-argument evidence. Invalid
+    metadata raises ManagedConfigError. Construction computes pure identity facts;
+    it never resolves symbols, constructs Objects, reads state, or opens Stores.
+    """
+
+    receiver: Node
+    member: str
+    argument_digest: str
+    _operation_id: str = field(init=False, repr=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, "_operation_id", operation_digest(self.receiver, self.member))
+        if (type(self.argument_digest) is not str or len(self.argument_digest) != 64
+                or any(c not in "0123456789abcdef" for c in self.argument_digest)):
+            raise ManagedConfigError(message="argument_digest must be a lowercase SHA-256 digest")
+
+    @property
+    def operation_id(self):
+        """Return stable projection/member digest; arguments and payloads are excluded."""
+        return self._operation_id
+
+    @classmethod
+    def from_call(cls, receiver, descriptor, args, kwargs):
+        """Bind detached receiver and checked declaration to ordinary argument facts.
+
+        receiver is a concrete Node; descriptor is the selected managed declaration;
+        args/kwargs are native tuple/dict caller values. Returns AdmissionIdentity.
+        Invalid declaration, binding or unsupported values raise ManagedConfigError.
+        Binding uses the Node as an inert first parameter, with no realization/IO.
+        Explicit signature authority must be normalized by its owning adapter before
+        using the direct constructor; this method handles the closed ordinary grammar.
+        """
+        from .descriptor import ManagedOperation
+        if not isinstance(descriptor, ManagedOperation):
+            raise ManagedConfigError(message="admission requires selected managed declaration evidence")
+        return cls(receiver, descriptor.member, argument_digest(descriptor, receiver, args, kwargs))
 
 
 def argument_digest(descriptor: object, instance: object, args: tuple[object, ...], kwargs: dict[str, object]) -> str:
@@ -196,6 +260,8 @@ class _ArgumentEncoder:
             return self._leaf_size(b"object-ref", len(value.digest().encode("ascii")), budget)
         if value_type is StateRef:
             return self._leaf_size(b"state-ref", len(value.digest().encode("ascii")), budget)
+        if isinstance(value, Node):
+            return self._leaf_size(b"node-exact/v1", len(value.exact_digest().encode("ascii")), budget)
         if value_type in (list, tuple, dict):
             return self._measure_container(value, path, depth, budget)
         object_ref = _live_object_ref(value)
@@ -266,6 +332,8 @@ class _ArgumentEncoder:
             self._emit_atom(b"object-ref", value.digest().encode("ascii"))
         elif value_type is StateRef:
             self._emit_atom(b"state-ref", value.digest().encode("ascii"))
+        elif isinstance(value, Node):
+            self._emit_atom(b"node-exact/v1", value.exact_digest().encode("ascii"))
         elif value_type in (list, tuple, dict):
             self._emit_container(value, size)
         else:
@@ -413,4 +481,4 @@ def _atom(tag: bytes, payload: bytes) -> bytes:
     return _atom_header(tag, len(payload)) + payload
 
 
-__all__ = ["argument_digest", "operation_digest"]
+__all__ = ["AdmissionIdentity", "argument_digest", "operation_digest"]

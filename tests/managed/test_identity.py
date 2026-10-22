@@ -28,12 +28,14 @@ def test_operation_identity_uses_only_exact_object_ref_and_member(tmp_path):
     """Operation IDs are stable across config and separate from argument identity."""
 
     obj = IdentityObject(1, repo=Repo(DirStore(tmp_path / "store")))
-    first = operation_digest(obj.object_ref, "calculate")
-    second = operation_digest(obj.object_ref, "calculate")
+    first = operation_digest(obj.definition, "calculate")
+    second = operation_digest(obj.definition, "calculate")
 
     assert first == second
     assert len(first) == 64
-    assert first != operation_digest(obj.object_ref, "other")
+    assert first != operation_digest(obj.definition, "other")
+    with pytest.raises(ManagedConfigError):
+        operation_digest(obj.object_ref, "calculate")
     with pytest.raises(ManagedConfigError):
         operation_digest(object(), "calculate")
 
@@ -154,3 +156,28 @@ def test_argument_digest_reports_utf8_and_key_paths_with_bounded_errors(tmp_path
     with pytest.raises(ManagedConfigError) as error:
         argument_digest(descriptor, obj, ({"key" * (64 * 1024 // 3): object()},), {})
     assert len(str(error.value)) < 256
+
+
+def test_projection_weakens_graph_state_but_not_quoted_configuration(tmp_path):
+    """Graph selection changes share an operation; quoted recipe changes do not."""
+    from pathlib import Path
+    from dryml.core import Definition
+    from tests.managed.test_u14_authority import Dataset, Experiment
+
+    store = DirStore(tmp_path / "state", query_index="none")
+    recipe = Definition(Dataset).concretize()
+    states = []
+    for payload in (b"one", b"two"):
+        staging = store.create_local_state_staging()
+        Path(staging, "data", "value").write_bytes(payload)
+        states.append(store.install_state(recipe, staging, codec="Test", codec_version=1, interpretation={}).state)
+    first = recipe.with_identity(ObjectId()).with_state(states[0])
+    second = first.with_realization(states={"$": states[1]})
+    a = Definition(Experiment, first).concretize()
+    b = Definition(Experiment, second).concretize()
+    assert operation_digest(a, "run") == operation_digest(b, "run")
+    from dryml.core.utils.graph.path import GraphPath, Parameter
+    configuration = Definition(IdentityObject, 1).concretize()
+    quoted_a = configuration.lens(GraphPath((Parameter("value"),))).set(first.quote())
+    quoted_b = configuration.lens(GraphPath((Parameter("value"),))).set(second.quote())
+    assert operation_digest(quoted_a, "calculate") != operation_digest(quoted_b, "calculate")

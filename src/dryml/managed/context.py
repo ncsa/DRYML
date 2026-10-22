@@ -1,281 +1,99 @@
-"""Invocation-scoped safe-point authority exposed to managed method bodies."""
+"""Invocation-scoped identity/fence value for the Node managed lifecycle handoff."""
 
-from __future__ import annotations
-
-import os
-from threading import get_ident
-
-from dryml.core.reference_values import StateRef
-
-from .errors import ManagedContextError, ManagedControlError, ManagedInterrupted
+from .errors import ManagedContextError, ManagedControlError
 
 
 class ManagedContext:
-    """Read-only authority for one active managed invocation.
+    """Read-only active admission identity and selected authority references.
 
-    Instances are created only by the managed runtime after state ownership and
-    the running control snapshot are established. They become inactive when the
-    method exits and cannot transfer across a thread or process. The context
-    borrows its resolved Repo/control Store and owns no caller resource lifetime.
-    Private publication events retire before hooks and never extend the validity
-    of state associated by a checkpoint or independent recovery operation.
+    Runtime-created contexts borrow control_store/state_repo, retain an active
+    operation admission, and expose run/invocation/generation distinctly. Foreign
+    process/thread/task or retired use raises ManagedContextError. No Core graph
+    reservation lasts through execution. Checkpoint/final policy is integrated by
+    U16; the U14 context fails explicitly before legacy publication effects.
     """
 
-    def __init__(self, token, *, control_store, operation_id: str,
-                 attempt_id: str, owner_id: str, is_resuming: bool,
-                  checkpoint_state_ref: StateRef | None, obj, state_repo,
-                  ownership, control, callbacks, snapshot_observer) -> None:
-        """Initialize private runtime authority; callers receive no construction API."""
+    def __init__(self, token, *, admission, control, generation):
+        """Bind private admission/control/generation; invalid token raises ManagedContextError.
 
+        Inputs are an active OperationAdmission, ManagedControlStore and integer
+        fence. Returns None; no Store IO, state capture or ownership acquisition.
+        """
         if token is not _CONTEXT_TOKEN:
             raise ManagedContextError("context_construction", "managed contexts are runtime-created")
-        self._control_store = control_store
-        self._operation_id = operation_id
-        self._attempt_id = attempt_id
-        self._owner_id = owner_id
-        self._is_resuming = is_resuming
-        self._checkpoint_state_ref = checkpoint_state_ref
-        self._obj = obj
-        self._state_repo = state_repo
-        self._ownership = ownership
-        self._control = control
-        self._callbacks = callbacks
-        self._snapshot_observer = snapshot_observer
-        self._pid = os.getpid()
-        self._thread_id = get_ident()
+        self._admission, self._control, self._generation = admission, control, generation
         self._active = True
-        self._checkpointing = False
-        self._interruption_cause: BaseException | None = None
-        self._terminal_interrupted = False
-        self._failure_code: str | None = None
-        self._safe_point_error: BaseException | None = None
-        self._publication_event = None
 
     @property
-    def active(self) -> bool:
-        """Return whether this context remains usable by its creating caller."""
+    def active(self):
+        """Return bool for the original caller's still-active invocation lifetime."""
+        return self._active and self._admission.active
 
-        return (
-            self._active and not self._terminal_interrupted
-            and self._pid == os.getpid() and self._thread_id == get_ident()
-        )
+    @property
+    def operation_id(self):
+        """Return stable operation digest (str), without IO."""
+        return self._admission.identity.operation_id
+
+    @property
+    def run_id(self):
+        """Return stable run UUID hex (str), retained across ordinary resume."""
+        return self._admission.run_id
+
+    @property
+    def invocation_id(self):
+        """Return fresh caller invocation UUID hex (str), distinct from producer."""
+        return self._admission.invocation_id
+
+    @property
+    def generation(self):
+        """Return this context's integer authority fence; it is not a fresh observation."""
+        return self._generation
 
     @property
     def state_repo(self):
-        """Return this invocation's resolved, borrowed state ``Repo``.
-
-        The Repo retains supplied routing and connected Store handles.  A supplied
-        Store is represented by a non-owning one-Store Repo wrapper, which is
-        released after the managed invocation without closing that Store.
-        """
-
-        return self._state_repo
+        """Return borrowed selected Repo without changing its lifetime or routing."""
+        return self._control.state_repo
 
     @property
     def control_store(self):
-        """Return the caller-selected control ``DirStore`` without changing it."""
+        """Return borrowed selected control DirStore without opening/closing it."""
+        return self._control.control_store
 
-        return self._control_store
+    def checkpoint(self):
+        """Validate the active fence then explicitly refuse unintegrated U16 policy.
 
-    @property
-    def operation_id(self) -> str:
-        """Return the stable identity of this managed member invocation."""
-
-        return self._operation_id
-
-    @property
-    def attempt_id(self) -> str:
-        """Return the current durable attempt identifier."""
-
-        return self._attempt_id
-
-    @property
-    def is_resuming(self) -> bool:
-        """Return whether this method entry followed exact checkpoint restoration."""
-
-        return self._is_resuming
-
-    @property
-    def checkpoint_state_ref(self) -> StateRef | None:
-        """Return the retained associated checkpoint, if this attempt has one."""
-
-        return self._checkpoint_state_ref
-
-    def checkpoint(self) -> StateRef:
-        """Publish a complete checkpoint and service an already-pending request.
-
-        Returns:
-            The exact StateRef associated with this invocation's current attempt.
-
-        Raises:
-            ManagedContextError: If this context is inactive or checkpoint entry is
-                recursive.
-            ManagedInterrupted: If a request was durable before the post-callback
-                safe-point decision.
-
-        Side Effects:
-            Saves through the resolved Repo routing policy, commits only required
-            dirty buffered state Stores, verifies exact recovery, commits control
-            association, invokes callbacks in configured order, and may commit
-            terminal interruption. The publisher's one-use completed event removes
-            only immediate duplicate validation; control and post-callback reads
-            remain fresh. Each framework-owned field transition may validate equal
-            current/proposed references once within its own control-first Repo cut;
-            the cut ends before callbacks. Incomplete state never receives association.
+        Returns no value. Raises ManagedContextError for inactive callers,
+        ManagedConflictError for stale authority, otherwise ManagedControlError.
+        Performs only metadata inspection; no capture, grant or payload effects.
         """
-
-        return self._checkpoint(cause=None, force_interrupt=False)
-
-    def interrupt(self, *, cause: BaseException | None = None) -> None:
-        """Publish a checkpoint, notify callbacks, then terminate this invocation.
-
-        Args:
-            cause: Optional exact exception retained as the outer interruption's
-                exception cause.
-
-        Raises:
-            ManagedContextError: If the context is inactive, recursive, or
-                ``cause`` is not a BaseException.
-            ManagedInterrupted: Always after the interruption transition commits.
-
-        Side Effects:
-            Uses the same routed durable checkpoint and callback boundary as
-            :meth:`checkpoint`, then marks this context terminal. Catching the
-            resulting exception cannot make the managed invocation complete.
-            The interruption decision rereads current authority after callbacks;
-            no checkpoint-association proof survives that boundary.
-        """
-
         self._require_active()
+        current = self._control.inspect(self.operation_id)
+        self._control._fence(current, self.operation_id, self._admission,
+                             self.run_id, self.invocation_id, self.generation)
+        raise ManagedControlError("checkpoint_not_integrated", "Node checkpoint policy awaits U16")
+
+    def interrupt(self, *, cause=None):
+        """Validate optional BaseException cause and fence; refuse unintegrated U16 policy.
+
+        Returns no value and raises as checkpoint(), or ManagedContextError for an
+        invalid cause. This primitive neither saves state nor marks success.
+        """
         if cause is not None and not isinstance(cause, BaseException):
-            raise ManagedContextError("invalid_cause", "interruption cause must be a BaseException or None")
-        self._checkpoint(cause=cause, force_interrupt=True)
-        raise AssertionError("managed interruption safe point must not return")
+            raise ManagedContextError("invalid_cause", "cause must be BaseException or None")
+        self.checkpoint()
 
-    def _checkpoint(self, *, cause: BaseException | None, force_interrupt: bool) -> StateRef:
-        """Perform one nonrecursive safe-point publication while ownership is live."""
-
-        self._require_active()
-        if self._checkpointing:
-            raise ManagedContextError("recursive_checkpoint", "managed checkpoint entry is not recursive")
-        if self._safe_point_error is not None:
-            raise self._safe_point_error
-        self._checkpointing = True
-        report = None
-        try:
-            try:
-                self._ownership.require_owner()
-                publish_managed_state = _publish_managed_state()
-                publication = publish_managed_state(
-                    self._state_repo, self._obj, reservation=self._ownership.reservation,
-                    snapshot_observer=self._snapshot_observer, invocation=self,
-                )
-                state_ref, report = publication.state_ref, publication.report
-                publication.event.consume(self._state_repo, state_ref, report, self)
-                _checkpoint_boundary("state_published")
-                self._control._transition_running_fields(
-                    self._operation_id, attempt_id=self._attempt_id, owner_id=self._owner_id,
-                    kind="checkpoint", digest=state_ref.digest(),
-                )
-                self._checkpoint_state_ref = state_ref
-                _checkpoint_boundary("checkpoint_associated")
-            except BaseException as error:
-                if report is not None and getattr(error, "report", None) is None:
-                    error.report = report
-                self._latch_safe_point_error("publication_error", error)
-                raise
-            try:
-                _checkpoint_boundary("callbacks_started")
-                for callback in self._callbacks:
-                    callback(self._obj, self)
-                _checkpoint_boundary("callbacks_finished")
-            except BaseException as error:
-                self._latch_safe_point_error("callback_error", error)
-                raise
-            try:
-                interrupted = self._control._transition_running_fields(
-                    self._operation_id, attempt_id=self._attempt_id, owner_id=self._owner_id,
-                    kind="interruption", force_interrupt=force_interrupt,
-                )
-            except BaseException as error:
-                if force_interrupt:
-                    self._latch_safe_point_error("publication_error", error)
-                    raise ManagedControlError(
-                        "interruption_recording_failed",
-                        "could not commit managed interruption",
-                    ) from error
-                self._latch_safe_point_error("publication_error", error)
-                raise
-            if interrupted is not None:
-                self._interruption_cause = cause
-                self._terminal_interrupted = True
-                _checkpoint_boundary("interrupted_transition")
-                error = ManagedInterrupted("interrupted", "managed operation stopped at a checkpoint")
-                if cause is not None:
-                    raise error from cause
-                raise error
-            _checkpoint_boundary("interruption_decided")
-            return state_ref
-        finally:
-            self._expire_publication_event()
-            self._checkpointing = False
-
-    def _raise_if_interrupted(self) -> None:
-        """Prevent method code from converting terminal safe-point outcomes into success."""
-
-        if self._safe_point_error is not None:
-            raise self._safe_point_error
-        if not self._terminal_interrupted:
-            return
-        error = ManagedInterrupted("interrupted", "managed operation stopped at a checkpoint")
-        if self._interruption_cause is not None:
-            raise error from self._interruption_cause
-        raise error
-
-    def _latch_safe_point_error(self, code: str, error: BaseException) -> None:
-        """Retain the first genuine safe-point failure for the runtime terminal guard."""
-
-        if self._safe_point_error is None:
-            self._safe_point_error = error
-            self._failure_code = code
-
-    def _require_active(self) -> None:
-        """Reject stale, cross-thread, or inherited context use."""
-
+    def _require_active(self):
         if not self.active:
             raise ManagedContextError("inactive_context", "managed context is inactive or belongs to another caller")
 
-    def _deactivate(self) -> None:
-        """Retire this private authority after runtime cleanup completes."""
-
-        self._expire_publication_event()
-        self._active = False
-
-    def _expire_publication_event(self):
-        if self._publication_event is not None:
-            self._publication_event.expire()
-            self._publication_event = None
+    def _deactivate(self): self._active = False
 
 
 _CONTEXT_TOKEN = object()
 
 
-def _create_context(**kwargs) -> ManagedContext:
-    """Create the runtime-only context after a running snapshot is committed."""
-
+def _create_context(**kwargs):
     return ManagedContext(_CONTEXT_TOKEN, **kwargs)
-
-
-def _publish_managed_state():
-    """Load the shared managed state publisher without widening import scope."""
-
-    from .storage import _publish_managed_state_result
-
-    return _publish_managed_state_result
-
-
-def _checkpoint_boundary(stage: str) -> None:
-    """Provide a no-op in-process seam for deterministic crash-window tests."""
 
 
 __all__ = ["ManagedContext"]

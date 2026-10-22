@@ -289,6 +289,32 @@ class StoreProjection:
     witness: object = field(repr=False, compare=False)
 
 
+_CONTROL_PROJECTIONS = {}
+
+
+def register_control_projection(namespace, root, reader, *, validate=None):
+    """Install a narrow owner-metadata reader without importing a higher layer.
+
+    namespace/root are normalized top-level/control-root strings; reader(path)
+    returns a closed path-bound record type with from_bytes/to_data. Optional
+    validate(Store) checks owner envelope metadata during detached capture, outside
+    short fences. Returns None. Conflicting
+    registrations raise StoreAuthorityError. Registration performs no Store IO and
+    grants no lifecycle-relation coverage: only generic record-byte projection is
+    enabled. Owners must journal changes before publication. A cold Core rebuild
+    refuses an unregistered managed area rather than certify missing rows.
+    """
+    from ..store.records import _normalized_file_path
+    _normalized_file_path(root)
+    if (type(namespace) is not str or "/" in namespace or not root.startswith(namespace + "/")
+            or not callable(reader) or (validate is not None and not callable(validate))):
+        raise StoreAuthorityError("Invalid control projection adapter.")
+    existing = _CONTROL_PROJECTIONS.get(namespace)
+    if existing is not None and existing != (root, reader, validate):
+        raise StoreAuthorityError("Control projection adapter already registered.")
+    _CONTROL_PROJECTIONS[namespace] = root, reader, validate
+
+
 def projection_record_type(path):
     """Return the closed format-4 metadata reader for a Store-relative path.
 
@@ -298,6 +324,9 @@ def projection_record_type(path):
     import re
     from ..store import records as r
     from ..store import retention as t
+    for root, reader, _ in _CONTROL_PROJECTIONS.values():
+        if path.startswith(root + "/"):
+            return reader(path)
     uuid = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     if re.fullmatch(rf"retention/intents/{uuid}\.record", path):
         return t.RetentionIntentRecord
@@ -420,6 +449,9 @@ def capture_store_projection(store, *, rebuild=False):
     from ..node_views import COMPATIBILITY_VIEW
 
     with store._metadata_read() as captured:
+        for _, _, validate in _CONTROL_PROJECTIONS.values():
+            if validate is not None:
+                validate(store)
         receipts = store.pending_mutations()
         paths = set(mutation_projection_paths(receipts))
         if rebuild:
@@ -437,6 +469,19 @@ def capture_store_projection(store, *, rebuild=False):
                         paths.add(path)
             for area in ("definitions", "graphs", "membership", "declarations", "names", "states", "retention", "metadata"):
                 inventory(area)
+            if (os.path.exists(os.path.join(store.base_dir, "managed"))
+                    and "managed" not in _CONTROL_PROJECTIONS):
+                raise StoreAuthorityError("Managed control projection adapter is not loaded; import its owner before rebuilding.")
+            for root, _, _ in _CONTROL_PROJECTIONS.values():
+                def control_inventory(relative):
+                    for name in captured.directory(relative):
+                        path = relative + "/" + name
+                        if os.path.isdir(os.path.join(store.base_dir, path)):
+                            control_inventory(path)
+                        elif name == "current.json":
+                            projection_record_type(path)
+                            paths.add(path)
+                control_inventory(root)
 
         rows, decoded, blocks, views, creations, anchors = [], {}, {}, {}, {}, {}
         discovery = {}

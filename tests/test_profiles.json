@@ -729,16 +729,15 @@
           ]
         },
         "tests/managed/test_status.py": {
-          "rationale": "Retain absent/wrong authority, owner loss, stale requests, spawned-owner exit, probe errors, generation replacement, and missing-lock behavior; exhaustive mode covers equivalent retained-key/store mismatch checks.",
+          "rationale": "U14 retains absent selected authority, metadata-only reclaimed checkpoints, producer/caller identity, targeted requests, explicit legacy refusal and unavailable lifecycle coverage.",
           "functions": [
-            "test_status_is_not_started_for_the_selected_absent_authority_without_hooks",
-            "test_wrong_selected_control_store_has_independent_not_started_metadata",
-            "test_owner_loss_status_and_request_are_read_only_after_full_free_probe",
-            "test_request_validates_stale_attempt_and_merges_only_the_current_owner",
-            "test_spawned_owner_exit_then_request_does_not_write_running_authority",
-            "test_owner_probe_checks_stale_attempt_before_probe_and_propagates_adapter_errors",
-            "test_locked_owner_probe_marks_generation_replacement_inconclusive",
-            "test_missing_lock_namespace_never_becomes_owner_loss_or_recovery_evidence"
+            "test_absent_status_read_only_and_selected_domain_specific",
+            "test_detached_status_and_replay_admission_after_checkpoint_reclamation",
+            "test_external_request_preconditions_and_dead_owner_are_read_only",
+            "test_legacy_runtime_explicit_refusal_precedes_work_or_publication",
+            "test_lifecycle_projection_does_not_claim_empty_supported_coverage",
+            "test_completion_projection_error_retains_completion_and_mutation_cut",
+            "test_accepted_interrupt_preserves_phase_and_fences_completion"
           ]
         },
         "tests/dispatch/test_backend_execution.py": {

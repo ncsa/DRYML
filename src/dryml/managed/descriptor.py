@@ -474,12 +474,21 @@ class _BoundComposite:
 
     def request_interrupt(self, *, state_repo: object = None,
                           control_store: object = None,
-                          expected_attempt_id: str | None = None) -> object:
-        """Delegate cooperative interruption to the enclosed declaration."""
+                          expected_run_id: str | None = None,
+                          expected_invocation_id: str | None = None,
+                          expected_generation: int | None = None) -> object:
+        """Delegate selected run/invocation/generation request control.
+
+        state_repo/control_store are optional borrowed resources; expected_run_id,
+        expected_invocation_id and expected_generation fence stale caller intent.
+        Returns InterruptRequestResult or propagates ManagedError; may publish a
+        request but never invokes the outer wrapper or managed body.
+        """
 
         return _BoundOperation(self._descriptor, self._instance).request_interrupt(
             state_repo=state_repo, control_store=control_store,
-            expected_attempt_id=expected_attempt_id,
+            expected_run_id=expected_run_id, expected_invocation_id=expected_invocation_id,
+            expected_generation=expected_generation,
         )
 
 
@@ -510,10 +519,12 @@ class _BoundOperation:
             ManagedConfigError: If config or normalized ordinary arguments are
                 unsupported.
             ManagedError: If selected lifecycle authority cannot be used safely.
+            ManagedControlError: With ``lifecycle_not_integrated`` while the Node
+                start/checkpoint/result execution policies await integration.
 
         Side Effects:
-            Acquires retained state ownership, then invokes the raw method only
-            after a running control snapshot is committed.
+            The U14 foundation refuses legacy execution before state/control
+            publication or body work. Its detached control APIs are usable now.
 
         Returns:
             The wrapped method's ordinary return value, or its invocation-captured
@@ -570,13 +581,17 @@ class _BoundOperation:
 
         return status(self._descriptor, self._instance, state_repo=state_repo, control_store=control_store)
 
-    def request_interrupt(self, *, state_repo: object = None, control_store: object = None, expected_attempt_id: str | None = None) -> object:
+    def request_interrupt(self, *, state_repo: object = None, control_store: object = None,
+                          expected_run_id: str | None = None, expected_invocation_id: str | None = None,
+                          expected_generation: int | None = None) -> object:
         """Publish a cooperative interruption request to selected running authority.
 
         Args:
             state_repo: Explicit selected state Repo or Store override.
             control_store: Explicit selected control Store override.
-            expected_attempt_id: Optional stale-attempt precondition.
+            expected_run_id: Optional UUID-hex stable-run precondition.
+            expected_invocation_id: Optional UUID-hex active-caller precondition.
+            expected_generation: Optional positive integer authority fence.
 
         Raises:
             ManagedError: If selected authority cannot safely accept a request.
@@ -593,7 +608,8 @@ class _BoundOperation:
 
         return request_interrupt(
             self._descriptor, self._instance, state_repo=state_repo,
-            control_store=control_store, expected_attempt_id=expected_attempt_id,
+            control_store=control_store, expected_run_id=expected_run_id,
+            expected_invocation_id=expected_invocation_id, expected_generation=expected_generation,
         )
 
 
