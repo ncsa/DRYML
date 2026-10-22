@@ -45,7 +45,20 @@ def _node_metadata_evidence(repo, node, owned, sources, prepared, *, source_stor
     fences. Exact capture replicas must agree unless a provider was selected;
     lineage evidence must agree with that capture and existing live identities.
     Missing object declarations are not invented from a donor LocalState.
+    Unrelated cooperating publications may invalidate a detached cut; retry only
+    this metadata preparation, at most eight times, never constructors or hooks.
     """
+    from .store.authority import StoreCutChanged
+    for attempt in range(8):
+        try:
+            return _read_node_metadata_evidence(repo, node, owned, sources, prepared,
+                source_store=source_store, source_stores=source_stores, reservation=reservation)
+        except StoreCutChanged:
+            if attempt == 7:
+                raise
+
+
+def _read_node_metadata_evidence(repo, node, owned, sources, prepared, *, source_store, source_stores, reservation):
     import json
     from .repo import MetadataConflictError
     from .metadata import timestamp_from_seconds
@@ -161,7 +174,16 @@ def _selected_state_sources(repo, associations, *, source_store=None, source_sto
                 keys = [key for key, stores in candidates.items() if store in stores and key not in sources]
                 if keys:
                     try:
-                        sources.update(lifetime.enter_context(store.read_states(keys)))
+                        from .store.authority import StoreCutChanged
+                        for attempt in range(8):
+                            try:
+                                selected_sources = lifetime.enter_context(store.read_states(keys))
+                            except StoreCutChanged:
+                                if attempt == 7:
+                                    raise
+                            else:
+                                sources.update(selected_sources)
+                                break
                     except Exception as error:
                         raise RepoLoadError("Selected state preflight is incomplete: invalid source authority or payload.") from error
             for path, state, _, _ in associations:
@@ -356,7 +378,7 @@ def realize_node(repo, node, *, cache="weak", reuse_live="matching", exact=False
                 raise RepoLoadError(f"{operation} at {active_path!s} failed: {error}{recovery}") from error
 
 
-def materialize_nodes(repo, roots, *, cache="weak", reuse_live="matching"):
+def materialize_nodes(repo, roots, *, cache="weak", reuse_live="matching", declaration_stores=None):
     """Admit one Node signature boundary before any selected constructor or hook.
 
     roots is an ordered tuple of Nodes, live Objects or supported containers.
@@ -366,6 +388,8 @@ def materialize_nodes(repo, roots, *, cache="weak", reuse_live="matching"):
     demands for one ObjectId raise RepoLoadError before effects. cache/reuse_live
     follow realize_node. Failures after a hook invalidate completed affected live
     graphs, including earlier roots. This owns no managed lifecycle policy.
+    declaration_stores optionally maps selected exact Node digests to connected
+    Store handles; pinned state/metadata sources never fall back to another replica.
     """
     from .canonical import node_kind, is_value_container_kind, rebuild_sequence_kind, rebuild_dict_kind
     from .node import Node
@@ -413,6 +437,8 @@ def materialize_nodes(repo, roots, *, cache="weak", reuse_live="matching"):
         return result
 
     normalized = tuple(normalize(root) for root in roots)
+    declaration_stores = {} if declaration_stores is None else declaration_stores
+    selected_stores = {}
     associations, demands = [], {}
     effective, paths, inputs = _NodeBindings(), {}, {}
     shared_classes = _NodeBindings()
@@ -420,6 +446,13 @@ def materialize_nodes(repo, roots, *, cache="weak", reuse_live="matching"):
     for root in nodes.values():
         inputs[root._view] = _node_inputs(root, classes=shared_classes)
         _, owned, classes = inputs[root._view]
+        provider = declaration_stores.get(root.exact_digest()) if declaration_stores else None
+        if provider is not None:
+            for _, current in owned:
+                if current.state is not None:
+                    previous = selected_stores.setdefault(current.state.key, provider)
+                    if previous is not provider:
+                        raise RepoLoadError("Boundary has conflicting selected StateKey source Stores.")
         for path, current in owned:
             previous = effective.get(current)
             paths.setdefault(current._node_id, path)
@@ -456,6 +489,8 @@ def materialize_nodes(repo, roots, *, cache="weak", reuse_live="matching"):
             except ValueError:
                 exact = False
             return realize_node(repo, value, cache=cache, reuse_live=reuse_live, exact=exact,
+                                source_store=declaration_stores.get(value.exact_digest()) if declaration_stores else None,
+                                source_stores=selected_stores,
                                 _memo=memo, _sources=sources, _hook_state=hook_state,
                                 _effective=effective, _inputs=inputs[value._view])
         if isinstance(value, (Object, QuotedDef, SelectorSpec)):
@@ -466,7 +501,7 @@ def materialize_nodes(repo, roots, *, cache="weak", reuse_live="matching"):
             return container(value, realize)
         return value
 
-    with _selected_state_sources(repo, associations) as sources:
+    with _selected_state_sources(repo, associations, source_stores=selected_stores) as sources:
         try:
             return tuple(realize(root) for root in normalized)
         except BaseException:
@@ -694,8 +729,9 @@ def preflight_symbolic_materialization(*roots: Any, repo: Any = None) -> None:
         if not isinstance(cls, type):
             raise TypeError("materializing Definition class authority must resolve to a type")
         plan = compile_signature(cls, constructor=True)
+        bound = plan.signature.bind_partial(*(definition.args or ()), **definition.kwargs)
         boundary = plan.prepare_bound(
-            BoundArguments(definition.parameters.items()), partial=True, repo=repo,
+            BoundArguments(bound.arguments.items()), partial=True, repo=repo,
         )
         for name, value in boundary.authority.items():
             role = plan.slots[name].role

@@ -4638,6 +4638,9 @@ class Repo:
             declaration_stores: Optional mapping from selected ObjectRef digests
                 to exact connected declaration Stores. A selected Store is
                 revalidated with its declaration and ClaimRecord before effects.
+                For Node roots, exact Node digests pin saved metadata and all
+                selected full StateKeys to that connected source with no replica
+                fallback. Conflicting source demands fail before hooks.
 
         Returns:
             A tuple of runtime values in ``roots`` order, preserving aliases across
@@ -4712,12 +4715,13 @@ class Repo:
                 return False
             return any(has_legacy(edge.value) for edge in iter_value_edges(value))
 
-        if reservation is None and not reserved_live and not declaration_stores and not any(has_legacy(root) for root in roots):
+        if reservation is None and not reserved_live and not any(has_legacy(root) for root in roots):
             from dryml.runtime import materialization_admission
             from .materialization import materialize_nodes
             with materialization_admission(operation="repo_node_boundary"):
                 return materialize_nodes(self, roots, cache="weak" if cache is None else cache,
-                                         reuse_live="matching" if reuse_live is None else reuse_live)
+                                         reuse_live="matching" if reuse_live is None else reuse_live,
+                                         declaration_stores=declaration_stores)
 
         canonical_memo = {}
 

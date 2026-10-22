@@ -352,10 +352,12 @@ class ManagedContext:
             if current.state == "completed":
                 from .runtime import _invocation_result
                 error.invocation_result = _invocation_result(self._control, current, self.invocation_id, self.cleanup_report)
+                error.__dryml_execute_failure__ = error.invocation_result
             else:
                 from .model import FailedInvocationResult, ExecutionIdentity
                 error.failed_result = FailedInvocationResult(self._control.status(self.operation_id),
                     ExecutionIdentity(self.operation_id, self.run_id, self.invocation_id, None), current.checkpoint)
+                error.__dryml_execute_failure__ = error.failed_result
         except Exception as recovery_error:
             error.recovery_error = recovery_error
 

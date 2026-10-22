@@ -124,7 +124,7 @@ def test_managed_default_resolution_uses_invocation_state_and_worker_control(
     with session_config(repo=ambient), _control_store_defaults(worker_control):
         result = _nested_observe(value, kwargs[selection]) if nested else value.observe(managed=kwargs[selection])
 
-    assert result == (str(expected_state.default_store.base_dir), str(expected_control.base_dir))
+    assert result.value == (str(expected_state.default_store.base_dir), str(expected_control.base_dir))
 
 
 def test_omitted_state_honors_nested_selection_and_clearing_fails(
@@ -139,13 +139,14 @@ def test_omitted_state_honors_nested_selection_and_clearing_fails(
 
     with session_config(repo=first), _control_store_defaults(control):
         with session_config(repo=second):
-            assert value.observe() == (str(second.default_store.base_dir), str(control.base_dir))
-            assert explicit_value.observe(managed=ManagedConfig(state_repo=first)) == (
+            assert value.observe().value == (str(second.default_store.base_dir), str(control.base_dir))
+            assert explicit_value.observe(managed=ManagedConfig(state_repo=first)).value == (
                 str(first.default_store.base_dir), str(control.base_dir),
             )
         with session_config(repo=None):
-            with pytest.raises(ManagedStoreError, match="no current Repo"):
+            with pytest.raises(ManagedStoreError) as raised:
                 value.observe()
+            assert raised.value.reason == "explicit_state_repo_required"
 
 
 def test_worker_control_default_is_owner_bound_and_expires_after_setup(tmp_path):
@@ -242,7 +243,7 @@ def test_execute_omitted_defaults_read_the_invocation_repo_not_the_codec_repo(
         )
 
     assert outcome["success"]
-    assert outcome["result"] == (str(invocation_repo.default_store.base_dir), str(control.base_dir))
+    assert outcome["result"].value == (str(invocation_repo.default_store.base_dir), str(control.base_dir))
 
 
 def test_worker_setup_installs_its_control_default_before_managed_invocation(tmp_path):
@@ -268,7 +269,7 @@ def _check_worker_defaults(tmp_path):
 
     with core_worker_setup(_worker_context(), data):
         value = DefaultsValue(repo=current_context().repo)
-        assert value.observe() == (
+        assert value.observe().value == (
             str(current_context().repo.default_store.base_dir),
             str(current_context().control_store.base_dir),
         )

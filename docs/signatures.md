@@ -228,16 +228,22 @@ runs. Prepared group closures retain detached structure and child invokers so
 global weak preparation state cannot retain their Method owner indirectly.
 
 Core Execute reconstructs a new worker-local plan rather than transporting a
-`SignaturePlan` or `BoundaryPlan`. Its function, Method, and managed integrations
-use their owners' narrow raw-result seam: the owner delivers arguments and invokes
-once, Execute may publish a live result, and that same owner then performs its one
-declared return normalization. These seams do not make contexts, prepared plans,
+`SignaturePlan` or `BoundaryPlan`. Ordinary function/Method integrations use their
+owners' narrow raw-result seam: the owner delivers arguments and invokes once,
+Execute may publish a live result, and that owner performs its one declared return
+normalization. Managed's supplied adapter instead calls its metadata-first
+admission seam; only execution delivers materializing arguments and normalizes a
+return, encodes the closed durable value before automatic final capture, and
+publishes completion. Compatible replay returns `InvocationResult` with no return
+normalization or consumer hook. Supported retained outer wrappers run only on the
+execution branch, under that same owner; the one-shot handoff does not suppress
+unrelated nested function boundaries. These seams do not make contexts, prepared plans,
 or caller-owned Repo/Store handles portable.
 See [Generic Execute](execute.md) for worker transport and [Managed Operations](managed_operations.md)
 for checkpoint/final-publication ordering.
 
-Core Execute's call description structurally lowers live Objects to their selected
-`StateRef` or CDef authority and uses a single receiving Repo boundary for Mat
+Core Execute's v3 call description structurally lowers saved live Objects to their selected
+Node authority and uses a single receiving Repo boundary for Mat
 delivery. It recursively walks closure globals, defaults, annotations, instance
 attributes, and `__slots__`; live Repo/Store resources are rejected rather than
 being carried by a pickle fallback. Selected declaration Stores are represented by
@@ -246,6 +252,14 @@ internal and bounded; it is not a general pickle or RPC format. Explicit
 `Ref(value)` and `Mat(value)` assertions remain transient while crossing an
 invocation and are consumed by the reconstructed worker-local plan. They cannot
 cross the result boundary or enter persistent identity data.
+
+Exact saved Node `ReferenceSelection` controls preserve all supplied facets and
+are checked against the pinned Store's saved-graph metadata at preparation and
+worker decoding. They do not infer a new identity, save state, or cache an
+availability proof. Node transport shares an authenticated table and compact
+root views across config starts, arguments and managed metadata. Config/declaration
+and detached-result schemas belong to `dryml.managed.execute_adapter`; Core has
+no managed import dependency.
 
 The callable graph includes globals, defaults, annotations, closure cells, bound
 receivers, instance attributes, and `__slots__` in one pass, preserving aliases

@@ -131,7 +131,8 @@ class ReferenceSelection:
     """Pin one signature slot to an exact ObjectRef and optional declaration Store.
 
     Args:
-        object_ref: Exact identity allowed for a CDef-to-ObjectRef strengthening.
+        object_ref: Exact identity allowed for a CDef-to-ObjectRef strengthening,
+            or an exact saved Node constraining the complete supplied graph.
         store: Optional connected Store required to carry that declaration.
 
     A selection is caller-owned control, not authority by itself. The ObjectRef
@@ -947,7 +948,8 @@ class BoundaryPlan:
             slot = self.plan.return_slot if name == "return" else self.plan.slots[name]
             if slot.role != "mat":
                 continue
-            digest = selection.object_ref.digest()
+            from .node import Node
+            digest = selection.object_ref.exact_digest() if isinstance(selection.object_ref, Node) else selection.object_ref.digest()
             previous = declaration_stores.get(digest)
             if previous is not None and previous is not selection.store:
                 previous_key = previous.authority_fence_key()
@@ -1370,6 +1372,11 @@ def _select_exact(value: Any, target: Any, name: str,
     from .selector import Selector
     from .state_values import IdentitySpec, StateSpec
 
+    selection = controls.selections.get(selection_key)
+    if selection is not None and isinstance(selection.object_ref, Node):
+        candidate = controls.repo.describe(value) if isinstance(value, Object) and controls.repo is not None else value
+        if not isinstance(candidate, Node) or not candidate.graph_equal(selection.object_ref):
+            raise _SelectionUnavailable()
     if target in (IdentitySpec, StateSpec):
         if isinstance(value, target):
             return value
@@ -1500,18 +1507,19 @@ def _selection_value(selection: Any, name: str) -> ReferenceSelection | None:
     """Normalize one accepted slot selection shape before evidence reads."""
 
     from .reference_values import ObjectRef
+    from .node import Node
 
     if selection is None:
         return None
     if isinstance(selection, ReferenceSelection):
         result = selection
-    elif isinstance(selection, ObjectRef):
+    elif isinstance(selection, (Node, ObjectRef)):
         result = ReferenceSelection(selection)
     elif isinstance(selection, tuple) and len(selection) == 2:
         result = ReferenceSelection(selection[0], selection[1])
     else:
         raise SignatureError("selection control is invalid", name)
-    if not isinstance(result.object_ref, ObjectRef):
+    if not isinstance(result.object_ref, (Node, ObjectRef)):
         raise SignatureError("selection control is invalid", name)
     return result
 

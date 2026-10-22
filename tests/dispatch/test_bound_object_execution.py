@@ -57,4 +57,4 @@ def test_dispatch_runs_a_bound_object_method_through_core_transport(
     value = _BoundValue(repo=repo)
     repo.save(value, deep_capture=True)
 
-    assert dispatch.run(value.add, 4) == 7
+    assert dispatch.run(value.add, 4).value == 7

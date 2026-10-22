@@ -79,6 +79,7 @@ class ManagedOperation:
     from dryml.core.signatures import _FUNCTION_DECLARATION_PARTICIPANT
 
     __dryml_function_participant__ = _FUNCTION_DECLARATION_PARTICIPANT
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
 
     def __init__(self, target: object, *, resumable: bool,
                  store_parameter: str | None = None):
@@ -389,6 +390,8 @@ class ManagedOperation:
 class _ManagedComposite:
     """Private descriptor retaining an executable wrapper around one declaration."""
 
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
+
     def __init__(self, descriptor: ManagedOperation,
                  outer: types.FunctionType) -> None:
         """Retain already-validated member and executable wrapper evidence."""
@@ -419,6 +422,7 @@ class _BoundComposite:
     """Bound managed controls that execute one retained outer wrapper."""
 
     __dryml_execute_owner__ = "managed"
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
 
     def __init__(self, composite: _ManagedComposite, instance: object) -> None:
         """Bind the composite while retaining the public managed call surface."""
@@ -427,20 +431,28 @@ class _BoundComposite:
         self._descriptor = composite._descriptor
         self._instance = instance
         self.__name__ = composite.__name__
+        self.__dryml_execute_carriers__ = (self, self._descriptor,
+            self._descriptor._target, self._descriptor._executable, composite._outer)
         self.__qualname__ = composite.__qualname__
         self.__doc__ = composite.__doc__
         self.__wrapped__ = composite._outer
         self.__signature__ = _bound_signature(self._descriptor)
 
     def __call__(self, *args: object, managed: ManagedConfig | None = None,
-                 **kwargs: object) -> object:
-        """Execute the retained outer wrapper and its one inner lifecycle."""
+                  **kwargs: object) -> object:
+        """Admit once; execute the retained outer wrapper only on execution.
+
+        args/kwargs are ordinary authored inputs and managed optional ManagedConfig.
+        Returns InvocationResult on execution/replay or a terminating recovery
+        disposition. Managed errors propagate; wrappers run under the same owner
+        as realization/body/finalization and are skipped on completed replay.
+        """
 
         if managed is not None and type(managed) is not ManagedConfig:
             raise ManagedConfigError(message="managed must be a ManagedConfig or None")
-        return self._composite._outer(
-            self._instance, *args, managed=managed, **kwargs,
-        )
+        from .runtime import invoke
+        return invoke(self._descriptor, self._instance, args, managed, kwargs,
+                      outer=self._composite._outer)
 
     def __dryml_execute_invoke__(self, args, kwargs, *, repo, on_raw_result):
         """Execute the outer wrapper before Execute publishes its delivered value."""
@@ -477,12 +489,15 @@ class _BoundComposite:
 class _BoundOperation:
     """Short-lived callable view that validates managed calls before execution."""
 
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
+
     def __init__(self, descriptor: ManagedOperation, instance: object):
         """Bind the declaration and advertise the caller-facing signature."""
 
         self._descriptor = descriptor
         self._instance = instance
         self.__name__ = descriptor.__name__
+        self.__dryml_execute_carriers__ = (self, descriptor, descriptor._target, descriptor._executable)
         self.__qualname__ = descriptor.__qualname__
         self.__doc__ = descriptor.__doc__
         self.__wrapped__ = descriptor._target
@@ -520,7 +535,11 @@ class _BoundOperation:
 
         if managed is not None and type(managed) is not ManagedConfig:
             raise ManagedConfigError(message="managed must be a ManagedConfig or None")
-        from .runtime import invoke
+        from .runtime import invoke, _consume_outer_handoff
+
+        handoff = _consume_outer_handoff(self._descriptor, self._instance, args, managed, kwargs)
+        if handoff is not None:
+            return handoff()
 
         return invoke(self._descriptor, self._instance, args, managed, kwargs)
 

@@ -18,6 +18,7 @@ class ManagedStatus:
     replay caller. Construction returns an immutable value, performs no IO or
     retention, and imposes no additional validation beyond its owning reader.
     """
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
     state: str
     operation_id: str
     run_id: str | None
@@ -54,6 +55,7 @@ class ExecutionIdentity:
     Strings are admitted by control/admission before construction. Replay preserves
     run/producer and allocates invocation_id for its current caller.
     """
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
     operation_id: str
     run_id: str
     invocation_id: str
@@ -75,6 +77,8 @@ class InvocationResult:
     Store.retry_state_removal; grant/association/index failures never enter this
     successful report. Historical final/status/value inspection survives state cleanup.
     """
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
+
     status: ManagedStatus
     execution: ExecutionIdentity
     final_state_ref: Node
@@ -96,6 +100,7 @@ class FailedInvocationResult:
     Construction has no IO and makes no availability promise. Attached to raised
     authored/finalization errors as failed_result for inspection after Repo closure.
     """
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
     status: ManagedStatus
     execution: ExecutionIdentity
     checkpoint_state_ref: Node | None

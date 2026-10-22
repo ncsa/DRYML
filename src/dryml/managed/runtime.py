@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, replace
 from uuid import UUID, uuid4
+from contextvars import ContextVar
 
 from .config import ManagedConfig, _ResolvedManagedConfig
 from .control import (ControlHistory, ControlIntent, ControlSnapshot, ManagedControlStore,
@@ -13,16 +14,35 @@ from .model import InterruptRequestResult
 from .storage import resolve_stores
 
 
-def invoke(descriptor, instance, args, managed, kwargs, *, on_raw_result=None):
+_outer_handoff = ContextVar("dryml_managed_outer_handoff", default=None)
+
+
+def _consume_outer_handoff(descriptor, instance, args, managed, kwargs):
+    lease = _outer_handoff.get()
+    if lease is None or lease["descriptor"] is not descriptor or lease["instance"] is not instance:
+        return None
+    from .storage import _caller
+    if not lease["active"] or lease["caller"] != _caller() or lease["used"]:
+        raise ManagedConflictError("expired_handoff", "managed outer invocation handoff is expired or already consumed")
+    if args != lease["args"] or kwargs != lease["kwargs"] or managed is not lease["managed"]:
+        raise ManagedConfigError(message="managed outer wrapper changed its admitted arguments")
+    lease["owner"].require_owner()
+    lease["used"] = True
+    return lease["execute"]
+
+
+def invoke(descriptor, instance, args, managed, kwargs, *, on_raw_result=None, realize=None, outer=None):
     """Validate a direct call and enter metadata-first start/replay admission.
 
-    descriptor selects a checked declaration, instance a live Object, args/kwargs
+    descriptor selects a checked declaration, instance a live Object or detached Node, args/kwargs
     ordinary caller input, managed optional exact ManagedConfig. Arguments/defaults
     normalize once before ownership or restore. Execution injects ManagedContext
     and returns InvocationResult after durable encoding/finalization/completion.
     Replay returns detached metadata without body/restore/capture/return hooks.
     Recovery returns a detached terminating disposition without execution.
     on_raw_result is an optional execution delivery adapter, never replayed.
+    realize optionally constructs a transported receiver only under admission's
+    lifetime owner; outer is the captured wrapper executed only on that branch.
     Preparation errors preserve old current; hooks follow Core invalidation rules.
     """
     if managed is not None and type(managed) is not ManagedConfig:
@@ -33,18 +53,41 @@ def invoke(descriptor, instance, args, managed, kwargs, *, on_raw_result=None):
     stores = resolve_stores(state_repo=config.state_repo if config.state_repo is not None else selected_store,
                             control_store=config.control_store)
     try:
+        if selected_store is not None and not any(selected_store is store for store in stores.state_repo.stores):
+            from dryml.core.repo import Repo
+            from .storage import ResolvedStores
+            wrapper = Repo._for_state_io((*stores.state_repo.stores, selected_store))
+            control_store = stores.control_store
+            stores.close()
+            stores = ResolvedStores(wrapper, control_store, wrapper)
         boundary = descriptor.signature_plan().prepare_bound(
             descriptor.bind_arguments(instance, args, kwargs), repo=stores.state_repo)
         digest = _argument_digest_bound(tuple(boundary.authority.items()))
-        receiver = stores.state_repo.describe(instance)
+        from dryml.core.node import Node
+        receiver = instance if isinstance(instance, Node) else stores.state_repo.describe(instance)
         identity = AdmissionIdentity(receiver, descriptor.member, digest)
         control = ManagedControlStore(stores.control_store, stores.state_repo)
         def execute(owner, snapshot, live, resuming):
-            return _execute_authored(owner, snapshot, live, resuming, descriptor, boundary, config,
-                control=control, store=selected_store,
-                invocation_parameters=descriptor.bind_invocation_parameters(instance, args, kwargs))
+            def authored():
+                return _execute_authored(owner, snapshot, live, resuming, descriptor, boundary, config,
+                    control=control, store=selected_store,
+                    invocation_parameters=descriptor.bind_invocation_parameters(instance, args, kwargs))
+            if outer is None:
+                return authored()
+            from .storage import _caller
+            lease = dict(descriptor=descriptor, instance=live, args=args, kwargs=kwargs,
+                managed=managed, execute=authored, owner=owner, caller=_caller(), active=True, used=False)
+            token = _outer_handoff.set(lease)
+            try:
+                result = outer(live, *args, managed=managed, **kwargs)
+                if not lease["used"]:
+                    raise ManagedConfigError(message="managed outer wrapper did not invoke admitted declaration")
+                return result
+            finally:
+                lease["active"] = False
+                _outer_handoff.reset(token)
         result = admit_execution(identity, descriptor, config,
-            control, realize=lambda node: instance, execute=execute)
+            control, realize=(lambda node: instance) if realize is None else realize, execute=execute)
         if isinstance(result, AdmissionOutcome) and result.disposition == "replay":
             return _invocation_result(control, result.current, result.invocation_id, result.cleanup_report)
         if on_raw_result is not None and not isinstance(result, AdmissionOutcome):
@@ -164,6 +207,7 @@ class AdmissionOutcome:
     outcomes, not unresolved grant/index/control work. Construction performs no IO
     or lazy result loading.
     """
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
     disposition: str
     run_id: str | None
     invocation_id: str
@@ -240,12 +284,11 @@ def admit_execution(identity, descriptor, config, control, *, realize, execute):
                 targets.setdefault(action.store, set()).add(action.state.key)
             ledger = control.control_store.retention.prepare(str(UUID(prepared.token)), selected.exact_digest(), targets.items())
             control.control_store.retention.protect(ledger.token, _stores(control))
-        # Transported receiver pins are historical, not an additional start.
-        # Realization constructs the identity graph; this owner alone restores
-        # the selected saved start through prepare_restore below.
+        # Receiver pins supply current state only when no start/recovery was
+        # selected. They cannot cause a second restore of that selected start.
         from dryml.core.node import _owned_nodes
         unpinned = identity.receiver.with_realization(states={path: None for path, _ in _owned_nodes(identity.receiver)})
-        live = owner.realize(lambda _: realize(unpinned))
+        live = owner.realize(lambda _: realize(identity.receiver if selected is None else unpinned))
         if not control.state_repo.describe(live).object_projection_equal(identity.receiver):
             raise ManagedConfigError("incompatible_receiver", "execution realization differs from admitted projection")
         if selected is not None:

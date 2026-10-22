@@ -12,6 +12,7 @@ import ast
 import asyncio
 import dis
 import inspect
+import importlib
 import pathlib
 import sys
 import types
@@ -28,6 +29,9 @@ from .links import DefLink
 from .object import Object, _AbstractObjectAdmissionError
 from .reference_values import ObjectRef, StateRef
 from .repo import Repo
+from .node import Node, require_saved
+from .node_codec import encode_node_graph, _decode_node_graph_views
+from .node_prepare import NodePreparation
 from .repo_plan import PUBLICATION_PHASES
 from .store.store import Store
 from .signatures import ReferenceSelection, SignatureError, compile_signature
@@ -36,11 +40,11 @@ from .utils.graph.path import GraphPath
 from ._callable_inspection import describe_callable
 
 
-_VERSION = 2
+_VERSION = 3
 _DEFAULT_LIMIT = 67_108_864
 _MAX_NODES = 65_536
 _MAX_DEPTH = 64
-_OUTCOME_VERSION = 2
+_OUTCOME_VERSION = 3
 _PATH_TYPES = {
     cls.__name__: cls
     for cls in (
@@ -94,8 +98,6 @@ class _DillLeafPickler(dill.Pickler):
     def persistent_id(self, value: object) -> object | None:
         """Reject values that require the structural core transport."""
 
-        from dryml.managed.config import ManagedConfig
-
         if isinstance(value, (asyncio.Future, asyncio.AbstractEventLoop)):
             raise _DillLeafError("live asyncio resource")
         if isinstance(value, (Repo, Store)):
@@ -105,12 +107,13 @@ class _DillLeafPickler(dill.Pickler):
             (
                 ConcreteDefinition,
                 DefLink,
-                ManagedConfig,
                 Object,
                 ObjectRef,
                 StateRef,
             ),
         ):
+            raise _DillLeafError("DRYML semantic value inside ordinary value")
+        if getattr(type(value), "__dryml_execute_adapter__", None) is not None:
             raise _DillLeafError("DRYML semantic value inside ordinary value")
         return None
 
@@ -155,7 +158,7 @@ def _result_graph(value: Any, *, limit_bytes: int,
     """Encode an already-published result graph with the call graph grammar."""
     encoder = _Encoder(
         limit_bytes=limit_bytes, automatic_references=automatic_references,
-        allow_managed_config=False, allow_assertions=False,
+        purpose="result", allow_assertions=False,
     )
     return encoder.finish(encoder.value(value, "$.result"))
 
@@ -164,7 +167,7 @@ def _load_result_graph(data: bytes, *, repo: Repo, limit_bytes: int) -> tuple[An
     """Decode one result graph after its outcome envelope has been validated."""
     decoder = _Decoder(
         data, repo=repo, limit_bytes=limit_bytes,
-        allow_managed_config=False, allow_assertions=False,
+        purpose="result", allow_assertions=False,
     )
     return decoder.value(decoder.graph["root"], "$.result"), frozenset(decoder.automatic_references)
 
@@ -173,7 +176,7 @@ def _outcome(success: bool, *, result: bytes | None = None,
               updates: list[dict[str, Any]] | None = None,
               publications: list[dict[str, Any]] | None = None,
               reason: str | None = None, traceback_text: str | None = None,
-              limit_bytes: int) -> bytes:
+              limit_bytes: int, failure: bytes | None = None) -> bytes:
     """Encode one bounded tagged worker outcome without live core values."""
     value = {
         "version": _OUTCOME_VERSION,
@@ -184,7 +187,21 @@ def _outcome(success: bool, *, result: bytes | None = None,
         "publications": publications or [],
         "reason": reason,
         "traceback": traceback_text,
+        "failure": failure,
     }
+    roots, root_slots = [], {}
+    for name in ("updates", "publications"):
+        rows = []
+        for item in value[name]:
+            state = item["state"]
+            require_saved(state)
+            if id(state) not in root_slots:
+                root_slots[id(state)] = len(roots)
+                roots.append(state)
+            defaults = {"source": None} if name == "publications" else {}
+            rows.append({**defaults, **item, "state": root_slots[id(state)]})
+        value[name] = rows
+    value["graphs"] = None if not roots else encode_node_graph(NodePreparation(roots))
     try:
         encoded = dill.dumps(value, protocol=5, byref=False, recurse=True)
     except Exception as error:
@@ -223,16 +240,48 @@ def decode_outcome(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LIMIT
     """Decode one closed worker outcome into portable result and update authority.
 
     The returned mapping contains only ordinary values, immutable references, and
-    Store-table-relative publication facts. It never reconstructs a StoreReport.
+    Store-table-relative publication facts, including optional owner-supplied
+    detached failure metadata. It never reconstructs a StoreReport.
+
+    Args:
+        data: Bounded tagged outcome bytes from invoke_invocation.
+        repo: Borrowed caller Repo identifying the frozen Store table.
+        limit_bytes: Positive maximum accepted envelope/graph byte count.
+        allow_raw_traceback: Whether unredacted worker diagnostics are admitted.
+        traceback_limit_bytes: Maximum accepted diagnostic UTF-8 bytes.
+    Returns:
+        A validated dict with success/result, updates/publications and optional
+        failure/traceback fields. Result sources are detached descriptors.
+    Raises:
+        CoreCallCodecError: For incompatible versions or malformed/bounded data.
+    Side Effects:
+        Reconstructs trusted ordinary values and supplied owner metadata; does not
+        read managed result bytes, construct receivers, restore or publish state.
     """
     if not isinstance(data, bytes) or len(data) > limit_bytes:
         raise CoreCallCodecError("core execution transport rejected oversized result")
     value = _load(data, "$.outcome")
-    fields = {"version", "tag", "success", "result", "updates", "publications", "reason", "traceback"}
+    fields = {"version", "tag", "success", "result", "updates", "publications", "reason", "traceback", "graphs", "failure"}
     if not isinstance(value, Mapping) or set(value) != fields or value.get("version") != _OUTCOME_VERSION or value.get("tag") != "core-outcome":
         raise CoreCallCodecError("core execution transport rejected malformed result outcome")
     if type(value["success"]) is not bool or not isinstance(value["updates"], list) or not isinstance(value["publications"], list):
         raise CoreCallCodecError("core execution transport rejected malformed result outcome")
+    if value["failure"] is not None:
+        if value["success"] or type(value["failure"]) is not bytes:
+            _fail("malformed owner failure", "$.outcome")
+        value = dict(value)
+        value["failure"], _ = _load_result_graph(value["failure"], repo=repo, limit_bytes=limit_bytes)
+    views = () if value["graphs"] is None else _decode_node_graph_views(value["graphs"])
+    value = dict(value)
+    for name in ("updates", "publications"):
+        rows = []
+        for item in value[name]:
+            if not isinstance(item, dict) or type(item.get("state")) is not int or not 0 <= item["state"] < len(views):
+                _fail("malformed outcome Node view", "$.outcome")
+            state = views[item["state"]]
+            require_saved(state)
+            rows.append({**item, "state": state})
+        value[name] = rows
     if value["reason"] is not None and not isinstance(value["reason"], str):
         raise CoreCallCodecError("core execution transport rejected malformed result outcome")
     raw_traceback = value["traceback"]
@@ -337,7 +386,7 @@ class _Encoder:
 
     def __init__(self, *, limit_bytes: int,
                  automatic_references: set[int] | None = None,
-                 allow_managed_config: bool = True,
+                 purpose: str = "call",
                  allow_assertions: bool = False) -> None:
         self.nodes: list[dict[str, Any]] = []
         self.memo: dict[int, int] = {}
@@ -345,8 +394,22 @@ class _Encoder:
         self.limit_bytes = limit_bytes
         self.automatic_references = automatic_references or set()
         self.imported_captures: dict[int, ImportRef] = {}
-        self.allow_managed_config = allow_managed_config
+        self.purpose = purpose
         self.allow_assertions = allow_assertions
+        self.adapters = {}
+        self.graph_roots = []
+
+    def adapter(self, value):
+        """Use only an adapter explicitly supplied by a value's owning type."""
+        reference = getattr(type(value), "__dryml_execute_adapter__", None)
+        if reference is None:
+            return None
+        if not isinstance(reference, str) or ":" not in reference:
+            _fail("malformed adapter reference", "$.adapters")
+        module, name = reference.split(":", 1)
+        adapter = ImportRef(module, name).resolve()
+        self.adapters[reference] = adapter
+        return adapter
 
     def _capture(self, value: Any, path: str, depth: int) -> int:
         """Import stable DRYML dependencies and capture caller helpers by value."""
@@ -382,74 +445,9 @@ class _Encoder:
         return index
 
     def _node(self, value: Any, path: str, depth: int) -> dict[str, Any]:
-        from dryml.managed.config import ManagedConfig
-        from dryml.managed.descriptor import (
-            ManagedOperation, _BoundComposite, _BoundOperation, _ManagedComposite,
-        )
-
-        if type(value) is ManagedConfig:
-            if not self.allow_managed_config:
-                _fail("managed config result", path)
-            return self._managed_config_node(value, path, depth)
-        if type(value) is ManagedOperation:
-            owner = value._owner
-            member = value.member
-            if not isinstance(owner, type) or not isinstance(member, str):
-                _fail("unbound managed declaration", path)
-            owner_ref = _import_ref(owner)
-            if (
-                owner_ref is not None
-                and owner_ref.qualname is not None
-                and (
-                    owner_ref.module == "dryml"
-                    or owner_ref.module.startswith("dryml.")
-                )
-                and inspect.getattr_static(owner, member, None) is value
-            ):
-                # Framework declarations are version-local imports; caller-owned
-                # declarations retain the existing by-value snapshot contract.
-                prefix = f"{owner_ref.qualname}.{member}"
-                self.imported_captures[id(value._target)] = ImportRef(
-                    owner_ref.module, f"{prefix}._target",
-                )
-                self.imported_captures[id(value._executable)] = ImportRef(
-                    owner_ref.module, f"{prefix}._executable",
-                )
-            return {
-                "tag": "managed_declaration",
-                "authored": self.value(value._target, f"{path}.authored", depth + 1),
-                "executable": self.value(value._executable, f"{path}.executable", depth + 1),
-                "owner": self.value(owner, f"{path}.owner", depth + 1),
-                "member": member,
-                "resumable": value.resumable,
-                "store_parameter": value.store_parameter,
-                "invocation_parameters": dict(value._invocation_parameters),
-            }
-        if type(value) is _ManagedComposite:
-            descriptor = value._descriptor
-            owner = descriptor._owner
-            member = descriptor.member
-            if not isinstance(owner, type) or not isinstance(member, str):
-                _fail("unbound managed composite", path)
-            return {
-                "tag": "managed_composite",
-                "declaration": self.value(descriptor, f"{path}.declaration", depth + 1),
-                "outer": self.value(value._outer, f"{path}.outer", depth + 1),
-                "owner": self.value(owner, f"{path}.owner", depth + 1),
-                "member": member,
-            }
-        if type(value) is _BoundOperation:
-            return {
-                "tag": "managed_target",
-                "receiver": self.value(value._instance, f"{path}.receiver", depth + 1),
-                "declaration": self.value(value._descriptor, f"{path}.declaration", depth + 1),
-            }
-        if type(value) is _BoundComposite:
-            return {
-                "tag": "managed_composite_target",
-                "receiver": self.value(value._instance, f"{path}.receiver", depth + 1),
-                "composite": self.value(value._composite, f"{path}.composite", depth + 1),
-            }
+        adapter = self.adapter(value)
+        if adapter is not None:
+            return adapter.encode(self, value, path, depth)
         if isinstance(value, (asyncio.Future, asyncio.AbstractEventLoop)):
             _fail("live asyncio resource", path)
         if _is_resource(value):
@@ -461,28 +459,20 @@ class _Encoder:
                 "qualname": imported_capture.qualname,
             }
         automatic = id(value) in self.automatic_references
-        if isinstance(value, Definition):
-            return {
-                "tag": "definition",
-                "cls": self.value(value.cls, f"{path}.cls", depth + 1),
-                "args": (
-                    None
-                    if value.args is None
-                    else self.value(value.args, f"{path}.args", depth + 1)
-                ),
-                "kwargs": self.value(
-                    value.kwargs, f"{path}.kwargs", depth + 1
-                ),
-            }
+        from .node import Node
+        if isinstance(value, Node):
+            slot = len(self.graph_roots)
+            self.graph_roots.append(value)
+            return {"tag": "auto_node" if automatic else "node", "view": slot}
         if isinstance(value, ConcreteDefinition):
             return {"tag": "auto_cdef" if automatic else "cdef", "value": encode_cdef_graph(value)}
         if isinstance(value, Object):
             if has_stateful_materialization(value.definition):
                 state = value.last_state_ref
-                if state is None or state.object != value.object_ref:
+                if state is None or not self.repo.describe(value).object_projection_equal(state):
                     _fail("unsaved live Object", path)
-                return {"tag": "state", "value": state.to_data()}
-            return {"tag": "cdef", "value": encode_cdef_graph(value.definition)}
+                return self._node(state, path, depth)
+            return self._node(value.definition, path, depth)
         if isinstance(value, StateRef):
             return {"tag": "auto_state" if automatic else "state", "value": value.to_data()}
         if isinstance(value, ObjectRef):
@@ -606,62 +596,13 @@ class _Encoder:
             "value": _dill_leaf(value, path, limit_bytes=self.limit_bytes),
         }
 
-    def _managed_config_resource(self, value: Any, path: str, *, allow_repo: bool) -> dict[str, Any] | None:
-        """Detach one supported ManagedConfig authority without retaining its handle."""
-        from .store.dir import DirStore
-
-        if value is None:
-            return None
-        if allow_repo and isinstance(value, Repo):
-            definition = value.to_definition().to_data()
-            role = "repo"
-            descriptors = definition["stores"]
-        elif type(value) is DirStore:
-            definition = value.to_definition()
-            role = "store"
-            descriptors = [definition]
-        else:
-            _fail("unsupported managed config resource", path)
-        if any(descriptor.get("kind") != "dir" for descriptor in descriptors):
-            _fail("unsupported managed config resource", path)
-        return {"role": role, "definition": definition}
-
-    def _managed_config_node(self, value: Any, path: str, depth: int) -> dict[str, Any]:
-        """Snapshot one exact ManagedConfig policy and its callback membership."""
-        if type(value.rerun) is not bool:
-            _fail("malformed managed config", path)
-        callbacks = value.callbacks
-        if callbacks is not None:
-            if type(callbacks) is not list or len(callbacks) > 64:
-                _fail("malformed managed config", path)
-            for callback in callbacks:
-                try:
-                    modality = describe_callable(callback).native_modality
-                except Exception:
-                    _fail("unsupported managed callback", path)
-                if modality != "sync":
-                    _fail("unsupported managed callback", path)
-            callback_nodes = [
-                self.value(callback, f"{path}.callback[{index}]", depth + 1)
-                for index, callback in enumerate(callbacks)
-            ]
-        else:
-            callback_nodes = None
-        return {
-            "tag": "managed_config",
-            "state_repo": self._managed_config_resource(
-                value.state_repo, f"{path}.state_repo", allow_repo=True,
-            ),
-            "control_store": self._managed_config_resource(
-                value.control_store, f"{path}.control_store", allow_repo=False,
-            ),
-            "rerun": value.rerun,
-            "callbacks": callback_nodes,
-        }
-
     def finish(self, root: int) -> bytes:
+        from .node_prepare import NodePreparation
+        from .node_codec import encode_node_graph
+        graphs = None if not self.graph_roots else encode_node_graph(NodePreparation(self.graph_roots))
         try:
-            payload = dill.dumps({"version": _VERSION, "root": root, "nodes": self.nodes}, protocol=5)
+            payload = dill.dumps({"version": _VERSION, "root": root, "nodes": self.nodes,
+                "graphs": graphs, "adapters": {name: adapter.version for name, adapter in self.adapters.items()}}, protocol=5)
         except Exception as error:
             raise CoreCallCodecError("core execution transport could not encode call graph") from error
         if len(payload) > self.limit_bytes:
@@ -673,14 +614,14 @@ class _Decoder:
     """Decode one validated graph after worker setup, preserving alias identity."""
 
     def __init__(self, data: bytes, *, repo: Repo, limit_bytes: int,
-                 allow_managed_config: bool = True,
+                 purpose: str = "call",
                  allow_assertions: bool = False) -> None:
         if not isinstance(data, bytes) or len(data) > limit_bytes:
             raise CoreCallCodecError("core execution transport rejected oversized invocation")
         graph = _load(data, "$")
         if (
-            not isinstance(graph, Mapping) or set(graph) != {"version", "root", "nodes"}
-            or graph.get("version") != _VERSION or not isinstance(graph.get("nodes"), list)
+            not isinstance(graph, Mapping) or set(graph) != {"version", "root", "nodes", "graphs", "adapters"}
+            or type(graph.get("version")) is not int or graph.get("version") != _VERSION or not isinstance(graph.get("nodes"), list)
         ):
             raise CoreCallCodecError("core execution transport rejected malformed call graph")
         self.graph = graph
@@ -688,9 +629,41 @@ class _Decoder:
         self.limit_bytes = limit_bytes
         if len(self.nodes) > _MAX_NODES:
             raise CoreCallCodecError("core execution transport rejected oversized call graph")
-        self.allow_managed_config = allow_managed_config
+        self.purpose = purpose
         self.allow_assertions = allow_assertions
+        self.adapters = {}
+        if not isinstance(graph["adapters"], dict):
+            _fail("malformed adapter table", "$.adapters")
+        for reference, version in graph["adapters"].items():
+            if type(reference) is not str or ":" not in reference or type(version) is not int:
+                _fail("malformed adapter reference", "$.adapters")
+            module, name = reference.split(":", 1)
+            try:
+                adapter = importlib.import_module(module)
+                for part in name.split("."):
+                    adapter = getattr(adapter, part)
+            except (ImportError, AttributeError) as error:
+                raise CoreCallCodecError("core execution transport rejected unavailable supplied adapter") from error
+            if adapter.version != version:
+                _fail("incompatible adapter version", "$.adapters")
+            for tag in adapter.schemas:
+                if tag in self.adapters:
+                    _fail("duplicate adapter tag", "$.adapters")
+                self.adapters[tag] = adapter
         self._validate_graph()
+        from .node_codec import _decode_node_graph_views, NodeCodecError
+        try:
+            self.graph_views = () if graph["graphs"] is None else _decode_node_graph_views(graph["graphs"])
+        except NodeCodecError as error:
+            raise CoreCallCodecError("core execution transport rejected malformed shared Node graph") from error
+        for node in self.nodes:
+            if node["tag"] in {"node", "auto_node"} and (type(node["view"]) is not int or not 0 <= node["view"] < len(self.graph_views)):
+                _fail("malformed Node view", "$.graphs")
+        for index, node in enumerate(self.nodes):
+            adapter = self.adapters.get(node["tag"])
+            validate_views = getattr(adapter, "validate_views", None)
+            if validate_views is not None:
+                validate_views(self, node, f"$.node[{index}]")
         self.repo = repo
         self.memo: dict[int, Any] = {}
         self.active: set[int] = set()
@@ -701,6 +674,7 @@ class _Decoder:
         if isinstance(self.graph.get("root"), bool) or not isinstance(self.graph.get("root"), int):
             _fail("malformed graph root", "$")
         allowed = {
+            "node": {"tag", "view"}, "auto_node": {"tag", "view"},
             "atom": {"tag", "value"}, "definition": {"tag", "cls", "args", "kwargs"},
             "cdef": {"tag", "value"},
             "auto_cdef": {"tag", "value"}, "state": {"tag", "value"},
@@ -720,14 +694,13 @@ class _Decoder:
             "function": {"tag", "code", "name", "defaults", "kwdefaults", "annotations", "captures", "freevars"},
             "class": {"tag", "name", "bases", "namespace"},
             "instance": {"tag", "type", "fields"},
-            "managed_declaration": {"tag", "authored", "executable", "owner", "member", "resumable", "store_parameter", "invocation_parameters"},
-            "managed_composite": {"tag", "declaration", "outer", "owner", "member"},
-            "managed_target": {"tag", "receiver", "declaration"},
-            "managed_composite_target": {"tag", "receiver", "composite"},
-            "managed_config": {"tag", "state_repo", "control_store", "rerun", "callbacks"},
         }
+        for adapter in set(self.adapters.values()):
+            if set(adapter.schemas) & set(allowed):
+                _fail("duplicate adapter tag", "$.adapters")
+            allowed.update(adapter.schemas)
         for index, node in enumerate(self.nodes):
-            if not isinstance(node, Mapping) or node.get("tag") not in allowed or set(node) != allowed[node["tag"]]:
+            if not isinstance(node, Mapping) or type(node.get("tag")) is not str or node.get("tag") not in allowed or set(node) != allowed[node["tag"]]:
                 _fail("malformed graph node", f"$.node[{index}]")
             tag = node["tag"]
             if tag == "dill" and (
@@ -748,10 +721,6 @@ class _Decoder:
                 _fail("malformed path", f"$.node[{index}]")
             if tag in {"dict", "frozen_dict"} and (not isinstance(node["items"], list) or any(not isinstance(item, list) or len(item) != 2 for item in node["items"])):
                 _fail("malformed mapping", f"$.node[{index}]")
-            if tag == "managed_config":
-                if not self.allow_managed_config:
-                    _fail("managed config result", f"$.node[{index}]")
-                self._validate_managed_config_node(node, f"$.node[{index}]")
             if tag == "assertion" and (
                 not self.allow_assertions
                 or not isinstance(node["kind"], str)
@@ -797,31 +766,8 @@ class _Decoder:
                 else:
                     references.append(node["type"])
                 references.extend(node["fields"].values())
-            elif tag == "managed_declaration":
-                if (
-                        not isinstance(node["member"], str)
-                        or type(node["resumable"]) is not bool
-                        or (node["store_parameter"] is not None and type(node["store_parameter"]) is not str)
-                        or not isinstance(node["invocation_parameters"], Mapping)
-                        or not all(
-                            type(name) is str
-                            and policy in {"observer_factories", "observer_strict"}
-                            for name, policy in node["invocation_parameters"].items()
-                        )
-                ):
-                    _fail("malformed managed target", f"$.node[{index}]")
-                references.extend((node["authored"], node["executable"], node["owner"]))
-            elif tag == "managed_composite":
-                if not isinstance(node["member"], str):
-                    _fail("malformed managed composite", f"$.node[{index}]")
-                references.extend((node["declaration"], node["outer"], node["owner"]))
-            elif tag == "managed_target":
-                references.extend((node["receiver"], node["declaration"]))
-            elif tag == "managed_composite_target":
-                references.extend((node["receiver"], node["composite"]))
-            elif tag == "managed_config":
-                if node["callbacks"] is not None:
-                    references.extend(node["callbacks"])
+            elif tag in self.adapters:
+                references.extend(self.adapters[tag].validate(self, node, f"$.node[{index}]"))
             if any(isinstance(reference, bool) or not isinstance(reference, int) or not 0 <= reference < len(self.nodes) for reference in references):
                 _fail("malformed graph reference", f"$.node[{index}]")
             if tag == "definition":
@@ -841,76 +787,6 @@ class _Decoder:
                     )
                 ):
                     _fail("malformed Definition", f"$.node[{index}]")
-            self._validate_managed_node_references(node, f"$.node[{index}]")
-
-    def _validate_managed_node_references(self, node: Mapping[str, Any], path: str) -> None:
-        """Validate managed evidence node kinds before decoding can import or materialize."""
-
-        def require(field: str, tags: set[str], reason: str) -> None:
-            reference = node[field]
-            candidate = self.nodes[reference]
-            if not isinstance(candidate, Mapping) or candidate.get("tag") not in tags:
-                _fail(reason, path)
-
-        tag = node["tag"]
-        if tag == "managed_declaration":
-            require(
-                "authored", {"function", "import"},
-                "malformed managed declaration",
-            )
-            require(
-                "executable", {"function", "function_owner", "import"},
-                "malformed managed declaration",
-            )
-            require("owner", {"class", "import"}, "malformed managed declaration")
-        elif tag == "managed_composite":
-            require("declaration", {"managed_declaration"}, "malformed managed composite")
-            require("outer", {"function"}, "malformed managed composite")
-            require("owner", {"class", "import"}, "malformed managed composite")
-        elif tag == "managed_target":
-            require("declaration", {"managed_declaration"}, "malformed managed target")
-        elif tag == "managed_composite_target":
-            require("composite", {"managed_composite"}, "malformed managed target")
-
-    @staticmethod
-    def _validate_managed_config_resource(
-            value: Any, path: str, *, allow_repo: bool) -> None:
-        """Validate an inert direct-DirStore config role before any resource opens."""
-        from .repo_definition import RepoDefinition, _validate_store_descriptor
-
-        if value is None:
-            return
-        if not isinstance(value, Mapping) or set(value) != {"role", "definition"}:
-            _fail("malformed managed config resource", path)
-        role = value["role"]
-        if role == "repo" and allow_repo:
-            try:
-                definition = RepoDefinition.from_data(value["definition"])
-                descriptors = definition.to_data()["stores"]
-            except (RecursionError, TypeError, ValueError, OverflowError, UnicodeError):
-                _fail("malformed managed config resource", path)
-        elif role == "store":
-            try:
-                descriptors = [_validate_store_descriptor(value["definition"])]
-            except (RecursionError, TypeError, ValueError, OverflowError, UnicodeError):
-                _fail("malformed managed config resource", path)
-        else:
-            _fail("malformed managed config resource", path)
-        if any(descriptor["kind"] != "dir" for descriptor in descriptors):
-            _fail("unsupported managed config resource", path)
-
-    def _validate_managed_config_node(self, node: Mapping[str, Any], path: str) -> None:
-        """Validate closed config policy and inert resource roles before decoding."""
-        callbacks = node["callbacks"]
-        if (
-            type(node["rerun"]) is not bool
-            or (callbacks is not None and (
-                type(callbacks) is not list or len(callbacks) > 64
-            ))
-        ):
-            _fail("malformed managed config", path)
-        self._validate_managed_config_resource(node["state_repo"], f"{path}.state_repo", allow_repo=True)
-        self._validate_managed_config_resource(node["control_store"], f"{path}.control_store", allow_repo=False)
 
     def value(self, index: Any, path: str = "$") -> Any:
         if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(self.nodes):
@@ -932,6 +808,16 @@ class _Decoder:
 
     def _node(self, node: Mapping[str, Any], path: str) -> Any:
         tag = node["tag"]
+        if tag in self.adapters:
+            return self.adapters[tag].decode(self, node, path)
+        if tag in {"node", "auto_node"}:
+            slot = node["view"]
+            if type(slot) is not int or not 0 <= slot < len(self.graph_views):
+                _fail("malformed Node view", path)
+            value = self.graph_views[slot]
+            if tag == "auto_node":
+                self.automatic_references.add(id(value))
+            return value
         if tag == "atom":
             value = node["value"]
             if value is not None and type(value) not in {bool, int, float, str, bytes}:
@@ -1080,109 +966,6 @@ class _Decoder:
                     self.value(index, f"{path}.field[{position}]"),
                 )
             return instance
-        if tag == "managed_declaration":
-            from dryml.managed.descriptor import ManagedOperation
-
-            authored = self.value(node["authored"], f"{path}.authored")
-            executable = self.value(node["executable"], f"{path}.executable")
-            owner = self.value(node["owner"], f"{path}.owner")
-            if (
-                type(authored) is not types.FunctionType
-                or type(executable) is not types.FunctionType
-                or not isinstance(owner, type)
-            ):
-                _fail("malformed managed declaration", path)
-            try:
-                declaration = ManagedOperation(
-                    executable, resumable=node["resumable"],
-                    store_parameter=node["store_parameter"],
-                )
-                if node["invocation_parameters"]:
-                    declaration._declare_invocation_parameters(
-                        **dict(node["invocation_parameters"]),
-                    )
-                declaration.__set_name__(owner, node["member"])
-            except (TypeError, ValueError) as error:
-                raise CoreCallCodecError(
-                    f"core execution transport rejected malformed managed declaration at {path}"
-                ) from error
-            if declaration.author_signature != inspect.signature(authored):
-                _fail("malformed managed declaration", path)
-            # The executable wrapper can reconstruct an equivalent raw function
-            # through a function-owner node. Keep the separately captured authored
-            # function as the declaration identity used for binding and signatures.
-            declaration._target = authored
-            return declaration
-        if tag == "managed_composite":
-            from dryml.managed.descriptor import ManagedOperation, _ManagedComposite
-
-            declaration = self.value(node["declaration"], f"{path}.declaration")
-            outer = self.value(node["outer"], f"{path}.outer")
-            owner = self.value(node["owner"], f"{path}.owner")
-            if (
-                type(declaration) is not ManagedOperation
-                or type(outer) is not types.FunctionType
-                or not isinstance(owner, type)
-                or declaration._owner is not owner
-                or declaration.member != node["member"]
-            ):
-                _fail("malformed managed composite", path)
-            return _ManagedComposite(declaration, outer)
-        if tag in {"managed_target", "managed_composite_target"}:
-            receiver = self.value(node["receiver"], f"{path}.receiver")
-            # Managed owns lifecycle admission and currently requires its bound
-            # receiver before it can expose the owner seam.
-            if isinstance(receiver, (StateRef, ObjectRef)):
-                receiver = self.repo.materialize_boundary((receiver,), reuse_live="never")[0]
-            evidence = self.value(
-                node["declaration"] if tag == "managed_target" else node["composite"],
-                f"{path}.declaration" if tag == "managed_target" else f"{path}.composite",
-            )
-            from dryml.managed.descriptor import (
-                ManagedOperation, _BoundComposite, _BoundOperation, _ManagedComposite,
-            )
-
-            declaration = evidence if tag == "managed_target" else (
-                evidence._descriptor if type(evidence) is _ManagedComposite else None
-            )
-            if type(declaration) is not ManagedOperation or not isinstance(receiver, declaration._owner):
-                _fail("malformed managed target", path)
-            if tag == "managed_target":
-                return _BoundOperation(declaration, receiver)
-            if type(evidence) is not _ManagedComposite:
-                _fail("malformed managed target", path)
-            return _BoundComposite(evidence, receiver)
-        if tag == "managed_config":
-            from dryml.managed import ManagedConfig
-
-            def decode_resource(value: Any, *, state_repo: bool) -> Any:
-                if value is None:
-                    return None
-                role = value["role"]
-                definition = value["definition"]
-                if role == "repo" and state_repo:
-                    from .repo_definition import RepoDefinition
-
-                    return Repo.from_definition(RepoDefinition.from_data(definition))
-                if role == "store":
-                    return Store.from_definition(definition)
-                _fail("malformed managed config resource", path)
-
-            callbacks = None if node["callbacks"] is None else [
-                self.value(index, f"{path}.callback[{position}]")
-                for position, index in enumerate(node["callbacks"])
-            ]
-            try:
-                return ManagedConfig(
-                    state_repo=decode_resource(node["state_repo"], state_repo=True),
-                    control_store=decode_resource(node["control_store"], state_repo=False),
-                    rerun=node["rerun"],
-                    callbacks=callbacks,
-                )
-            except (TypeError, ValueError) as error:
-                raise CoreCallCodecError(
-                    f"core execution transport rejected malformed managed config at {path}"
-                ) from error
         _fail("unknown graph tag", path)
 
 
@@ -1200,16 +983,26 @@ def _selection_data(
         if selection is None:
             result[key] = None
             continue
-        if isinstance(selection, ObjectRef):
+        if isinstance(selection, (Node, ObjectRef)):
             selection = ReferenceSelection(selection)
         elif isinstance(selection, tuple) and len(selection) == 2:
             selection = ReferenceSelection(selection[0], selection[1])
-        if not isinstance(selection, ReferenceSelection) or not isinstance(selection.object_ref, ObjectRef):
+        if not isinstance(selection, ReferenceSelection) or not isinstance(selection.object_ref, (Node, ObjectRef)):
             _fail("malformed selection", "$.selections")
         store = selection.store
         table = tuple(repo.stores) if store_table is None else store_table
         if store is not None and not any(store is candidate for candidate in table):
             _fail("unsupported selected Store", "$.selections")
+        if isinstance(selection.object_ref, Node):
+            node = selection.object_ref
+            require_saved(node)
+            digest = NodePreparation((node,)).digest(node, domain="dryml-saved-root/v1")
+            candidates = table if store is None else (store,)
+            if not any((saved := candidate.read_node(digest, kind="saved")) is not None
+                       and saved.graph_equal(node) for candidate in candidates):
+                _fail("selected authority is unavailable", "$.selections")
+            result[key] = {"object_ref": node, "store": None if store is None else table.index(store)}
+            continue
         evidence = repo.reference_evidence(selection.object_ref.definition)
         if not any(
             item.object_ref == selection.object_ref and (store is None or store in item.stores)
@@ -1235,147 +1028,20 @@ def _selection_controls(data: Mapping[Any, Any], repo: Repo) -> Mapping[Any, Any
         if value is None:
             result[key] = None
             continue
-        if not isinstance(value, Mapping) or set(value) != {"object_ref", "store"} or not isinstance(value["object_ref"], ObjectRef):
+        if not isinstance(value, Mapping) or set(value) != {"object_ref", "store"} or not isinstance(value["object_ref"], (Node, ObjectRef)):
             _fail("malformed selection", "$.selections")
         index = value["store"]
         if index is not None and (isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(repo.stores)):
             _fail("malformed selected Store", "$.selections")
         store = None if index is None else repo.stores[index]
+        if isinstance(value["object_ref"], Node):
+            node = value["object_ref"]
+            digest = NodePreparation((node,)).digest(node, domain="dryml-saved-root/v1")
+            if not any((saved := candidate.read_node(digest, kind="saved")) is not None and saved.graph_equal(node)
+                       for candidate in (repo.stores if store is None else (store,))):
+                _fail("selected authority is unavailable", "$.selections")
         result[key] = ReferenceSelection(value["object_ref"], store)
     return result
-
-
-def _managed_store_control(fn: Any, kwargs: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Detach one declared managed Store control from ordinary worker arguments.
-
-    Store handles remain forbidden everywhere except this declaration-owned slot.
-    The worker rebuilds the handle from its existing Store definition only after
-    the managed target has been reconstructed and its metadata checked.
-    """
-
-    from dryml.managed.descriptor import ManagedOperation
-
-    descriptor = getattr(fn, "_descriptor", None)
-    values = dict(kwargs)
-    if type(descriptor) is not ManagedOperation or descriptor.store_parameter is None:
-        return {"version": 1, "store_parameter": None, "store": None}, values
-    name = descriptor.store_parameter
-    value = values.pop(name, None)
-    if value is None:
-        store = None
-    elif isinstance(value, Store):
-        try:
-            store = value.to_definition()
-        except (TypeError, ValueError) as error:
-            raise CoreCallCodecError(
-                "core execution transport rejected declared managed Store"
-            ) from error
-    else:
-        _fail("unsupported declared managed Store", "$.managed_controls")
-    return {"version": 1, "store_parameter": name, "store": store}, values
-
-
-def _validate_managed_invocation_parameters(
-        fn: Any, kwargs: Mapping[str, Any]) -> None:
-    """Reject unsupported transient managed controls before worker submission.
-
-    Only declaration-owned observer slots use this private channel. Live callback
-    instances remain local; workers receive inert :class:`FactorySpec` values and
-    build their observers after runtime admission.
-    """
-
-    descriptor = getattr(fn, "_descriptor", None)
-    policies = getattr(descriptor, "_invocation_parameters", {})
-    if not policies:
-        return
-    from .factory import FactorySpec
-
-    for name, policy in policies.items():
-        if name not in kwargs:
-            continue
-        value = kwargs[name]
-        if policy == "observer_strict":
-            if type(value) is not bool:
-                _fail("malformed observer strict policy", f"$.kwargs[{name!r}]")
-            continue
-        if policy != "observer_factories":
-            _fail("unsupported managed invocation control", f"$.kwargs[{name!r}]")
-        if value is None:
-            continue
-        if type(value) not in {list, tuple} or len(value) > 64:
-            _fail("malformed observer factory collection", f"$.kwargs[{name!r}]")
-        for index, factory in enumerate(value):
-            if type(factory) is not FactorySpec:
-                _fail(
-                    "live telemetry observer; use FactorySpec for worker construction",
-                    f"$.kwargs[{name!r}][{index}]",
-                )
-            _validate_observer_factory(factory, f"$.kwargs[{name!r}][{index}]", 0)
-
-
-def _validate_observer_factory(value: Any, path: str, depth: int) -> None:
-    """Require bounded plain worker-construction configuration."""
-
-    from .factory import FactorySpec
-    from .symbol import ImportRef, SourceSpec
-
-    if depth > 32:
-        _fail("observer factory configuration depth", path)
-    if value is None or type(value) in {bool, int, float, str, bytes}:
-        return
-    if isinstance(value, (ImportRef, SourceSpec)) or type(value) in _PATH_TYPES.values():
-        return
-    if isinstance(value, FactorySpec):
-        _validate_observer_factory(value.target, f"{path}.target", depth + 1)
-        for index, item in enumerate(value.args):
-            _validate_observer_factory(item, f"{path}.args[{index}]", depth + 1)
-        for key, item in value.kwargs.items():
-            if type(key) is not str:
-                _fail("observer factory configuration", f"{path}.kwargs")
-            _validate_observer_factory(item, f"{path}.kwargs[{key!r}]", depth + 1)
-        return
-    if isinstance(value, (tuple, list, set, frozenset)):
-        for index, item in enumerate(value):
-            _validate_observer_factory(item, f"{path}[{index}]", depth + 1)
-        return
-    if isinstance(value, Mapping):
-        for index, (key, item) in enumerate(value.items()):
-            _validate_observer_factory(key, f"{path}.key[{index}]", depth + 1)
-            _validate_observer_factory(item, f"{path}.value[{index}]", depth + 1)
-        return
-    _fail("live observer factory configuration", path)
-
-
-def _decode_managed_store_control(target: Any, data: Any) -> tuple[str | None, Store | None]:
-    """Validate and rebuild a declaration-owned Store control on the worker."""
-
-    from dryml.managed.descriptor import ManagedOperation
-    from .repo_definition import _validate_store_descriptor
-
-    descriptor = getattr(target, "_descriptor", None)
-    if (
-            not isinstance(data, Mapping)
-            or set(data) != {"version", "store_parameter", "store"}
-            or type(data["version"]) is not int or data["version"] != 1
-            or (data["store_parameter"] is not None and type(data["store_parameter"]) is not str)
-    ):
-        _fail("malformed managed Store control", "$.managed_controls")
-    expected = descriptor.store_parameter if type(descriptor) is ManagedOperation else None
-    if data["store_parameter"] != expected:
-        _fail("forbidden managed Store control", "$.managed_controls")
-    if expected is None:
-        if data["store"] is not None:
-            _fail("forbidden managed Store control", "$.managed_controls")
-        return None, None
-    if data["store"] is None:
-        return expected, None
-    try:
-        definition = _validate_store_descriptor(data["store"])
-        return expected, Store.from_definition(definition)
-    except (RecursionError, TypeError, ValueError, OverflowError, UnicodeError) as error:
-        raise CoreCallCodecError(
-            "core execution transport rejected malformed managed Store control"
-        ) from error
 
 
 def encode_invocation(
@@ -1385,7 +1051,26 @@ def encode_invocation(
         limit_bytes: int = _DEFAULT_LIMIT,
         update_targets: tuple[Mapping[str, Any], ...] = (),
 ) -> bytes:
-    """Encode one detached call graph without activating annotations or saving input state."""
+    """Encode a detached call without activating annotations or capturing state.
+
+    Args:
+        fn: Trusted synchronous callable with statically supported modality.
+        args: Tuple of positional inputs.
+        kwargs: String-keyed ordinary keyword Mapping.
+        repo: Borrowed Repo used for exact descriptions and selected membership.
+        selections: Optional signature-slot selection Mapping.
+        store_table: Optional frozen tuple of connected Store handles.
+        limit_bytes: Positive maximum invocation size in bytes.
+        update_targets: Tuple of detached caller-refresh associations.
+    Returns:
+        Version-local bounded bytes with shared Node views and supplied adapters.
+    Raises:
+        CoreCallCodecError: For unsupported callables/resources, cycles, malformed
+            policy, unavailable selected authority or an oversized invocation.
+    Side Effects:
+        Reads selected metadata and detaches resource descriptors; never saves,
+        materializes a receiver, invokes callbacks or resolves annotations.
+    """
     if not callable(fn) or not isinstance(args, tuple) or not isinstance(kwargs, Mapping) or not all(isinstance(key, str) for key in kwargs):
         raise CoreCallCodecError("core execution transport requires a callable, tuple arguments, and string keyword mapping")
     description = describe_callable(fn)
@@ -1393,22 +1078,33 @@ def encode_invocation(
     owner = description.owner
     if description.native_modality != "sync":
         raise CoreCallCodecError("core execution transport rejected async or generator target")
-    _validate_managed_invocation_parameters(fn, kwargs)
     encoder = _Encoder(limit_bytes=limit_bytes, allow_assertions=True)
+    encoder.repo = repo
     if not isinstance(update_targets, tuple):
         raise CoreCallCodecError("core execution transport requires tuple update targets")
-    managed_controls, ordinary_kwargs = _managed_store_control(fn, kwargs)
-    root = encoder.value({"target": target, "args": args, "kwargs": ordinary_kwargs, "owner": owner, "selections": _selection_data(selections or {}, repo, store_table), "updates": list(update_targets), "managed_controls": managed_controls}, "$")
+    adapter = encoder.adapter(target)
+    controls, ordinary_kwargs = (None, dict(kwargs)) if adapter is None else adapter.prepare_call(target, kwargs)
+    root = encoder.value({"target": target, "args": args, "kwargs": ordinary_kwargs, "owner": owner, "selections": _selection_data(selections or {}, repo, store_table), "updates": list(update_targets), "controls": controls}, "$")
     return encoder.finish(root)
 
 
 def decode_invocation(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LIMIT) -> tuple[Any, tuple[Any, ...], dict[str, Any], str, Mapping[Any, Any], tuple[Mapping[str, Any], ...]]:
-    """Reconstruct a call graph after worker setup and before one local boundary."""
+    """Reconstruct a validated call under an established worker resource scope.
+
+    data is bounded invocation bytes, repo the borrowed worker Repo, and
+    limit_bytes its positive byte limit. Returns (target, args, kwargs, owner,
+    selections, update_targets). Malformed or incompatible graph/adapter data
+    raises CoreCallCodecError; unavailable explicit config resources preserve
+    their owning open errors. Supplied adapters validate Node capabilities before
+    reconstruction. Managed targets stay metadata-only; config resources reopen
+    through the active scope. Generic Method targets retain their own realization
+    boundary. This function never invokes the workload or saves input state.
+    """
     decoder = _Decoder(
         data, repo=repo, limit_bytes=limit_bytes, allow_assertions=True,
     )
     decoded = decoder.value(decoder.graph["root"])
-    if not isinstance(decoded, Mapping) or set(decoded) != {"target", "args", "kwargs", "owner", "selections", "updates", "managed_controls"}:
+    if not isinstance(decoded, Mapping) or set(decoded) != {"target", "args", "kwargs", "owner", "selections", "updates", "controls"}:
         raise CoreCallCodecError("core execution transport rejected malformed call descriptor")
     if not callable(decoded["target"]) or not isinstance(decoded["args"], tuple) or not isinstance(decoded["kwargs"], dict) or not all(isinstance(key, str) for key in decoded["kwargs"]):
         raise CoreCallCodecError("core execution transport rejected malformed call descriptor")
@@ -1423,11 +1119,12 @@ def decode_invocation(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LI
         if not isinstance(item, Mapping) or set(item) != {"target", "object_digest", "path"} or not all(isinstance(item[name], str) and item[name] for name in item):
             raise CoreCallCodecError("core execution transport rejected malformed update target")
         targets.append(item)
-    name, store = _decode_managed_store_control(
-        decoded["target"], decoded["managed_controls"],
-    )
-    if name is not None:
-        decoded["kwargs"][name] = store
+    adapter = getattr(type(decoded["target"]), "__dryml_execute_adapter__", None)
+    if adapter is not None:
+        module, name = adapter.split(":", 1)
+        ImportRef(module, name).resolve().restore_call(decoded["target"], decoded["controls"], decoded["kwargs"])
+    elif decoded["controls"] is not None:
+        _fail("unexpected owner controls", "$.controls")
     return decoded["target"], decoded["args"], decoded["kwargs"], decoded["owner"], _selection_controls(decoded["selections"], repo), tuple(targets)
 
 
@@ -1548,16 +1245,18 @@ def _report_data(report: Any, repo: Repo, state_ref: StateRef | None) -> list[di
     """Project ephemeral StoreReport facts into Store-table-relative evidence."""
     if report is None:
         return []
-    indexes = {id(store): index for index, store in enumerate(repo.stores)}
+    indexes = {(store.store_uuid, store.authority_fence_key()): index for index, store in enumerate(repo.stores)}
     facts = []
     for item in report.publications:
-        index = indexes.get(id(item.store))
-        reference = item.state_ref if isinstance(item.state_ref, StateRef) else state_ref
-        if index is None or not isinstance(reference, StateRef):
+        index = indexes.get((item.store.store_uuid, item.store.authority_fence_key()))
+        reference = item.state_ref if isinstance(item.state_ref, Node) else state_ref
+        if not isinstance(reference, Node):
             continue
         facts.append({
-            "state": reference.to_data(), "store": index, "phase": item.phase,
+            "state": reference, "store": index, "phase": item.phase,
             "status": item.status, "path": str(item.path),
+            "source": None if index is not None else {
+                "definition": item.store.to_definition(), "store_uuid": item.store.store_uuid},
         })
     return facts
 
@@ -1619,7 +1318,7 @@ class _ResultPublisher:
         self._remember_graph(root, state)
         if update:
             assert target is not None
-            self.update_states.append({"state": state.to_data(), "object": state.object.to_data(), "target": target})
+            self.update_states.append({"state": state, "object": state.object_projection_digest(), "target": target})
         return state
 
     def publish_updates(self) -> None:
@@ -1630,13 +1329,19 @@ class _ResultPublisher:
         for target, root in self.updates:
             self._save(root, update=True, target=target)
 
-    def _prospective_state(self, value: Object) -> StateRef:
+    def _prospective_state(self, value: Object) -> Node:
         """Build a shape-accurate future receipt without saving ``value``."""
         state = self._prospective_states.get(id(value))
         if state is None:
-            state = StateRef(value.object_ref, {
-                path: "core-" + "0" * 64 for path in value.object_ref.objects
-            })
+            from .state_values import LocalState, StateKey
+            from .node import _owned_nodes
+            node = self.repo.describe(value)
+            states = {}
+            for path, current in _owned_nodes(node):
+                if current._stateful_role:
+                    creation = current.creation_view()
+                    states[path] = LocalState(StateKey(creation.creation_digest(), "core-" + "0" * 64), creation)
+            state = node.with_realization(states=states)
             self._prospective_states[id(value)] = state
         return state
 
@@ -1728,8 +1433,8 @@ class _ResultPublisher:
         if len(roots) > _MAX_NODES:
             raise CoreCallCodecError("core execution transport rejected oversized publication roots")
         updates = [
-            {"state": self._prospective_state(root).to_data(),
-             "object": root.object_ref.to_data(), "target": target}
+            {"state": self._prospective_state(root),
+             "object": self.repo.describe(root).object_projection_digest(), "target": target}
             for target, root in self.updates
         ]
         phases = tuple(sorted(PUBLICATION_PHASES))
@@ -1754,11 +1459,11 @@ class _ResultPublisher:
                 if phase != "lineage":
                     yield snapshot_path, phase
             projection = state if not snapshot_path else state.at(snapshot_path)
-            for lineage_path in dict.fromkeys((GraphPath(), *projection.object.objects)):
+            for lineage_path in dict.fromkeys((GraphPath(), *projection.identity_spec())):
                 yield snapshot_path.join(lineage_path), "lineage"
 
         publications = [
-            {"state": state.to_data(), "store": store_index, "phase": phase,
+            {"state": state, "store": store_index, "phase": phase,
              "status": "completed", "path": str(path)}
             for root in roots
             for state in (self._prospective_state(root),)
@@ -1842,11 +1547,40 @@ def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = 
                         traceback_limit_bytes: int = 65_536) -> bytes:
     """Invoke once, publish selected state, and return a tagged portable outcome.
 
-    Result publication happens at each owner's raw-return seam, before its one
-    existing return-normalization boundary. Expected invocation, publication, and
-    result-encoding failures retain any completed publication ledger in the
-    returned outcome rather than escaping as a type-only worker exception.
+    Ordinary Execute publication uses its owner's raw-return seam. Supplied
+    lifecycle adapters own their durable result/final ordering. Reconstructed
+    resources share one invocation cache and close when this call exits; the
+    supplied Repo and any enclosing session resources remain borrowed. Failures
+    retain completed publication evidence rather than claiming rollback.
+
+    Args:
+        data: Detached bounded invocation bytes.
+        repo: Borrowed worker Repo; an existing ambient Repo remains selected.
+        invocation_limit_bytes: Maximum accepted invocation size.
+        result_limit_bytes: Maximum encoded outcome size, including evidence.
+        update_args: Whether selected delivered arguments may publish updates.
+        raw_traceback: Whether to retain bounded unredacted worker failure text.
+        traceback_limit_bytes: Maximum diagnostic UTF-8 bytes.
+    Returns:
+        Tagged success/failure bytes preserving exact publication and owner facts.
+    Raises:
+        CoreCallCodecError: For malformed invocation or unencodable evidence.
+        BaseException: Interruption and resource-scope failures propagate.
+    Side Effects:
+        Executes admitted work and may restore/capture/publish exact state;
+        completed managed replay skips those effects under its owner's policy.
     """
+    from dryml.session import resource_cache
+    from .session import config, get_config
+    selected_repo = get_config().repo
+    with config(repo=repo if selected_repo is None else selected_repo), resource_cache():
+        return _invoke_invocation(data, repo=repo, invocation_limit_bytes=invocation_limit_bytes,
+            result_limit_bytes=result_limit_bytes, update_args=update_args,
+            raw_traceback=raw_traceback, traceback_limit_bytes=traceback_limit_bytes)
+
+
+def _invoke_invocation(data, *, repo, invocation_limit_bytes, result_limit_bytes,
+                       update_args, raw_traceback, traceback_limit_bytes):
     target, args, kwargs, owner, selections, update_targets = decode_invocation(
         data, repo=repo, limit_bytes=invocation_limit_bytes,
     )
@@ -1879,7 +1613,7 @@ def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = 
         return publisher.raw_result(value)
 
     try:
-        capture_roots, install_captures = _target_materializing_roots(target)
+        capture_roots, install_captures = ((), lambda values: None) if owner == "managed" else _target_materializing_roots(target)
         if owner == "function":
             from .signatures import _invoke_function_with_raw_result
             plan = compile_signature(target)
@@ -1922,8 +1656,14 @@ def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = 
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception as error:
-        publications = [] if publisher is None else publisher.publications
+        publications = list([] if publisher is None else publisher.publications)
+        for fact in _report_data(getattr(error, "report", None), repo, None):
+            if fact not in publications:
+                publications.append(fact)
         updates = [] if publisher is None else publisher.update_states
+        failure = getattr(error, "__dryml_execute_failure__", None)
+        if failure is not None:
+            failure = _result_graph(failure, limit_bytes=result_limit_bytes, automatic_references=set())
         traceback_text = None
         if raw_traceback:
             from dryml.execute.errors import _format_raw_traceback
@@ -1934,7 +1674,7 @@ def invoke_invocation(data: bytes, *, repo: Repo, invocation_limit_bytes: int = 
         return _outcome(
             False, updates=updates, publications=publications,
             reason=_failure_reason(error), traceback_text=traceback_text,
-            limit_bytes=result_limit_bytes,
+            limit_bytes=result_limit_bytes, failure=failure,
         )
 
 

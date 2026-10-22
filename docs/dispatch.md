@@ -164,6 +164,17 @@ validation, core payload preparation, and backend acceptance synchronously. It
 returns the existing `CoreExecutionFuture`, so cancellation, uncertain outcome,
 result recovery, and cleanup retain the core Execute contracts.
 
+Managed backend targets use the managed-owned Core transport adapter. Dispatch
+preflight captures declarations and call-entry controls without realizing the
+receiver. Worker reconstruction remains metadata-only until managed admission:
+pending recovery and completed replay precede receiver materialization, and an
+execution handoff retains the same operation owner. Direct/in-process and worker
+success return `InvocationResult`; `run` does not unwrap `.value` or substitute a
+final-state reference. Run identity is stable on replay/resume, while caller
+invocation identity is fresh. Detached status/references survive worker cleanup;
+`.value` freshly reopens and validates its supported result source. Reclaimed
+receiver checkpoint data cannot force completed work to run again.
+
 `run` performs the same one-off submission, waits for that future's recovered
 result, and reconciles its owned cleanup. If both the workload result and
 cleanup fail, the workload failure remains primary and the cleanup failure is

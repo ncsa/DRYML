@@ -18,7 +18,6 @@ from collections.abc import Generator, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from pathlib import Path
 from threading import Condition, RLock, Thread
 from typing import Any, Callable, Literal, Protocol, TypeAlias
 
@@ -48,7 +47,7 @@ from .repo_plan import PUBLICATION_PHASES, PUBLICATION_STATUSES
 from .session import config, get_config
 from .store.dir import DirStore
 from .store.store import Store
-from .reference_values import StateRef
+from .node import Node, require_saved
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +75,7 @@ class _ContextLease:
     value: ExecutionContext
     thread_id: int
     task: asyncio.Task[Any] | None
+    process_id: int = field(default_factory=os.getpid)
     active: bool = True
 
 
@@ -98,24 +98,29 @@ _worker_cleanup_quarantine: list[Any] = []
 
 @dataclass(frozen=True, slots=True)
 class CorePublicationEvidence:
-    """Portable fact for one Store-table-relative publication boundary.
+    """Portable fact for one indexed or explicitly described publication source.
 
     Args:
-        state_ref: Exact StateRef associated with the observed boundary.
+        state_ref: Exact SavedNode associated with the observed boundary.
         store_index: Index in the frozen Repo Store table, never a Store handle.
         phase: Repo publication phase reported by the owning save path.
         status: Observed completed, failed, uncertain, or unattempted status.
         path: Canonical graph path recorded by the save report.
+        store_descriptor: Detached source descriptor when publication belongs to
+            explicit owner authority outside the frozen Repo table; otherwise None.
+        store_uuid: Exact external authority UUID when store_descriptor is present.
 
     The value is detached from the worker's ephemeral StoreReport and is safe for
     Future snapshots may retain it after worker cleanup.
     """
 
-    state_ref: StateRef
-    store_index: int
+    state_ref: Node
+    store_index: int | None
     phase: str
     status: str
     path: str
+    store_descriptor: Mapping[str, Any] | None = None
+    store_uuid: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +138,7 @@ class CoreRefreshEvidence:
     """
 
     target: str
-    state_ref: StateRef
+    state_ref: Node
     status: Literal["pending", "applied", "preflight_failed", "invalidated", "skipped"]
 
 
@@ -142,17 +147,20 @@ class CoreOutcomeEvidence:
     """Detached exact authority published by a completed worker outcome.
 
     Args:
-        publications: Store-table-relative publication boundaries from Repo save
-            reports, including partial publication evidence.
-        updates: Exact maximal-root StateRefs selected for optional caller refresh.
+        publications: Publication boundaries from Repo save reports, including
+            partial publication evidence and detached external owner sources.
+        updates: Exact maximal-root SavedNodes selected for optional caller refresh.
+        failure: Optional detached owner-supplied failure metadata; no live
+            exception, caller resource, or payload-availability promise.
 
     No live Store, Repo, StoreReport, workload argument, or result is retained.
     Publication failure is therefore inspectable without presenting it as rollback.
     """
 
     publications: tuple[CorePublicationEvidence, ...]
-    updates: tuple[StateRef, ...]
+    updates: tuple[Node, ...]
     refreshes: tuple[CoreRefreshEvidence, ...] = ()
+    failure: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +226,7 @@ class _RefreshLedger:
         self.entries: list[CoreRefreshEvidence] = []
         self.error: CoreExecutionError | None = None
 
-    def begin(self, updates: tuple[tuple[str, StateRef], ...]) -> None:
+    def begin(self, updates: tuple[tuple[str, Node], ...]) -> None:
         if not self.entries:
             self.entries = [CoreRefreshEvidence(token, state, "pending") for token, state in updates]
 
@@ -227,7 +235,7 @@ class _RefreshLedger:
         self.entries[index] = CoreRefreshEvidence(current.target, current.state_ref, status)
 
     def evidence(self, base: CoreOutcomeEvidence) -> CoreOutcomeEvidence:
-        return CoreOutcomeEvidence(base.publications, base.updates, tuple(self.entries))
+        return CoreOutcomeEvidence(base.publications, base.updates, tuple(self.entries), base.failure)
 
 
 @dataclass(slots=True)
@@ -394,8 +402,8 @@ class SharedDirStoreStrategy:
     """Initial marshalling strategy for existing directly shared DirStore authority.
 
     The strategy freezes directly reopenable ``DirStore`` descriptors once for
-    each prepared call. Its result adapter remains unavailable until result
-    publication owns recovery of live core values.
+    each prepared call. Bounded Node transport preserves exact graph authority;
+    supplied owner adapters retain their own admission and result policies.
     """
 
     def validate(self, *, repo: Repo | RepoDefinition | None, control_store: DirStore | None) -> None:
@@ -570,7 +578,7 @@ class SharedDirStoreStrategy:
                 phase="invoke", evidence=decoded.evidence,
                 remote_traceback=outcome["traceback"],
             )
-        updates = tuple((item["target"], StateRef.from_data(item["state"])) for item in outcome["updates"])
+        updates = tuple((item["target"], item["state"]) for item in outcome["updates"])
         recovery = _recovery or self.bind_recovery(prepared, args=args, kwargs=kwargs)
         targets = recovery.targets
         if updates and not update_args:
@@ -663,28 +671,43 @@ def decode_core_outcome(
     )
     publications = []
     for item in outcome["publications"]:
-        if not isinstance(item, Mapping) or set(item) != {"state", "store", "phase", "status", "path"}:
+        if not isinstance(item, Mapping) or set(item) != {"state", "store", "phase", "status", "path", "source"}:
             raise CoreCallCodecError("core execution transport rejected malformed publication evidence")
-        if (isinstance(item["store"], bool) or not isinstance(item["store"], int)
-                or not 0 <= item["store"] < len(repo.stores)
-                or not all(isinstance(item[name], str) for name in ("phase", "status", "path"))
+        descriptor, domain = None, None
+        source = item["source"]
+        if item["store"] is None:
+            from uuid import UUID
+            from .repo_definition import _validate_store_descriptor
+            try:
+                if type(source) is not dict or set(source) != {"definition", "store_uuid"}:
+                    raise ValueError()
+                descriptor = _validate_store_descriptor(source["definition"])
+                domain = source["store_uuid"]
+                if descriptor["kind"] != "dir" or type(domain) is not str or str(UUID(domain)) != domain:
+                    raise ValueError()
+                descriptor = _freeze_storage_setup(descriptor)
+            except (TypeError, ValueError) as error:
+                raise CoreCallCodecError("core execution transport rejected malformed publication source") from error
+        elif (type(item["store"]) is not int or not 0 <= item["store"] < len(repo.stores) or source is not None):
+            raise CoreCallCodecError("core execution transport rejected malformed publication Store index")
+        if (not all(isinstance(item[name], str) for name in ("phase", "status", "path"))
                 or item["status"] not in PUBLICATION_STATUSES
                 or item["phase"] not in PUBLICATION_PHASES):
             raise CoreCallCodecError("core execution transport rejected malformed publication evidence")
         try:
-            state = StateRef.from_data(item["state"])
+            state = require_saved(item["state"])
         except (TypeError, ValueError) as error:
             raise CoreCallCodecError("core execution transport rejected malformed publication evidence") from error
-        publications.append(CorePublicationEvidence(state, item["store"], item["phase"], item["status"], item["path"]))
+        publications.append(CorePublicationEvidence(state, item["store"], item["phase"], item["status"], item["path"], descriptor, domain))
     updates = []
     for item in outcome["updates"]:
         if not isinstance(item, Mapping) or set(item) != {"state", "object", "target"}:
             raise CoreCallCodecError("core execution transport rejected malformed update evidence")
         try:
-            state = StateRef.from_data(item["state"])
+            state = require_saved(item["state"])
         except (TypeError, ValueError) as error:
             raise CoreCallCodecError("core execution transport rejected malformed update evidence") from error
-        if state.object.to_data() != item["object"] or not isinstance(item["target"], str) or not item["target"]:
+        if state.object_projection_digest() != item["object"] or not isinstance(item["target"], str) or not item["target"]:
             raise CoreCallCodecError("core execution transport rejected mismatched update evidence")
         updates.append(state)
     if len({item["target"] for item in outcome["updates"]}) != len(updates):
@@ -694,6 +717,7 @@ def decode_core_outcome(
         CoreOutcomeEvidence(
             tuple(publications), tuple(updates),
             tuple(CoreRefreshEvidence(item["target"], state, "pending") for item, state in zip(outcome["updates"], updates)),
+            outcome["failure"],
         ),
     )
 
@@ -1308,6 +1332,8 @@ def current_context() -> ExecutionContext:
     lease = _current_context.get()
     if lease is None or not lease.active:
         raise RuntimeError("current_context is unavailable outside an active worker setup; copied-task contexts cannot outlive their owner")
+    if lease.process_id != os.getpid():
+        raise RuntimeError("current_context belongs to a different process")
     if lease.thread_id != threading.get_ident():
         raise RuntimeError("current_context belongs to a different thread")
     if lease.task is not _task():
@@ -1561,10 +1587,6 @@ def core_worker_setup(context: WorkerSetupContext, data: Mapping[str, Any]) -> I
         repo = Repo.from_definition(definition)
         control = _control_store(repo, descriptor)
         stack.enter_context(config(repo=repo, cache=cache))
-        if control is not None:
-            from dryml.managed.defaults import _control_store_defaults
-
-            stack.enter_context(_control_store_defaults(control))
         stack.enter_context(worker_context(ExecutionContext(repo, control)))
         yield None
 

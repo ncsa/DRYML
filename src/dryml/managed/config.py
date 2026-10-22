@@ -43,9 +43,9 @@ class ManagedConfig:
         the invocation-local immutable copy.
 
     Transport:
-        Core Execute v2 can capture an exact configuration appearing anywhere in
+        The supplied managed-owned Core Execute v3 adapter captures exact configurations anywhere in
         its supported invocation graph. Capture preserves ``None`` versus an
-        empty callback list, snapshots callback-list membership, then workers
+        empty callback list, snapshots callback-list membership and saved start selection, then workers
         reopen only direct-DirStore resource descriptors through their active
         Session resource cache. Result graphs reject configurations so returned
         values cannot retain reconstructed resources. Unsupported resource types,
@@ -53,6 +53,8 @@ class ManagedConfig:
         configuration opens its selected authority before workload invocation;
         ordinary descriptor data in code remains inert until code requests it.
     """
+
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
 
     state_repo: Repo | Store | None = None
     control_store: DirStore | None = None

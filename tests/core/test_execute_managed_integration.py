@@ -21,6 +21,8 @@ from dryml.core.utils.graph.path import GraphPath, Parameter
 from dryml.data import ArrayDataset, as_supervised
 from dryml.execute.subprocess import SubProcessConfig
 from dryml.managed import ManagedConfig, managed_operation
+from dryml.managed import InvocationResult
+from tests.core.u19_execution_fixtures import WorkerValue
 from dryml.models import Experiment, TrainFunction
 from dryml.models.experiment import _notify_host_observers
 from tests.managed.execution_fixtures import (
@@ -43,7 +45,8 @@ def _add_wrapper(target):
     def wrapped(self, value, *, managed):
         self.events.append("before")
         try:
-            return target(self, value, managed=managed) + 10
+            result = target(self, value, managed=managed)
+            return result if isinstance(result, InvocationResult) else result + 10
         finally:
             self.events.append("after")
 
@@ -55,7 +58,8 @@ def _default_wrapper(target):
 
     @functools.wraps(target)
     def wrapped(self, value, *, managed, _target=target):
-        return _target(self, value, managed=managed) + 10
+        result = _target(self, value, managed=managed)
+        return result if isinstance(result, InvocationResult) else result + 10
 
     return wrapped
 
@@ -187,6 +191,264 @@ def _count_checkpoint_callback(value, context) -> None:
     value.checkpoint_callbacks += 1
 
 
+def test_u19_subprocess_completed_target_replays_after_receiver_cleanup(tmp_path):
+    """Directly transported completion admits before any receiver hook or IO."""
+    from dryml.managed.control import ManagedControlStore
+    from dryml.managed.results import result_path
+    from dryml.managed.errors import ManagedResultError
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    marker = tmp_path / "events"
+    subject = WorkerValue(str(marker), repo=repo)
+    old, report = repo.save(subject, report_stores=True)
+    first = subject.advance(managed=ManagedConfig(state_repo=repo))
+    control = ManagedControlStore(repo.stores[0], repo)
+    control.cleanup_checkpoints(first.execution.operation_id)
+    for publication in report.publications:
+        if publication.retention_token is not None:
+            repo.release(publication.retention_token, owner_store=repo.stores[0])
+    assert not Path(repo.stores[0].state_data_path(old.state.key)).exists()
+    assert not Path(repo.stores[0].state_data_path(first.final_state_ref.state.key)).exists()
+    before = marker.read_text()
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = CoreExecutor(SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False))
+    try:
+        future = executor.submit(subject.advance)
+        replay = future.result(timeout=30)
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=10)
+    repo.close(flush=False)
+    assert type(replay) is InvocationResult
+    assert replay.status.state == "completed"
+    assert replay.execution.run_id == first.execution.run_id
+    assert replay.execution.producer_invocation_id == first.execution.invocation_id
+    assert replay.execution.invocation_id != first.execution.invocation_id
+    assert replay.final_state_ref.graph_equal(first.final_state_ref)
+    assert replay.value == {"value": 3, "resuming": False}
+    Path(result_path(repo.stores[0], replay.result_reference.key)).unlink()
+    with pytest.raises(ManagedResultError, match="result_unavailable"):
+        replay.value
+    assert marker.read_text() == before
+
+
+def test_u19_transport_rerun_start_and_resume_restore_once_under_owner(tmp_path):
+    """Supplied saved start seeds recovery and only resume restores latest."""
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    marker = tmp_path / "events"
+    subject = WorkerValue(str(marker), repo=repo)
+    start = repo.save(subject)
+    subject.value = 90
+    Path(str(marker) + ".fail").touch()
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = CoreExecutor(SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False))
+    try:
+        before = marker.read_text().splitlines()
+        failed = executor.submit(subject.advance, kwargs={"managed": ManagedConfig(rerun=True, start_from=start)})
+        with pytest.raises(CoreExecutionError):
+            failed.result(timeout=30)
+        failed.cleanup(timeout=5)
+        status = subject.advance.status(state_repo=repo)
+        assert status.state == "failed"
+        delta = marker.read_text().splitlines()[len(before):]
+        assert delta.count("restore") == delta.count("construct") == delta.count("body") == delta.count("save") == 1
+        before = marker.read_text().splitlines()
+        resumed = executor.submit(subject.advance)
+        result = resumed.result(timeout=30)
+        resumed.cleanup(timeout=5)
+        assert result.value == {"value": 6, "resuming": True}
+        assert result.execution.run_id == status.run_id
+        assert result.execution.invocation_id != status.invocation_id
+        delta = marker.read_text().splitlines()[len(before):]
+        assert delta.count("restore") == delta.count("construct") == delta.count("body") == delta.count("save") == 1
+    finally:
+        executor.close(cancel=True, timeout=10)
+
+
+def test_u19_decoded_target_and_copied_worker_context_expire(tmp_path):
+    """Detached receiver metadata cannot extend a closed or inherited owner scope."""
+    import contextvars
+    from dryml.core.execute import ExecutionContext, worker_context
+    from dryml.core.execute_codec import decode_invocation
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    marker = tmp_path / "events"
+    subject = WorkerValue(str(marker), repo=repo)
+    repo.save(subject)
+    wire = encode_invocation(subject.advance, (), {}, repo=repo)
+    target, *_ = decode_invocation(wire, repo=repo)
+    with worker_context(ExecutionContext(repo, None)):
+        copied = contextvars.copy_context()
+    before = marker.read_text()
+    with pytest.raises(RuntimeError, match="outside an active worker"):
+        copied.run(target)
+    repo.close(flush=False)
+    with pytest.raises(RuntimeError, match="expired"):
+        target()
+    assert marker.read_text() == before
+
+
+def test_u19_execution_realization_retains_the_admitting_owner(tmp_path, monkeypatch):
+    """The constructor handoff cannot release/reacquire the operation lifetime lock."""
+    from dryml.managed.control import ManagedControlStore
+    from dryml.managed.identity import AdmissionIdentity
+    from dryml.managed.errors import ManagedConflictError
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    subject = WorkerValue(str(tmp_path / "events"), repo=repo)
+    repo.save(subject)
+    identity = AdmissionIdentity.from_call(repo.describe(subject), subject.advance._descriptor, (), {})
+    control = ManagedControlStore(repo.stores[0], repo)
+    original = repo.materialize_boundary
+    observed = []
+    def realize(roots, **kwargs):
+        with pytest.raises(ManagedConflictError, match="already_running"):
+            with control.admission(identity):
+                pytest.fail("execution owner was released")
+        observed.append(True)
+        return original(roots, **kwargs)
+    monkeypatch.setattr(repo, "materialize_boundary", realize)
+    outcome = decode_outcome(invoke_invocation(encode_invocation(subject.advance, (), {}, repo=repo), repo=repo), repo=repo)
+    assert outcome["success"] and outcome["result"].value["value"] == 3
+    assert observed == [True]
+
+
+def test_u19_active_owner_and_start_without_rerun_do_not_materialize_worker(tmp_path):
+    """Busy admission and invalid start controls refuse before receiver construction."""
+    from dryml.managed.control import ManagedControlStore
+    from dryml.managed.identity import AdmissionIdentity
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    marker = tmp_path / "events"
+    subject = WorkerValue(str(marker), repo=repo)
+    saved = repo.save(subject)
+    identity = AdmissionIdentity.from_call(saved, subject.advance._descriptor, (), {})
+    control = ManagedControlStore(repo.stores[0], repo)
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = CoreExecutor(SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False))
+    before = marker.read_text()
+    try:
+        with control.admission(identity):
+            busy = executor.submit(subject.advance)
+            with pytest.raises(CoreExecutionError, match="ManagedConflictError"):
+                busy.result(timeout=30)
+            busy.cleanup(timeout=5)
+        invalid = executor.submit(subject.advance, kwargs={"managed": ManagedConfig(start_from=saved)})
+        with pytest.raises(CoreExecutionError, match="ManagedConfigError"):
+            invalid.result(timeout=30)
+        invalid.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=10)
+    assert marker.read_text() == before
+
+
+def test_u19_two_worker_branches_preserve_shared_dataset_and_independent_models(tmp_path):
+    """Separate operation/run owners retain shared input IDs and exact alias edges."""
+    from tests.core.u19_execution_fixtures import Branch
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    data = WorkerValue(str(tmp_path / "data-events"), repo=repo)
+    first_model = WorkerValue(str(tmp_path / "first-events"), repo=repo)
+    second_model = WorkerValue(str(tmp_path / "second-events"), repo=repo)
+    first, second = Branch(data, data, first_model, repo=repo), Branch(data, data, second_model, repo=repo)
+    repo.save(first)
+    repo.save(second)
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = CoreExecutor(SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False))
+    try:
+        a, b = executor.submit(first.run), executor.submit(second.run)
+        left, right = a.result(timeout=30), b.result(timeout=30)
+        a.cleanup(timeout=5)
+        b.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=10)
+    assert left.value == (str(data.object_id), str(first_model.object_id), 1)
+    assert right.value == (str(data.object_id), str(second_model.object_id), 1)
+    assert left.execution.operation_id != right.execution.operation_id
+    assert left.execution.run_id != right.execution.run_id
+    for result in (left, right):
+        live = repo.load_state_ref(result.final_state_ref, reuse_live="never")
+        assert live.data is live.repeated and live.data.object_id == data.object_id
+        assert live.model.value == 1
+
+
+def test_u19_inherited_core_worker_resources_refuse_a_forked_process(tmp_path):
+    """An inherited ContextVar cannot authorize resource use in a new process."""
+    import os
+    from dryml.core.execute import ExecutionContext, current_context, worker_context
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    with worker_context(ExecutionContext(repo, None)):
+        pid = os.fork()
+        if pid == 0:
+            try:
+                current_context()
+            except RuntimeError as error:
+                os._exit(0 if "different process" in str(error) else 2)
+            os._exit(1)
+        _, status = os.waitpid(pid, 0)
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+        assert current_context().repo is repo
+
+
+def test_u19_source_cut_retry_is_metadata_only_and_does_not_repeat_hooks(tmp_path, monkeypatch):
+    """A changed detached read cut retries before construction/restore delivery."""
+    from contextlib import contextmanager
+    from dryml.core.store.authority import StoreCutChanged
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    marker = tmp_path / "events"
+    subject = WorkerValue(str(marker), repo=repo)
+    saved = repo.save(subject)
+    store = repo.stores[0]
+    original = store.read_states
+    calls = []
+    @contextmanager
+    def changed_once(keys):
+        calls.append(True)
+        if len(calls) == 1:
+            raise StoreCutChanged("controlled unrelated publication")
+        with original(keys) as sources:
+            yield sources
+    before = marker.read_text().splitlines()
+    monkeypatch.setattr(store, "read_states", changed_once)
+    restored = repo.load_state_ref(saved, reuse_live="never")
+    assert restored.value == 0
+    assert len(calls) == 2
+    assert marker.read_text().splitlines()[len(before):] == ["construct", "restore"]
+
+
+def test_u19_worker_recovery_transports_exact_current_witness_without_execution(tmp_path, monkeypatch):
+    """Abandoned rerun recovery terminates and preserves original current CAS bytes."""
+    from dryml.managed.control import ManagedControlStore
+    from dryml.managed.runtime import AdmissionOutcome
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    marker = tmp_path / "events"
+    subject = WorkerValue(str(marker), repo=repo)
+    first = subject.advance(managed=ManagedConfig(state_repo=repo))
+    control = ManagedControlStore(repo.stores[0], repo)
+    original = control.inspect(first.execution.operation_id).to_bytes()
+    wire = encode_invocation(subject.advance, (), {"managed": ManagedConfig(rerun=True, start_from=first.final_state_ref)}, repo=repo)
+    with monkeypatch.context() as patch:
+        patch.setattr(repo, "materialize_boundary", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("preparation failed")))
+        failed = decode_outcome(invoke_invocation(wire, repo=repo), repo=repo)
+    assert not failed["success"]
+    assert not control.read_preparation(first.execution.operation_id).settled
+    before = marker.read_text()
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = CoreExecutor(SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False))
+    try:
+        future = executor.submit(subject.advance)
+        result = future.result(timeout=30)
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=10)
+    assert type(result) is AdmissionOutcome
+    assert result.disposition == "preparation_abandoned"
+    assert result.current.to_bytes() == original
+    assert result.run_id == first.execution.run_id
+    assert result.invocation_id != first.execution.invocation_id
+    assert marker.read_text() == before
+
+
 class InheritedDirectConfigValue(DirectConfigValue):
     """Child fixture retaining its base class's normal inherited declaration."""
 
@@ -278,7 +540,7 @@ def test_accepted_composite_uses_captured_wrapper_after_class_mutation(tmp_path)
         type.__setattr__(FrozenWrapperValue, "advance", original)
 
     assert outcome["success"]
-    assert outcome["result"] == 12
+    assert outcome["result"].value == 2
 
 
 @pytest.mark.parametrize(
@@ -318,7 +580,7 @@ def test_accepted_composite_snapshots_closure_and_default_wrapper_captures(
         restore()
 
     assert outcome["success"]
-    assert outcome["result"] == 12
+    assert outcome["result"].value == 2
 
 
 @pytest.mark.parametrize(
@@ -370,8 +632,7 @@ def test_managed_decorator_orders_materialize_once_and_publish_one_final_state(
         result = operation(
             argument_state, managed=matrix_config(repo, control_store),
         )
-        assert result is argument
-        assert result.value == 3
+        assert result.value.graph_equal(argument_state)
         assert (subject.calls, subject.value) == (1, 3)
         assert subject.save_calls == 1
         assert observed == ["args", "return"]
@@ -387,14 +648,14 @@ def test_managed_decorator_orders_materialize_once_and_publish_one_final_state(
         )
         try:
             future = executor.submit(operation, argument_state)
-            assert isinstance(future.result(timeout=15), StateRef)
+            assert future.result(timeout=15).value.graph_equal(argument_state)
             future.cleanup(timeout=5)
         finally:
             executor.close(cancel=True, timeout=10)
         restored = repo.load_state_ref(
             operation.status(
                 state_repo=repo, control_store=control_store,
-            ).final_state_ref,
+            ).final,
         )
         assert (restored.calls, restored.value, restored.save_calls) == (1, 3, 2)
     assert operation.status(
@@ -424,12 +685,12 @@ def test_ordinary_wrappers_run_in_authored_order_on_first_subprocess_call(
     )
     try:
         future = executor.submit(subject.advance, 2)
-        assert future.result(timeout=15) == 12
+        assert future.result(timeout=15).value == (2 if subject_type is FrozenWrapperValue else 12)
         future.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=10)
     restored = repo.load_state_ref(
-        subject.advance.status(state_repo=repo).final_state_ref, reuse_live="never",
+        subject.advance.status(state_repo=repo).final, reuse_live="never",
     )
     assert restored.events == persisted_events
     assert restored.value == 2
@@ -450,7 +711,7 @@ def test_direct_bound_operation_transports_explicit_managed_config(
         state_repo=repo, control_store=control_store,
         callbacks=[_count_checkpoint_callback],
     )
-    assert subject.advance(managed=initial) == 1
+    assert subject.advance(managed=initial).value == 1
     rerun = ManagedConfig(
         state_repo=repo, control_store=control_store, rerun=True,
         callbacks=[_count_checkpoint_callback],
@@ -460,12 +721,12 @@ def test_direct_bound_operation_transports_explicit_managed_config(
         outcome = decode_outcome(
             invoke_invocation(
                 encode_invocation(subject.advance, (), {"managed": rerun}, repo=repo),
-                repo=repo,
+                repo=repo, raw_traceback=True,
             ),
-            repo=repo,
+            repo=repo, allow_raw_traceback=True,
         )
-        assert outcome["success"]
-        assert outcome["result"] == 2
+        assert outcome["success"], outcome["traceback"]
+        assert outcome["result"].value == 2
     else:
         spool = tmp_path / "spool"
         spool.mkdir()
@@ -477,13 +738,13 @@ def test_direct_bound_operation_transports_explicit_managed_config(
         )
         try:
             future = executor.submit(subject.advance, kwargs={"managed": rerun})
-            assert future.result(timeout=15) == 2
+            assert future.result(timeout=15).value == 2
             future.cleanup(timeout=5)
         finally:
             executor.close(cancel=True, timeout=10)
 
     status = subject.advance.status(state_repo=repo, control_store=control_store)
-    restored = repo.load_state_ref(status.final_state_ref, reuse_live="never")
+    restored = repo.load_state_ref(status.final, reuse_live="never")
     assert status.state == "completed"
     assert (restored.value, restored.checkpoint_callbacks) == (2, 2)
 
@@ -624,14 +885,18 @@ def test_managed_store_control_uses_definition_transport_and_returns_state_ref(t
                     ),
                 }, repo=repo,
             ),
-            repo=repo,
+            repo=repo, raw_traceback=True,
         ),
-        repo=repo,
+        repo=repo, allow_raw_traceback=True,
     )
 
-    assert outcome["success"]
-    assert type(outcome["result"]) is StateRef
-    assert override.read_state_ref_record(outcome["result"].digest()).state_ref == outcome["result"]
+    assert outcome["success"], outcome["traceback"]
+    from dryml.core.node_prepare import NodePreparation
+    result = outcome["result"]
+    assert type(result) is InvocationResult
+    final = result.final_state_ref
+    digest = NodePreparation((final,)).digest(final, domain="dryml-saved-root/v1")
+    assert override.read_node(digest, kind="saved").graph_equal(final)
 
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
@@ -671,7 +936,7 @@ def test_unrelated_nested_function_keeps_its_own_normalization_boundary(
     repo = Repo(DirStore(tmp_path / "state", query_index="none"))
     subject = NestedFunctionValue(repo=repo)
     try:
-        assert subject.run(managed=ManagedConfig(state_repo=repo)) == 3
+        assert subject.run(managed=ManagedConfig(state_repo=repo)).value == 3
         assert [stage for stage, _ in observed] == ["args", "return"]
         nested_plan = observed[0][1]
         assert observed[1][1] is nested_plan
@@ -696,7 +961,7 @@ def test_nested_managed_config_preserves_selected_state_ref_authority(
     repo.save_object(subject, deep_capture=True)
     nested_config = {"config": [matrix_config(repo, control_store)]}
     if placement == "local":
-        assert nested_managed_call(subject, argument_state, nested_config) == argument_state
+        assert nested_managed_call(subject, argument_state, nested_config).graph_equal(argument_state)
     else:
         spool = tmp_path / "spool"
         spool.mkdir()
@@ -710,7 +975,7 @@ def test_nested_managed_config_preserves_selected_state_ref_authority(
             future = executor.submit(
                 nested_managed_call, subject, argument_state, nested_config,
             )
-            assert future.result(timeout=15) == argument_state
+            assert future.result(timeout=15).graph_equal(argument_state)
             future.cleanup(timeout=5)
         finally:
             executor.close(cancel=True, timeout=10)
@@ -718,5 +983,5 @@ def test_nested_managed_config_preserves_selected_state_ref_authority(
         state_repo=repo, control_store=control_store,
     )
     assert status.state == "completed"
-    restored = repo.load_state_ref(status.final_state_ref, reuse_live="never")
+    restored = repo.load_state_ref(status.final, reuse_live="never")
     assert (restored.calls, restored.value) == (1, 3)

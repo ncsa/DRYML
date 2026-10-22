@@ -144,10 +144,10 @@ factory. It publishes runtime controls, activates the public Session resource
 cache, then reopens a detached `RepoDefinition` and optional control Store through
 that cache before temporarily installing `core.session.config` and
 `current_context()`. The context exposes only the worker's borrowed Repo and
-optional explicitly selected control Store. It is task/thread owned, is
+optional explicitly selected control Store. It is process/task/thread owned, is
 unavailable outside that scope, and does not modify caller session state.
-When setup has an explicit control Store, core also installs a private
-task/thread-owned managed control default before invocation decoding. Managed
+When setup has an explicit control Store, managed's resolver borrows that
+owner-checked context as its control default. Core does not import managed. Managed
 methods still resolve an omitted `state_repo` from invocation-time `current_repo`,
 so a supported nested session override is honored; an explicit config state or
 control field wins. Without a setup control role, omitted control falls back to
@@ -198,17 +198,30 @@ use their public kind and text rather than version-specific private slots.
 Stable DRYML-owned managed declarations likewise import the authored and
 executable functions through their exact owner member; caller-owned declarations
 remain captured by value.
+Core invocation graph **v3** exports Node roots through one shared authenticated
+Node table with compact root views, preserving aliases, independent occurrences,
+roles, quotations, retained construction, and full `(cdef_digest, codec_hash)`
+StateKeys. It does not serialize private state bytes. Earlier call/outcome graph
+versions are rejected without conversion or Store mutation.
+
+Managed values explicitly supply their versioned
+`dryml.managed.execute_adapter:ManagedExecuteAdapter` through Core's owner-adapter
+seam. That managed-owned adapter owns its tags, closed schemas, declaration and
+wrapper reconstruction, config policy, result metadata, and admission handoff.
+Ordinary Core transport works with managed unavailable. An incompatible supplied
+adapter version fails before target/config/result reconstruction.
+
 Live `Repo` and `Store` captures are rejected except in an exact
-`ManagedConfig` value. Core invocation graph v2 captures those configs wherever
+`ManagedConfig` value or a declaration-owned Store control slot. The adapter captures configs wherever
 they occur in supported arguments, containers, defaults, captures, or instance
-fields, snapshots the exact `rerun` bool and callback-list membership, and
+fields, snapshots the exact `rerun` bool, SavedNode `start_from` and callback-list membership, and
 preserves repeated config/callback aliases. It transports only detached direct
 `DirStore` descriptors and detached Repo definitions containing direct
 `DirStore`s; ZipStore and arbitrary live resource captures remain rejected.
 Callback policy preserves `None` separately from an explicitly empty callback
 list. Managed configuration is invocation-only: it cannot appear in a result
 graph, so a completed result never returns a live reconstructed resource.
-The same closed v2 graph represents managed declarations, composites, and bound
+The managed-owned closed graph tags represent declarations, composites, and bound
 targets with authored function, executable wrapper, member, and recognized owner
 evidence. Nested callbacks may capture a managed declaration or its
 default/closure values without relying on member lookup as graph evidence.
@@ -217,8 +230,10 @@ the active worker Session resource cache. Thus matching config resources reuse
 the worker's handles, while different supported settings remain distinct. A
 malformed or unavailable selected resource fails at decode before workload
 invocation; an ordinary descriptor captured only by an untaken code branch is
-not opened until that code requests it. Core values otherwise lower to exact CDef,
-`ObjectRef`, or `StateRef` authority; a selected declaration Store is a pinned
+not opened until that code requests it. A declared publication Store outside the
+selected state Repo is borrowed through an invocation-local federation wrapper;
+the cached caller Repo's topology is not mutated. Core values otherwise lower to
+Node metadata; a selected declaration Store is a pinned
 index in the frozen Store table, never a path. The worker reconstructs one local
 owner boundary: function, Method, and managed owners each deliver/invoke/normalize
 once rather than gaining a second generic signature boundary.
@@ -233,9 +248,28 @@ the same managed resolver. Worker failure, cancellation, and lost delivery remai
 ordinary Execute/core errors; the coordinator does not inspect managed status or
 automatically reconcile, retry, resume, or rerun mutation.
 
+A directly transported managed target reconstructs **receiver metadata only**.
+Managed normalizes ordinary arguments, takes operation ownership, and resolves
+pending recovery, argument compatibility and completed replay before receiver
+construction or payload access. Only an execution branch materializes the selected
+receiver/start/recovery graph under that same lifetime owner. A selected saved
+start restores once; an unselected old checkpoint is not opened. Stateful live
+receiver transport requires a saved receipt; capture is never implicit.
+
+Success and compatible replay return `InvocationResult`, with operation/run/current
+invocation/producer identities, detached status, final SavedNode, result reference
+and reopenable source descriptor. Metadata inspection survives worker/Future/Repo
+closure. Each `.value` access freshly opens and checks the source UUID and result
+kind/version/key/availability; no live resource or cached availability proof crosses
+the boundary. Reclaiming receiver/final state does not prevent completed replay.
+Missing result bytes fail `.value` without rerunning the body. Replay performs no
+receiver construction, restore, capture, outer wrapper, return normalization,
+checkpoint callback or post-completion consumer hook. Recovery dispositions
+terminate without execution and preserve exact original current-record byte witnesses.
+
 A same-host worker may compute or republish a CachedDataset when its exact source
 and state authority are available through the supported shared direct-DirStore
-strategy. The managed call returns its final StateRef as reference data; payload
+strategy. Managed transport exposes its final SavedNode in `InvocationResult`; payload
 chunks and live Dataset/Repo/Store objects are not result transport. Same-codec
 completed content can republish without opening the source. A changed codec or
 unfinished resume still needs the retained source/work authority. Missing or
@@ -307,13 +341,16 @@ owner; their core recovery resources remain independently owned by the facade.
 pickled live Object or `StoreReport`. A live returned Object is saved through the
 worker Repo's normal flushing `save(..., deep_capture=True, report_stores=True)`
 path before shared automatic reference selection. Stateful graphs therefore
-return a `StateRef`; stateless graphs return their CDef; incoming CDef,
-`ObjectRef`, and `StateRef` result values remain reference data.
+return a SavedNode; stateless graphs return their concrete Node. Explicit incoming
+Node metadata result values remain data, with their exact facets and sharing.
 
-Execute owns result publication before requesting shared-signature `AutoRef`
+For ordinary calls, Execute owns result publication before requesting shared-signature `AutoRef`
 selection; signature selection itself never saves an Object. The core codec
 is a bounded, version-local worker/coordinator implementation detail. It is not a
 Store format, general pickle format, or a cross-version RPC compatibility promise.
+Managed instead owns return normalization, closed durable-result encoding **before**
+automatic final capture, publication/grant confirmation and fenced completion.
+Its ordinary result bytes are separate from trusted Execute callable transport.
 
 With `update_args=False` (the default), execution never saves merely-mutated
 arguments and result recovery never restores into an original caller Object.
@@ -321,7 +358,7 @@ With `update_args=True`, explicitly materialized live argument graphs are
 coalesced to maximal roots, saved once, and restored into their original caller
 instances after all delivered update references preflight successfully. A failed
 restore leaves previously applied targets intact and does not replay execution.
-Overlapping returned roots and descendants reuse the update StateRef, with a
+Overlapping returned roots and descendants reuse the update SavedNode, with a
 descendant represented by `root_state_ref.at(path)`.
 
 The worker validates the complete result and selected update graph before any
@@ -332,15 +369,19 @@ remain visible after a later failure, and refresh failure neither rolls back
 earlier restores nor replays the workload.
 
 `decode_core_outcome()` exposes `CoreAdaptationOutcome` and
-`CoreOutcomeEvidence` value types. Evidence has exact StateRefs and
-Store-table-relative publication status only; it never carries a live Repo,
-Store, `StoreReport`, argument, or result. A delivered core-worker failure raises
+`CoreOutcomeEvidence` value types. Evidence has exact SavedNodes and
+Store-table-relative publication status. Explicit managed publication outside that
+table instead carries a detached direct-DirStore descriptor and authority UUID,
+with `store_index=None`; decoding validates it without reopening the Store. It never carries a live Repo,
+Store, `StoreReport`, argument, or live result. Its optional `failure` field carries
+managed-owned detached failed/completed invocation metadata when supplied by that
+owner. Partial replica publication retains both completed and failed facts. A delivered core-worker failure raises
 `CoreExecutionError` with `core execution worker failed: <reason>`, preserves
 its bounded failure category and known publication evidence, and does not imply
 rollback, retry, or successful caller refresh. With the backend's default
 `raw_traceback=True`, the failed Core outcome also transports bounded, unredacted
 worker text in `CoreExecutionError.remote_traceback` and its displayed error.
-The private Core outcome codec is version 2; raw diagnostics are dropped before
+The private Core outcome codec is version 3; raw diagnostics are dropped before
 publication evidence or the primary failure category if the result budget is
 tight. With `raw_traceback=False`, Core errors remain type/category-only. No
 remote exception instance, submitted argument value, or Store resource is
