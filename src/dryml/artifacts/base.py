@@ -1,17 +1,24 @@
+"""Artifact completion discovery and explicit SavedNode materialization.
+
+Discovery reads metadata even after private-data cleanup. Materialization raises
+on unavailable state; this module never substitutes recomputation for recovery.
+"""
+
 from __future__ import annotations
 
 from abc import abstractmethod
 from typing import Any
 
-from dryml.core import ConcreteDefinition, Serializable, StateRef
+from dryml.core import ConcreteDefinition, Node, Serializable
+from dryml.core.node import require_saved
 from dryml.managed import ManagedContext, managed_operation
 
 
 class ArtifactRecoveryError(RuntimeError):
     """Raised when exact completed Artifact recovery is ambiguous or invalid.
 
-    Artifact recovery accepts only one managed-completed immutable StateRef for a
-    fully bound recipe. Callers must retain a more specific initial StateRef when
+    Artifact recovery accepts only one managed-completed immutable SavedNode for a
+    fully bound recipe. Callers must retain a more specific initial SavedNode when
     identical recipe definitions legitimately have multiple completed results.
     """
 
@@ -28,27 +35,27 @@ class Artifact(Serializable):
     @classmethod
     def find_completed_state_ref(
             cls, recipe: "Artifact | ConcreteDefinition", *, repo,
-            control_store=None) -> StateRef | None:
+            control_store=None) -> Node | None:
         """Return the unique managed-completed exact state for one recipe.
 
         Args:
             recipe: Fully bound live Artifact or its exact ConcreteDefinition.
                 Its definition is queried without materializing Artifact states.
-            repo: Connected Repo supplying immutable StateRef and managed-control
+            repo: Connected Repo supplying immutable Node and managed-control
                 authority.
             control_store: Optional exact managed control DirStore. Omitting it
                 selects the Repo default control Store.
 
         Returns:
-            The one exact completed StateRef, or ``None`` when no matching managed
-            operation has completed.
+            The one exact completed SavedNode, or ``None`` when no matching managed
+            operation has completed. Private-data availability is not required.
 
         Raises:
             TypeError: If ``recipe`` is not an Artifact or ConcreteDefinition.
             ArtifactRecoveryError: If more than one distinct completed result is
                 valid for the recipe, or completion authority names another recipe.
             dryml.managed.ManagedError: If retained completion authority is corrupt
-                or its exact StateRef closure is unavailable.
+                or its exact Node metadata closure is invalid.
 
         Side Effects:
             Reads Repo reference evidence and managed control records only. It does
@@ -57,13 +64,12 @@ class Artifact(Serializable):
 
         definition = _recipe_definition(recipe)
         completed = {}
-        for evidence in repo.reference_evidence(definition).states:
-            state_ref = evidence.state_ref
+        for state_ref in repo.query().saved().sel(definition).iter():
             completed_state = _completed_state_for_reference(
                 state_ref, repo=repo, control_store=control_store,
             )
             if completed_state is not None:
-                completed[completed_state.digest()] = completed_state
+                completed[completed_state.exact_digest()] = completed_state
         if len(completed) > 1:
             raise ArtifactRecoveryError(
                 "Artifact recipe has multiple distinct completed states; recover "
@@ -85,7 +91,7 @@ class Artifact(Serializable):
                 default reuses one matching live completed Artifact identity.
 
         Returns:
-            The unique ready Artifact restored from its exact completed StateRef,
+            The unique ready Artifact restored from its exact completed SavedNode,
             or ``None`` when no completed result exists.
 
         Raises:
@@ -109,12 +115,12 @@ class Artifact(Serializable):
 
     @classmethod
     def recover(
-            cls, initial_state_ref: StateRef, *, repo, control_store=None,
+            cls, initial_state_ref: Node, *, repo, control_store=None,
             reuse_live: str = "matching") -> "Artifact":
         """Recover a completed result or its exact initial managed receiver.
 
         Args:
-            initial_state_ref: Exact saved initial Artifact StateRef retained before
+            initial_state_ref: Complete SavedNode for the initial Artifact retained before
                 managed computation or result-row publication.
             repo: Connected Repo supplying initial/final state authority.
             control_store: Optional exact managed control DirStore.
@@ -126,10 +132,12 @@ class Artifact(Serializable):
             failed or interrupted invocation can resume through ``compute``.
 
         Raises:
-            TypeError: If ``initial_state_ref`` is not a StateRef.
+            TypeError, ValueError: If ``initial_state_ref`` is not a complete SavedNode.
             ArtifactRecoveryError: If the recovered state is not this Artifact type
                 or a completed result is not ready.
-            dryml.core.RepoLoadError: If either exact StateRef is missing or corrupt.
+            dryml.core.RepoLoadError: If the selected final (or uncompleted initial)
+                SavedNode's private state is missing or corrupt. An unselected
+                initial payload is not opened to recover completed work.
             ValueError: If ``reuse_live`` is not a supported exact-load policy.
 
         Side Effects:
@@ -138,11 +146,7 @@ class Artifact(Serializable):
             ``compute``.
         """
 
-        if not isinstance(initial_state_ref, StateRef):
-            raise TypeError("Artifact.recover requires an exact initial StateRef.")
-        from dryml.managed.storage import validate_state_ref
-
-        validate_state_ref(repo, initial_state_ref)
+        require_saved(initial_state_ref)
         completed_state = _completed_state_for_reference(
             initial_state_ref, repo=repo, control_store=control_store,
         )
@@ -153,7 +157,7 @@ class Artifact(Serializable):
 
     @classmethod
     def _load_ready_state(
-            cls, state_ref: StateRef, *, repo, reuse_live: str,
+            cls, state_ref: Node, *, repo, reuse_live: str,
             require_ready: bool = True) -> "Artifact":
         """Restore one already-selected exact Artifact state and validate readiness."""
 
@@ -186,7 +190,10 @@ class Artifact(Serializable):
             **kwargs: Domain-specific keyword arguments.
 
         Returns:
-            The domain-specific operation result.
+            InvocationResult with detached run/invocation metadata, the admitted
+            ordinary result in ``.value``, and the completed SavedNode in
+            ``.final_state_ref``. Custom summary objects are not durable results;
+            concrete bodies must return closed KTD11 values or supported metadata.
 
         Raises:
             dryml.managed.ManagedError: If managed lifecycle handling fails.
@@ -223,26 +230,23 @@ def _recipe_definition(recipe: Artifact | ConcreteDefinition) -> ConcreteDefinit
     raise TypeError("Artifact recipe must be an Artifact or ConcreteDefinition.")
 
 
-def _completed_state_for_reference(state_ref: StateRef, *, repo, control_store) -> StateRef | None:
+def _completed_state_for_reference(state_ref: Node, *, repo, control_store) -> Node | None:
     """Read one receiver's managed completion receipt without materialization."""
 
     from dryml.managed.control import ManagedControlStore
     from dryml.managed.identity import operation_digest
-    from dryml.managed.storage import state_ref_for_digest
 
     control = ManagedControlStore(
         repo.default_store if control_store is None else control_store, repo,
     )
-    snapshot = control.inspect(operation_digest(state_ref.object, "compute"))
+    snapshot = control.inspect(operation_digest(state_ref, "compute"))
     if snapshot is None or snapshot.state != "completed":
         return None
-    if snapshot.final_digest is None:
+    if snapshot.final is None:
         raise ArtifactRecoveryError("Managed completed authority lacks an exact final StateRef.")
-    completed = state_ref_for_digest(repo, snapshot.final_digest)
-    if completed is None or completed.object != state_ref.object:
+    completed = snapshot.final
+    if not completed.object_projection_equal(state_ref):
         raise ArtifactRecoveryError("Managed completion authority has an incompatible final StateRef.")
-    if not completed.definition.graph_equal(state_ref.definition):
-        raise ArtifactRecoveryError("Managed completion authority changed the Artifact recipe definition.")
     return completed
 
 

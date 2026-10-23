@@ -6,8 +6,11 @@ import pandas as pd
 import pytest
 
 from dryml.core import Repo, Serializable
+from dryml.core.store.dir import DirStore
 from dryml.core.cardinality import Cardinality
 from dryml.models import ExperimentData, ExperimentDataError
+
+pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 
 
 class HistorySubject(Serializable):
@@ -18,10 +21,10 @@ class HistorySubject(Serializable):
 
 
 def _history(tmp_path):
-    repo = Repo(tmp_path / "store")
+    repo = Repo(DirStore(tmp_path / "store"))
     checkpoint = repo.save_object(HistorySubject(1, repo=repo), deep_capture=True)
     return repo, checkpoint, ExperimentData.get_or_create(
-        checkpoint.object_projection(), repo=repo,
+        checkpoint.object_view(), repo=repo,
     )
 
 def test_experiment_data_is_publicly_available():
@@ -67,7 +70,7 @@ def test_rows_preserve_missing_null_big_ints_and_detached_data(tmp_path):
     assert data.loc[0, "count"] == 10**120
     assert data.loc[0, "total_parameters"] is pd.NA
     data.loc[0, "eval_artifacts"]["metric"] = None
-    assert history.data.loc[0, "eval_artifacts"]["metric"] == checkpoint
+    assert history.data.loc[0, "eval_artifacts"]["metric"].graph_equal(checkpoint)
     assert row_key == data.loc[0, "row_key"]
     repo.close(flush=False)
 
@@ -110,8 +113,9 @@ def test_updates_keep_inputs_separate_and_enforce_status_and_row_bounds(tmp_path
         scalar_values={"one": 1}, evaluation_status="failed", failed_artifact="two",
     )
     record = history.data.loc[0]
-    assert record["artifact_inputs"] == {"one": checkpoint}
-    assert record["eval_artifacts"] == {"one": checkpoint}
+    assert tuple(record["artifact_inputs"]) == ("one",)
+    assert record["artifact_inputs"]["one"].graph_equal(checkpoint)
+    assert record["eval_artifacts"]["one"].graph_equal(checkpoint)
     with pytest.raises(ExperimentDataError, match="Completed rows"):
         history.update_row(
             row_key, eval_artifacts={}, scalar_values={}, evaluation_status="completed",

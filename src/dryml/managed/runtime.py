@@ -436,7 +436,9 @@ def _associate_state(context, selected, kind, *, report=None, published=None):
     """Use the existing two-phase preparation journal for one root replacement."""
     from .storage import _validate_selection
     current = context._safe_point()
-    plan = _validate_selection(context.state_repo, context._obj, current.receiver, selected)
+    source_store = context._store if report is not None else None
+    plan = _validate_selection(context.state_repo, context._obj, current.receiver, selected,
+                               source_store=source_store)
     targets = {}
     for action in plan.actions:
         targets.setdefault(action.store, set()).add(action.state.key)
@@ -465,7 +467,8 @@ def _associate_state(context, selected, kind, *, report=None, published=None):
         published()
         # A boundary is not a live availability witness. In particular, a custom
         # reader or a publication-phase failure must still refuse association.
-        _validate_selection(context.state_repo, context._obj, current.receiver, selected)
+        _validate_selection(context.state_repo, context._obj, current.receiver, selected,
+                            source_store=source_store)
     proposed = replace(proposed, intents=keep + (replace(intent, disposition="adopted"),))
     ready = replace(preparation, proposed=proposed, phase="ready")
     preparation = context._control.write_preparation(ready, owner=context._admission, expected=preparation)
@@ -557,7 +560,8 @@ def _receiver(instance):
     from dryml.core.object import Object
     if isinstance(instance, Node): return instance
     if isinstance(instance, Object):
-        return instance.definition.with_realization(identities=instance.object_ref.objects)
+        construction = getattr(instance, "_construction_node", instance.definition)
+        return construction.with_realization(identities=instance.object_ref.objects)
     raise ManagedConfigError("invalid_receiver", "metadata access requires a Node or Object receiver")
 
 

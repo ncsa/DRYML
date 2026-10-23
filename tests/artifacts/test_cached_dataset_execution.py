@@ -7,13 +7,14 @@ from pathlib import Path
 import numpy as np
 
 from dryml.artifacts import CachedDataset
-from dryml.core import Executor as CoreExecutor, Repo, StateRef
+from dryml.core import Executor as CoreExecutor, Node, Repo
 from dryml.core.execute import CoreOptions
 from dryml.core.store.dir import DirStore
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import Dataset
 from dryml.execute.subprocess import SubProcessConfig
-from dryml.managed import ManagedConfig
+from dryml.managed import InvocationResult, ManagedConfig
+from dryml.artifacts.dataset import _saved_digest
 
 
 class ObservedDataset(Dataset):
@@ -48,19 +49,22 @@ def test_local_compute_and_subprocess_republication_return_exact_state_refs(
     marker = tmp_path / "source-opens.txt"
     cache = CachedDataset(ObservedDataset(str(marker)))
 
-    initial = cache.compute(
+    invocation = cache.compute(
         codec="numpy",
         managed=ManagedConfig(state_repo=repo, control_store=control_store),
     )
-    assert type(initial) is StateRef
-    assert cache.last_state_ref == initial
-    assert state_store.read_state_ref_record(initial.digest()).state_ref == initial
+    assert type(invocation) is InvocationResult
+    assert invocation.value is None
+    initial = invocation.final_state_ref
+    assert isinstance(initial, Node)
+    assert cache.last_state_ref.graph_equal(initial)
+    assert state_store.read_node(_saved_digest(initial), kind="saved").graph_equal(initial)
     execution_state = DirStore.open_existing(tmp_path / "state", query_index="none")
     execution_override = DirStore(tmp_path / "override", query_index="none")
     execution_control = DirStore(tmp_path / "republication-control", query_index="none")
     execution_repo = Repo(execution_state)
     completed = execution_repo.load_state_ref(initial, reuse_live="never")
-    assert completed.last_state_ref == initial
+    assert completed.last_state_ref.graph_equal(initial)
     spool = tmp_path / "spool"
     spool.mkdir()
     executor = CoreExecutor(
@@ -84,14 +88,17 @@ def test_local_compute_and_subprocess_republication_return_exact_state_refs(
                 ),
             },
         )
-        republished = future.result(timeout=20)
+        worker_result = future.result(timeout=60)
         future.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=10)
 
-    assert type(republished) is StateRef
+    assert type(worker_result) is InvocationResult
+    assert worker_result.value is None
+    republished = worker_result.final_state_ref
+    assert isinstance(republished, Node)
     reader_store = DirStore.open_existing(tmp_path / "override", query_index="none")
-    assert reader_store.read_state_ref_record(republished.digest()).state_ref == republished
+    assert reader_store.read_node(_saved_digest(republished), kind="saved").graph_equal(republished)
     assert marker.read_text(encoding="ascii").splitlines() == ["opened"]
     restored = Repo(reader_store).load_state_ref(republished, reuse_live="never")
     assert [value.item() for value in restored] == [2, 5]

@@ -95,9 +95,9 @@ def _assert_row(repo, row, *, control=None):
     for name in ("training_loss", "total_parameters", "trainable_parameters"):
         assert pd.isna(row[name]), f"{name} must be unavailable, not fabricated zero"
     artifact = repo.load_state_ref(row.eval_artifacts["model"], reuse_live="never", cache="none")
-    assert artifact.model == row.state_ref.at(GraphPath((Parameter("model"),)))
+    assert artifact.model.graph_equal(row.state_ref.at(GraphPath((Parameter("model"),))))
     assert artifact.ready
-    assert artifact.compute.status(state_repo=repo, control_store=control).final_state_ref == row.eval_artifacts["model"]
+    assert artifact.compute.status(state_repo=repo, control_store=control).final.graph_equal(row.eval_artifacts["model"])
 
 
 @pytest.mark.parametrize("kind", KINDS)

@@ -19,7 +19,7 @@ Value persists only a versioned result envelope through `Serializable` hooks;
 ordinary subclass fields, input graphs, iterators, accumulator state, and managed
 control records are not captured. Subclasses that need additional durable state
 must use distinct hook filenames and validate their own files. A saved Artifact
-returns a StateRef, and `Repo.load_state_ref()` restores exact Value results
+returns a SavedNode, and `Repo.load_state_ref()` restores exact Value results
 without recomputation or input materialization. Invalid result payloads fail
 restoration rather than becoming ready values; existing core restoration
 invalidation handles failed in-place restores.
@@ -36,9 +36,9 @@ dtypes. Ragged, sparse, Python-object, and nullable-object leaves are rejected.
 
 `compute(codec="numpy" | "parquet" | "netcdf", store=None,
 target_chunk_bytes=None)` requires known finite cardinality, verifies exact EOF,
-streams chunks around a positive byte target, and returns the completed
-invocation's exact `StateRef`. The authored body still declares and returns
-`None`; this result is the managed completion policy, not its body value.
+streams chunks around a positive byte target, and returns an `InvocationResult`.
+Use `.final_state_ref` for its completed SavedNode; `.value` is the authored
+`None`. This differs from `Value.value()`, which reads the domain payload.
 NumPy is always available; Parquet and NetCDF import `pyarrow>=25.0.1` and
 `netCDF4>=1.7.4` only after selection and before source traversal. Missing
 dependencies raise actionable `ImportError` without codec fallback. Install the
@@ -48,11 +48,14 @@ Progress checkpoints contain validated sealed-chunk descriptors, yielded count,
 source/spec evidence, and one opaque Store-owned work token. They contain no
 chunk bytes, absolute work path, iterator, or source values and are not iterable
 partial caches. Compatible resume resolves exactly one retained work directory
-through connected Stores, authenticates its owner/operation/attempt marker, opens
+through connected Stores, authenticates its owner/operation/stable-run marker, opens
 a fresh cursor, skips the saved yield count, and appends only a fresh suffix.
 Position preserves a stochastic prefix but does not promise replay-equivalent
 suffix values. Missing, ambiguous, mismatched, or deleted work fails before source
 access; it is not silently rebuilt.
+An ordinary resume keeps the run ID while admitting a fresh invocation ID. A
+different run cannot append the retained prefix. Cache manifests and work markers
+are version 3; old/malformed records are rejected intact without conversion.
 
 Finished state is self-contained in its immutable Store snapshot and remains
 readable after retained work is reclaimed or the source is unavailable. Restore
@@ -100,9 +103,9 @@ also retain source, declared/refined spec, backend/device, and Method-definition
 evidence. They contain no source payload, iterator, selected callable, or runtime
 context.
 
-Fold's managed `compute` operation returns its exact completed `StateRef` after
-final publication and association. The authored Fold body still returns `None`.
-This receipt can be retained for result-only recovery: restoring a completed Fold
+Fold's managed `compute` operation returns an `InvocationResult` with the exact
+completed SavedNode in `.final_state_ref` and authored `None` in `.value`.
+The saved reference can be retained for result-only recovery: restoring a completed Fold
 validates its Value payload without loading its source Dataset or invoking its
 declared Methods.
 
@@ -127,7 +130,7 @@ publication without loading or traversing the source. Source replay is positiona
 a deterministic source reproduces uninterrupted results, while a stochastic fresh
 cursor may produce a new suffix after the saved prefix position.
 
-New progress is version 2: active progress contains no EOF proof; exhausted
+New progress is version 3, with stable operation/run provenance: active progress contains no EOF proof; exhausted
 progress requires `eof="root-output-eof"`. A source, Map, acquisition, body,
 validation, strict-skip, or interruption failure cannot manufacture that proof.
 Cleanup failures preserve the primary workload error. After genuine EOF, cleanup
@@ -135,18 +138,11 @@ failure retains the existing finalize-then-report ordering: the call raises even
 if a complete live Value was installed, and its associated exhausted checkpoint
 can retry finalization without reopening the source.
 
-Compatible version-1 active checkpoints remain resumable. Valid version-1
-exhausted checkpoints load successfully as **ambiguous**, but continuation raises
-`ManagedRerunRequiredError` with `rerun_required`; explicitly call
-`compute(..., managed=ManagedConfig(state_repo=repo, rerun=True))` to traverse
-fresh. Admission occurs in the Fold body after managed running/state restoration,
-before native carry materialization, Method selection/invocation, or source access.
-The failure retains checkpoint association and receiver validity. Saving unchanged
-legacy progress preserves version 1 and cannot bless it as new EOF evidence.
-Malformed/unknown progress still fails restoration. Completed legacy Values remain
-readable; historically completed truncated results cannot be detected or repaired
-automatically. Existing snapshots are immutable. See [Formats](formats.md) for
-the closed grammar and downgrade limitations.
+Prior version-1/version-2 progress is incompatible and fails before native carry
+materialization, Method selection/invocation, or source access. The source bytes
+and receiver's prior progress remain intact. Current progress resumes only in its
+original run; changed source, program, operation or run evidence fails explicitly.
+There is no migration, legacy EOF promotion, or fallback traversal.
 
 NumPy, Torch CPU, and TensorFlow CPU carry leaves are copied losslessly to tagged
 host arrays only at checkpoint boundaries and restored to the same native backend.
@@ -253,11 +249,28 @@ creates independent evaluation streams.
 
 Direct managed invocation and `dryml.core.execute` can compute a concrete Value,
 Fold, or CachedDataset through a supported same-host worker. The managed operation
-publishes its exact final `StateRef`; callers recover the result by loading that
-StateRef, not by
+publishes its exact final SavedNode in `InvocationResult.final_state_ref`;
+callers recover the result by loading that reference rather than
 transporting a live Dataset, model, iterator, accumulator, or managed-control
 record. A result reader may use an explicit orchestrator materialization scope for
 that selected result only; retained `Ref[AutoRef]` inputs remain inert. A later
 rerun still needs the caller-owned source/model authority and fails if it is gone.
 Ray is optional and attaches only to a caller-supplied existing same-host target;
 Artifact construction and ordinary imports never start or provision Ray.
+
+All normal direct and worker managed returns use `InvocationResult`; immutable
+reference/status metadata remains inspectable after Repo/worker closure. Ordinary
+authored returns must use the managed closed grammar (scalars, admitted containers,
+nonobject NumPy data, or explicitly supported immutable DRYML metadata), never
+custom summary serialization, live Artifacts, iterators, or resources.
+
+Completed replay keeps the run ID and produces a fresh caller invocation ID,
+without source traversal, receiver restore, capture, checkpoint callbacks, or
+post-completion hooks. Cache generation installation and work cleanup run only for
+a newly acknowledged completion. Explicit rerun is new work; a supplied starting
+SavedNode requires `rerun=True`, and selected missing state has no fallback.
+Managed checkpoint/durable/initial/final roots protect state until superseded or
+explicitly released/cleaned. Historical completion and ordinary result metadata
+survive state cleanup. `find_completed_state_ref` can still return the historical
+SavedNode; `load_completed`/`recover` fail on unavailable selected payloads and
+never recompute them.

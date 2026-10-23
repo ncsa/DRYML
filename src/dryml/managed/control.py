@@ -690,7 +690,8 @@ class ManagedControlStore:
                       "admitted": {"admitted"}, "abandoned": {"abandoned"}}
             same_proposal = _same_snapshot_bytes(proposed.proposed, expected.proposed)
             if expected.phase == "prepared" and proposed.phase == "ready":
-                same_proposal = replace(proposed.proposed, intents=expected.proposed.intents) == expected.proposed
+                same_proposal = _same_snapshot_bytes(
+                    replace(proposed.proposed, intents=expected.proposed.intents), expected.proposed)
             if (proposed.token != expected.token or not _same_snapshot_bytes(proposed.previous, expected.previous)
                     or proposed.phase not in phases[expected.phase] or not same_proposal):
                 raise ManagedConflictError("preparation_conflict", "preparation dispositions are irreversible")
@@ -723,7 +724,7 @@ class ManagedControlStore:
                 or proposed.invocation_id != owner.invocation_id
                 or persisted is None or persisted.to_bytes() != preparation.to_bytes()):
             raise ManagedConflictError("preparation_conflict", "start was not prepared by this invocation")
-        if self.inspect(proposed.operation_id) != preparation.previous:
+        if not _same_snapshot_bytes(self.inspect(proposed.operation_id), preparation.previous):
             raise ManagedConflictError("generation_conflict", "authority or interrupt fence changed during preparation")
         self._publish(preparation.previous, proposed)
         owner.run_id = proposed.run_id

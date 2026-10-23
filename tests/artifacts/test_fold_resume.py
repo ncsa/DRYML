@@ -26,6 +26,11 @@ from dryml.methods import Accumulator, Method, traits
 _SPEC = TensorSpec("float64", shape=(), batch=Dynamic, backend="numpy")
 
 
+class _ShortReplayCleanup:
+    def close(self):
+        raise OSError("short replay cleanup")
+
+
 class ResumeDataset(Dataset):
     """Re-iterable scalar batches with process-local traversal evidence."""
 
@@ -46,6 +51,13 @@ class ResumeDataset(Dataset):
                 return
             type(self).yields += 1
             yield np.asarray([value], dtype=np.float64)
+
+    def iterator(self):
+        """Attach a cleanup failure only to the explicitly shortened replay."""
+        cursor = super().iterator()
+        if type(self).limit is not None:
+            cursor._own(_ShortReplayCleanup())
+        return cursor
 
 
 class ResumeInitial(Method):
@@ -117,22 +129,23 @@ def test_fold_failed_read_retains_active_authority_before_repaired_resume(tmp_pa
         fold.compute(checkpoint_every=1, managed=ManagedConfig(state_repo=repo))
     status = fold.compute.status(state_repo=repo)
     assert status.state == "failed"
-    assert status.final_state_ref is None
+    assert status.final is None
     assert not fold.ready
-    checkpoint = status.checkpoint_state_ref
+    checkpoint = status.checkpoint
     restored = repo.load_state_ref(checkpoint, reuse_live="never")
     payload_dir = tmp_path / "payload"
     payload_dir.mkdir()
     restored.save_state_to_dir(str(payload_dir), codec=restored.state_codec)
     payload = pickle_load(payload_dir / "fold-progress.pkl")
-    assert payload["version"] == 2
+    assert payload["version"] == 3
     assert payload["processed_count"] == 1
     assert payload["progress"]["state"] == "active"
     assert "eof" not in payload["progress"]
     assert not restored.ready
     monkeypatch.setattr(RepairableDataset, "broken", False)
     receipt = fold.compute(checkpoint_every=1, managed=ManagedConfig(state_repo=repo))
-    assert receipt == fold.last_state_ref == fold.compute.status(state_repo=repo).final_state_ref
+    assert receipt.final_state_ref.graph_equal(fold.last_state_ref)
+    assert receipt.final_state_ref.graph_equal(fold.compute.status(state_repo=repo).final)
     assert fold.value() == 3.0
     assert fold.processed_count == 2
 
@@ -258,140 +271,20 @@ def _restore_fixture(fold, name, directory):
     fold.restore_state_from_dir_imp(str(directory), codec=fold.state_codec)
 
 
-def _seed_fixture_checkpoint(fold, repo, tmp_path, name, *, incompatible=None):
-    """Associate fixture carry/state with only synthetic invocation identities rebound."""
-
-    from dryml.artifacts import Fold
-    from dryml.artifacts.fold import _source_binding_evidence
-    from dryml.managed.control import ControlSnapshot, ManagedControlStore
-    from dryml.managed.identity import argument_digest, operation_digest
-    from dryml.managed.storage import ownership_evidence
-
-    _restore_fixture(fold, name, tmp_path / "fixture")
-    progress = fold._fold_progress
-    operation_id = operation_digest(fold.object_ref, "compute")
-    attempt_id = "a" * 32
-    progress.update(source_binding=_source_binding_evidence(fold.src),
-                    program=fold._program_evidence(), operation_id=operation_id, attempt_id=attempt_id)
-    if incompatible:
-        if incompatible == "program":
-            progress["program"]["initializer"] = "different-program"
-        elif incompatible == "source_binding":
-            progress["source_binding"]["digest"] = "different-source"
-        else:
-            progress[incompatible] = "different-attempt"
-    checkpoint = repo.save_object(fold, deep_capture=True)
-    arguments = argument_digest(Fold.compute, fold, (), {"checkpoint_every": 100, "managed": None})
-    ManagedControlStore(repo.stores[0], repo).create_initial(ControlSnapshot(
-        operation_id, fold.object_ref.digest(), arguments, "compute", attempt_id, None,
-        1, "failed", None, checkpoint.digest(), None, "method_error",
-        ownership_evidence(repo, fold.object_ref.objects.values()),
-    ))
-    return checkpoint
-
-
-@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-@pytest.mark.parametrize("name", ("v1-active", "v2-active", "v2-exhausted"))
-def test_fold_frozen_progress_compatible_recovery(tmp_path, monkeypatch, name):
-    """Frozen active carries resume; trusted v2 exhaustion finalizes source-free."""
-
-    from dryml.artifacts import Fold
-
-    fold = Fold(FixtureDataset(), initial_state=ResumeInitial(), accumulator=ResumeSum(), finalize=ResumeFinish())
-    repo = Repo(DirStore(tmp_path / "store"))
-    _seed_fixture_checkpoint(fold, repo, tmp_path, name + ".pkl.b64")
-    calls = ResumeInitial.calls
-    if name == "v2-exhausted":
-        monkeypatch.setattr(Fold, "_load_source", lambda *_: pytest.fail("trusted EOF loaded source"))
-    receipt = fold.compute(checkpoint_every=100, managed=ManagedConfig(state_repo=repo))
-    assert receipt == fold.last_state_ref == fold.compute.status(state_repo=repo).final_state_ref
-    assert fold.value() == (1.0 if name == "v2-exhausted" else 3.0)
-    assert ResumeInitial.calls == calls
-
-
-@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-def test_fold_legacy_exhausted_admission_preserves_valid_receiver_and_provenance(tmp_path, monkeypatch):
-    """Ambiguous v1 restores, fails in BODY before effects, and accepts explicit rerun."""
-
-    from dryml.artifacts import Fold
+@pytest.mark.parametrize("name", ("v1-active", "v1-exhausted", "v1-completed", "v2-active", "v2-exhausted"))
+def test_fold_frozen_progress_rejected_intact_before_carry_use(tmp_path, monkeypatch, name):
+    """The breaking run-aware cut rejects every prior progress envelope intact."""
     import dryml.artifacts.fold as fold_module
 
-    fold = Fold(FixtureDataset(), initial_state=ResumeInitial(), accumulator=ResumeSum(), finalize=ResumeFinish())
-    repo = Repo(DirStore(tmp_path / "store"))
-    checkpoint = _seed_fixture_checkpoint(fold, repo, tmp_path, "v1-exhausted.pkl.b64")
-    snapshot = Path(repo.stores[0].get_snapshot_directory(checkpoint))
-    before = {str(path.relative_to(snapshot)): hashlib.sha256(path.read_bytes()).hexdigest()
-              for path in snapshot.rglob("*") if path.is_file()}
-    restore_carry = fold_module._restore_carry
-
-    def no_materialization(*args, **kwargs):
-        assert kwargs.get("materialize") is False, "legacy admission materialized carry"
-        return restore_carry(*args, **kwargs)
-
-    with monkeypatch.context() as guard:
-        guard.setattr(fold_module, "_restore_carry", no_materialization)
-        for method in ("_select_initializer", "_select_followups", "_load_source", "_install_terminal"):
-            guard.setattr(Fold, method, lambda *_: pytest.fail("legacy admission invoked a role/source"))
-        with pytest.raises(ManagedRerunRequiredError, match="legacy.*rerun=True"):
-            fold.compute(checkpoint_every=100, managed=ManagedConfig(state_repo=repo))
-    status = fold.compute.status(state_repo=repo)
-    assert (status.state, status.failure_code, status.checkpoint_state_ref) == ("failed", "method_error", checkpoint)
-    assert status.final_state_ref is None
-    assert not fold.ready
-    saved = repo.save_object(fold, deep_capture=True)
-    restored = repo.load_state_ref(saved, reuse_live="never")
-    directory = tmp_path / "roundtrip"
-    directory.mkdir()
-    restored.save_state_to_dir(str(directory), codec=restored.state_codec)
-    payload = pickle_load(directory / "fold-progress.pkl")
-    assert payload["version"] == 1
-    assert payload["progress"]["state"] == "exhausted"
-    assert "eof" not in payload["progress"]
-    with pytest.raises(ManagedRerunRequiredError, match="legacy"):
-        fold.compute(checkpoint_every=100, managed=ManagedConfig(state_repo=repo))
-    receipt = fold.compute(checkpoint_every=100, managed=ManagedConfig(state_repo=repo, rerun=True))
-    assert receipt == fold.last_state_ref
-    assert fold.value() == 3.0
-    assert fold.compute.status(state_repo=repo).attempt_id != status.attempt_id
-    assert before == {str(path.relative_to(snapshot)): hashlib.sha256(path.read_bytes()).hexdigest()
-                      for path in snapshot.rglob("*") if path.is_file()}
-    _fixture_bytes("v1-exhausted.pkl.b64")
-
-
-@pytest.mark.parametrize("name", ("v1-active", "v1-exhausted", "v1-completed", "v2-active", "v2-exhausted"))
-def test_fold_frozen_progress_roundtrip_and_downgrade_gate(tmp_path, monkeypatch, name):
-    """Frozen bytes restore/roundtrip without blessing old EOF; old readers reject v2."""
-
-    spec = importlib.util.spec_from_file_location("fold_legacy_reader", _FIXTURES / "legacy_reader.py")
-    legacy_reader = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(legacy_reader)
-
     fold = _fold((1.0, 2.0))
-    _restore_fixture(fold, name + ".pkl.b64", tmp_path / "fixture")
-    if name == "v1-completed":
-        from dryml.artifacts import Value
-        (tmp_path / "fixture" / "value.pkl").write_bytes(_fixture_bytes("v1-completed-value.pkl.b64"))
-        Value.restore_state_from_dir_imp(fold, str(tmp_path / "fixture"), codec=fold.state_codec)
-        assert fold.ready and fold.value() == 3.0
-    directory = tmp_path / "saved"
-    directory.mkdir()
-    fold.save_state_to_dir(str(directory), codec=fold.state_codec)
-    payload = pickle_load(directory / "fold-progress.pkl")
-    assert payload == unpickler(_fixture_bytes(name + ".pkl.b64"))
-    if name == "v1-completed":
-        again = _fold()
-        again.restore_state_from_dir(str(directory), codec=again.state_codec)
-        assert again.value() == 3.0 and again.processed_count == 2
-    assert payload["version"] == int(name[1])
-    assert payload["processed_count"] == (2 if name.endswith("completed") else 1)
-    assert (payload["progress"] is None) == name.endswith("completed")
-    if name.startswith("v2"):
-        monkeypatch.setattr(legacy_reader, "_restore_carry", lambda *_args, **_kwargs: pytest.fail("old reader reached carry"))
-        with pytest.raises(ValueError, match="version is unsupported"):
-            legacy_reader._validate_progress_payload(payload)
-    else:
-        assert legacy_reader._validate_progress_payload(payload)[0] == payload["processed_count"]
-    _fixture_bytes(name + ".pkl.b64")
+    fold._install_value_payload({"format": "dryml.artifacts.value", "version": 1, "present": True, "result": 99.0})
+    monkeypatch.setattr(fold_module, "_restore_carry", lambda *_a, **_k: pytest.fail("old progress reached carry"))
+    raw = _fixture_bytes(name + ".pkl.b64")
+    with pytest.raises(ValueError, match="version is unsupported"):
+        _restore_fixture(fold, name + ".pkl.b64", tmp_path / "fixture")
+    assert (tmp_path / "fixture" / "fold-progress.pkl").read_bytes() == raw
+    assert fold._fold_progress is None and fold.processed_count == 0
+    assert fold.value() == 99.0
 
 
 @pytest.mark.parametrize("damage", ("version", "extra", "missing_eof", "active_eof", "unknown_eof", "carry", "count"))
@@ -399,6 +292,8 @@ def test_fold_malformed_progress_does_not_partially_install(tmp_path, damage):
     """Closed grammar failures leave the prior in-memory progress and Value intact."""
 
     payload = unpickler(_fixture_bytes("v2-exhausted.pkl.b64"))
+    payload["version"] = 3
+    payload["progress"]["run_id"] = payload["progress"].pop("attempt_id")
     if damage == "version":
         payload["version"] = 99
     elif damage == "extra":
@@ -414,7 +309,13 @@ def test_fold_malformed_progress_does_not_partially_install(tmp_path, damage):
     else:
         payload["processed_count"] = 2
     fold = _fold()
-    _restore_fixture(fold, "v1-active.pkl.b64", tmp_path / "prior")
+    prior_dir = tmp_path / "prior"
+    prior_dir.mkdir()
+    prior_payload = unpickler(_fixture_bytes("v2-active.pkl.b64"))
+    prior_payload["version"] = 3
+    prior_payload["progress"]["run_id"] = prior_payload["progress"].pop("attempt_id")
+    pickle_save(prior_payload, prior_dir / "fold-progress.pkl")
+    fold.restore_state_from_dir_imp(str(prior_dir), codec=fold.state_codec)
     prior = fold._fold_progress
     fold._install_value_payload({"format": "dryml.artifacts.value", "version": 1, "present": True, "result": 99.0})
     damaged = tmp_path / "damaged"
@@ -424,30 +325,45 @@ def test_fold_malformed_progress_does_not_partially_install(tmp_path, damage):
         fold.restore_state_from_dir_imp(str(damaged), codec=fold.state_codec)
     assert fold._fold_progress is prior
     assert fold.processed_count == 1
-    assert fold._fold_progress_version == 1
+    assert fold._fold_progress_version == 3
     assert fold.value() == 99.0
 
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-@pytest.mark.parametrize("incompatible", ("source_binding", "program", "operation_id", "attempt_id"))
+@pytest.mark.parametrize("incompatible", ("source_binding", "program", "operation_id", "run_id"))
 def test_fold_incompatible_progress_rejected_before_runtime_effects(tmp_path, monkeypatch, incompatible):
     """Saved identity mismatches cannot invoke Methods, restore native carry, or complete."""
 
     import dryml.artifacts.fold as fold_module
     from dryml.artifacts import Fold
 
-    fold = Fold(FixtureDataset(), initial_state=ResumeInitial(), accumulator=ResumeSum(), finalize=ResumeFinish())
+    fold = _fold()
     repo = Repo(DirStore(tmp_path / "store"))
-    checkpoint = _seed_fixture_checkpoint(fold, repo, tmp_path, "v1-active.pkl.b64", incompatible=incompatible)
+    with pytest.raises(RuntimeError, match="stop after checkpoint"):
+        fold.compute(checkpoint_every=2, managed=ManagedConfig(state_repo=repo, callbacks=[_stop_after_checkpoint]))
+    checkpoint = fold.compute.status(state_repo=repo).checkpoint
+    restore = Fold.restore_state_from_dir_imp
+
+    def changed_restore(self, *args, **kwargs):
+        restore(self, *args, **kwargs)
+        progress = self._fold_progress
+        if incompatible == "program":
+            progress["program"]["initializer"] = "different-program"
+        elif incompatible == "source_binding":
+            progress["source_binding"]["digest"] = "different-source"
+        else:
+            progress[incompatible] = "different-run"
+
+    monkeypatch.setattr(Fold, "restore_state_from_dir_imp", changed_restore)
     original = fold_module._restore_carry
     def no_materialization(*args, **kwargs):
         assert kwargs.get("materialize") is False
         return original(*args, **kwargs)
     monkeypatch.setattr(fold_module, "_restore_carry", no_materialization)
     with pytest.raises(ValueError, match="incompatible"):
-        fold.compute(checkpoint_every=100, managed=ManagedConfig(state_repo=repo))
+        fold.compute(checkpoint_every=2, managed=ManagedConfig(state_repo=repo))
     assert not fold.ready
-    assert fold.compute.status(state_repo=repo).checkpoint_state_ref == checkpoint
+    assert fold.compute.status(state_repo=repo).checkpoint.graph_equal(checkpoint)
 
 
 def _contains_forbidden_runtime(value) -> bool:
@@ -477,7 +393,8 @@ def test_fold_resumes_saved_carry_and_position_without_rerunning_initializer(tmp
         fold.compute(checkpoint_every=2, managed=ManagedConfig(
             state_repo=repo, callbacks=[_stop_after_checkpoint],
         ))
-    checkpoint = fold.compute.status(state_repo=repo).checkpoint_state_ref
+    failed = fold.compute.status(state_repo=repo)
+    checkpoint = failed.checkpoint
     assert checkpoint is not None
     assert fold.processed_count == 2
     assert ResumeInitial.calls == 1
@@ -489,16 +406,21 @@ def test_fold_resumes_saved_carry_and_position_without_rerunning_initializer(tmp
     restored.save_state_to_dir(str(payload_dir), codec=restored.state_codec)
     payload = pickle_load(payload_dir / "fold-progress.pkl")
     assert payload["processed_count"] == 2
-    assert payload["version"] == 2
+    assert payload["version"] == 3
+    assert payload["progress"]["run_id"] == failed.run_id
+    assert "attempt_id" not in payload["progress"]
     assert payload["progress"]["state"] == "active"
     assert "eof" not in payload["progress"]
     assert not _contains_forbidden_runtime(payload)
 
-    with pytest.raises(ManagedRerunRequiredError, match="rerun_required"):
+    with pytest.raises(ManagedRerunRequiredError, match="argument_mismatch"):
         fold.compute(checkpoint_every=3, managed=ManagedConfig(state_repo=repo))
     assert ResumeInitial.calls == 1
 
-    assert fold.compute(checkpoint_every=2, managed=ManagedConfig(state_repo=repo)) == fold.last_state_ref
+    result = fold.compute(checkpoint_every=2, managed=ManagedConfig(state_repo=repo))
+    assert result.final_state_ref.graph_equal(fold.last_state_ref)
+    assert result.execution.run_id == failed.run_id
+    assert result.execution.invocation_id != failed.invocation_id
     assert fold.value() == 6.0
     assert fold.processed_count == 3
     assert ResumeInitial.calls == 1
@@ -522,9 +444,9 @@ def test_fold_eof_checkpoint_retries_finalization_without_loading_source(tmp_pat
         ))
     assert ResumeFinish.calls == 0
     assert fold._fold_progress["state"] == "exhausted"
-    checkpoint = fold.compute.status(state_repo=store).checkpoint_state_ref
+    checkpoint = fold.compute.status(state_repo=store).checkpoint
     saved = Repo(store).load_state_ref(checkpoint, reuse_live="never")
-    assert saved._fold_progress_version == 2
+    assert saved._fold_progress_version == 3
     assert saved._fold_progress["eof"] == "root-output-eof"
     assert not saved.ready
 
@@ -532,7 +454,7 @@ def test_fold_eof_checkpoint_retries_finalization_without_loading_source(tmp_pat
         raise AssertionError("exhausted resume loaded its source")
 
     monkeypatch.setattr(Fold, "_load_source", fail_source_load)
-    assert fold.compute(checkpoint_every=100, managed=ManagedConfig(state_repo=store)) == fold.last_state_ref
+    assert fold.compute(checkpoint_every=100, managed=ManagedConfig(state_repo=store)).final_state_ref.graph_equal(fold.last_state_ref)
     assert fold.value() == 6.0
     assert fold.processed_count == 2
     assert ResumeFinish.calls == 1
@@ -577,9 +499,10 @@ def test_fold_store_override_controls_checkpoint_and_final_publication(tmp_path)
         )
     checkpoint = fold.compute.status(
         state_repo=override, control_store=control,
-    ).checkpoint_state_ref
-    assert override.read_state_ref_record(checkpoint.digest()).state_ref == checkpoint
-    assert routed.read_state_ref_record(checkpoint.digest()) is None
+    ).checkpoint
+    from dryml.artifacts.dataset import _saved_digest
+    assert override.read_node(_saved_digest(checkpoint), kind="saved").graph_equal(checkpoint)
+    assert routed.read_node(_saved_digest(checkpoint), kind="saved") is None
 
     fold.compute(
         checkpoint_every=2,
@@ -588,9 +511,9 @@ def test_fold_store_override_controls_checkpoint_and_final_publication(tmp_path)
     )
     final = fold.compute.status(
         state_repo=override, control_store=control,
-    ).final_state_ref
-    assert override.read_state_ref_record(final.digest()).state_ref == final
-    assert routed.read_state_ref_record(final.digest()) is None
+    ).final
+    assert override.read_node(_saved_digest(final), kind="saved").graph_equal(final)
+    assert routed.read_node(_saved_digest(final), kind="saved") is None
 
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
@@ -605,20 +528,7 @@ def test_fold_resume_fails_if_fresh_source_exhausts_during_saved_skip(tmp_path, 
             state_repo=store, callbacks=[_stop_after_checkpoint],
         ))
 
-    checkpoint = fold.compute.status(state_repo=store).checkpoint_state_ref
-    original_iterator = ResumeDataset.iterator
-
-    class CleanupFailure:
-        def close(self):
-            raise OSError("short replay cleanup")
-
-    def iterator(self):
-        cursor = original_iterator(self)
-        if type(self).limit is not None:
-            cursor._own(CleanupFailure())
-        return cursor
-
-    monkeypatch.setattr(ResumeDataset, "iterator", iterator)
+    checkpoint = fold.compute.status(state_repo=store).checkpoint
     ResumeDataset.limit = 1
     try:
         with pytest.raises(DatasetExhaustedError) as caught:
@@ -627,7 +537,7 @@ def test_fold_resume_fails_if_fresh_source_exhausts_during_saved_skip(tmp_path, 
         assert any("short replay cleanup" in note for note in caught.value.__notes__)
         assert fold.ready is False
         assert fold.processed_count == 2
-        assert fold.compute.status(state_repo=store).checkpoint_state_ref == checkpoint
+        assert fold.compute.status(state_repo=store).checkpoint.graph_equal(checkpoint)
         assert Repo(store).load_state_ref(checkpoint, reuse_live="never")._fold_progress["state"] == "active"
     finally:
         ResumeDataset.limit = None
@@ -657,9 +567,10 @@ except RuntimeError as error:
     assert str(error) == 'stop after checkpoint'
 else:
     raise AssertionError('Fold did not stop after its checkpoint')
-checkpoint = fold.compute.status(state_repo=repo).checkpoint_state_ref
+checkpoint = fold.compute.status(state_repo=repo).checkpoint
 assert checkpoint is not None
-print(checkpoint.digest())
+from dryml.artifacts.dataset import _saved_digest
+print(_saved_digest(checkpoint))
 """
     interrupted = subprocess.run(
         [sys.executable, "-c", interrupt_script, str(store_path)],
@@ -675,10 +586,10 @@ from dryml.core import Repo
 from dryml.core.store.dir import DirStore
 from dryml.managed import ManagedConfig
 store = DirStore.open_existing(sys.argv[1])
-record = store.read_state_ref_record(sys.argv[2])
+record = store.read_node(sys.argv[2], kind='saved')
 repo = Repo._for_state_io((store,))
-fold = repo.load_state_ref(record.state_ref, reuse_live='never')
-assert fold.compute(checkpoint_every=2, managed=ManagedConfig(state_repo=repo)) == fold.last_state_ref
+fold = repo.load_state_ref(record, reuse_live='never')
+assert fold.compute(checkpoint_every=2, managed=ManagedConfig(state_repo=repo)).final_state_ref.graph_equal(fold.last_state_ref)
 assert fold.value() == 6.0
 assert fold.processed_count == 3
 assert fold.compute.status(state_repo=repo).state == 'completed'
@@ -750,7 +661,9 @@ def _run_optional_backend_test_in_subprocess(request, backend):
     env = os.environ.copy()
     env["DRYML_FOLD_RESUME_NATIVE_SUBPROCESS"] = "1"
     completed = subprocess.run(
-        [sys.executable, "-m", "pytest", "--no-cov", request.node.nodeid],
+        [str(Path(__file__).resolve().parents[2] / "tests.sh"), request.node.nodeid,
+         "--no-cov", "-o", "tmp_path_retention_policy=failed",
+         "-o", "cache_dir=/tmp/dryml/u20-pytest-cache"],
         cwd=Path(__file__).resolve().parents[2], env=env,
         capture_output=True, text=True, check=False,
     )
@@ -774,12 +687,13 @@ def test_fold_resume_round_trips_optional_cpu_native_carry(tmp_path, request, ba
         fold.compute(checkpoint_every=2, managed=ManagedConfig(
             state_repo=store, callbacks=[_stop_after_checkpoint],
         ))
-    checkpoint = fold.compute.status(state_repo=store).checkpoint_state_ref
+    checkpoint = fold.compute.status(state_repo=store).checkpoint
     saved = Repo(store).load_state_ref(checkpoint, reuse_live="never")
-    assert saved._fold_progress_version == 2
+    assert saved._fold_progress_version == 3
     assert all(item[:2] == (backend, "cpu") for item in saved._fold_progress["backend_devices"])
     receipt = fold.compute(checkpoint_every=2, managed=ManagedConfig(state_repo=store))
-    assert receipt == fold.last_state_ref == fold.compute.status(state_repo=store).final_state_ref
+    assert receipt.final_state_ref.graph_equal(fold.last_state_ref)
+    assert receipt.final_state_ref.graph_equal(fold.compute.status(state_repo=store).final)
 
     assert fold.value() == 2.0
     assert fold.processed_count == 3

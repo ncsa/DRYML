@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any
 
 from dryml.core.backend import Backend
 from dryml.core.tensor_spec import Dim, Layout, SpecTree, TensorSpec, is_spec_tree
 
 
 _FORMAT = "dryml.cached-dataset"
-_VERSION = 2
+_VERSION = 3
 
 
 class CacheIntegrityError(ValueError):

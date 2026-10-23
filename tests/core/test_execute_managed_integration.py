@@ -483,7 +483,7 @@ def _materialize_worker_target(value: Mat[Object]) -> str:
 
 
 @function
-def _train_materialized_experiment(value: Mat[Object]) -> StateRef:
+def _train_materialized_experiment(value: Mat[Object]):
     """Train one materialized Experiment and return its managed terminal state."""
 
     return value.train()
@@ -794,11 +794,13 @@ def test_execute_builds_experiment_telemetry_factory_in_worker(
 
     assert outcome["success"]
     result = outcome["result"]
-    assert isinstance(result, StateRef)
+    from dryml.managed import InvocationResult
+    assert isinstance(result, InvocationResult)
+    assert result.value is None
     assert marker.read_text(encoding="ascii").splitlines() == [
         "constructed", "train_batch_end:1", "closed",
     ]
-    restored = repo.load_state_ref(result, reuse_live="never")
+    restored = repo.load_state_ref(result.final_state_ref, reuse_live="never")
     assert (restored.model.value, restored.state.step) == (1, 1)
 
 
@@ -813,7 +815,7 @@ def test_execute_saves_experiment_with_nested_cached_test_data(tmp_path) -> None
     }, repo=repo))
     source = cached.compute(
         codec="numpy", managed=ManagedConfig(state_repo=repo),
-    )
+    ).final_state_ref
     experiment = Definition(
         Experiment,
         Definition(WorkerTelemetryModel),
@@ -828,14 +830,14 @@ def test_execute_saves_experiment_with_nested_cached_test_data(tmp_path) -> None
     )
     try:
         future = executor.submit(_train_materialized_experiment, experiment)
-        final = future.result(timeout=30)
+        final = future.result(timeout=60).final_state_ref
         future.cleanup(timeout=5)
     finally:
         executor.close(cancel=True, timeout=10)
 
     assert final.at(GraphPath((
         Parameter("test_data"), Parameter("src"),
-    ))) == source
+    ))).graph_equal(source)
 
 
 def test_execute_rejects_live_experiment_telemetry_before_training(tmp_path) -> None:

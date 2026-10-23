@@ -19,7 +19,7 @@ def _append(store_path, checkpoint, key, ready, start, results):
 
     repo = Repo(DirStore(store_path, query_index="memory"))
     try:
-        history = ExperimentData.find(checkpoint.object_projection(), repo=repo)
+        history = ExperimentData.find(checkpoint.object_view(), repo=repo)
         history.add_row(
             expected_artifacts=(), state_ref=checkpoint, prev_state_ref=None,
             time=key, examples_seen=key, row_key=f"row-{key}",
@@ -42,7 +42,7 @@ def test_stale_publishers_reload_reapply_and_preserve_both_rows(tmp_path):
     store_path = tmp_path / "store"
     owner = Repo(DirStore(store_path, query_index="memory"))
     checkpoint = owner.save_object(ConcurrentSubject(repo=owner), deep_capture=True)
-    ExperimentData.get_or_create(checkpoint.object_projection(), repo=owner)
+    ExperimentData.get_or_create(checkpoint.object_view(), repo=owner)
     context = multiprocessing.get_context("spawn")
     start = context.Event()
     ready = [context.Event(), context.Event()]
@@ -70,7 +70,7 @@ def test_stale_publishers_reload_reapply_and_preserve_both_rows(tmp_path):
             if writer.is_alive():
                 writer.terminate()
                 writer.join(timeout=5)
-    final = ExperimentData.find(checkpoint.object_projection(), repo=owner)
+    final = ExperimentData.find(checkpoint.object_view(), repo=owner)
     assert set(final.data["row_key"]) == {"row-1", "row-2"}
     owner.close(flush=False)
 
@@ -80,10 +80,9 @@ def test_initialization_recovers_one_empty_snapshot_but_not_populated_history(tm
 
     repo = Repo(DirStore(tmp_path / "store", query_index="memory"))
     checkpoint = repo.save_object(ConcurrentSubject(repo=repo), deep_capture=True)
-    subject = checkpoint.object_projection()
+    subject = checkpoint.object_view()
     cdef = ExperimentData._definition(subject)
-    reference = repo.get_or_declare_object_ref(cdef, store=repo.default_store)
-    empty = repo.build_object_ref(reference, store=repo.default_store)
+    empty = repo.build(cdef)
     repo.save_object(empty, store=repo.default_store)
 
     recovered = ExperimentData.get_or_create(subject, repo=repo)
@@ -91,10 +90,9 @@ def test_initialization_recovers_one_empty_snapshot_but_not_populated_history(tm
 
     repo = Repo(DirStore(tmp_path / "populated", query_index="memory"))
     checkpoint = repo.save_object(ConcurrentSubject(repo=repo), deep_capture=True)
-    subject = checkpoint.object_projection()
+    subject = checkpoint.object_view()
     cdef = ExperimentData._definition(subject)
-    reference = repo.get_or_declare_object_ref(cdef, store=repo.default_store)
-    populated = repo.build_object_ref(reference, store=repo.default_store)
+    populated = repo.build(cdef)
     populated.add_row(
         expected_artifacts=(), state_ref=checkpoint, prev_state_ref=None,
         time=0, examples_seen=0,
@@ -102,3 +100,39 @@ def test_initialization_recovers_one_empty_snapshot_but_not_populated_history(tm
     repo.save_object(populated, store=repo.default_store)
     with pytest.raises(StoreAuthorityError, match="empty"):
         ExperimentData.get_or_create(subject, repo=repo)
+
+
+def test_current_name_index_failure_preserves_authority_without_reporting_success(tmp_path, monkeypatch):
+    """A committed current-name CAS does not hide its unacknowledged index failure."""
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    checkpoint = repo.save(ConcurrentSubject(repo=repo))
+    history = ExperimentData.get_or_create(checkpoint.object_view(), repo=repo)
+    history.add_row(expected_artifacts=(), state_ref=checkpoint, prev_state_ref=None,
+                    time=0, examples_seen=0, row_key="retained-row")
+    compare_and_set = store.compare_and_set_node_name
+    complete_index = store._complete_index_mutation
+    failure = OSError("current-name index unavailable")
+
+    def fail_current_name(record, *, expected):
+        def fail_index(*args):
+            raise failure
+        monkeypatch.setattr(store, "_complete_index_mutation", fail_index)
+        try:
+            return compare_and_set(record, expected=expected)
+        finally:
+            monkeypatch.setattr(store, "_complete_index_mutation", complete_index)
+
+    monkeypatch.setattr(store, "compare_and_set_node_name", fail_current_name)
+    with pytest.raises(OSError, match="current-name index unavailable") as raised:
+        history.publish(repo=repo)
+    assert raised.value is failure
+    assert store.authority_cut().pending
+    current = store.read_node_name(ExperimentData._current_name(checkpoint.object_view()))
+    assert current is not None
+    monkeypatch.setattr(store, "compare_and_set_node_name", compare_and_set)
+    store.open_query_index().maintain_store()
+    assert not store.authority_cut().pending
+    recovered = ExperimentData.find(checkpoint.object_view(), repo=repo)
+    assert tuple(recovered._rows) == ("retained-row",)
+    repo.close(flush=False)

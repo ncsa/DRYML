@@ -1863,7 +1863,7 @@ class Repo:
         candidates[0].preflight_publication(operation)
         return candidates[0]
 
-    def _selected_writable_physical_store(self, store, operation: str) -> Store:
+    def _selected_writable_physical_store(self, store, operation: str, *, record_family=None) -> Store:
         """Select one connected writable physical Store for current-state CAS.
 
         Ordinary reference mutation retains its historical handle-level selection.
@@ -1873,7 +1873,7 @@ class Repo:
 
         if store is not None:
             selected = self._connected_metadata_store(store)
-            selected.preflight_publication(operation)
+            selected.preflight_publication(operation, record_family=record_family)
             return selected
         candidates = {}
         for candidate in self.stores:
@@ -1886,7 +1886,7 @@ class Repo:
                 f"{operation} requires an explicit Store or exactly one writable physical Repo Store."
             )
         selected = next(iter(candidates.values()))
-        selected.preflight_publication(operation)
+        selected.preflight_publication(operation, record_family=record_family)
         return selected
 
     def _connected_metadata_store(self, store: Store) -> Store:

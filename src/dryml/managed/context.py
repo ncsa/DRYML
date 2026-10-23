@@ -154,6 +154,18 @@ class ManagedContext:
             self._busy = False
             self._failure_code = "method_error"
 
+    def _prepend_checkpoint_callback(self, callback):
+        """Install a consumer callback within the admitted author's active scope.
+
+        This private consumer seam preserves admitted ManagedConfig authority and
+        caller callback order. It is never entered on replay. Returns None;
+        inactive/recursive contexts fail before changing invocation-local callbacks.
+        """
+        self._require_mutation()
+        if len(self._callbacks) >= 64:
+            raise ManagedContextError("invalid_checkpoint", "consumer callback requires room in the callback limit")
+        self._callbacks = (callback, *self._callbacks)
+
     def initial_state(self, state):
         """Designate complete SavedNode state as immutable operation-wide initial.
 

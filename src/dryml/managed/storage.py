@@ -37,12 +37,14 @@ def _publish_checkpoint(repo, obj, *, states=None, store=None):
             provisional=True, report_stores=True)
 
 
-def _validate_selection(repo, obj, original, selected):
+def _validate_selection(repo, obj, original, selected, *, source_store=None):
     """Freshly preflight original projection, live codecs, and selected availability.
 
     Returns the Core exact load plan, with no hooks, capture or restoration. The
     supplied graph itself remains the authority; no projected substitute is saved.
     Reader overrides and validation exceptions propagate without cached proof.
+    source_store optionally pins fresh publication validation to its explicit
+    destination, avoiding unrelated replicas with different capture evidence.
     """
     from dryml.core.node import require_saved
     from dryml.core.repo_plan import build_save_plan
@@ -53,7 +55,7 @@ def _validate_selection(repo, obj, original, selected):
         raise ManagedConflictError("incompatible_selection", "saved selection differs from original receiver projection")
     for action in live.actions:
         selected.at(action.path).state.validate_for(live.node.at(action.path), codec=action.obj.state_codec)
-    return build_exact_state_load_plan(repo, selected)
+    return build_exact_state_load_plan(repo, selected, source_store=source_store)
 
 
 def _cleanup_checkpoints(control, owner, operation_id, *, tokens=None):

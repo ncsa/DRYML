@@ -411,44 +411,39 @@ Fixture authority is checked out byte-for-byte via `.gitattributes`, without
 line-ending conversion. Git for Windows needs long-path support to check out the
 snapshot directory fixtures; CI enables `core.longpaths` for its Git processes.
 
-## Fold Progress V1 And V2
+## Fold Progress V3
 
 `fold-progress.pkl` is a trusted pickle envelope with exactly `format`, `version`,
 `processed_count`, and `progress`. Format is `dryml.artifacts.fold-progress`;
-version is the exact integer 1 or 2, and processed count is a nonnegative exact
+version is the exact integer 3, and processed count is a nonnegative exact
 integer. `progress=None` represents no remaining continuation (uncomputed or
 completed); a separate `value.pkl` v1 envelope determines result presence.
 
 Non-null progress has positive `count` equal to processed count and the existing
 fields `state`, `carry`, `source_binding`, `source_spec`, `observed_spec`,
 `carry_spec`, `observation_devices`, `program`, `backend_devices`, `operation_id`,
-and `attempt_id`. Specs, tagged lossless host carry, backend/device records, and
-source/program/attempt compatibility checks retain their existing meanings.
+and `run_id`. Specs, tagged lossless host carry, backend/device records, and
+source/program compatibility checks retain their existing meanings. Resume
+requires the same managed operation/run; the invocation ID may change.
 
 | Version/state | Additional fields | Recovery |
 |---|---|---|
-| v1 active | None | Compatible positional resume |
-| v1 exhausted | None | Loadable ambiguous state; explicit fresh managed rerun required |
-| v2 active | None (`eof` forbidden) | Compatible positional resume |
-| v2 exhausted | Exactly `eof="root-output-eof"` | Trusted source-free finalization retry |
+| v3 active | None (`eof` forbidden) | Same-run positional resume |
+| v3 exhausted | Exactly `eof="root-output-eof"` | Same-run source-free finalization retry |
 
 Only positive root-output termination authorizes new exhausted progress; closure,
 failure, child EOF, and strict replay shortfall are not evidence. Unknown versions,
 extra/missing fields, invalid EOF tokens, and inconsistent carry/count evidence
-fail restoration before assignment. Valid legacy exhaustion is rejected at Fold
-body admission rather than in restore, so the receiver remains usable for explicit
-rerun. Unchanged restored v1 envelopes save as v1; new checkpoints and completed
-computations write v2. No existing immutable snapshot is rewritten.
+fail restoration before assignment. All prior v1/v2 records, including completed
+progress envelopes, are incompatible and rejected intact; no conversion or EOF
+promotion is performed. New checkpoints and completed computations write v3.
 
 `tests/fixtures/fold_progress/` freezes synthetic v1 active/exhausted/completed and
 v2 active/exhausted payload bytes, wrapped in base64 for byte-preserving checkout.
 One manifest records decoded and encoded SHA256 hashes, semantic expectations,
-and identity rebinding for synthetic managed tests. Its independent generation
-recipe never runs in reader assertions. A frozen v1 validator from `ba368afc`
-qualifies v2 rejection at its version gate **before carry restoration**.
-Downgraded readers cannot resume v2 progress. Choosing a retained earlier
-compatible snapshot may replay work; this is neither automatic rollback nor
-repair. Historical completed truncated Values cannot be identified automatically.
+and historical compatibility expectations. These bytes now qualify explicit
+version rejection before carry restoration, without rewriting fixtures or saved
+state. Historical completed truncated Values cannot be identified automatically.
 
 ## Symbolic Definition And Generator Selector V1
 
@@ -479,20 +474,25 @@ Store records.
 ## Workflow Records
 
 `ExperimentData` persists its authoritative `experiment_data.json` as the closed
-`dryml-experiment-data` v3 format. It stores declared column kinds, ordered row
-facts, exact `ObjectRef`/`StateRef` values, artifact-reference mappings, and
+`dryml-experiment-data` v4 format. It stores declared column kinds, ordered row
+facts, exact SavedNode values, artifact-reference mappings, and
 status cells without opening an Experiment, checkpoint, Dataset, or Artifact
-payload. V3 delegates every embedded exact reference to core's versioned
-`dryml-reference-json` envelope. The reader retains the closed v1 and v2 value
-grammars, and an existing history migrates under its established current-history
-alias when its next immutable v3 snapshot publishes.
+payload. V4 delegates every embedded exact reference to core's versioned
+`dryml-node-graph/v1` envelope. Earlier history versions are rejected intact.
+Current history uses a format-4 Node-name CAS at
+`experiment_data_current_v4-<subject-object-projection-digest>`; it does not
+rewrite a prior alias or convert old reference authority.
 Pandas is only a lazy inspection dependency; it is not part of this format or a
 reader requirement.
 
 Completed `Value` Artifacts retain their result through the
 `dryml.artifacts.value` v1 envelope. A `TrainState` is ordinary Object state, not
-a separate file format: its named state and supported historical three-slot state
-are validated by its state hooks before restored progress is installed. Experiment
+a separate Store format: its closed pickle state is
+`{"version": 2, "fields": <complete-current-field-map>}`. Missing/unknown fields,
+prior named/three-slot states, and inconsistent progress are rejected before
+installation. Experiment state wraps this as `{"version": 2, "state": TrainState}`.
+Pending observations carry `pending_observation_run_id`, with occurrence keys
+`v2:<run_id>:<sequence>`; resumed invocations reuse those facts. Experiment
 artifact mappings persist individual Template-role Definitions as quotation data
 in canonical key order; there is no aggregate recipe-container format.
 
@@ -579,10 +579,10 @@ compatibility only: they do not serialize a source Dataset/model, iterator,
 accumulator, or managed-control record, and they do not define a compatibility
 format for subclass-owned files.
 
-## CachedDataset Format V2 And Fixture Set V1
+## CachedDataset Format V3 And Historical Fixture Set V1
 
 Completed CachedDataset local state uses exact JSON `cache-manifest.json` format
-`dryml.cached-dataset`, version `2`, plus an ordered `chunks/` inventory. The
+`dryml.cached-dataset`, version `3`, plus an ordered `chunks/` inventory. The
 manifest stores mode, selected built-in codec, encoded NumPy-backed SpecTree,
 total yield count, and closed codec descriptors. It stores no source value,
 absolute path, work token, attempt identity, iterator, or live backend object.
@@ -602,17 +602,22 @@ is no object/VLEN reconstruction authority, silent coercion, codec fallback, or
 public extension grammar.
 
 Working snapshots use the same format/version with mode `working`, expected and
-sealed counts, descriptors, exact owner/operation/attempt evidence, and an opaque
+sealed counts, descriptors, exact owner/operation/run evidence, and an opaque
 Store-local work token. They deliberately refer to external retained work and are
 not independently iterable. Finished snapshots use mode `completed`, include no
 work identity, and own every declared chunk through normal snapshot-local state.
+Work markers use `dryml.cached-dataset-work` version 3 and `run_id` instead of
+attempt identity. Incompatible manifests/markers fail intact. Allocator leases
+span authored work and are released on normal or exceptional body exit; a later
+same-run invocation borrows the retained allocation under Core's owner/lease
+checks. Only an explicitly reclaimable, uncontended allocation can be removed.
 
 `tests/fixtures/cached_dataset/v1/` is fixture-package version 1, not an older
 cache manifest version. Its complete Store-v3 snapshots contain finished NumPy,
 Parquet, and NetCDF format-v2 payloads, including empty, nested dynamic/dtype, and
 polynomial cases. The manifest hashes every authority file and records PyArrow
-25.0.1/netCDF4 1.7.4 writer qualification. Compatibility tests read these bytes
-directly with supported readers and never regenerate them in the assertion path;
+25.0.1/netCDF4 1.7.4 historical writer qualification. Those old Store/cache formats
+are incompatible with the current reader and are not automatically converted;
 no progress snapshot, staging dependency, work token, or machine-local path is
 part of the fixture commitment.
 

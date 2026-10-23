@@ -124,28 +124,18 @@ def test_train_state_rejects_invalid_completed_epoch_metrics_before_installation
     assert (state.epoch, state.next_batch, state.pending_epoch_postlude) == (0, 1, None)
 
 
-def test_train_state_restores_legacy_slotted_schema_with_new_defaults():
-    state = TrainState.__new__(TrainState)
-
-    state.__setstate__({"epoch": 3, "step": 5, "phase": TrainState.training})
-
-    assert (state.epoch, state.step, state.phase) == (3, 5, TrainState.training)
-    assert state.examples_seen == 0
-    assert state.epoch_loss_denominator == 0
-    assert state.pending_epoch_postlude is None
-    assert state.pending_epoch_metrics is None
-    assert state.pending_observation is None
+def test_train_state_rejects_legacy_slotted_schema_without_default_conversion():
+    state = TrainState(step=7)
+    with pytest.raises(ValueError, match="version"):
+        state.__setstate__({"epoch": 3, "step": 5, "phase": TrainState.training})
+    assert state.step == 7
 
 
-def test_train_state_restores_genuine_three_slot_pickle_state_with_defaults():
-    state = TrainState.__new__(TrainState)
-
-    state.__setstate__((3, 5, TrainState.training))
-
-    assert (state.epoch, state.step, state.phase) == (3, 5, TrainState.training)
-    assert state.examples_seen == state.loss_denominator == state.next_batch == 0
-    assert state.epoch_loss_denominator == 0
-    assert state.target_epoch is state.pending_epoch_postlude is None
+def test_train_state_rejects_genuine_three_slot_pickle_state_intact():
+    state = TrainState(step=7)
+    with pytest.raises(ValueError, match="version"):
+        state.__setstate__((3, 5, TrainState.training))
+    assert state.step == 7
 
 
 @pytest.mark.parametrize(
@@ -161,11 +151,18 @@ def test_train_state_restores_genuine_three_slot_pickle_state_with_defaults():
         ({"epoch": 1, "next_batch": 1, "pending_epoch_postlude": 0,
           "pending_epoch_postlude_phase": "start"}, ValueError),
         ({"pending_observation": object()}, TypeError),
-        (({"unexpected": 1}, {"epoch": 1}), TypeError),
+        (({"unexpected": 1}, {"epoch": 1}), ValueError),
     ],
 )
 def test_train_state_rejects_malformed_persisted_state_before_installation(state, error):
-    restored = TrainState.__new__(TrainState)
+    restored = TrainState(step=7)
+    before = restored.__getstate__()
+    if isinstance(state, dict):
+        payload = TrainState().__getstate__()
+        payload["fields"].update(state)
+    else:
+        payload = state
 
     with pytest.raises(error):
-        restored.__setstate__(state)
+        restored.__setstate__(payload)
+    assert restored.__getstate__() == before
