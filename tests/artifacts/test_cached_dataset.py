@@ -316,7 +316,8 @@ print(json.dumps({"native_available": native_available,
 repo.close(flush=False)
 """, str(store.base_dir), key.cdef_digest, key.codec_hash,
         result.execution.operation_id, str(cleanup),
-    ], check=True, text=True, capture_output=True, timeout=60)
+    ], text=True, capture_output=True, timeout=60)
+    assert completed.returncode == 0, completed.stderr
     return json.loads(completed.stdout)
 
 
