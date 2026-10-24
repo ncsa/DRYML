@@ -200,7 +200,7 @@ class NativeResumeDataset(Dataset):
             for value in (1.0, 2.0, 3.0):
                 yield torch.tensor([value], dtype=torch.float64)
         else:
-            import dryml.tf
+            import dryml.tf  # noqa: F401 - activate the explicit TensorFlow adapter
             import tensorflow as tf
 
             with tf.device("/CPU:0"):
@@ -603,34 +603,37 @@ assert fold.compute.status(state_repo=repo).state == 'completed'
 
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-def test_fold_resumes_reservoir_and_confusion_carry_without_losing_components(tmp_path):
+@pytest.mark.parametrize("carry", ("reservoir", "confusion"))
+def test_fold_resumes_reservoir_and_confusion_carry_without_losing_components(tmp_path, carry):
     """Reservoir counters/key/storage and confusion counts survive checkpoints."""
 
     from dryml.artifacts import Fold, quantile
     from dryml.metrics import ConfusionCounts, ConfusionInitial
 
-    resumed_quantile = quantile(
-        ResumeDataset((1.0, 9.0, 3.0, 7.0, 5.0)), 0.5,
-        mode="global", capacity=2, seed=17,
-    )
-    direct_quantile = quantile(
-        ResumeDataset((1.0, 9.0, 3.0, 7.0, 5.0)), 0.5,
-        mode="global", capacity=2, seed=17,
-    )
-    resumed_store = DirStore(tmp_path / "quantile-resumed")
-    with pytest.raises(RuntimeError, match="stop after checkpoint"):
-        resumed_quantile.compute(checkpoint_every=2, managed=ManagedConfig(
-            state_repo=resumed_store, callbacks=[_stop_after_checkpoint],
-        ))
-    resumed_quantile.compute(
-        checkpoint_every=2, managed=ManagedConfig(state_repo=resumed_store),
-    )
-    direct_quantile.compute(
-        checkpoint_every=100, managed=ManagedConfig(
-            state_repo=DirStore(tmp_path / "quantile-direct"),
-        ),
-    )
-    np.testing.assert_array_equal(resumed_quantile.value(), direct_quantile.value())
+    if carry == "reservoir":
+        resumed_quantile = quantile(
+            ResumeDataset((1.0, 9.0, 3.0, 7.0, 5.0)), 0.5,
+            mode="global", capacity=2, seed=17,
+        )
+        direct_quantile = quantile(
+            ResumeDataset((1.0, 9.0, 3.0, 7.0, 5.0)), 0.5,
+            mode="global", capacity=2, seed=17,
+        )
+        resumed_store = DirStore(tmp_path / "quantile-resumed")
+        with pytest.raises(RuntimeError, match="stop after checkpoint"):
+            resumed_quantile.compute(checkpoint_every=2, managed=ManagedConfig(
+                state_repo=resumed_store, callbacks=[_stop_after_checkpoint],
+            ))
+        resumed_quantile.compute(
+            checkpoint_every=2, managed=ManagedConfig(state_repo=resumed_store),
+        )
+        direct_quantile.compute(
+            checkpoint_every=100, managed=ManagedConfig(
+                state_repo=DirStore(tmp_path / "quantile-direct"),
+            ),
+        )
+        np.testing.assert_array_equal(resumed_quantile.value(), direct_quantile.value())
+        return
 
     confusion = Fold(
         ConfusionDataset(),
