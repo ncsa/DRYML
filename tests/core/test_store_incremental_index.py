@@ -1,7 +1,7 @@
 """Store-owned schema-11 projection completion, independent of Repo consumers."""
 
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import asyncio
 import json
 import multiprocessing
@@ -145,7 +145,7 @@ def test_missing_stale_or_owned_incompatible_sidecar_rebuilds_metadata_only(tmp_
     elif damage == "corrupt":
         index.path.write_bytes(b"broken owned derived file")
     else:
-        with sqlite3.connect(index.path) as con:
+        with closing(sqlite3.connect(index.path)) as con, con:
             if damage in {"schema9", "schema10"}:
                 con.execute("PRAGMA user_version=" + damage.removeprefix("schema"))
             elif damage == "coverage2":
@@ -170,7 +170,7 @@ def test_foreign_future_sidecar_refused_intact_before_effects(tmp_path, damage):
     store.publish_node(creation())
     index = store.open_query_index()
     index.close()
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         if damage == "foreign":
             con.execute("UPDATE catalog_state SET store_key='other-store'")
         elif damage == "future":
@@ -270,7 +270,7 @@ def test_closed_coverage_families_are_guarded_or_explicitly_unavailable(tmp_path
             values(index, family)
         return
     values(index, family)
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute("DELETE FROM store_projection_coverage WHERE family=?", (family,))
     assert index.status().state == "dirty"
     with pytest.raises(QueryIndexDirty):
@@ -282,7 +282,7 @@ def test_unmanaged_posting_change_trips_guard_and_rebuild_restores_it(tmp_path):
     store.publish_node(creation())
     index = store.open_query_index()
     assert values(index, "facet")
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute("DELETE FROM store_projection_rows WHERE family='facet'")
     assert index.status().state == "dirty"
     with pytest.raises(QueryIndexDirty):
@@ -623,12 +623,12 @@ def test_new_coverage_version_and_missing_guards_never_advertise_ready(tmp_path)
     store = indexed_store(tmp_path / "store")
     store.publish_node(creation())
     index = store.open_query_index()
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute("DROP TRIGGER store_projection_delete")
     assert index.status().state == "dirty"
     index.maintain_store()
     assert index.status().state == "ready"
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute("UPDATE store_projection_cut SET contract_version=" + str(STORE_COVERAGE_VERSION + 1))
     before = index.path.read_bytes()
     with pytest.raises(QueryIndexIncompatible, match="Future"):
@@ -686,7 +686,7 @@ def test_sql_rollback_and_cancellation_never_advance_projection_coverage(tmp_pat
     assert raised.value.mutation_id in store.authority_cut().pending
     assert raised.value.confirmed_refs and raised.value.index_disposition == "repair_pending"
     assert all(not con.in_transaction for con in index._connections._connections.values())
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         assert con.execute("SELECT epoch FROM store_projection_cut").fetchone() == (1,)
         assert con.execute("SELECT COUNT(*) FROM store_projection_rows WHERE family='recipe_root'").fetchone() == (1,)
     index.maintain_store()
@@ -730,7 +730,7 @@ def test_authority_classification_is_independent_of_derived_destination(tmp_path
         patch.setattr(authority, "acknowledge", lambda *a: (_ for _ in ()).throw(OSError("ack pending")))
         with pytest.raises(StoreMutationError):
             store.publish_node(creation(2))
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute("PRAGMA user_version=" + str(SQLITE_QUERY_INDEX_SCHEMA_VERSION + 1))
     records = store.recover_authority()
     assert records and all(record.intent["status"] == "classified" for record in records)
@@ -774,7 +774,7 @@ def test_epoch_gap_between_replay_decision_and_detached_capture_cannot_certify_m
         with pytest.raises(QueryIndexDirty):
             index.maintain_store()
     assert store.authority_cut().epoch == 3 and index.status().state == "dirty"
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         assert con.execute("SELECT epoch FROM store_projection_cut").fetchone() == (1,)
     index.maintain_store()
     assert len(values(index, "recipe_root")) == 3

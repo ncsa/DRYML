@@ -1,6 +1,6 @@
 """Current-format discovery, completeness and detached page boundaries."""
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 import sqlite3
 
@@ -135,7 +135,7 @@ def test_annotations_current_capture_and_metadata_query_are_distinct(tmp_path):
 def test_empty_and_count_require_relation_guards(tmp_path):
     store, repo, _ = saved_values(tmp_path, 1)
     index = store.open_query_index()
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute("DROP TRIGGER store_projection_delete")
     for query in (repo.query().cdefs(), repo.query().sel(Definition(DiscoveryValue, name="absent"))):
         with pytest.raises(QueryIndexError):
@@ -463,7 +463,7 @@ def test_each_continuation_disposition_rejects_changed_cut(tmp_path, change):
     if change == "sidecar":
         store.rebuild_query_index()
     elif change == "coverage":
-        with sqlite3.connect(store.open_query_index().path) as con:
+        with closing(sqlite3.connect(store.open_query_index().path)) as con, con:
             con.execute("UPDATE store_projection_coverage SET dirty=1 WHERE family='edge'")
     elif change == "topology":
         repo.add_store(DirStore(tmp_path / "added", query_index="none"))

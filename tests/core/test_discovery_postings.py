@@ -1,5 +1,6 @@
 """Occurrence-local discovery storage, portable locators and selective SQL work."""
 
+from contextlib import closing
 import json
 import sqlite3
 
@@ -16,7 +17,7 @@ pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 def _sql_work(store, pattern, *, kind="object_refs", limit=10):
     query = getattr(store.query(), kind)().sel(pattern).refresh(False).require_indexed()
     sql, params = _store_discovery_page_sql(_store_discovery_relation(query), page_size=limit)
-    with sqlite3.connect(store.open_query_index().path) as con:
+    with closing(sqlite3.connect(store.open_query_index().path)) as con, con:
         plan = tuple(row[-1] for row in con.execute("EXPLAIN QUERY PLAN " + sql, params))
         steps = [0]
         def progress():
@@ -247,13 +248,15 @@ def test_posting_coverage_and_seek_loss_refuse_negative_answers_then_repair(tmp_
     store.publish_node(Definition(DiscoveryPair, child, "pair").concretize())
     index = store.open_query_index()
     before = authority_bytes(store)
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         if damage == "coverage":
             con.execute("DELETE FROM store_projection_coverage WHERE family=?", (family,))
         elif damage == "row":
             con.execute("DELETE FROM store_projection_rows WHERE family=?", (family,))
         else:
             con.execute("DROP INDEX " + ("store_discovery_token" if family == "discovery_feature" else "store_discovery_child"))
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        con.execute("SELECT 1")
     for pattern in (Definition(DiscoveryValue).with_identity(child.object_id), Definition(DiscoveryValue).with_identity(ObjectId())):
         with pytest.raises(QueryIndexError):
             store.query().object_refs().sel(pattern).refresh(False).require_indexed().count()

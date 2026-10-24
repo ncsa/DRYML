@@ -89,6 +89,7 @@ def test_cold_core_refuses_actual_managed_authority_without_complete_owner(tmp_p
     generation = index.status().generation
     file_identity = index._connections._path_identity()
     script = f'''
+from contextlib import closing
 import sys
 import sqlite3
 from dryml.core import Definition
@@ -103,7 +104,7 @@ store = DirStore({store.base_dir!r}, query_index="sqlite")
 index = store.open_query_index()
 assert index.status().state != "ready"
 # An older/incomplete owner feed may have explicitly marked lifecycle unsupported.
-with sqlite3.connect(index.path) as con:
+with closing(sqlite3.connect(index.path)) as con, con:
     con.execute("UPDATE store_projection_coverage SET supported=0 WHERE family='lifecycle'")
 assert index.status().state != "ready"
 for query in (store.query().cdefs().stored(), store.query().cdefs().stored().sel(Definition(int))):

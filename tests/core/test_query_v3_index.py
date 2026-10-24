@@ -7,6 +7,7 @@ recovery, admission, interruption and continuation assertions against Store 4.
 Standalone legacy SQLite delta/cursor tests remain live at the bottom.
 """
 
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 
@@ -97,7 +98,7 @@ def test_immutable_root_collision_refuses_without_replacing_authority(tmp_path, 
 def test_missing_projection_family_guard_refuses_empty_and_count(tmp_path, family):
     store, _, _ = _ready(tmp_path)
     index = store.open_query_index()
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute("DELETE FROM store_projection_coverage WHERE family=?", (family,))
     for query in (store.query().cdefs().stored(), store.query().sel(Definition(ProjectionLeaf, "absent"))):
         with pytest.raises(QueryIndexDirty):
@@ -111,7 +112,7 @@ def test_missing_projection_row_is_not_a_certified_negative(tmp_path, family):
     if family == "edge":
         child = Definition(ProjectionLeaf, "child").concretize()
         store.publish_node(Definition(ProjectionPair, child, child).concretize())
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute("DELETE FROM store_projection_rows WHERE family=?", (family,))
     with pytest.raises(QueryIndexDirty):
         store.query().cdefs().stored().refresh(False).require_indexed().count()
@@ -133,7 +134,7 @@ def test_sidecar_policy_and_derived_only_recovery(tmp_path, monkeypatch, damage)
     elif damage == "dirty":
         store.mark_query_index_dirty()
     else:
-        with sqlite3.connect(index.path) as con:
+        with closing(sqlite3.connect(index.path)) as con, con:
             if damage in {"schema7", "schema9"}:
                 con.execute("PRAGMA user_version=" + damage.removeprefix("schema"))
             else:
@@ -154,7 +155,7 @@ def test_future_sidecar_is_refused_intact(tmp_path, version):
     store, _, _ = _ready(tmp_path)
     index = store.open_query_index()
     index._connections.close_all_current_process()
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute(f"PRAGMA user_version={version}")
     before = index.path.read_bytes(), _authority_bytes(store)
     with pytest.raises(QueryIndexIncompatible):
@@ -298,7 +299,7 @@ def test_foreign_sidecar_query_is_refused_intact(tmp_path):
     store, _, _ = _ready(tmp_path)
     index = store.open_query_index()
     index._connections.close_all_current_process()
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute("UPDATE catalog_state SET store_key='foreign-owner'")
     before = index.path.read_bytes(), _authority_bytes(store)
     with pytest.raises(QueryIndexIncompatible):

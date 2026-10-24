@@ -1,5 +1,6 @@
 """Full-key retention, native active use and incarnation-safe cleanup proofs."""
 
+from contextlib import closing
 import multiprocessing
 import os
 from pathlib import Path
@@ -582,7 +583,7 @@ def test_prior_schema10_unsupported_retention_coverage_recovers_explicitly(tmp_p
     retained(store, store, key)
     index = store.open_query_index()
     index.close()
-    with sqlite3.connect(index.path) as con:
+    with closing(sqlite3.connect(index.path)) as con, con:
         con.execute("UPDATE store_projection_coverage SET supported=0 WHERE family='retention'")
     with pytest.raises((QueryIndexDirty, QueryIndexIncompatible)):
         index.projection_rows("retention")
