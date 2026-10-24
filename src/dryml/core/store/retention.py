@@ -418,9 +418,21 @@ def _grant_path(store, key, grant):
 def grants(store, key):
     """Read exact authoritative per-key grants under detached cut validation.
 
-    Returns tuple of validated RetentionGrantRecords. Missing reverse indexes are
-    irrelevant. Malformed or misplaced records fail closed with StoreAuthorityError.
-    No owner reconnection, payload IO or grant release occurs.
+    Args:
+        store: DirStore owning the target state's grant namespace.
+        key: Full StateKey identifying the protected local state.
+
+    Returns:
+        Tuple of validated RetentionGrantRecords. Native and portable path
+        spellings compare by normalized Store-relative address, not raw strings.
+        Missing reverse indexes are irrelevant.
+
+    Raises:
+        StoreAuthorityError: A discovered grant is malformed or misplaced.
+
+    Side Effects:
+        Reads metadata under fresh cut validation. No owner reconnection, payload
+        IO or grant release occurs; native IO and cut-change failures propagate.
     """
     with store._metadata_read() as captured:
         relative = store._relative(os.path.join(_variant(store, key), "grants"))
@@ -430,7 +442,8 @@ def grants(store, key):
                 continue
             path = os.path.join(store.base_dir, relative, name)
             grant = store._read_file(path, RetentionGrantRecord)
-            if grant is None or key not in grant.keys or path != _grant_path(store, key, grant):
+            if (grant is None or key not in grant.keys
+                    or store._relative(path) != store._relative(_grant_path(store, key, grant))):
                 raise StoreAuthorityError("Missing or mismatched authoritative state grant.")
             result.append(grant)
         return tuple(result)

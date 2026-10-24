@@ -62,6 +62,26 @@ def test_protect_associate_release_and_full_key_store_isolation(tmp_path):
     assert Path(a.state_data_path(key)).parent.joinpath("manifest.record").is_file()
 
 
+def test_grant_addresses_normalize_equivalent_paths_but_reject_misplaced_records(tmp_path, monkeypatch):
+    """Native and portable path spellings denote one grant, never another address."""
+    from dryml.core.store import retention
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    key = install(store)
+    retained(store, store, key)
+    expected = retention.grants(store, key)
+    assert len(expected) == 1
+    grant_path = retention._grant_path
+    monkeypatch.setattr(retention, "_grant_path", lambda *args: os.path.join(
+        os.path.dirname(grant_path(*args)), ".", os.path.basename(grant_path(*args))))
+    assert retention.grants(store, key) == expected
+    assert store.delete_state(key).status == "retained"
+    path = Path(grant_path(store, key, expected[0]))
+    path.rename(path.with_name("misplaced.record"))
+    with pytest.raises(StoreAuthorityError, match="grant"):
+        retention.grants(store, key)
+
+
 def test_uncertain_owner_keeps_grants_and_abandonment_fences_adoption(tmp_path):
     owner, target = (DirStore(tmp_path / name, query_index="none") for name in ("owner", "target"))
     key = install(target)
