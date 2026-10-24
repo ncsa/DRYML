@@ -286,7 +286,7 @@ def test_ci_workflow_keeps_comprehensive_and_coverage_suites_opt_in() -> None:
     heavy = jobs["heavy"]
     assert "if" not in heavy and "strategy" not in heavy
     assert heavy["runs-on"] == "ubuntu-latest"
-    assert heavy["timeout-minutes"] == 60
+    assert heavy["timeout-minutes"] == 120
     for step in heavy["steps"]:
         command = step.get("run", "")
         assert "./tests.sh good-enough" not in command

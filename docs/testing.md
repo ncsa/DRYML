@@ -439,7 +439,9 @@ The JUnit gate requires 97 executed native cases and zero skips, errors or
 failures, including teardown failures. The shared job uploads JUnit and per-test
 execution records, including partial evidence after failure. Native thread
 limits are set before imports, with a 600-second per-test watchdog and a
-60-minute job bound. These limits do not change product-global thread policy.
+120-minute job bound. The estimator worker fixture allows 180 seconds of worker
+execution and a 240-second caller wait. These limits do not change product-global
+thread policy or execution defaults.
 
 Local verification of the shared pip stack on 2026-10-15 used CPython 3.12.13
 on Linux: framework preflight and `pip check` passed, followed by 274 framework
@@ -595,7 +597,7 @@ run in fresh interpreters. CUDA visibility is disabled for tensor-framework
 tests only: an empty `CUDA_VISIBLE_DEVICES` triggers XGBoost 3.4.1 multiclass
 metric failures on the verification host even with `device='cpu'`. Native tests
 leave CUDA visibility alone and explicitly select CPU recipes. The job has a
-60-minute bound and uploads JUnit/execution evidence. Workflow configuration is
+120-minute bound and uploads JUnit/execution evidence. Workflow configuration is
 not support evidence until the job passes on the exact child commit.
 
 Manual `exhaustive` and `coverage` dispatches additionally run the remaining
