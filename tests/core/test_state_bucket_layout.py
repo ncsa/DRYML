@@ -597,9 +597,8 @@ def test_archive_replacement_during_open_does_not_rebase_old_extraction(tmp_path
 
 
 def test_short_manifest_write_cannot_report_installed_state(tmp_path, monkeypatch):
-    import io
     store = DirStore(tmp_path / "store", query_index="none")
-    original = io.open
+    original = Path.open
     class ShortWriter:
         def __init__(self, stream):
             self.stream = stream
@@ -612,8 +611,8 @@ def test_short_manifest_write_cannot_report_installed_state(tmp_path, monkeypatc
             return self.stream.write(payload[:4])
     def opened(path, mode="r", *args, **kwargs):
         stream = original(path, mode, *args, **kwargs)
-        return ShortWriter(stream) if not isinstance(path, int) and Path(path).name == "manifest.record" and mode == "wb" else stream
-    monkeypatch.setattr(io, "open", opened)
+        return ShortWriter(stream) if path.name == "manifest.record" and mode == "wb" else stream
+    monkeypatch.setattr(Path, "open", opened)
     with pytest.raises(OSError, match="incomplete"):
         install(store)
     assert store.inspect_states(view_digest(creation(), CREATION_VIEW)) == ()

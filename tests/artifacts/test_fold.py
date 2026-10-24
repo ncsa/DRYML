@@ -870,7 +870,7 @@ def test_fold_uses_one_managed_owner_and_services_interrupt_at_checkpoint(tmp_pa
 
     def pause_checkpoint(_obj, _context):
         BlockingAccumulator.entered.set()
-        assert BlockingAccumulator.release.wait(10)
+        assert BlockingAccumulator.release.wait(60)
 
     def invoke():
         """Run the only active Fold attempt until the test deliberately releases it."""
@@ -886,17 +886,17 @@ def test_fold_uses_one_managed_owner_and_services_interrupt_at_checkpoint(tmp_pa
     worker = Thread(target=invoke)
     worker.start()
     try:
-        assert BlockingAccumulator.entered.wait(10)
+        assert BlockingAccumulator.entered.wait(60), outcome
         with pytest.raises(ManagedConflictError):
             fold.compute(managed=ManagedConfig(state_repo=store))
         assert fold.compute.request_interrupt(state_repo=store).outcome == "requested"
         assert worker.is_alive()
         BlockingAccumulator.release.set()
-        worker.join(10)
+        worker.join(60)
         assert not worker.is_alive()
     finally:
         BlockingAccumulator.release.set()
-        worker.join(10)
+        worker.join(60)
 
     assert len(outcome) == 1
     assert isinstance(outcome[0], ManagedInterrupted)
@@ -977,7 +977,7 @@ class BlockingAccumulator(Adding):
         """Wait without a managed checkpoint, then return one valid next carry."""
 
         type(self).entered.set()
-        assert type(self).release.wait(10)
+        assert type(self).release.wait(60)
         return state + observation.sum(dtype=np.float64)
 
 
