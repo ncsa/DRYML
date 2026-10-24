@@ -267,6 +267,12 @@ named drops are validated against the original
 selected traversal before projection; a projected name cannot hide an invalid or
 absent source path.
 
+A selected Node is edited coherently at every alias of that occurrence. Restoring
+one path in a shared graph therefore restores the same Node through its other
+paths; independent equal nodes remain independent. Quoted constructor metadata
+stays exact and separate from these graph edits. Non-Node value endpoints retain
+ordinary structural-slot replacement semantics.
+
 For a stored-CDef-only query whose Stores have ready SQLite indexes, `take(n)`
 uses graph-complete `(graph digest, encoded root)` keyset pages and a bounded
 cross-Store frontier. The encoded tie key preserves sharing topology and genuine

@@ -394,7 +394,9 @@ class Selector:
 
         Returns:
             A selector whose original complete CDef, when available, is retained
-            for a later :meth:`exact` or :meth:`restore` edit.
+            for a later :meth:`exact` or :meth:`restore` edit. Node endpoints are
+            edited at every alias; independent equal nodes and quoted data remain
+            separate.
 
         Raises:
             QueryPathError: If the selected occurrence is unavailable.
@@ -406,7 +408,7 @@ class Selector:
         """
 
         from .categorical import _project_categorical_definition_with_origins
-        from .query.path import get_subtree, normalize_path, replace_subtree
+        from .query.path import get_subtree, normalize_path
 
         norm = normalize_path(path)
         subtree = get_subtree(self.root, norm)
@@ -418,7 +420,7 @@ class Selector:
             drop_class=drop_class,
         )
         return Selector(
-            replace_subtree(self.root, norm, projected, _origins=origins),
+            _replace_selector_subtree(self.root, norm, projected, _origins=origins),
             strict=self.strict,
             cls_policy=self.cls_policy,
             exact_root=self.exact_root,
@@ -431,7 +433,9 @@ class Selector:
             path: Root-relative subtree to restore.
 
         Returns:
-            A selector with the original subtree restored.
+            A selector with the original subtree restored at every alias of a
+            selected Node. Independent equal nodes and quoted data stay separate;
+            non-Node endpoints retain structural-slot replacement semantics.
 
         Raises:
             QueryPathError: If no original exact CDef is available or ``path``
@@ -441,14 +445,14 @@ class Selector:
             None. Restoration is an immutable selector edit.
         """
 
-        from .query.path import QueryPathError, get_subtree, normalize_path, replace_subtree
+        from .query.path import QueryPathError, get_subtree, normalize_path
 
         if self.exact_root is None:
             raise QueryPathError("restore() requires an original ConcreteDefinition.")
         norm = normalize_path(path)
         exact_path = _exact_authority_path(self.root, self.exact_root, norm)
         return Selector(
-            replace_subtree(self.root, norm, get_subtree(self.exact_root, exact_path)),
+            _replace_selector_subtree(self.root, norm, get_subtree(self.exact_root, exact_path)),
             strict=self.strict,
             cls_policy=self.cls_policy,
             exact_root=self.exact_root,
@@ -463,7 +467,8 @@ class Selector:
             path: Root-relative selected subtree.
 
         Returns:
-            A selector carrying the exact replacement.
+            A selector carrying the exact replacement at every alias of a selected
+            Node. Independent equal nodes and quoted data remain separate.
 
         Raises:
             QueryPathError: If no exact authority exists for an implicit edit.
@@ -474,7 +479,7 @@ class Selector:
         """
 
         from .definition import ConcreteDefinition
-        from .query.path import QueryPathError, get_subtree, normalize_path, replace_subtree
+        from .query.path import QueryPathError, get_subtree, normalize_path
 
         norm = normalize_path(path)
         if definition is None:
@@ -485,11 +490,23 @@ class Selector:
         if not isinstance(definition, ConcreteDefinition):
             raise TypeError("exact() requires a ConcreteDefinition.")
         return Selector(
-            replace_subtree(self.root, norm, definition),
+            _replace_selector_subtree(self.root, norm, definition),
             strict=self.strict,
             cls_policy=self.cls_policy,
             exact_root=self.exact_root,
         )
+
+
+def _replace_selector_subtree(root, path, replacement, *, _origins=None):
+    """Use occurrence-coherent Node edits while keeping literal slot edits structural."""
+    from .node import Node, _coalesce, _rewrite
+    from .query.path import get_subtree, replace_subtree
+
+    selected = get_subtree(root, path)
+    if isinstance(selected, Node) and isinstance(replacement, Node):
+        return _coalesce(_rewrite(root, {selected._occurrence: replacement},
+                                  reset_construction=True, enter_quoted=False))
+    return replace_subtree(root, path, replacement, _origins=_origins)
 
 
 def _exact_authority_path(selector_root, exact_root, path):
