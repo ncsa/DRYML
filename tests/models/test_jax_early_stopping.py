@@ -173,12 +173,13 @@ def test_jax_strict_stop_telemetry_resumes_without_extra_updates(tmp_path):
 
     final = resumed.train(managed=ManagedConfig(
         state_repo=repo, control_store=resume_control,
-    ))
+    )).final_state_ref
     status = resumed.train.status(
         state_repo=repo, control_store=resume_control,
     )
 
-    assert final == status.final_state_ref == resumed.last_state_ref
+    assert final.graph_equal(status.final)
+    assert final.graph_equal(resumed.last_state_ref)
     assert (resumed.state.epoch, resumed.state.step, resumed.state.target_epoch) == (2, 4, None)
     np.testing.assert_array_equal(resumed.model.parameters["weight"], stopped_parameters)
     np.testing.assert_array_equal(jax.random.key_data(resumed.model.rng), stopped_rng)
@@ -299,11 +300,12 @@ def test_jax_managed_early_stopping_returns_exact_terminal_state(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     exp = _experiment(restore_best_weights=True)
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
     status = exp.train.status(state_repo=repo)
     restored = repo.load_state_ref(final, reuse_live="never")
 
-    assert final == status.final_state_ref == exp.last_state_ref
+    assert final.graph_equal(status.final)
+    assert final.graph_equal(exp.last_state_ref)
     assert (restored.state.epoch, restored.state.step, restored.state.target_epoch) == (2, 4, None)
     assert restored.train_fn.early_stopping.accepted_target == 2
     assert restored.train_fn.early_stopping.restored is True

@@ -90,7 +90,7 @@ def test_torch_invocation_telemetry_receives_host_logs_after_accounting(tmp_path
     final = exp.train(
         callbacks=[lambda values: logs.append(dict(values))],
         managed=ManagedConfig(state_repo=repo),
-    )
+    ).final_state_ref
 
     assert [values["event"] for values in logs] == [
         "train_batch_end", "train_batch_end", "epoch_end",
@@ -98,7 +98,7 @@ def test_torch_invocation_telemetry_receives_host_logs_after_accounting(tmp_path
     assert [values["step"] for values in logs] == [1, 2, 2]
     assert [values["batch"] for values in logs[:2]] == [0, 1]
     assert all(type(values["loss"]) is float for values in logs)
-    assert exp.train.status(state_repo=repo).final_state_ref == final
+    assert exp.train.status(state_repo=repo).final.graph_equal(final)
 
 
 def test_torch_model_and_optimizer_state_ref_round_trip(tmp_path):
@@ -550,8 +550,8 @@ def test_torch_training_prepares_cross_backend_data_before_model_invocation(monk
 
 def test_torch_training_prepares_tensorflow_data_through_its_retained_method_edge():
     """TensorFlow batches reach the real Torch loop through TrainingPreparation."""
-    tf = pytest.importorskip("tensorflow")
-    import dryml.tf
+    pytest.importorskip("tensorflow")
+    import dryml.tf  # noqa: F401 - activate the explicit TensorFlow adapter
     from dryml.core import TensorSpec
     from dryml.core.cardinality import Cardinality
     from dryml.data import GeneratorDataset
@@ -904,12 +904,13 @@ def test_torch_strict_stop_telemetry_resumes_without_extra_updates(tmp_path):
 
     final = resumed.train(managed=ManagedConfig(
         state_repo=repo, control_store=resume_control,
-    ))
+    )).final_state_ref
     status = resumed.train.status(
         state_repo=repo, control_store=resume_control,
     )
 
-    assert final == status.final_state_ref == resumed.last_state_ref
+    assert final.graph_equal(status.final)
+    assert final.graph_equal(resumed.last_state_ref)
     assert (resumed.state.epoch, resumed.state.step, resumed.state.target_epoch) == (2, 4, None)
     torch.testing.assert_close(resumed.model.obj.state_dict(), stopped_model)
     assert [
@@ -1095,11 +1096,12 @@ def test_torch_managed_early_stopping_returns_exact_terminal_state(tmp_path):
     )
     exp = Experiment(model, trainer, train_data=data)
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
     status = exp.train.status(state_repo=repo)
     restored = repo.load_state_ref(final, reuse_live="never")
 
-    assert final == status.final_state_ref == exp.last_state_ref
+    assert final.graph_equal(status.final)
+    assert final.graph_equal(exp.last_state_ref)
     assert (restored.state.epoch, restored.state.step, restored.state.target_epoch) == (2, 4, None)
     assert restored.train_fn.early_stopping.accepted_target == 2
     assert restored.train_fn.early_stopping.restored is True
