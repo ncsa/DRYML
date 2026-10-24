@@ -44,6 +44,33 @@ class ZeroLeafDataset(Dataset):
         return self.count
 
 
+class ObjectArrayDataset(Dataset):
+    """Generate invalid object leaves at iteration, outside construction metadata."""
+
+    def __init__(self):
+        super().__init__(TensorSpec("object", shape=(), backend="numpy"))
+
+    def __iter__(self):
+        return iter((np.asarray(object(), dtype=object),))
+
+    def __len__(self):
+        return Cardinality.finite(1)
+
+
+class ByteRangeDataset(Dataset):
+    """Generate one large uint8 yield from a compact portable size declaration."""
+
+    def __init__(self, size):
+        self.size = size
+        super().__init__(TensorSpec("uint8", shape=(size,), backend="numpy"))
+
+    def __iter__(self):
+        return iter((np.arange(self.size, dtype=np.uint8),))
+
+    def __len__(self):
+        return Cardinality.finite(1)
+
+
 class FrameworkArrayDataset(Dataset):
     """Yield one framework tensor while retaining only portable CDef inputs."""
 
@@ -109,9 +136,10 @@ def test_numpy_cache_round_trips_nested_values_and_empty_source(tmp_path):
     state = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
 
     assert cache.ready
-    assert state == cache.last_state_ref
+    assert state.value is None
+    assert state.final_state_ref.graph_equal(cache.last_state_ref)
     assert len(cache) == 2
-    restored = repo.load_state_ref(state, reuse_live="never")
+    restored = repo.load_state_ref(state.final_state_ref, reuse_live="never")
     values = list(restored)
     assert values[0]["name"].item() == "a\x00b"
     assert values[1]["name"].item() == "é"
@@ -200,7 +228,8 @@ def test_numpy_cache_rejects_invalid_logical_yields(tmp_path, spec, value):
     from dryml.core import Repo
     from dryml.core.store.dir import DirStore
 
-    cache = CachedDataset(ArrayDataset([value], spec))
+    source = ObjectArrayDataset() if isinstance(spec, TensorSpec) and spec.dtype.name == "object" else ArrayDataset([value], spec)
+    cache = CachedDataset(source)
     with pytest.raises((TypeError, ValueError)):
         cache.compute(codec="numpy", managed=ManagedConfig(state_repo=Repo(DirStore(tmp_path / "store"))))
     assert not cache.ready
@@ -307,9 +336,7 @@ def test_oversized_logical_yield_uses_bounded_physical_segments(tmp_path):
     from dryml.core.store.dir import DirStore
 
     value = np.arange(6 * 1024 * 1024, dtype=np.uint8)
-    cache = CachedDataset(ArrayDataset(
-        [value], TensorSpec("uint8", shape=(6 * 1024 * 1024,), backend="numpy"),
-    ))
+    cache = CachedDataset(ByteRangeDataset(value.size))
     cache.compute(
         codec="numpy", target_chunk_bytes=1024 * 1024,
         managed=ManagedConfig(state_repo=Repo(DirStore(tmp_path / "store"))),

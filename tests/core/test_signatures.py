@@ -7,7 +7,7 @@ import contextvars
 import pickle
 import threading
 from types import SimpleNamespace
-from typing import Annotated, get_args, get_type_hints
+from typing import get_args, get_type_hints
 
 import pytest
 
@@ -577,11 +577,13 @@ def test_reference_union_rejects_incomparable_identity_and_state_deliveries(monk
 def test_automatic_live_reference_never_captures_a_saved_refinement(monkeypatch):
     """An unsaved live Object yields existing identity, never manufactured state."""
 
-    from dryml.core import SavedNode, Serializable
+    from dryml.core import ConcreteNode, SavedNode, Serializable
 
     live = Serializable()
     monkeypatch.setattr(Repo, "save_object", lambda *a, **k: pytest.fail("automatic save"))
-    assert _plan(Ref[AutoRef]).prepare_args((live,), {}).deliver_args()[0][0] == live.object_ref
+    selected = _plan(Ref[AutoRef]).prepare_args((live,), {}).deliver_args()[0][0]
+    assert isinstance(selected, ConcreteNode)
+    assert selected.object_id == live.object_id and selected.state is None
     with pytest.raises(SignatureError, match="unavailable"):
         _plan(Ref[SavedNode]).prepare_args((live,), {})
     assert live.last_state_ref is None

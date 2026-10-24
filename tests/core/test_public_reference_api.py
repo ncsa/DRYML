@@ -36,7 +36,7 @@ def test_public_save_and_load_signatures_exclude_retired_controls():
     """Public structural and exact APIs do not expose mutable-state switches."""
 
     assert tuple(inspect.signature(Object.save).parameters) == (
-        "self", "repo", "main", "store", "alias", "deep_capture",
+        "self", "repo", "main", "states", "store", "alias", "deep_capture",
         "match_mode", "graph_mode", "report_stores", "source_store",
         "source_stores", "annotations",
     )

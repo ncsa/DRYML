@@ -2,7 +2,7 @@
 
 Version inspection never decodes Store or index rows. Valid foreign ownership
 refuses maintenance; known older owned formats can be rebuilt from authority.
-Schema 10 separates the closed format-4 coverage contract from legacy V3 rows.
+Schema 11 adds local discovery postings and portable occurrence locators.
 """
 
 from __future__ import annotations
@@ -19,13 +19,14 @@ from ..model import CANONICAL_QUERY_SEMANTICS_VERSION, FINGERPRINT_SCHEMA_VERSIO
 
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
-SQLITE_QUERY_INDEX_SCHEMA_VERSION = 10
-STORE_COVERAGE_VERSION = 2
+SQLITE_QUERY_INDEX_SCHEMA_VERSION = 11
+STORE_COVERAGE_VERSION = 3
 # Unimplemented owners are explicit capabilities, never certified empty relations.
 STORE_PROJECTION_FAMILIES = (
     "record", "recipe_root", "saved_root", "declaration", "creation",
     "manifest", "availability", "node", "edge", "facet", "name",
     "requested_metadata", "retention", "lifecycle", "discovery",
+    "discovery_feature", "discovery_link",
 )
 STORE_UNAVAILABLE_FAMILIES = frozenset({"lifecycle"})
 IndexCompatibilityDecision = Literal["compatible", "rebuild", "future-unsupported", "foreign-owned"]
@@ -86,6 +87,17 @@ DDL = (
         family, json_extract(CAST(payload AS TEXT), '$.key_kind'),
         json_extract(CAST(payload AS TEXT), '$.digest'), source, row_key)
         WHERE family='discovery'""",
+    """CREATE INDEX store_discovery_fact ON store_projection_rows(
+        family, json_extract(CAST(payload AS TEXT), '$.fact'))""",
+    """CREATE INDEX store_discovery_token ON store_projection_rows(
+        family, json_extract(CAST(payload AS TEXT), '$.token'),
+        json_extract(CAST(payload AS TEXT), '$.node')) WHERE family='discovery_feature'""",
+    """CREATE INDEX store_discovery_parent ON store_projection_rows(
+        family, json_extract(CAST(payload AS TEXT), '$.parent'),
+        json_extract(CAST(payload AS TEXT), '$.child')) WHERE family='discovery_link'""",
+    """CREATE INDEX store_discovery_child ON store_projection_rows(
+        family, json_extract(CAST(payload AS TEXT), '$.child'),
+        json_extract(CAST(payload AS TEXT), '$.parent')) WHERE family='discovery_link'""",
     """
     CREATE TABLE store_projection_coverage (
         family TEXT PRIMARY KEY,

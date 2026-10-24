@@ -37,6 +37,85 @@ class CompletionValue(Pickleable):
         type(self).handoffs += 1
 
 
+class MetadataCompletionValue(CompletionValue):
+    """Publish related metadata roots through the real managed completion chain."""
+
+    @managed_operation(resumable=True)
+    def describe(self, *, managed):
+        """Return inert related graph values after one counted body execution."""
+        from tests.managed.test_result_codec import related_metadata_result
+        type(self).bodies += 1
+        return related_metadata_result()
+
+
+def test_related_metadata_completion_reopens_in_fresh_kernel_and_never_caches_source(tmp_path):
+    import json
+    from pathlib import Path
+    import subprocess
+    import sys
+    from dryml.core import Definition
+    from dryml.managed import ManagedResultError
+    from dryml.managed.results import result_path
+    from tests.managed.test_result_codec import assert_related_metadata_result
+    from tests.managed.test_u14_authority import Experiment
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    live = MetadataCompletionValue(repo=repo)
+    MetadataCompletionValue.bodies = MetadataCompletionValue.captures = MetadataCompletionValue.restores = 0
+    result = live.describe(managed=ManagedConfig(state_repo=repo))
+    first, second = result.value, result.value
+    assert_related_metadata_result(first)
+    assert_related_metadata_result(second)
+    assert first["roots"][0] is not second["roots"][0]
+    expected = Definition(Experiment, first["roots"][:5])
+    assert expected.graph_equal(Definition(Experiment, second["roots"][:5]))
+    replay = live.describe(managed=ManagedConfig(state_repo=repo))
+    assert_related_metadata_result(replay.value)
+    counts = MetadataCompletionValue.bodies, MetadataCompletionValue.captures, MetadataCompletionValue.restores
+    assert counts == (1, 1, 0)
+    descriptor = {"reference": result.result_reference.to_data(), "path": result.source.path,
+                  "store_uuid": result.source.store_uuid, "key": expected.exact_key().decode("ascii")}
+    path = Path(result_path(repo.stores[0], result.result_reference.key))
+    repo.close(flush=False)
+    reader = subprocess.run([sys.executable, "-c", """
+import json, sys
+from dryml.core import Definition
+from dryml.managed.results import ResultReference, ResultSource
+from tests.managed.test_result_codec import assert_related_metadata_result
+from tests.managed.test_u14_authority import Experiment
+data = json.loads(sys.argv[1])
+value = ResultSource(data['path'], data['store_uuid']).read(ResultReference.from_data(data['reference']))
+assert_related_metadata_result(value)
+assert Definition(Experiment, value['roots'][:5]).exact_key().decode('ascii') == data['key']
+""", json.dumps(descriptor)], capture_output=True, text=True, timeout=30)
+    assert reader.returncode == 0, reader.stdout + reader.stderr
+    path.unlink()
+    with pytest.raises(ManagedResultError, match="result_unavailable"): result.value
+    assert (MetadataCompletionValue.bodies, MetadataCompletionValue.captures, MetadataCompletionValue.restores) == counts
+
+
+def test_execute_related_metadata_result_keeps_detached_aliases(tmp_path):
+    from dryml.core import Executor
+    from dryml.core.execute import CoreOptions
+    from dryml.execute.subprocess import SubProcessConfig
+    from tests.managed.test_result_codec import assert_related_metadata_result
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    live = MetadataCompletionValue(repo=repo)
+    first = live.describe(managed=ManagedConfig(state_repo=repo))
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = Executor(SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False))
+    try:
+        future = executor.submit(live.describe)
+        detached = future.result(timeout=30)
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=10)
+    repo.close(flush=False)
+    assert detached.execution.run_id == first.execution.run_id
+    assert detached.result_reference.version == 2
+    assert_related_metadata_result(detached.value)
+
+
 def test_public_result_detaches_and_replays_old_live_receiver_without_work(tmp_path):
     from dryml.managed import InvocationResult
     store = DirStore(tmp_path / "state", query_index="none")

@@ -58,19 +58,40 @@ different run cannot append the retained prefix. Cache manifests and work marker
 are version 3; old/malformed records are rejected intact without conversion.
 
 Finished state is self-contained in its immutable Store snapshot and remains
-readable after retained work is reclaimed or the source is unavailable. Restore
-validates manifest completeness and descriptors eagerly but opens and verifies a
-chunk only when iteration reaches it; corruption raises `CacheIntegrityError`
-before any yield from that chunk. Independent iterators lease immutable cache
-generations. Same-codec managed rerun republishes completed content without source
+readable after retained work is reclaimed or the source is unavailable. Core's
+current full-key read authenticates every inventoried byte before restoration.
+The cache codec restores manifest/descriptors without decoding native chunks;
+iteration performs codec-level validation before any yield from each chunk.
+Metadata-only inspection reads no payload bytes. Independent iterators lease immutable cache
+generations. Store-backed cursors acquire a freshly validated native Core reader
+for the exact Store authority domain and full StateKey when opened, and retain
+active-use protection until exhaustion, explicit close, or read failure. This
+includes unused cursors closed before their first pull and cursors closed from
+another thread. Each cursor owns independent protection: closing one does not
+release another reader. Trusted cleanup in another process reports `in-use`
+without removing active chunks; deletion can be retried after readers close.
+Completed state capture likewise holds a fresh native reader while copying its
+deferred chunks. Retained cache metadata and source paths do not prove current
+availability: missing, withdrawn, closed, or replaced source authority raises
+`CacheIntegrityError` before chunk decoding/copying. Chunk decoding remains lazy;
+these readers add no durable retention root.
+
+Same-codec managed rerun republishes completed content without source
 access; changing codec recomputes from the source. Default Repo routing and
 required replicas apply normally, while `store=` selects one supported closure
 destination for that invocation.
 
+When rerun starts from the live completed cache, managed preserves the old final's
+physical grant until replacement publication has finished reading its chunks. The
+old association is already retired, and its explicit release-pending debt survives
+an interrupted or failed retirement. This neither implicitly restores that final
+nor promotes it to initial/latest recovery. See
+[managed rerun and cleanup](managed_operations.md#caller-configuration-and-start-selection).
+
 Current work allocation and same-host worker transport are qualified only for
 already connected direct `DirStore` authority. Work directories remain private
 Store-owned staging children; no public Store/Repo API, inode-based cache identity,
-automatic cross-process synchronization, remote Store transport, cache discovery,
+cross-process work coordination, remote Store transport, cache discovery,
 or public codec plugin system is added.
 
 Fold role preparation selects first, then infers each selected initializer,

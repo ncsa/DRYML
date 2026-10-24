@@ -1,5 +1,3 @@
-from typing import Optional
-
 import dryml
 import pytest
 from dryml.core import (
@@ -7,7 +5,6 @@ from dryml.core import (
     Definition,
     EdgeKind,
     QuotedDef,
-    Mat,
     Ref,
     Selector,
     SelectorSpec,
@@ -81,12 +78,12 @@ def test_optional_role_default_and_explicit_none_match_in_private_bound_records(
     omitted = Definition(OptionalRefOwner).concretize()
     explicit = Definition(OptionalRefOwner, None).concretize()
 
-    assert omitted == explicit
+    assert omitted.graph_equal(explicit)
     assert omitted["parameters"]["child"] is None
 
     selector_omitted = Definition(OptionalSelectorOwner).concretize()
     selector_explicit = Definition(OptionalSelectorOwner, None).concretize()
-    assert selector_omitted == selector_explicit
+    assert selector_omitted.graph_equal(selector_explicit)
     assert selector_omitted["parameters"]["selector"] is None
 
 

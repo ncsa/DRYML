@@ -12,6 +12,7 @@ import pytest
 
 from dryml.artifacts import CacheIntegrityError, CachedDataset
 from dryml.core.cardinality import Cardinality
+from dryml.core.node_prepare import NodePreparation
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import Dataset
 from dryml.managed import ManagedConfig
@@ -46,19 +47,22 @@ class TwoArrays(Dataset):
 
 
 def test_late_chunk_corruption_fails_before_affected_yield(tmp_path):
-    """Restore reads only manifest metadata and iteration authenticates chunks."""
+    """Post-restore corruption fails iteration before an affected logical yield."""
 
     from dryml.core import Repo
+    from dryml.core.repo import RepoLoadError
     from dryml.core.store.dir import DirStore
 
     repo = Repo(DirStore(tmp_path / "store"))
     state = CachedDataset(OneArray()).compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
-    restored = repo.load_state_ref(state, reuse_live="never")
+    restored = repo.load_state_ref(state.final_state_ref, reuse_live="never")
     chunk = next((tmp_path / "store").rglob("*.npz"))
     chunk.write_bytes(b"not an archive")
 
     with pytest.raises(CacheIntegrityError):
         list(restored)
+    with pytest.raises(RepoLoadError, match="preflight is incomplete"):
+        repo.load_state_ref(state.final_state_ref, reuse_live="never")
 
 
 def test_completed_cache_uses_snapshot_after_retained_work_is_removed(tmp_path):
@@ -69,11 +73,21 @@ def test_completed_cache_uses_snapshot_after_retained_work_is_removed(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     cache = CachedDataset(OneArray())
-    state = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
+    allocations = []
 
-    # Work is private scratch, while the associated StateRef owns the completed bytes.
-    for work in (tmp_path / "store" / ".staging").iterdir():
-        store.discard_local_state_staging(work)
+    def checkpoint_work(obj, _context):
+        allocations.append(obj._cache_payload["work_token"])
+
+    state = cache.compute(codec="numpy", managed=ManagedConfig(
+        state_repo=repo, callbacks=[checkpoint_work],
+    )).final_state_ref
+
+    assert allocations
+    for token in set(allocations):
+        work = Path(store._staging_root, token)
+        if work.exists():
+            assert store._discard_abandoned_staging(token, store._staging_owner(token))
+        assert not work.exists()
 
     assert [item.item() for item in cache] == [1]
     restored = repo.load_state_ref(state, reuse_live="never")
@@ -198,10 +212,15 @@ def test_routed_scratch_uses_first_local_store_and_final_replicates_all(tmp_path
     assert scratch._resolve_local_state_staging_id(token) is not None
     assert replica._resolve_local_state_staging_id(token) is None
 
-    state = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
+    state = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo)).final_state_ref
+    digest = NodePreparation((state,)).digest(state, domain="dryml-saved-root/v1")
 
-    assert scratch.read_state_ref_record(state.digest()).state_ref == state
-    assert replica.read_state_ref_record(state.digest()).state_ref == state
+    assert scratch.read_node(digest, kind="saved").graph_equal(state)
+    assert replica.read_node(digest, kind="saved").graph_equal(state)
+    with scratch.read_state(state.state.key) as source:
+        assert source.state == state.state
+    with replica.read_state(state.state.key) as source:
+        assert source.state == state.state
     assert [item.item() for item in Repo(scratch).load_state_ref(state, reuse_live="never")] == [1]
     assert [item.item() for item in Repo(replica).load_state_ref(state, reuse_live="never")] == [1]
 
@@ -217,7 +236,12 @@ def test_explicit_store_override_controls_work_and_completed_placement(tmp_path)
     repo = Repo(routed, save_routing=SaveRouting(((Selector(CachedDataset), routed),)))
     state = CachedDataset(OneArray()).compute(
         codec="numpy", store=override, managed=ManagedConfig(state_repo=repo),
-    )
+    ).final_state_ref
+    digest = NodePreparation((state,)).digest(state, domain="dryml-saved-root/v1")
 
-    assert override.read_state_ref_record(state.digest()).state_ref == state
-    assert routed.read_state_ref_record(state.digest()) is None
+    assert override.read_node(digest, kind="saved").graph_equal(state)
+    with override.read_state(state.state.key) as source:
+        assert source.state == state.state
+    assert routed.read_node(digest, kind="saved") is None
+    with routed.read_states((state.state.key,)) as sources:
+        assert not sources

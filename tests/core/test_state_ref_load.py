@@ -55,9 +55,9 @@ def test_load_state_ref_restores_saved_identity_and_shared_topology(tmp_path):
 
     assert loaded.left is loaded.right
     assert loaded.left.value == 9
-    assert loaded.object_ref == state.object
+    assert Repo().describe(loaded).object_projection_equal(state)
     assert loaded.left.object_id == leaf.object_id
-    assert loaded.last_state_ref == state
+    assert loaded.last_state_ref.graph_equal(state)
     assert loaded.left.last_state_ref is None
 
 
@@ -80,10 +80,48 @@ def test_failed_fresh_exact_restore_leaves_no_cache_or_state_hash(tmp_path):
     reopened = Repo(DirStore(tmp_path / "store"))
     FailedRestoreValue.constructed = None
 
-    with pytest.raises(RepoLoadError, match="codec 'pkl'.*incompatible payload") as error:
+    with pytest.raises(RepoLoadError, match="incompatible payload.*fresh materialization") as error:
         reopened.load_state_ref(state, reuse_live="never", cache="strong")
 
     assert isinstance(error.value.__cause__, RuntimeError)
     assert FailedRestoreValue.constructed._last_state_hash is None
     assert FailedRestoreValue.constructed._restore_failed
     assert reopened._all_live_candidates() == ()
+
+
+def test_warm_named_views_and_validation_never_certify_payload_availability(tmp_path, monkeypatch):
+    """Resident pure facts survive withdrawal, but every public load preflights IO."""
+    from dryml.core.node_prepare import _owned_preparation
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    repo = Repo(store)
+    obj = RestoredValue(1, repo=repo)
+    obj.value = 9
+    saved = repo.save(obj)
+    selected = saved.state
+    expected = (saved.creation_digest(), saved.compatibility_fingerprint(), saved.object_projection_digest())
+    assert selected.validate_for(saved, codec="pkl") is selected
+    reader = Repo(store)
+    assert reader.load_state_ref(saved, reuse_live="never").value == 9
+    payload = Path(store.state_data_path(selected.key), "value")
+    payload.unlink()
+    restores = []
+    restore = RestoredValue.restore_state_from_dir_imp
+
+    def counted_restore(target, directory, *, codec):
+        restores.append(target)
+        return restore(target, directory, codec=codec)
+
+    monkeypatch.setattr(RestoredValue, "restore_state_from_dir_imp", counted_restore)
+    for phase in ("warm", "cleared"):
+        if phase == "cleared":
+            _owned_preparation(saved).clear()
+            _owned_preparation(selected.creation_cdef).clear()
+        assert (saved.creation_digest(), saved.compatibility_fingerprint(), saved.object_projection_digest()) == expected
+        assert selected.validate_for(saved, codec="pkl") is selected
+        with pytest.raises(RepoLoadError, match="preflight is incomplete"):
+            reader.load_state_ref(saved, reuse_live="never")
+        assert restores == []
+    payload.write_text("9", encoding="ascii")
+    assert reader.load_state_ref(saved, reuse_live="never").value == 9
+    assert len(restores) == 1

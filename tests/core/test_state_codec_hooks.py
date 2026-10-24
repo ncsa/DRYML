@@ -36,7 +36,7 @@ def test_codec_reaches_every_mro_hook_unchanged(tmp_path, codec):
     state = obj.save(repo=repo)
 
     assert CodecLeaf.calls == [("leaf", codec), ("base", codec)]
-    assert state.states[next(iter(state.states))].startswith(f"{codec}-")
+    assert state.state.key.codec_hash.startswith(f"{codec}-")
 
 
 def test_invalid_codec_fails_before_hook_or_store_mutation(tmp_path):

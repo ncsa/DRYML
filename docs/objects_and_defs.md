@@ -66,6 +66,17 @@ facet. Bulk replacement rejects contradictions within the edit itself.
 in the returned graph, leaving independent equal nodes and the original unchanged.
 A soft replacement weakens affected concrete ancestors to general Node views.
 
+The retained recipe editors `with_cls`, `with_args`, `with_arg`, `with_kwargs`,
+`with_kwarg`, and `without_kwarg` preserve the root occurrence and its exact
+ObjectId/LocalState facets. Nested facets, aliases, and quoted values survive;
+newly embedded complementary aliases compose and contradictory views fail.
+An actual recipe change invalidates the edited root's retained construction
+evidence; an unchanged recipe preserves that evidence. These metadata edits do
+not check state availability or compatibility. For example, changing width on a
+state-bound model retains that selection, and an incompatible build rejects it
+before constructors or restore hooks rather than initializing fresh state.
+Remove selections deliberately with the binding-removal APIs above.
+
 `node.at(path, traverse_refs=False, traverse_quoted=False)` returns **Node endpoints
 only**, for soft and concrete metadata. Ordinary materializing structure is
 traversable by default. A path can terminate at a Ref-held or quoted Node without
@@ -89,6 +100,16 @@ construction selections: recording a child capture S1 does not overwrite an
 explicit construction pin S0. This records metadata only; it does not capture,
 restore, allocate, read payloads, or publish. Navigation, binding, replacement and
 extraction likewise perform none of those effects or target resolution.
+Realization overlays do not enter quotations: when an owned Node is also held as
+quoted future-recipe data, only its unquoted aliases receive allocated identities,
+captured states, partial state application, or removed state pins. The quotation
+retains its exact original view and internal sharing, including when it holds a
+different facet view of that same occurrence. Explicit authoring edits through
+`bind` and `replace_bindings` retain their occurrence-wide alias semantics.
+Graph identity/declaration collection likewise stops at quotations. When a
+metadata transformation exactly removes an overlay, it reuses the retained
+original view to preserve any original alias to quoted data; distinct facet views
+are not merged merely because they share an occurrence.
 
 `require_saved(concrete_node)` validates that every owned stateful occurrence has
 an exact ObjectId and LocalState, with no independent identity collisions. It
@@ -124,6 +145,14 @@ also accepts soft Nodes without resolving their targets.
 `OBJECT_PROJECTION_VIEW` for explicit operation-owned preparation, for example
 `NodePreparation((node,), view=CREATION_VIEW)`. Requests use its transformed
 `prepared.roots`; eager and deferred preparation implement the same key contract.
+Ordinary named digest/equality calls also reuse bounded pure preparation owned by
+the immutable source handle, so resident repeated calls add no graph discovery,
+folds, or semantic hashes. Derived view tables and their reserved fact budgets
+share the owner's entry/byte limits. Eviction or clearing preparation changes
+work only; it never changes keys, quotation, roles, sharing, or facet semantics.
+These owners are transient: fresh graph copies and portable transport do not
+carry cache locks or external evidence, and unreachable source graphs can be
+collected.
 
 `local_state.validate_for(destination, codec="pkl")` validates the retained
 normalized origin evidence against its full StateKey, then verifies exact
@@ -133,6 +162,11 @@ resolve a class to guess codec support, invoke a custom compatibility callback,
 open payloads, or prove their availability. Applying compatible foreign-origin
 metadata preserves the donor's StateKey and creation evidence. A subsequent new
 capture's address must derive from the destination's retained construction view.
+Multiple LocalStates sharing immutable creation evidence reuse its preparation;
+each validation still checks the selected StateKey and admitted codec and compares
+exact destination evidence. Cached graph facts certify no alias, live Object,
+Store contents, or payload availability. Build/load/restore reacquire and validate
+their external evidence even after successful warm metadata validation.
 
 A parent constructed with child S0 retains S0 in its creation view after a
 realization overlay selects child S1. Automatically allocated identities are not
@@ -228,9 +262,13 @@ from framework caches, and rejects later state IO. There is no automatic rollbac
 Recover with `repo.load_state_ref(saved_node, reuse_live="never")` from a valid
 available saved graph; its ObjectIds are preserved.
 
-Query V3 returns immutable identity values rather than live Objects. Select a CDef
-with `repo.query().sel(...).cdefs()` and pass the selected value to an explicit Repo
-load method when construction is intended.
+Queries return immutable Nodes rather than live Objects. Select a concrete recipe
+with `repo.query().sel(...).cdefs()` and pass the selected value to
+`repo.build(concrete_recipe_node)` when construction is intended. Build allocates
+missing identities and initializes unspecified state. For exact restoration,
+select a complete SavedNode with `saved()` / `state_refs()` and use
+`repo.load(saved_node)` or `repo.load_state_ref(saved_node)`; a stateful recipe
+without the required identity/state facets is not loadable as a saved graph.
 
 Default `Pickleable` restoration replaces ordinary payload fields rather than
 merging them. It removes fields absent from the checkpoint while preserving graph

@@ -4,7 +4,7 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import Definition, Object, Repo, SaveRouting, Selector, Serializable
+from dryml.core import Object, Repo, SaveRouting, Selector, Serializable, Parameter
 from dryml.core.object import Pickleable
 from dryml.core.repo import RepoSaveError
 from dryml.core.utils.general import pickle_load
@@ -72,12 +72,16 @@ def test_exact_load_attaches_only_its_requested_root_receipt(tmp_path, reuse_liv
     source = Repo(DirStore(tmp_path / "store"))
     root = ReceiptRoot(ReceiptValue(7, repo=source), repo=source)
     state = source.save_object(root)
+    previous_child_receipt = root.children.last_state_ref
     root._last_state_ref = None
 
     loaded = source.load_state_ref(state, reuse_live=reuse_live)
 
     assert loaded.last_state_ref == state
-    assert loaded.children.last_state_ref is None
+    if loaded.children is root.children:
+        assert loaded.children.last_state_ref is previous_child_receipt
+    else:
+        assert loaded.children.last_state_ref is None
 
 
 def test_aggregate_exact_load_attaches_its_requested_root_receipt(tmp_path):
@@ -105,8 +109,8 @@ def test_receipt_preserves_equal_child_identity_and_shared_alias_topology(tmp_pa
     loaded = Repo(DirStore(tmp_path / "store")).load_state_ref(state, reuse_live="never")
 
     assert root.last_state_ref == state
-    assert first.last_state_ref is None
-    assert second.last_state_ref is None
+    assert first.last_state_ref.graph_equal(state.at((Parameter("children"), 0)))
+    assert second.last_state_ref.graph_equal(state.at((Parameter("children"), 1)))
     assert first.object_id != second.object_id
     assert loaded.children[0] is loaded.children[2]
     assert loaded.children[0] is not loaded.children[1]
@@ -118,35 +122,28 @@ def test_receipt_preserves_equal_child_identity_and_shared_alias_topology(tmp_pa
 
 def test_recursive_child_receipt_survives_an_enclosing_root_failure(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store")
+    child_store = DirStore(tmp_path / "child")
     repo = Repo(
-        store,
+        [store, child_store],
         save_routing=SaveRouting(
             (
-                (Selector(ReceiptValue), store),
+                (Selector(ReceiptValue), child_store),
                 (Selector(ReceiptPendingParent), store),
             ),
             graph_mode="per-object",
         ),
     )
-    child_ref = repo.declare_object(ReceiptValue(5).definition)
-    parent_ref = repo.declare_object(
-        Definition(ReceiptPendingParent, child_ref).concretize(repo=repo)
-    )
-    parent = repo.build_object_ref(parent_ref)
-    installed = []
-    original = store.publish_snapshot
+    parent = ReceiptPendingParent(ReceiptValue(5, repo=repo), repo=repo)
 
-    def fail_parent_snapshot(reference, **kwargs):
-        installed.append(reference)
-        if len(installed) == 2:
-            raise OSError("parent snapshot install failed")
-        return original(reference, **kwargs)
+    def fail_parent_snapshot(*args, **kwargs):
+        raise OSError("parent snapshot install failed")
 
-    monkeypatch.setattr(store, "publish_snapshot", fail_parent_snapshot)
+    monkeypatch.setattr(store, "publish_save_batch", fail_parent_snapshot)
     with pytest.raises(RepoSaveError) as raised:
         repo.save_object(parent, deep_capture=True)
 
     assert isinstance(raised.value.__cause__, OSError)
     assert str(raised.value.__cause__) == "parent snapshot install failed"
     assert parent.last_state_ref is None
-    assert parent.child.last_state_ref == installed[0]
+    assert parent.child.last_state_ref is not None
+    assert parent.child.last_state_ref.graph_equal(raised.value.report.snapshots[0].state_ref)

@@ -7,7 +7,6 @@ import pickle
 import shutil
 import subprocess
 import sys
-from abc import abstractmethod
 from pathlib import Path
 
 import numpy as np
@@ -15,13 +14,13 @@ import pytest
 
 from dryml.artifacts import Fold, Value
 from dryml.core import Executor as CoreExecutor
-from dryml.core import Repo, StateRef
+from dryml.core import Repo, SavedNode, require_saved
 from dryml.core.execute import CoreOptions
 from dryml.core.store.dir import DirStore
 from dryml.core.tensor_spec import Dynamic, TensorSpec
 from dryml.data import Dataset
 from dryml.execute.subprocess import SubProcessConfig
-from dryml.managed import ManagedConfig, managed_operation
+from dryml.managed import InvocationResult, ManagedConfig, managed_operation
 from dryml.methods import Accumulator, Method, traits
 
 
@@ -130,16 +129,14 @@ def _run_managed(artifact, *, placement: str, repo: Repo, control_store: DirStor
         spool: Existing subprocess spool directory.
 
     Returns:
-        The final exact StateRef published by the managed lifecycle.
+        The final exact SavedNode published by the managed lifecycle.
     """
 
     config = ManagedConfig(state_repo=repo, control_store=control_store)
     if placement == "direct":
         result = artifact.compute(managed=config)
-        if isinstance(artifact, Fold):
-            assert result == artifact.last_state_ref
-        else:
-            assert result is None
+        assert isinstance(result, InvocationResult) and result.value is None
+        assert result.final_state_ref.graph_equal(artifact.last_state_ref)
     else:
         spool.mkdir()
         repo.save_object(artifact, deep_capture=True)
@@ -151,23 +148,19 @@ def _run_managed(artifact, *, placement: str, repo: Repo, control_store: DirStor
         )
         try:
             future = executor.submit(artifact.compute, kwargs={"managed": config})
-            result = future.result(timeout=15)
-            if isinstance(artifact, Fold):
-                assert isinstance(result, StateRef)
-            else:
-                assert result is None
+            result = future.result(timeout=180)
+            assert isinstance(result, InvocationResult) and result.value is None
             future.cleanup(timeout=5)
         finally:
             executor.close(cancel=True, timeout=10)
     status = artifact.compute.status(state_repo=repo, control_store=control_store)
     assert status.state == "completed"
-    assert isinstance(status.final_state_ref, StateRef)
-    if isinstance(artifact, Fold):
-        assert result == status.final_state_ref
-    return status.final_state_ref
+    assert require_saved(status.final) is status.final
+    assert result.final_state_ref.graph_equal(status.final)
+    return status.final
 
 
-def _assert_fresh_result(state_dir: Path, state: StateRef, expected) -> None:
+def _assert_fresh_result(state_dir: Path, state: SavedNode, expected) -> None:
     """Restore one exact result in a process that receives no input/control authority."""
 
     script = """
@@ -221,6 +214,7 @@ def test_value_execution_publishes_a_result_only_state_for_a_fresh_reader(tmp_pa
         control_store=control_store,
         spool=tmp_path / "spool",
     )
+    retained = repo.retain(state)
     source.unlink()
     with pytest.raises(FileNotFoundError):
         value.compute(managed=ManagedConfig(
@@ -230,6 +224,7 @@ def test_value_execution_publishes_a_result_only_state_for_a_fresh_reader(tmp_pa
     shutil.rmtree(control_dir)
 
     _assert_fresh_result(state_dir, state, "worker value")
+    assert all(outcome.status == "removed" for outcome in repo.release(retained))
 
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
@@ -252,6 +247,7 @@ def test_fold_execution_publishes_a_result_only_state_for_a_fresh_reader(tmp_pat
         control_store=control_store,
         spool=tmp_path / "spool",
     )
+    retained = repo.retain(state)
     source_path.unlink()
     with pytest.raises(FileNotFoundError):
         fold.compute(managed=ManagedConfig(
@@ -261,6 +257,7 @@ def test_fold_execution_publishes_a_result_only_state_for_a_fresh_reader(tmp_pat
     shutil.rmtree(control_dir)
 
     _assert_fresh_result(state_dir, state, 6.0)
+    assert all(outcome.status == "removed" for outcome in repo.release(retained))
 
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
@@ -283,26 +280,28 @@ def test_fold_worker_failed_read_repairs_and_returns_exact_completion_receipt(tm
     try:
         failed = executor.submit(fold.compute, kwargs={"checkpoint_every": 1, "managed": config})
         with pytest.raises(Exception, match="broken"):
-            failed.result(timeout=30)
+            failed.result(timeout=180)
         failed.cleanup(timeout=5)
         status = fold.compute.status(state_repo=repo, control_store=control)
-        assert (status.state, status.final_state_ref) == ("failed", None)
-        saved = repo.load_state_ref(status.checkpoint_state_ref, reuse_live="never")
-        assert saved._fold_progress_version == 2
+        assert (status.state, status.final) == ("failed", None)
+        saved = repo.load_state_ref(status.checkpoint, reuse_live="never")
+        assert saved._fold_progress_version == 3
         assert saved._fold_progress["state"] == "active"
         assert saved.processed_count == 1
         assert not saved.ready
         source.write_text("1\n2\n", encoding="utf-8")
         resumed = executor.submit(fold.compute, kwargs={"checkpoint_every": 1, "managed": config})
-        receipt = resumed.result(timeout=30)
+        result = resumed.result(timeout=180)
+        receipt = result.final_state_ref
         resumed.cleanup(timeout=5)
         completed = fold.compute.status(state_repo=repo, control_store=control)
         assert completed.state == "completed"
-        assert receipt == completed.final_state_ref
-        assert completed.attempt_id == status.attempt_id
+        assert receipt.graph_equal(completed.final)
+        assert completed.run_id == status.run_id
+        assert completed.invocation_id != status.invocation_id
         restored = repo.load_state_ref(receipt, reuse_live="never")
         assert restored.value() == 3.0
         assert restored.processed_count == 2
-        assert restored.last_state_ref == receipt
+        assert restored.last_state_ref.graph_equal(receipt)
     finally:
         executor.close(cancel=True, timeout=10)

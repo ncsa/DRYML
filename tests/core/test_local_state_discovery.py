@@ -228,7 +228,7 @@ def test_discovery_digest_domains_share_one_exact_preparation(tmp_path, monkeypa
         "dryml-node-graph/v1", "dryml-recipe-root/v1", "dryml-node-graph/v1",
         "dryml-node-graph/v1", "dryml-saved-root/v1",
     ]
-    assert len({id(owner) for owner, _, _, _ in calls}) == 3
+    assert len({id(owner) for owner, _, _, _ in calls}) == 1
     assert calls[0][0] is calls[1][0] and calls[0][3] == calls[1][3]
     assert calls[3][0] is calls[4][0] and calls[3][3] == calls[4][3]
     for row, (_, selected, _, _) in zip(rows, (calls[0], calls[2], calls[3])):
@@ -240,7 +240,7 @@ def test_discovery_digest_domains_share_one_exact_preparation(tmp_path, monkeypa
                                         if row["kind"] == "state_ref" else None)
         assert row["object_digest"] == (selected.object_projection_digest()
                                          if row["kind"] != "cdef" else None)
-    print("discovery: 3 selected views, 3 exact owners, 2 domain reuses, 0 repeat folds")
+    print("discovery: 3 selected views, 1 shared exact owner, 2 domain reuses, 0 repeat folds")
 
 
 def _identified_pair():

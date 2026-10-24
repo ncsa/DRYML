@@ -7,7 +7,7 @@ import pytest
 from dryml.core import Definition, Object
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import NodeMembershipRecord, NodeRootRecord
-from dryml.core.store.store import StoreAuthorityError, StoreCapabilityError
+from dryml.core.store.store import StoreAuthorityError
 
 
 class DirectLayoutObject(Object):
@@ -29,13 +29,14 @@ def test_node_roots_use_direct_digest_paths_without_object_generations(tmp_path)
 @pytest.mark.parametrize("consumer", ("query", "rebuild"))
 def test_old_query_consumers_refuse_new_authority_without_inventory(tmp_path, monkeypatch, consumer):
     writer = DirStore(tmp_path / "store", query_index="none")
-    writer.publish_node(Definition(DirectLayoutObject).concretize())
+    root = Definition(DirectLayoutObject).concretize()
+    writer.publish_node(root)
     store = DirStore(writer.base_dir, query_index="sqlite")
     monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("legacy inventory"))
-    action = store.query if consumer == "query" else store.rebuild_query_index
-    with pytest.raises(StoreCapabilityError):
-        action()
-    assert not Path(store.query_index_path).exists()
+    if consumer == "rebuild":
+        store.rebuild_query_index()
+    assert store.query().cdefs().stored().one().graph_equal(root)
+    assert Path(store.query_index_path).exists()
 
 
 @pytest.mark.parametrize("damage", ("definition", "marker", "marker-path", "target", "kind", "legacy"))

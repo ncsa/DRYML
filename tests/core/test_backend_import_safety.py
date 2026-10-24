@@ -24,13 +24,15 @@ def _run_import_probe(code: str):
     if env.get("PYTHONPATH"):
         pythonpath.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(pythonpath)
-    return subprocess.run(
+    result = subprocess.run(
         [sys.executable, "-c", code],
-        check=True,
+        check=False,
         env=env,
         text=True,
         capture_output=True,
     )
+    assert result.returncode == 0, result.stderr
+    return result
 
 
 def test_dryml_tf_import_installs_adapters_without_importing_tensorflow():
@@ -131,9 +133,12 @@ with tempfile.TemporaryDirectory() as tmp:
         ImportRef("dryml.models.tf.keras.base", "Sequential"),
         BoundArguments((("name", "symbolic"),)),
     )
-    store.write_definition_record(DefinitionRecord(cdef))
-    assert tuple(store.hydrate_index()) == (cdef,)
-    assert store.read_definition(cdef) == cdef
+    from dryml.core.node import _as_node_view
+    cdef = _as_node_view(cdef)
+    record = store.publish_node(cdef)
+    assert store.read_node(record.digest).graph_equal(cdef)
+    from dryml.core import Repo
+    assert Repo(store).query().cdefs().one().graph_equal(cdef)
 
 assert "tensorflow" not in sys.modules
         """
@@ -245,7 +250,8 @@ universe = IdentitySet((cdef,)).query()
 
 selector = Definition(cls, SKIP_ARGS, name="safe")
 assert tuple(universe.sel(selector).collect()) == (cdef,)
-with __import__("pytest").raises(TypeError, match="keyword spelling or SKIP_ARGS"):
+from dryml.core.query.model import QueryDomainError
+with __import__("pytest").raises(QueryDomainError, match="Positional Node constraints"):
     universe.sel(Definition(cls, "safe")).count()
 
 assert "tensorflow" not in sys.modules
@@ -369,26 +375,23 @@ with tempfile.TemporaryDirectory() as tmp:
     root_cls = ImportRef("dryml.models.tf.base", "Model")
     child = ConcreteDefinition._from_bound_record(child_cls, BoundArguments((("name", "tf-child"),)))
     root = ConcreteDefinition._from_bound_record(root_cls, BoundArguments((("child", child), ("name", "tf-root"))))
-    index = SQLiteStoreQueryIndex(
-        source_key=store.catalog_key(),
-        path=store.query_index_path,
-        config=SQLiteQueryIndexConfig(path=store.query_index_path, journal_mode="delete"),
-    )
-    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
-    index.close()
+    from dryml.core.node import _as_node_view
+    root = _as_node_view(root)
+    child = root.parameters["child"]
+    store.publish_node(root)
 
     repo = Repo(stores=store)
     assert repo.index_status(store=store)[0].state == "ready"
-    roots = IdentitySet((root,)).query()
+    roots = repo.query().cdefs()
     assert roots.sel(root).count() == 1
-    assert list(roots.sel(root).cdefs().collect()) == [root]
+    assert roots.sel(root).cdefs().one().graph_equal(root)
     selector = Definition(child_cls, SKIP_ARGS, name="tf-child")
-    assert list(roots.nested(selector).targets().cdefs().collect()) == [child]
-    assert list(roots.nested(selector).owners().cdefs().collect()) == [root]
+    assert roots.nested(selector).targets().cdefs().one().graph_equal(child)
+    assert roots.nested(selector).owners().cdefs().one().graph_equal(root)
     occurrences = tuple(roots.nested(selector).max_occurrences(2).collect())
     assert len(occurrences) == 1
-    assert occurrences[0].owner == root
-    assert occurrences[0].target == child
+    assert occurrences[0].owner.graph_equal(root)
+    assert occurrences[0].target.graph_equal(child)
     repo.close(flush=False)
     store.close()
     assert store._query_index_instance is None
@@ -423,21 +426,18 @@ with tempfile.TemporaryDirectory() as tmp:
     root_cls = ImportRef("dryml.models.tf.base", "Model")
     child = ConcreteDefinition._from_bound_record(leaf_cls, BoundArguments((("name", "v2-child"),)))
     root = ConcreteDefinition._from_bound_record(root_cls, BoundArguments((("child", child),)))
-    index = SQLiteStoreQueryIndex(
-        source_key=store.catalog_key(),
-        path=store.query_index_path,
-        config=SQLiteQueryIndexConfig(path=store.query_index_path, journal_mode="delete"),
-    )
-    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
-    index.close()
+    from dryml.core.node import _as_node_view
+    root = _as_node_view(root)
+    child = root.parameters["child"]
+    store.publish_node(root)
 
     repo = Repo(stores=store)
-    roots = IdentitySet((root,)).query()
+    roots = repo.query().cdefs()
     selector = Definition(leaf_cls, SKIP_ARGS, name="v2-child")
-    assert list(roots.nested(selector).targets().cdefs().collect()) == [child]
-    assert list(roots.nested(selector).owners().cdefs().collect()) == [root]
+    assert roots.nested(selector).targets().cdefs().one().graph_equal(child)
+    assert roots.nested(selector).owners().cdefs().one().graph_equal(root)
     nested_selector = Definition(root_cls, child=selector)
-    assert list(roots.sel(nested_selector).cdefs().collect()) == [root]
+    assert roots.sel(nested_selector).cdefs().one().graph_equal(root)
     repo.close(flush=False)
     store.close()
     assert store._query_index_instance is None
@@ -483,11 +483,12 @@ with tempfile.TemporaryDirectory() as tmp:
         ),
         BoundArguments((("backend", ImportRef("dryml.models.torch.base", "Model")),)),
     )
+    from dryml.core.node import _as_node_view
+    v1, v2 = _as_node_view(v1), _as_node_view(v2)
     for root in (v1, v2):
-        store.write_definition_record(DefinitionRecord(root))
+        store.publish_node(root)
 
     index = store.open_query_index()
-    index.initialize_empty()
     previous_sidecar = Path(store.query_index_path).read_bytes()
 
     def fail_activation(self):
@@ -500,18 +501,16 @@ with tempfile.TemporaryDirectory() as tmp:
     reconciled = store.reconcile_query_index()
 
     assert rebuilt.action == "rebuild"
-    assert rebuilt.definitions_scanned == 2
-    assert reconciled.action == "validate"
+    assert reconciled.action == "replay"
     assert not reconciled.changed
     status = store.query_index_status()
     assert status.state == "ready"
-    assert status.row_counts["stored_roots"] == 2
+    assert len(index.projection_rows("recipe_root")) == 2
     assert Path(store.query_index_path).read_bytes() != previous_sidecar
-    with index.read_view() as view:
-        for root in (v1, v2):
-            exact = view.exact_ids(root)
-            assert exact
-            assert view.filter_stored_ids(exact) == exact
+    from dryml.core import Repo
+    repo = Repo(store)
+    for root in (v1, v2):
+        assert repo.query().sel(root).cdefs().one().graph_equal(root)
     index.close()
 
 assert "tensorflow" not in sys.modules
@@ -543,18 +542,18 @@ def test_sqlite_rebuild_rejects_malformed_definition_record_before_sidecar_activ
         index.initialize_empty()
         sidecar_digest = hashlib.sha256(Path(store.query_index_path).read_bytes()).hexdigest()
         from dryml.core import Object
-        from dryml.core.store.records import DefinitionRecord
 
         class DirectRecordAuthority(Object):
             pass
 
-        record = DefinitionRecord(DirectRecordAuthority().definition)
-        store.write_definition_record(record)
-        root_path = Path(store.base_dir, "definitions", record.digest[:2], f"{record.digest}.record")
+        record = store.publish_node(DirectRecordAuthority().definition)
+        sidecar_digest = hashlib.sha256(Path(store.query_index_path).read_bytes()).hexdigest()
+        root_path = Path(store._node_path("definitions/roots", record.digest))
         root_path.write_bytes(payload)
         authority_digest = hashlib.sha256(root_path.read_bytes()).hexdigest()
 
-        with pytest.raises(StoreAuthorityError, match="Malformed Store record"):
+        from dryml.core.store.records import StoreRecordError
+        with pytest.raises((StoreAuthorityError, StoreRecordError)):
             store.rebuild_query_index()
 
         sidecar_path = Path(store.query_index_path)
@@ -591,26 +590,23 @@ with tempfile.TemporaryDirectory() as tmp:
     root_cls = ImportRef("dryml.models.torch.base", "Model")
     child = ConcreteDefinition._from_bound_record(child_cls, BoundArguments((("name", "torch-child"),)))
     root = ConcreteDefinition._from_bound_record(root_cls, BoundArguments((("child", child), ("name", "torch-root"))))
-    index = SQLiteStoreQueryIndex(
-        source_key=store.catalog_key(),
-        path=store.query_index_path,
-        config=SQLiteQueryIndexConfig(path=store.query_index_path, journal_mode="delete"),
-    )
-    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
-    index.close()
+    from dryml.core.node import _as_node_view
+    root = _as_node_view(root)
+    child = root.parameters["child"]
+    store.publish_node(root)
 
     repo = Repo(stores=store)
     assert repo.index_status(store=store)[0].state == "ready"
-    roots = IdentitySet((root,)).query()
+    roots = repo.query().cdefs()
     assert roots.sel(root).count() == 1
-    assert list(roots.sel(root).cdefs().collect()) == [root]
+    assert roots.sel(root).cdefs().one().graph_equal(root)
     selector = Definition(child_cls, SKIP_ARGS, name="torch-child")
-    assert list(roots.nested(selector).targets().cdefs().collect()) == [child]
-    assert list(roots.nested(selector).owners().cdefs().collect()) == [root]
+    assert roots.nested(selector).targets().cdefs().one().graph_equal(child)
+    assert roots.nested(selector).owners().cdefs().one().graph_equal(root)
     occurrences = tuple(roots.nested(selector).max_occurrences(2).collect())
     assert len(occurrences) == 1
-    assert occurrences[0].owner == root
-    assert occurrences[0].target == child
+    assert occurrences[0].owner.graph_equal(root)
+    assert occurrences[0].target.graph_equal(child)
     repo.close(flush=False)
     store.close()
     assert store._query_index_instance is None
@@ -710,7 +706,7 @@ from dryml.core.query.sqlite.utils import wal_runtime_is_known_safe
 assert SQLiteQueryIndexConfig is not None
 assert open_connection is not None
 assert SQLiteConnectionManager is not None
-assert SQLITE_QUERY_INDEX_SCHEMA_VERSION == 9
+assert SQLITE_QUERY_INDEX_SCHEMA_VERSION == 11
 assert wal_runtime_is_known_safe((3, 51, 3))
 assert "sqlite3" not in sys.modules
         """

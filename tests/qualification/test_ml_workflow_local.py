@@ -80,6 +80,23 @@ def test_version_one_baseline_is_explicitly_unsupported(tmp_path):
         load_baseline(path)
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
+@pytest.mark.parametrize("version", (1, 2))
+def test_old_fixture_manifest_versions_are_rejected_intact_before_store_open(tmp_path, monkeypatch, version):
+    """Current Node manifests cannot reinterpret old reference-format authority."""
+    path, store, manifest = _authority(tmp_path)
+    old = manifest.to_data()
+    old["version"] = version
+    payload = json.dumps(old).encode("ascii")
+    path.write_bytes(payload)
+    before = {p.relative_to(store): p.read_bytes() for p in store.rglob("*") if p.is_file()}
+    monkeypatch.setattr(DirStore, "open_existing", lambda *a, **k: pytest.fail("old manifest opened a Store"))
+    with pytest.raises(FixtureManifestError, match="unsupported"):
+        load_manifest(path, fixture_store=store, tfds_data_dir=tmp_path / "tfds", environment=_TEST_ENVIRONMENT)
+    assert path.read_bytes() == payload
+    assert {p.relative_to(store): p.read_bytes() for p in store.rglob("*") if p.is_file()} == before
+
+
 @pytest.mark.parametrize("mutation", ("missing", "malformed", "version", "config", "environment", "extra"))
 def test_manifest_rejects_missing_malformed_version_config_environment_and_extra_fields(tmp_path, mutation):
     """Manifest authority and mandatory environment compatibility fail before Store work."""
@@ -191,9 +208,9 @@ def test_tiny_local_cache_refs_are_genuinely_distinct_without_network(tmp_path):
 
     repo = Repo(DirStore(tmp_path / "cache-store"))
     arrays = {"x": np.asarray([[1.0]], dtype=np.float32), "y": np.asarray([[2.0]], dtype=np.float32)}
-    first = CachedDataset(ArrayDataset(arrays, validate_lengths=True)).compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
-    second = CachedDataset(ArrayDataset(arrays, validate_lengths=False)).compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
-    assert first != second
+    first = CachedDataset(ArrayDataset(arrays, validate_lengths=True)).compute(codec="numpy", managed=ManagedConfig(state_repo=repo)).final_state_ref
+    second = CachedDataset(ArrayDataset(arrays, validate_lengths=False)).compute(codec="numpy", managed=ManagedConfig(state_repo=repo)).final_state_ref
+    assert not first.graph_equal(second)
     assert repo.load_state_ref(first, reuse_live="never").ready
     assert repo.load_state_ref(second, reuse_live="never").ready
 
@@ -212,7 +229,7 @@ def test_workload_graph_is_publicly_inspectable_prepared_and_executable(tmp_path
     assert isinstance(first, tuple) and len(first) == 2
     assert first[0].dtype == np.dtype("float32") and first[0].shape == (4,)
     assert w1_label_methods()["prediction"].__class__.__name__ == "ArgMax"
-    torch = pytest.importorskip("torch")
+    pytest.importorskip("torch")
     from dryml import F
     from dryml.models.torch import Sequential
     consumer = Map(ArrayDataset(np.zeros((1, 4), dtype=np.float32)), Sequential(layer_defs=(F("Linear", 4, 1),)))
@@ -256,10 +273,10 @@ def test_all_workload_artifact_recipes_construct_from_public_dataset_shapes(
         }
         first = CachedDataset(
             ArrayDataset(values, validate_lengths=True), repo=fixture_repo,
-        ).compute(codec="numpy", managed=ManagedConfig(state_repo=fixture_repo))
+        ).compute(codec="numpy", managed=ManagedConfig(state_repo=fixture_repo)).final_state_ref
         second = CachedDataset(
             ArrayDataset(values, validate_lengths=False), repo=fixture_repo,
-        ).compute(codec="numpy", managed=ManagedConfig(state_repo=fixture_repo))
+        ).compute(codec="numpy", managed=ManagedConfig(state_repo=fixture_repo)).final_state_ref
         assert fixture_repo.load_state_ref(first, reuse_live="never").ready
         manifest = FixtureManifest(
             fixture_store.resolve(),
@@ -297,7 +314,7 @@ def test_all_workload_artifact_recipes_construct_from_public_dataset_shapes(
         mnist_source=lambda split, tensorflow_mode: source,
     )
     if workload == "W3":
-        assert experiment.test_data.object_ref == first.object
+        assert repo.describe(experiment.test_data).object_projection_equal(first)
     experiment._preflight_artifacts()
     model_ref = repo.save(experiment.model, deep_capture=True)
     x_path, y_path = ((0,), (1,)) if workload in {"W1", "W2"} else ("x", "y")
@@ -314,21 +331,20 @@ def test_all_workload_artifact_recipes_construct_from_public_dataset_shapes(
         store=output_store,
         managed=managed,
     )
-    result = repo.load_state_ref(result_ref, reuse_live="never").value()
+    result = repo.load_state_ref(result_ref.final_state_ref, reuse_live="never").value()
 
     assert tuple(experiment.artifacts) == (artifact_name,)
     assert experiment.train_data.example_cardinality().require_finite() in {4, 4096}
     assert np.asarray(result).shape == () and np.isfinite(result)
     assert snapshot(fixture_store) == fixture_before
     if workload in {"W1", "W2"}:
-        assert output_store.read_state_ref_record(
-            experiment.test_data.last_state_ref.digest()
-        ) is not None
+        from dryml.core.node_prepare import NodePreparation
+        saved = experiment.test_data.last_state_ref
+        key = NodePreparation((saved,)).digest(saved, domain="dryml-saved-root/v1")
+        assert output_store.read_node(key, kind="saved").graph_equal(saved)
         fixture_handle = DirStore.open_existing(fixture_store, query_index="none")
         try:
-            assert fixture_handle.read_state_ref_record(
-                experiment.test_data.last_state_ref.digest()
-            ) is None
+            assert fixture_handle.read_node(key, kind="saved") is None
         finally:
             fixture_handle.close()
 
@@ -387,7 +403,8 @@ def test_workload_cache_uses_selected_control_store(tmp_path, monkeypatch):
 
         def compute(self, **kwargs):
             captured.update(kwargs)
-            return None
+            from types import SimpleNamespace
+            return SimpleNamespace(final_state_ref=None)
 
     monkeypatch.setattr(dryml.artifacts, "CachedDataset", ObservedCache)
     monkeypatch.setattr(
@@ -715,12 +732,12 @@ def test_evidence_record_is_closed_round_trippable_and_rejects_nonfinite_or_extr
             "worker_pid": 1, "worker_identity": "test",
             "runtime_allocation": {"resource_mode": "python", "allocation": "none", "admission": "in-process"},
             "shared_authority": {"fixture_store": os.fspath(manifest.fixture_store), "control_store": os.fspath(roots["control"].resolve())},
-            "submitted": {"request_digest": request.request_id, "submission_id": "in-process:1", "result_ref": manifest.references.numpy.digest()},
+            "submitted": {"request_digest": request.request_id, "submission_id": "in-process:1", "result_ref": manifest.references.numpy.exact_digest()},
             "core_outcome": {"kind": "in-process", "publication_refs": (), "update_refs": ()},
             "final_refs": {
-                "experiment": manifest.references.numpy.digest(), "model": manifest.references.parquet.digest(),
-                "test": manifest.references.numpy.digest(), "history": manifest.references.parquet.digest(),
-                "artifact": manifest.references.parquet.digest(),
+                "experiment": manifest.references.numpy.exact_digest(), "model": manifest.references.parquet.exact_digest(),
+                "test": manifest.references.numpy.exact_digest(), "history": manifest.references.parquet.exact_digest(),
+                "artifact": manifest.references.parquet.exact_digest(),
             },
             "coordinator_validated_refs": None,
         },
@@ -765,7 +782,6 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
     from dryml.core import Repo
     from dryml.core.store.dir import DirStore
     from dryml.data import TFDSAdapter
-    from dryml.data import Map
     from dryml.managed import ManagedConfig
     from dryml.models import ExperimentData
     from tests.qualification.ml_workflow_workloads import (
@@ -856,7 +872,7 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
     try:
         if recovery is None:
             with observer_scope:
-                final = experiment.train(managed=managed)
+                final = experiment.train(managed=managed).final_state_ref
         else:
             import dryml.models.experiment as experiment_module
             from dryml.artifacts import Artifact
@@ -875,10 +891,10 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
                     for state in optimizer_state["state"].values()
                     if "step" in state
                 )
-                history = ExperimentData.find(checkpoint.object_projection(), repo=state_repo)
+                history = ExperimentData.find(checkpoint.object_view(), repo=state_repo)
                 if history is None:
                     raise FixtureManifestError("Recovery checkpoint lacks a durable history row.")
-                rows = history.data[history.data["state_ref"] == checkpoint]
+                rows = history.data[history.data["state_ref"].map(lambda ref: ref.graph_equal(checkpoint))]
                 if len(rows) != 1:
                     raise FixtureManifestError("Recovery checkpoint has no unique durable history occurrence.")
                 row = rows.iloc[0]
@@ -901,9 +917,9 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
                     "optimizer_iterations": iterations, "epoch": state.epoch,
                     "next_batch": state.next_batch, "step": state.step,
                     "examples_seen": state.examples_seen, "loss_numerator": state.loss_numerator,
-                    "loss_denominator": state.loss_denominator, "checkpoint_ref": checkpoint.digest(),
+                    "loss_denominator": state.loss_denominator, "checkpoint_ref": checkpoint.exact_digest(),
                     "history_occurrence": str(row.row_key),
-                    "artifact_status": f"{row.evaluation_status}:{completed.last_state_ref.digest()}",
+                    "artifact_status": f"{row.evaluation_status}:{completed.last_state_ref.exact_digest()}",
                 }
 
             live_facts = None
@@ -914,7 +930,7 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
                     triggered.append(boundary)
                     checkpoint = experiment.train.status(
                         state_repo=repo, control_store=control,
-                    ).checkpoint_state_ref
+                    ).checkpoint
                     if checkpoint is None:
                         raise FixtureManifestError("Recovery interruption lacks a checkpoint receipt.")
                     nonlocal live_facts
@@ -935,7 +951,7 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
                 experiment_module._experiment_boundary = original_boundary
             checkpoint = experiment.train.status(
                 state_repo=repo, control_store=control,
-            ).checkpoint_state_ref
+            ).checkpoint
             if checkpoint is None or experiment.state.step != recovery.interrupt_after_step:
                 raise FixtureManifestError("Recovery did not retain the required step-64 checkpoint.")
             if live_facts is None:
@@ -971,18 +987,18 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
 
             torch_training.record_train_update = record_update
             try:
-                final = retained.train(managed=managed)
+                final = retained.train(managed=managed).final_state_ref
             finally:
                 experiment_module._experiment_boundary = original_boundary
                 torch_training.record_train_update = original_update
             if tuple(repair_events)[:2] != ("artifact_repaired", "optimizer_update:65"):
                 raise FixtureManifestError("Recovery did not prove Artifact repair before optimizer update 65.")
-            repaired_history = ExperimentData.find(checkpoint.object_projection(), repo=repo)
-            repaired_rows = repaired_history.data[repaired_history.data["state_ref"] == checkpoint] if repaired_history is not None else ()
+            repaired_history = ExperimentData.find(checkpoint.object_view(), repo=repo)
+            repaired_rows = repaired_history.data[repaired_history.data["state_ref"].map(lambda ref: ref.graph_equal(checkpoint))] if repaired_history is not None else ()
             if len(repaired_rows) != 1 or str(repaired_rows.iloc[0].row_key) != before["history_occurrence"]:
                 raise FixtureManifestError("Recovery created a duplicate history row instead of repairing the retained occurrence.")
             repaired_artifact = repaired_rows.iloc[0].eval_artifacts.get("test_mse")
-            if repaired_artifact is None or repaired_artifact.digest() != before["artifact_status"].split(":", 1)[1]:
+            if repaired_artifact is None or repaired_artifact.exact_digest() != before["artifact_status"].split(":", 1)[1]:
                 raise FixtureManifestError("Recovery created a duplicate Artifact result instead of repairing the retained result.")
             recovery_evidence = {
                 "checkpoint_step": recovery.interrupt_after_step,
@@ -996,14 +1012,15 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
             training_model.obj.forward = original_forward
     if not training_tensors or not execution_tensors:
         raise FixtureManifestError("Real runner did not observe native training and execution tensors.")
-    history = ExperimentData.find(final.object_projection(), repo=repo)
+    history = ExperimentData.find(final.object_view(), repo=repo)
     if history is None or history.data.empty:
         raise FixtureManifestError("Real runner did not publish ExperimentData history.")
     row = history.data.iloc[-1]
     artifact_ref = row.eval_artifacts[_METRIC_NAMES[case.workload]]
     artifact_value = float(repo.load_state_ref(artifact_ref, reuse_live="never").value())
-    model_ref = final.at("model")
-    test_ref = final.at("test_data")
+    from dryml.core import Parameter
+    model_ref = final.at((Parameter("model"),))
+    test_ref = final.at((Parameter("test_data"),))
     model = repo.load_state_ref(model_ref, reuse_live="never")
     test_data = repo.load_state_ref(test_ref, reuse_live="never")
     prepare_exact_model_for_formula(model, case)
@@ -1039,8 +1056,8 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
             **dict(observations),
         }
     final_refs = {
-        "experiment": final.digest(), "model": model_ref.digest(), "test": test_ref.digest(),
-        "history": history.last_state_ref.digest(), "artifact": artifact_ref.digest(),
+        "experiment": final.exact_digest(), "model": model_ref.exact_digest(), "test": test_ref.exact_digest(),
+        "history": history.last_state_ref.exact_digest(), "artifact": artifact_ref.exact_digest(),
     }
     if recovery_evidence is not None:
         recovery_evidence["final_refs"] = final_refs
@@ -1062,7 +1079,7 @@ def _real_runner(manifest, case, *, recovery=None, worker_request_id=None, contr
             "worker_pid": os.getpid(), "worker_identity": f"pid:{os.getpid()}",
             "runtime_allocation": {"resource_mode": "worker", "allocation": "worker-local", "admission": "worker"},
             "shared_authority": {"fixture_store": os.fspath(manifest.fixture_store), "control_store": os.fspath(control_path)},
-            "submitted": {"request_digest": case.case_id if worker_request_id is None else worker_request_id, "submission_id": f"worker:{os.getpid()}", "result_ref": final.digest()},
+            "submitted": {"request_digest": case.case_id if worker_request_id is None else worker_request_id, "submission_id": f"worker:{os.getpid()}", "result_ref": final.exact_digest()},
             "core_outcome": {"kind": "worker-initial", "publication_refs": (), "update_refs": ()},
             "final_refs": final_refs,
             "coordinator_validated_refs": None,

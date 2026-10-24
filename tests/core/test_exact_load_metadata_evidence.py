@@ -823,9 +823,12 @@ def test_exact_plan_retains_order_across_default_change_and_alias_views(tmp_path
     assert reader.stores[0] is alias and plan.actions[0].store is first
     assert build_exact_state_load_plan(reader, state, source_store=alias).actions[0].store is alias
     assert execute_exact_state_load_plan(reader, plan, reuse_live="never").value == 1
-    duplicate = Repo([first, DirStore.open_existing(first.base_dir, query_index="none")])
-    with pytest.raises(ValueError, match="physical destination"):
-        build_exact_state_load_plan(duplicate, state, source_store=first)
+    same_domain = DirStore.open_existing(first.base_dir, query_index="none")
+    duplicate = Repo([first, same_domain])
+    for selected in (first, same_domain):
+        duplicate_plan = build_exact_state_load_plan(duplicate, state, source_store=selected)
+        assert duplicate_plan.actions[0].store is selected
+        assert execute_exact_state_load_plan(duplicate, duplicate_plan, reuse_live="never").value == 1
 
 
 @pytest.fixture(autouse=True)

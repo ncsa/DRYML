@@ -340,24 +340,26 @@ class SourceCapture:
         if precedence.index(action) > precedence.index(self.refresh_action):
             self.refresh_action = action
 
-    def require_scan(self) -> None:
-        """Enforce effective inventory/recovery policy before scan IO.
+    def require_scan(self, *, reason=None) -> None:
+        """Enforce effective inventory/recovery or unsupported-plan scan policy.
 
         Returns None when allowed. Raises QueryIndexUnavailable for indexed-only
         or QueryWouldScanError for forbidden scans. Warning mode emits at most
         one RuntimeWarning per terminal, without reading or changing authority.
+        ``reason`` is optional static plan text for a derived-family scan; omitted
+        reasons retain the authoritative inventory/recovery diagnostic.
         """
 
         from .model import QueryIndexUnavailable, QueryWouldScanError
 
         if self.indexed_required:
-            raise QueryIndexUnavailable("Query V3 index coverage requires an authoritative inventory scan.")
+            raise QueryIndexUnavailable(reason or "Query V3 index coverage requires an authoritative inventory scan.")
         if self.scan_policy_mode == "forbid":
-            raise QueryWouldScanError("Query V3 requires an authoritative inventory scan.")
+            raise QueryWouldScanError(reason or "Query V3 requires an authoritative inventory scan.")
         if self.scan_policy_mode == "warn" and not self.scan_warning_emitted:
             import warnings
 
-            warnings.warn("Query V3 requires an authoritative inventory scan.", RuntimeWarning, stacklevel=4)
+            warnings.warn(reason or "Query V3 requires an authoritative inventory scan.", RuntimeWarning, stacklevel=4)
             self.scan_warning_emitted = True
 
     def reserve(self, values: Iterable[IdentityValue]) -> None:
@@ -1050,6 +1052,33 @@ def node_query_stores(query, capture):
     return stores if all(hasattr(store, "store_uuid") for store in stores) else None
 
 
+def _node_discovery_plan(query, capture):
+    """Admit unsupported physical scans before explicit refresh can inventory.
+
+    Only the pure compiled plan is terminal-local memoized. Direct authority and
+    live-cache-only domains need no discovery scan admission.
+    """
+    from .sqlite.lowering import _store_discovery_relation
+    plans = getattr(capture, "_node_discovery_plans", None)
+    if plans is None:
+        plans = capture._node_discovery_plans = {}
+    if id(query) not in plans:
+        direct = any(r.kind == "state_key" for r in query.restrictions)
+        if isinstance(query.source, RetainedRepoLookupSource):
+            selectors = [r.value for r in query.restrictions if r.kind == "sel"]
+            direct |= len(selectors) == 1 and isinstance(selectors[0], ConcreteDefinition)
+        cache_only = any(r.kind == "cached" and isinstance(r.scope, RepoSource)
+                         and isinstance(query.source, RepoSource) and r.scope.repo is query.source.repo
+                         for r in query.restrictions) and all(r.kind not in {"stored", "alias", "metadata"} for r in query.restrictions)
+        def admit():
+            capture.require_scan(reason="Node query has no supported selective posting anchor; derived-family scan required.")
+        plan = _store_discovery_relation(query, scan_admission=None if direct or cache_only else admit)
+        if len(plans) >= 64:
+            plans.pop(next(iter(plans)))
+        plans[id(query)] = query, plan
+    return plans[id(query)][1]
+
+
 class _NodeFacts:
     """Terminal-local complete evidence for the existing algebra/scope consumer."""
 
@@ -1117,6 +1146,7 @@ class _NodePage:
         self.names, self.scoped_roots = {}, {}
         self.state_memberships = {}
         self.validated_declarations = set()
+        self.discovery_preparations, self.discovery_members = {}, {}
 
     def read(self, store, path, reader, required=False):
         import os
@@ -1175,32 +1205,41 @@ class _NodePage:
         for (domain, digest), (block, selected) in self.blocks.items():
             # Owners contain pure metadata only. Their lifetime is this terminal;
             # fresh bytes and final witnesses are mandatory even for a reuse hit.
-            key = block.content, tuple(selected)
+            key = block.content
             previous = owners.get(key)
             cacheable = False
             if previous is None:
                 packet = block.blocks
                 packet["views"] = [r.view for r in selected.values()]
                 roots, prepared = _decode_node_graph_views(packet, with_owner=True)
-                previous = roots, prepared, set(), set()
+                previous = dict(zip(selected, roots)), prepared, set(), set()
                 capture.cdef_blobs_decoded += 1
                 # Bound detached pure ownership, rather than accumulating every
                 # page's graphs. Oversized blocks are never retained for reuse.
                 owners.clear()
                 from .._content_facts import _node_block_owner_size
-                if _node_block_owner_size(block.content, packet) <= max_cached_bytes:
+                if 3 * _node_block_owner_size(block.content, packet) <= max_cached_bytes:
                     cacheable = True
-            roots, prepared, validated_views, validated_slots = previous
+            by_view, prepared, validated_views, validated_slots = previous
             self.preparations[domain, digest] = prepared
-            by_view = dict(zip(selected, roots))
+            for view_bytes, record in selected.items():
+                if view_bytes not in by_view:
+                    view = record.view
+                    try:
+                        node = prepared._transport_nodes[view["table"], view["slot"]]
+                    except KeyError:
+                        raise InventoryCapabilityError("Root view locator is outside its authenticated block.") from None
+                    if prepared.semantic_key(node, policy=view["view"]).decode("ascii") != view["expected_key"]:
+                        raise InventoryCapabilityError("Root view semantic key disagrees with authenticated authority.")
+                    by_view[view_bytes] = node
             from .authority import validate_node_root_views
             validate_node_root_views(((record, by_view[record.view_bytes])
                                       for record in self.root_kinds[domain, digest].values()), prepared,
                                      validated_views=validated_views, validated_slots=validated_slots)
             if cacheable:
                 owners[key] = previous
-            for record, root in zip(selected.values(), roots):
-                self.roots[domain, digest, record.view_bytes] = root
+            for record in selected.values():
+                self.roots[domain, digest, record.view_bytes] = by_view[record.view_bytes]
         projections = {}
         for (domain, identity), anchor in self.anchors.items():
             root = self.roots[domain, anchor.projection.block_digest, anchor.projection.view_bytes]
@@ -1215,6 +1254,47 @@ class _NodePage:
 
     def preparation(self, store, record):
         return self.preparations[store.authority_fence_key(), record.block_digest]
+
+    def discovery_value(self, store, record, item):
+        """Resolve a block/table/overlay locator and prove source-root reachability."""
+        from .relationships import _discovery_preparation
+        key = store.authority_fence_key(), record.block_digest
+        if key not in self.discovery_preparations:
+            self.discovery_preparations[key] = _discovery_preparation(self.preparation(store, record), record.block_digest)
+        p = self.discovery_preparations[key]
+        root = self.value(store, record)
+        member_key = key, record.view_bytes
+        if member_key not in self.discovery_members:
+            seen, pending = set(), [root]
+            while pending:
+                node = pending.pop()
+                if id(node) in seen:
+                    continue
+                seen.add(id(node))
+                pending.extend(child for _, _, child in p.edges[id(node)])
+            self.discovery_members[member_key] = seen
+        locator = item.get("locator")
+        if (type(locator) is not dict or set(locator) != {"table", "slot"}
+                or type(locator["table"]) is not str or type(locator["slot"]) is not int):
+            raise InventoryCapabilityError("Candidate occurrence locator is malformed.")
+        try:
+            node = p.decoded._transport_nodes[locator["table"], locator["slot"]]
+        except KeyError:
+            raise InventoryCapabilityError("Candidate occurrence locator is outside its authenticated block.") from None
+        if id(node) not in self.discovery_members[member_key] or item["is_root"] != (node is root):
+            raise InventoryCapabilityError("Candidate occurrence has no matching source-root contribution.")
+        projection = item["projection"]
+        if projection == "creation":
+            selected = p.creation[id(node)]
+        elif projection == "object":
+            selected = p.objects[id(node)]
+        elif projection == "saved":
+            if not p.summaries[id(node)][2]:
+                raise InventoryCapabilityError("Candidate saved occurrence is incomplete.")
+            selected = node
+        else:
+            selected = node
+        return selected, p.owner
 
     def validate(self):
         import os
@@ -1255,15 +1335,13 @@ def iter_node_query(query, capture, stores, *, admit=True):
     import json
     import os
     from contextlib import ExitStack
-    from ..node import require_saved
     from ..state_values import LocalState
-    from ..utils.graph.path import GraphPath
     from ..store import records as r
     from .identity import identity_key, IdentityKey, IdentityEvidence
     from .model import QueryError, QueryDomainError, QueryIndexDirty, QueryIndexUnavailable, QueryStats
     from .node_pattern import _PreparedPredicate
     from ..selector import QueryPredicate
-    from .sqlite.lowering import _store_discovery_relation
+    from .sqlite.lowering import _store_discovery_page_sql
 
     producers = {s.authority_fence_key(): s for s in stores}
     scope_stores = {}
@@ -1311,6 +1389,8 @@ def iter_node_query(query, capture, stores, *, admit=True):
             if all(query._matches(item, value, evidence, capture, capture.witness_budget()) for item in query.restrictions):
                 yield key, (value, evidence)
         return
+    discovery_plan = _node_discovery_plan(query, capture)
+    family = discovery_plan[0]
     if not direct:
         targets = capture.resolve_index_targets()
         by_store = {id(item.store): target.index for target in targets for item in target.presentations}
@@ -1367,7 +1447,6 @@ def iter_node_query(query, capture, stores, *, admit=True):
         if store.authority_cut() != tokens[store.authority_fence_key()][0]:
             raise QueryError("Store changed during query continuation; start a new query.")
 
-    family, where, params = _store_discovery_relation(query)
     metadata_scopes = query._metadata_scopes()
     aliases = tuple(r for r in query.restrictions if r.kind == "alias")
     metadata_facts = {}
@@ -1422,7 +1501,7 @@ def iter_node_query(query, capture, stores, *, admit=True):
     def object_holder(selected, value, page, item, owner):
         if value.object_id is not None:
             return (selected.authority_fence_key(), value.object_id) in page.anchors
-        if selected is owner and not item["path"]["segments"] and item["root"]["root_kind"] == "saved":
+        if selected is owner and item.get("is_root", True) and item["root"]["root_kind"] == "saved":
             return True
         # A stateless aggregate has no root ObjectId anchor. Its object projection
         # must instead have a real contributing root in the selected source; a
@@ -1480,7 +1559,7 @@ def iter_node_query(query, capture, stores, *, admit=True):
                     if membership is not None and after is None:
                         root = page.read(store, store._relative(store._node_path("definitions/roots", digest)), r.NodeRootRecord, True)
                         row = {"kind": "cdef", "key_kind": "cdef", "digest": recipe.exact_digest(),
-                               "root": root.to_data(), "path": GraphPath().to_data(),
+                               "root": root.to_data(), "locator": {k: root.view[k] for k in ("table", "slot")}, "is_root": True,
                                "projection": "creation", "stored": True, "recipe_digest": digest,
                                "object_digest": None, "saved_digest": None}
                         rows = [(path, "", r._json_bytes(row))]
@@ -1494,12 +1573,7 @@ def iter_node_query(query, capture, stores, *, admit=True):
                         try:
                             if _node_index_token(index, con, identity, store.authority_cut()) != tokens[domain]:
                                 raise QueryError("Index changed during query continuation.")
-                            order = ("p.source,p.row_key" if local else
-                                     "json_extract(CAST(p.payload AS TEXT),'$.key_kind'),json_extract(CAST(p.payload AS TEXT),'$.digest'),p.source,p.row_key")
-                            clause, arguments = ("", ()) if after is None else (
-                                " AND (" + order + ") > (" + ",".join("?" for _ in after) + ")", after)
-                            rows = con.execute("SELECT p.source,p.row_key,p.payload FROM store_projection_rows p WHERE p.family=? AND (" + where + ")" + clause + " ORDER BY " + order + " LIMIT ?",
-                                               (family, *params, *arguments, page_size)).fetchall()
+                            rows = con.execute(*_store_discovery_page_sql(discovery_plan, after=after, page_size=page_size)).fetchall()
                         finally:
                             con.execute("ROLLBACK")
                 capture.pages_fetched += 1
@@ -1573,24 +1647,13 @@ def iter_node_query(query, capture, stores, *, admit=True):
                             if not view_equal(declared, page.value(store, anchor.projection), OBJECT_PROJECTION_VIEW):
                                 raise InventoryCapabilityError("Candidate conflicts with its declaration anchor.")
                         page.validated_declarations.add(declaration_key)
-                    value = node.at(GraphPath.from_data(item["path"]), traverse_refs=True)
-                    view_record = header
-                    if item["projection"] == "creation":
-                        value = value.creation_view()
-                    elif item["projection"] == "object":
+                    value, owner = page.discovery_value(store, header, item)
+                    if item["projection"] == "object":
                         anchor = page.anchors.get((domain, value.object_id))
-                        value = value.object_view() if anchor is None else page.value(store, anchor.projection)
                         if anchor is not None:
-                            view_record = anchor.projection
-                    elif item["projection"] == "saved":
-                        require_saved(value)
-                    owner = page.preparation(store, view_record)
-                    try:
-                        digest = owner.digest(value)
-                    except ValueError:
-                        from ..node_prepare import NodePreparation
-                        owner = NodePreparation((value,), previous=owner)
-                        digest = owner.digest(value)
+                            value = page.value(store, anchor.projection)
+                            owner = page.preparation(store, anchor.projection)
+                    digest = owner.digest(value)
                     if digest != item["digest"]:
                         raise InventoryCapabilityError("Candidate semantic digest disagrees with authority.")
                 key = identity_key(value) if local else IdentityKey(item["kind"], item["digest"], value)
@@ -1638,7 +1701,7 @@ def iter_node_query(query, capture, stores, *, admit=True):
                     elif kind == "sel" and local:
                         match &= prepared[id(restriction)].matches(value, generator_budget=capture.witness_budget())
                     elif kind == "alias":
-                        match &= not local and page.names[id(restriction)] == (header.root_kind, header.digest) and not item["path"]["segments"]
+                        match &= not local and page.names[id(restriction)] == (header.root_kind, header.digest) and item.get("is_root", True)
                     elif kind == "metadata":
                         match &= query._matches_metadata(value, restriction.value,
                                                          metadata_facts[id(restriction)], kind=item["kind"])

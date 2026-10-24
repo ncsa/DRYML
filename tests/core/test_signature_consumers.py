@@ -8,16 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core import ConcreteDefinition, Definition, Object, Repo, Selector
+from dryml.core import ConcreteDefinition, Definition, Object, Repo, Selector, Serializable
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_codec import decode_cdef_graph, encode_cdef_graph
 from dryml.core.cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from dryml.core.factory import FactorySpec
-from dryml.core.freeze import FrozenList
 from dryml.core.links import DefLink
 from dryml.core.params import Present
 from dryml.core.quoted import QuotedDef, SelectorSpec
 from dryml.core.signatures import Mat, Ref, SignatureError, compile_signature
+from dryml.data import Dataset
 
 
 class ConsumerLeaf(Object):
@@ -25,6 +25,62 @@ class ConsumerLeaf(Object):
 
     def __init__(self, value=1):
         self.value = value
+
+
+class StatefulSignatureSource(Dataset, Serializable):
+    """Dataset with real local state and no permitted declaration-time traversal."""
+
+    def __init__(self):
+        from dryml.core.tensor_spec import TensorSpec
+        super().__init__(spec=TensorSpec("int32", shape=(1,), backend="numpy"))
+
+    def __iter__(self):
+        """Reject any traversal during reference-only source selection."""
+        raise AssertionError("source selection traversed the Dataset")
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        """Publish a minimal real payload for saved-source selection."""
+        Path(dest_dir, "value").write_text("1", encoding="ascii")
+
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
+        """Validate the fixture payload if explicitly restored."""
+        assert Path(src_dir, "value").read_text(encoding="ascii") == "1"
+
+
+@pytest.mark.usefixtures("fixed_snapshot_environment")
+@pytest.mark.parametrize("consumer", ("fold", "cache"))
+@pytest.mark.parametrize("saved", (False, True))
+def test_artifact_automatic_live_sources_select_nodes_without_effects(
+    tmp_path, monkeypatch, consumer, saved,
+):
+    """Fold/cache declarations retain current identity or saved Node source data."""
+    from dryml.artifacts import CachedDataset, mean
+    from dryml.core import ConcreteNode, require_saved
+    from dryml.core.store.dir import DirStore
+
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    source = StatefulSignatureSource()
+    receipt = repo.save(source) if saved else None
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("source selection performed IO, capture, or restore")
+
+    monkeypatch.setattr(StatefulSignatureSource, "save_state_to_dir_imp", forbidden)
+    monkeypatch.setattr(StatefulSignatureSource, "restore_state_from_dir_imp", forbidden)
+    monkeypatch.setattr(repo, "save", forbidden)
+    monkeypatch.setattr(repo, "describe", forbidden)
+    monkeypatch.setattr(repo.default_store, "read_states", forbidden)
+    artifact = mean(source, mode="coordinate") if consumer == "fold" else CachedDataset(Ref(source))
+    assert isinstance(artifact.src, ConcreteNode)
+    assert artifact.src.object_id == source.object_id
+    assert artifact.definition.parameters["src"].kind is EdgeKind.REF
+    assert artifact.definition.parameters["src"].target is artifact.src
+    assert not artifact.ready
+    if saved:
+        assert artifact.src is receipt
+        assert require_saved(artifact.src) is receipt
+    else:
+        assert artifact.src.state is None and source.last_state_ref is None
 
 
 class PreparedConsumer(Object):

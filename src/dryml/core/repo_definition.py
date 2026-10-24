@@ -1,8 +1,9 @@
 """Detached, bounded v1 configuration records for :class:`dryml.core.Repo`.
 
-This module deliberately represents configuration only.  Its decoding paths do
-not open Stores, resolve symbols, construct selectors, or activate sessions;
-connected reconstruction is a separate boundary.
+This module deliberately represents configuration only. Its decoding paths do
+not open Stores, resolve recipe symbols, construct live selectors, or activate
+sessions; connected reconstruction is a separate boundary. Node-only selectors
+use a separately versioned carrier over the shared occurrence-aware Node codec.
 """
 
 from __future__ import annotations
@@ -759,10 +760,148 @@ class _SelectorEncoder:
 
     def selector(self, selector: Any, path: str, depth: int = 0) -> dict[str, Any]:
         from .generator import GeneratorSelector
+        from .definition import ConcreteNode
+        from .node import Node
+        from .node_prepare import NodePreparation, _unordered
+        from .node_codec import encode_node_graph
 
         if isinstance(selector, GeneratorSelector):
             return {"kind": "template-selector", "payload": selector.to_data()}
+        try:
+            prepared = NodePreparation((selector.root,))
+            needs_graph = any(_unordered(row) for row in prepared._rows) or any(
+                isinstance(node, ConcreteNode) or isinstance(node, Node) and (
+                    node.object_id is not None or node.state is not None
+                    or node._construction is not None
+                ) for node in prepared.nodes
+            )
+            if needs_graph:
+                _validate_portable_node_values(prepared, path)
+                return {
+                    "kind": "node-selector", "version": 1,
+                    "strict": selector.strict, "cls_policy": selector.cls_policy,
+                    "graph": encode_node_graph(prepared, canonical=True),
+                }
+        except (RecursionError, TypeError, ValueError, OverflowError, UnicodeError):
+            raise _error(path, "semantic graph is invalid or unsupported") from None
         return {"root": self.definition(selector.root, path + ".root", depth + 1), "strict": selector.strict, "cls_policy": selector.cls_policy, "nodes": self.nodes}
+
+
+def _validate_inert_node_data(value, path):
+    """Refuse shared-codec leaves requiring imports before any graph decoding."""
+    seen = set()
+    def visit(current):
+        if not isinstance(current, (dict, list, tuple)) or id(current) in seen:
+            return
+        seen.add(id(current))
+        if isinstance(current, dict):
+            if current.get("type") in ("enum", "core_type", "numpy_dtype"):
+                raise _error(path, "type-resolving values are not portable selector data")
+            if current.get("type") == "int":
+                encoded = current.get("value")
+                if type(encoded) is not str or len(encoded) > _BOUNDS["max_int_bits"] + 1 or int(encoded).bit_length() > _BOUNDS["max_int_bits"]:
+                    raise _error(path, "integer bound exceeded")
+            if current.get("tag") == "float":
+                encoded = current.get("bits")
+                if type(encoded) is not str or len(encoded) != 16 or not math.isfinite(struct.unpack(">d", bytes.fromhex(encoded))[0]):
+                    raise _error(path, "nonfinite float is not portable")
+            children = current.values()
+        else:
+            children = current
+        for child in children:
+            visit(child)
+    visit(value)
+
+
+def _validate_portable_node_values(prepared, path):
+    """Apply portable selector admission to the owning Node table, without IO."""
+    # Quotation is inert data, but an unresolved receiving role on the active
+    # selector graph remains unsupported at the portable configuration boundary.
+    unquoted = set()
+    active_ref_seen = set()
+    def active_refs(value):
+        if isinstance(value, (dict, list, tuple)):
+            if id(value) in active_ref_seen:
+                return
+            active_ref_seen.add(id(value))
+        if isinstance(value, dict):
+            if value.get("tag") == "quote":
+                return
+            if value.get("tag") == "node":
+                yield value["slot"]
+            else:
+                for child in value.values():
+                    yield from active_refs(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                yield from active_refs(child)
+    pending = [prepared._slot(root) for root in prepared.roots]
+    while pending:
+        slot = pending.pop()
+        if slot in unquoted:
+            continue
+        unquoted.add(slot)
+        pending.extend(active_refs(prepared._rows[slot]))
+        if slot in prepared._construction:
+            pending.append(prepared._construction[slot])
+
+    budget = _SemanticBudget()
+    heights = {}
+    for slot in prepared._postorder:
+        _validate_inert_node_data(prepared._rows[slot], path)
+        memo = {}
+        def visit(value, depth=0, quoted=False):
+            budget.visit(path, depth)
+            if not isinstance(value, (dict, list, tuple)):
+                return 0
+            key = id(value), quoted
+            if key in memo:
+                return memo[key]
+            if isinstance(value, dict):
+                if value.get("tag") == "node":
+                    return 1 + heights[value["slot"]]
+                if value.get("tag") == "match" and value["matcher"]["kind"] == "satisfies" and not quoted:
+                    raise _error(path, "matcher is not portable")
+                if value.get("tag") == "link" and not value["finalized"] and not quoted:
+                    raise _error(path, "unresolved link assertion is not portable")
+                if value.get("tag") in {"set", "frozenset", "list", "tuple", "map"} and len(value["items"]) > _BOUNDS["max_entries"]:
+                    raise _error(path, "container entry bound exceeded")
+                children = value.values()
+                quoted = quoted or value.get("tag") == "quote"
+            else:
+                children = value
+            result = 1 + max((visit(child, depth + 1, quoted) for child in children), default=0)
+            memo[key] = result
+            return result
+        heights[slot] = visit(prepared._rows[slot], quoted=slot not in unquoted)
+        if heights[slot] > _BOUNDS["max_depth"]:
+            raise _error(path, "semantic depth bound exceeded")
+
+
+def _node_selector_root(value, path):
+    """Validate the separately versioned shared-table selector carrier inertly."""
+    from .node import Node
+    from .node_codec import decode_node_graph, encode_node_graph
+    from .node_prepare import NodePreparation
+
+    record = _exact_keys(value, {"kind", "version", "strict", "cls_policy", "graph"}, path)
+    if type(record["version"]) is not int or record["version"] != 1:
+        raise _error(path, "Node selector version is unsupported")
+    if type(record["strict"]) is not bool or record["cls_policy"] not in _CLASS_POLICIES:
+        raise _error(path, "selector policy is invalid")
+    try:
+        _bounded_json_bytes(record, path)
+        _validate_inert_node_data(record["graph"], path)
+        root = decode_node_graph(record["graph"])
+        if not isinstance(root, Node):
+            raise ValueError()
+        prepared = NodePreparation((root,))
+        _validate_portable_node_values(prepared, path)
+        if encode_node_graph(prepared, canonical=True) != record["graph"]:
+            raise ValueError()
+        return root
+    except (RecursionError, TypeError, ValueError, OverflowError, UnicodeError):
+        raise _error(path, "Node selector graph is invalid or unsupported") from None
 
 
 def _validate_match(value: Mapping[str, Any], path: str, validate_value: Any) -> None:
@@ -837,6 +976,9 @@ def _validate_reference_graph_path(value: Any, path: str) -> None:
 
 
 def _validate_selector(value: Any, path: str) -> None:
+    if isinstance(value, Mapping) and value.get("kind") == "node-selector":
+        _node_selector_root(value, path)
+        return
     if isinstance(value, Mapping) and value.get("kind") == "template-selector":
         record = _exact_keys(value, {"kind", "payload"}, path)
         try:
@@ -1270,6 +1412,11 @@ class RepoDefinition:
     Objects, or construct a live Repo. Use :meth:`Repo.from_definition` for the
     explicit existing-Store reconstruction boundary. Retained data is detached
     and bounded; callers still own transport and any sensitive configuration.
+    Unordered graph-bearing selectors, normalized Nodes and exact facets use the
+    closed ``node-selector`` version-1 carrier with canonical shared Node blocks.
+    Independent equal occurrences and aliases survive decoding as fresh handles;
+    graph semantic identity remains separate from authenticated source bytes.
+    Unsupported nested versions or nonportable values raise RepoDefinitionError.
     """
 
     _data: dict[str, Any]
@@ -1429,6 +1576,36 @@ def _selector_from_data(value: Mapping[str, Any]):
 
     if value.get("kind") == "template-selector":
         return GeneratorSelector.from_data(value["payload"])
+    if value.get("kind") == "node-selector":
+        root = _node_selector_root(value, "$.routing.selector")
+        from .node import _rewrite
+        from .symbol import ImportRef, SourceSpec
+
+        def live_matchers(current, visit):
+            if isinstance(current, Match):
+                matcher = current.matcher
+                if type(matcher) is SubclassMatcher and isinstance(matcher.cls, (ImportRef, SourceSpec)):
+                    cls = matcher.cls.resolve()
+                    if not isinstance(cls, type):
+                        raise RepoDefinitionError("Repo definition subclass matcher did not resolve to a type.")
+                    matcher = SubclassMatcher(cls)
+                elif type(matcher) is ExactMatcher:
+                    matcher = ExactMatcher(visit(matcher.value))
+                elif type(matcher) is ChoiceMatcher:
+                    matcher = ChoiceMatcher(visit(child) for child in matcher.values)
+                return Match(matcher, current.name)
+            if isinstance(current, FactorySpec):
+                return FactorySpec._from_symbolic_parts(
+                    current.target, tuple(visit(child) for child in current.args),
+                    FrozenDict((name, visit(child)) for name, child in current.kwargs.items()),
+                )
+            if isinstance(current, SelectorSpec):
+                nested = current.selector
+                return SelectorSpec(Selector(visit(nested.root), strict=nested.strict, cls_policy=nested.cls_policy))
+            return NotImplemented
+
+        root = _rewrite(root, value_transform=live_matchers)
+        return Selector(root, strict=value["strict"], cls_policy=value["cls_policy"])
 
     nodes = {node["label"]: node for node in value["nodes"]}
     definitions: dict[str, Any] = {}

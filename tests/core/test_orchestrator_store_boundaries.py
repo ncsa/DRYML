@@ -1,8 +1,9 @@
 import pytest
 
 from dryml import session
-from dryml.core import Object, Repo, Serializable
+from dryml.core import Definition, Repo, Serializable
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import NodeNameRecord
 from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.runtime.errors import RuntimeTransitionError
 
@@ -46,15 +47,24 @@ def test_strict_rejects_live_store_mutation_and_restoration_before_io(tmp_path):
 
 
 def test_typed_alias_resolution_remains_available_without_materialization(tmp_path):
+    """Recipe and exact saved names resolve as Nodes under the strict floor."""
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
-    state = repo.save_object(StoreBoundaryObject("reference", repo=repo), alias="reference")
-    repo.set_state_alias("checkpoint", state)
+    cdef = Definition(StoreBoundaryObject, "reference").concretize(repo=repo)
+    recipe = store.publish_node(cdef, kind="recipe")
+    store.compare_and_set_node_name(NodeNameRecord("reference", "recipe", recipe.digest), expected=None)
+    state = repo.save_object(StoreBoundaryObject("reference", repo=repo), alias="checkpoint")
 
     session.set_mode("orchestrator")
 
-    object_ref = repo.resolve_object_alias("reference")
-    state_ref = repo.resolve_state_alias(object_ref, "checkpoint")
+    recipe_name = store.read_node_name("reference")
+    saved_name = store.read_node_name("checkpoint")
+    assert recipe_name.root_kind == "recipe"
+    assert saved_name.root_kind == "saved"
+    reference = store.read_node(recipe_name.root_digest, kind=recipe_name.root_kind)
+    state_ref = store.read_node(saved_name.root_digest, kind=saved_name.root_kind)
 
-    assert object_ref == state.object
-    assert state_ref == state
+    assert reference.graph_equal(cdef)
+    assert state_ref.object_id == state.object_id
+    assert state_ref.state.key == state.state.key
+    assert state_ref.graph_equal(state)

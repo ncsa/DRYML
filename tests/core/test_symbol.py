@@ -46,11 +46,11 @@ def make_multiplier(scale):
 
 
 def caller_anchor_template(value):
-    return caller_anchor_dependency.sin(value)
+    return caller_anchor_dependency.sin(value)  # noqa: F821 - deliberately detached lexical fixture
 
 
 def resolution_precedence_template(value):
-    return resolution_precedence_dependency.sin(value)
+    return resolution_precedence_dependency.sin(value)  # noqa: F821 - supplied by each resolution scope
 
 
 def test_symbol_ref_from_function_import():
@@ -136,8 +136,8 @@ def test_concrete_definition_equal_for_same_import_function():
     cdef1 = Definition(FunctionHolder, top_level_add1).concretize()
     cdef2 = Definition(FunctionHolder, top_level_add1).concretize()
 
-    assert cdef1 == cdef2
-    assert hash(cdef1) == hash(cdef2)
+    assert cdef1.graph_equal(cdef2)
+    assert cdef1.stable_hash() == cdef2.stable_hash()
 
 
 def test_concrete_definition_equal_for_same_local_function_source():
@@ -150,8 +150,8 @@ def test_concrete_definition_equal_for_same_local_function_source():
     assert cdef1.parameters["fn"].kind == "function"
     assert cdef2.parameters["fn"].kind == "function"
 
-    assert cdef1 == cdef2
-    assert hash(cdef1) == hash(cdef2)
+    assert cdef1.graph_equal(cdef2)
+    assert cdef1.stable_hash() == cdef2.stable_hash()
 
 
 def test_concrete_definition_rejects_closure_function():
@@ -418,15 +418,15 @@ def test_source_spec_characterization_preserves_canonical_bytes_and_identity():
 
     first = Definition(FunctionHolder, outer).concretize()
     second = Definition(FunctionHolder, outer).concretize()
-    assert first == second
-    assert hash(first) == hash(second)
+    assert first.graph_equal(second)
+    assert first.stable_hash() == second.stable_hash()
 
 
 def test_source_spec_missing_dependency_fails_closed():
     """A source-backed function with an unresolved free name never gets a spec."""
 
     def missing_dependency(value):
-        return missing_source_dependency + value
+        return missing_source_dependency + value  # noqa: F821 - the missing-name failure witness
 
     with pytest.raises(ValueError, match="Missing/unimportable globals"):
         symbol_ref(missing_dependency)
@@ -477,10 +477,10 @@ def test_source_spec_captures_caller_anchor_before_lexical_analysis(monkeypatch)
         caller_anchor_template.__code__, {}, name=caller_anchor_template.__name__
     )
     detached.__module__ = __name__
-    caller_anchor_dependency = np
+    caller_anchor_dependency = np  # noqa: F841 - captured from this caller frame
 
     def helper(source):
-        caller_anchor_dependency = __import__("math")
+        caller_anchor_dependency = __import__("math")  # noqa: F841 - must not outrank the caller frame
         return lexical.LexicalDependencies((lexical.LexicalDependency("caller_anchor_dependency", None),))
 
     monkeypatch.setattr(lexical, "collect_lexical_dependencies", helper)
@@ -517,7 +517,7 @@ def test_source_spec_preserves_globals_module_and_caller_precedence(monkeypatch)
         resolution_precedence_template.__code__, {}, name=resolution_precedence_template.__name__
     )
     caller_third.__module__ = "missing_source_spec_module"
-    resolution_precedence_dependency = np
+    resolution_precedence_dependency = np  # noqa: F841 - final caller-local fallback fixture
     assert SourceSpec.from_function(caller_third).imports[
         "resolution_precedence_dependency"
     ].import_path() == "numpy"
@@ -535,7 +535,9 @@ def test_source_spec_identity_round_trips_through_store_lookup(tmp_path):
     saved = FunctionHolder(local, repo=repo)
     repo.save_object(saved)
 
-    loaded = Repo(DirStore(tmp_path / "store")).load(Definition(FunctionHolder, local))
-    assert loaded.definition == saved.definition
-    assert hash(loaded.definition) == hash(saved.definition)
+    reopened = Repo(DirStore(tmp_path / "store"))
+    selected = reopened.query().sel(Definition(FunctionHolder, local)).saved().one()
+    loaded = reopened.load_state_ref(selected, reuse_live="never")
+    assert loaded.definition.graph_equal(saved.definition)
+    assert loaded.definition.stable_hash() == saved.definition.stable_hash()
     assert loaded.fn(3) == 4

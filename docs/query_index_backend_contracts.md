@@ -1,6 +1,6 @@
 # Query Index Backend Contracts
 
-## Format-4 Store Projection (Schema 10, Coverage Contract 1)
+## Format-4 Store Projection (Schema 11, Coverage Contract 3)
 
 Every supported query-visible built-in DirStore mutation owns its derived work:
 persist intent and authority, classify the committed Store cut, apply the coalesced
@@ -8,7 +8,7 @@ projection delta **and** coverage in one explicit SQLite transaction, reread its
 committed evidence, then acknowledge the exact captured mutations. Filesystem and
 SQLite publication are separate boundaries. A complete public mutation returns
 only after both finish. The Store-owned prepared-batch seam applies the same
-protocol once per logical Store commit; future Repo/managed owners supply prepared
+protocol once per logical Store commit; Repo/managed owners supply prepared
 facts through that seam, rather than maintaining a second index themselves.
 
 `auto` enables usable SQLite. Only optional-backend unavailability admits its
@@ -23,7 +23,8 @@ binding is not an API for maintaining independent sidecars over one domain.
 
 The closed relation families are `record`, `recipe_root`, `saved_root`,
 `declaration`, `creation`, `manifest`, `availability`, `node`, `edge`, `facet`,
-`name`, `requested_metadata`, `retention`, `lifecycle`, and `discovery`. Compact root membership
+`name`, `requested_metadata`, `retention`, `lifecycle`, `discovery`,
+`discovery_feature`, and `discovery_link`. Compact root membership
 joins to its authenticated block/table/overlay slot. Node, typed edge, and facet
 postings retain those correlations and typed value paths; they do not flatten
 different occurrences into one match. Manifests and availability retain the full
@@ -45,15 +46,28 @@ current object/state annotations, first saved-graph capture, and lineage evidenc
 SaveAnnotations, current-mapping replacement/removal, and immutable captures use
 the same journal/projection/acknowledgement boundary. Rebuild never reconstructs
 captured annotations from current mappings.
-`lifecycle` remains **explicitly unavailable** until its managed owner supplies
-versioned authority through the Store protocol. Its closed coverage entry has
-`supported=0`; asking for it raises `QueryIndexUnavailable`, never a certified empty
-result. Unknown families
-and unknown prepared record paths are refused. Later adapters must add their
-closed record readers, journal transitions, source projections and publication
-guards together before enabling a capability. Managed lifecycle integration remains
-separate from Core physical protection. Older schema-10 certificates marking
-retention unsupported require visible metadata-only coverage recovery.
+`lifecycle` uses the managed owner's registered, versioned control reader and
+relation projector. It covers current, history, root-intent, preparation,
+result-association and result-content contributions through the same journal.
+Core never imports managed to discover policy. A missing/incompatible required
+owner feed refuses visibly rather than certifying an empty relation. Unknown
+families and prepared paths are refused. Owner adapters must supply closed readers,
+transitions, projections and publication guards together. Managed lifecycle
+association policy remains separate from Core physical protection. Older schema-10
+or coverage-1/2 certificates require visible metadata-only derived recovery; they
+cannot claim coverage 3 or authorize stale negative/count results. Store 4 bytes
+and identity/Node encoding versions are unchanged by this derived-schema revision.
+
+Coverage support is local to the certified Store cut, not ambient imports. An
+absent owner namespace contributes no records and needs no adapter for general
+Core readiness, positive queries, or complete negative/count answers. A sidecar
+built by a Core-only process remains ready in a managed-loaded process and vice
+versa, without refresh, inventory, or generation changes. Presence of managed
+authority requires its complete owner reader for readiness and maintenance;
+missing/incomplete readers fail closed even if SQLite already contains lifecycle
+rows. An unsupported (`supported=0`) family cannot advertise readiness by matching
+an unavailable process-local reader. Explicit `projection_rows("lifecycle")` still requires the registered owner,
+including when the namespace is absent. Core never imports that owner itself.
 
 Readiness requires matching Store UUID/epoch, no pending authority work, index
 UUID/schema/coverage version, the exact closed capability set, and clean mutation
@@ -69,10 +83,44 @@ seam. It returns detached `(source_path, correlation_key, canonical_json_bytes)`
 rows under a short certified Store/SQLite cut. False performs no initialization,
 replay or rebuild and refuses missing/stale/pending/incomplete coverage. True
 permits maintenance first. The ordinary Repo/Store consumer separately uses bounded
-`discovery` and manifest pages under the same certificate. Discovery postings retain
-source membership, root/block identity, typed occurrence paths, result domain and
-correlated necessary features; exact residuals and direct authority validate
-acceptance. Legacy Query V3 read views and
+`discovery` and manifest pages under the same certificate. Discovery contributions
+retain source membership, root/block identity, a table/overlay locator, result
+domain and a shared local-fact key. They never persist process-local tied-set
+ordinals as occurrence identities. The authenticated decoder resolves the locator;
+root reachability, named projection, declarations and final digest are checked
+outside the short read cut. Local identity, full-StateKey and scalar tokens are
+written once per prepared occurrence view in `discovery_feature`, and direct typed
+edges once in `discovery_link`, under the block source. Root contributions do not
+embed a feature closure or an encoded subtree. Withdrawing membership removes its
+contributions without promoting block-local history to independent roots.
+Local-fact keys use authenticated table/overlay locators and named derived views,
+not preparation traversal slots. A later membership-only delta therefore joins
+existing block facts even after tied-set traversal order changes.
+Discovery never resolves an authored recipe to name positional fields. Unresolved
+soft calls retain their literal positional edges and explicit keyword facts;
+unknown positional names supply no named scalar posting. Quotation remains an
+opaque edge boundary even though its Nodes share the authenticated block table.
+An independently published soft recipe still contributes its own root and real
+unquoted children; quotation alone does not create that membership or containment.
+
+Qualified Node predicates seek token indexes, correlate all local constraints to
+one occurrence and propagate indexed child/parent joins before seeking contribution
+rows. The adapter forces the contribution seek: an ordering-index scan with a
+posting filter is not a selective plan. Ordered local edge paths and link roles
+constrain joins; unordered assignment, aliases, quotation, class rules and remaining
+facets retain the exact Node residual. Supported anchors are exact ObjectIds, full
+StateKeys and supplied local `str`/`int`/`bool`/`None` fields. Boolean conjunctions
+can use a safe anchored conjunct; disjunction requires an anchor on every branch.
+Class-only, absence/negation-only, unsupported scalar/support-only shapes without a
+safe anchor visibly use scan policy, including refusal by `require_indexed()` or
+`scan_policy("forbid")`, **before** explicit refresh or recovery can inventory.
+Enumerating an explicitly requested complete domain without a selector still uses
+its certified ordered relation. Exact-origin manifests seek their bucket source
+range; compatibility-only discovery currently admits a derived-family scan.
+
+All discovery families, guards and seek indexes participate in readiness, including
+empty/count queries. Exact residuals and direct authority validate acceptance.
+Legacy Query V3 read views and
 coverage claims remain explicitly unavailable for format-4 authority.
 
 `maintain_store()`/enabled mutation completion replay classified pending records
@@ -85,6 +133,16 @@ authoritative no-op changes no epoch, dirty token, generation or SQL row. A
 previous SQL commit awaiting acknowledgement is recognized by its exact receipt
 and does not repeat the delta transaction.
 
+Before that replay/reuse, Store-owned recovery reestablishes any unresolved native
+publication barriers for the exact classified authority. Classification records
+visible bytes, independently of the mutation intent's `persistence_confirmed`
+boolean. A committed SQL receipt cannot set that confirmation. Repeated native
+barrier failure preserves pending evidence and raises `StoreMutationError` with
+the mutation/cut receipt, including during automatic query refresh. Successful
+barrier repair performs no capture, restore, body execution or payload reads and
+does not execute missing transitions. Coverage still describes the actual partial
+cut rather than the intended complete publication.
+
 Missing/stale/owned incompatible or corrupt sidecars use a visibly reported,
 explicit metadata-only inventory and staged replacement. The staged certificate,
 row witnesses and SQLite integrity are validated before activation; the Store
@@ -93,6 +151,13 @@ application capture/restore, and changes no product records. A ready explicit
 refresh uses its current certificate without a historical scan; `rebuild()` is
 the separate unconditional inventory/replacement operation. Legacy unscoped
 dirty tokens request rebuild and only captured tokens are removed.
+
+A rebuild waiter that observes another maintainer's ready replacement rechecks
+current authority before proceeding. If a sibling publishes between that ready
+observation and the recheck, the changed cut raises `StoreCutChanged`; ordinary
+Store publication uses its bounded preparation retry. This does not acknowledge
+the sibling's pending work or report the earlier replacement as still owned.
+Unchanged-cut contention retains the explicit `QueryIndexBusy` failure.
 
 After ambiguous SQL commit, independently reread the exact mutation receipt and
 coverage before acknowledgement. Pending work blocks ordinary indexed reads even
@@ -119,7 +184,13 @@ short Store/SQLite cuts. It releases both before preparation, exact matching and
 metadata expansion, revalidates that same cut before accepting the page, and
 releases again before user output. One decoded preparation serves captured views
 of an authenticated block; operation-local reuse compares exact bytes/views and
-uses conservative `_content_facts` ownership sizing.
+uses conservative `_content_facts` ownership sizing. Different advertised views of
+the same exact block bytes reuse its decoder table and individually checked view
+keys. Derived discovery tables share that owner's bounded fact LRU, reserving the
+child key budget; clear/eviction repeats pure work, never external authority checks.
+Oversized/nonresident blocks/views can repeat preparation. Exact hard cross-branch
+joins, bitset frontiers, unordered canonicalization and output-dependent root/source
+contributions retain their measured costs; no universal linear DAG bound is claimed.
 
 Tokens retain Store UUID/epoch/pending evidence, index file identity/UUID,
 schema/coverage/generation, producer and external-scope Repo topology, and keyset

@@ -482,29 +482,61 @@ def _restore_record(data, build, memo):
     raise NodeCodecError("Unknown Node value tag.")
 
 
-def encode_node_graph(prepared, roots=None):
+def encode_node_graph(prepared, roots=None, *, canonical=False):
     """Export one authenticated unique table/value block and compact root views.
 
     Args:
         prepared (NodePreparation): Owning immutable graph preparation.
         roots (Iterable[Node] | None): Required views, defaulting to declared roots.
+        canonical (bool): Canonically place the complete single-root table,
+            including retained construction views and occurrence joins. Default
+            false permits incidental storage placement without changing identity.
     Returns:
         dict: Closed JSON-compatible identity-3 ``dryml-node-graph/v1`` packet.
         Each view names a table hash, slot, policy and expected exact key. The
         table contains value-block references and retained construction handles.
     Raises:
-        TypeError: If prepared is not a NodePreparation.
-        ValueError: If a selected handle is outside the prepared table.
+        TypeError: If prepared is not a NodePreparation or canonical is not bool.
+        ValueError: If a selected handle is outside the prepared table, or canonical
+            placement is requested for anything other than one declared root.
     Side Effects:
         Updates owned export counts and requested pure key facts only; no IO.
     """
     if not isinstance(prepared, NodePreparation):
         raise TypeError("Node graph export requires a NodePreparation.")
+    if type(canonical) is not bool:
+        raise TypeError("canonical must be bool.")
+    selected = prepared.roots if roots is None else tuple(roots)
+    if canonical and (len(prepared.roots) != 1 or selected != prepared.roots):
+        raise ValueError("Canonical Node export requires one declared root.")
+    order = (prepared._transport_order(prepared._slot(selected[0])) if canonical
+             else tuple(range(len(prepared.nodes))))
+    labels = {slot: index for index, slot in enumerate(order)}
+
+    normalized = {}
+    def normalize(value):
+        if isinstance(value, (dict, list, tuple)) and id(value) in normalized:
+            return normalized[id(value)]
+        if isinstance(value, dict):
+            if value.get("tag") == "node":
+                return {"tag": "node", "slot": labels[value["slot"]]}
+            result = {key: normalize(child) for key, child in value.items()}
+            if value.get("tag") in {"set", "frozenset"}:
+                result["items"].sort(key=_bytes)
+            normalized[id(value)] = result
+            return result
+        if isinstance(value, (list, tuple)):
+            result = [normalize(child) for child in value]
+            normalized[id(value)] = result
+            return result
+        return value
+
     values, rows, overlays = {}, [], []
     occurrences = {}
     occurrence_slots = []
     from .node import Node
-    for node in prepared.nodes:
+    for slot in order:
+        node = prepared.nodes[slot]
         token = node._occurrence if isinstance(node, Node) else node._node_id
         if token not in occurrences:
             occurrences[token] = len(occurrences)
@@ -535,7 +567,9 @@ def encode_node_graph(prepared, roots=None):
         return value
 
     structural_memo = {}
-    for slot, row in enumerate(prepared._rows):
+    for original_slot in order:
+        slot = labels[original_slot]
+        row = normalize(prepared._rows[original_slot]) if canonical else prepared._rows[original_slot]
         # externalize owns every emitted container and keeps shared syntax compact.
         key = intern(externalize(row))
         structural = {name: _map(value, lambda child: {"tag": "node", "slot": occurrence_slots[child]}, structural_memo)
@@ -546,16 +580,15 @@ def encode_node_graph(prepared, roots=None):
             rows.append({"structures": [structural_key]})
         elif structural_key not in rows[occurrence]["structures"]:
             rows[occurrence]["structures"].append(structural_key)
-        construction = prepared._construction.get(slot)
+        construction = prepared._construction.get(original_slot)
         overlays.append({"occurrence": occurrence, "value": key, "structure": structural_key,
                          "construction": None if construction is None else
-                         {"slot": construction, "view": "construction"}})
-    selected = prepared.roots if roots is None else tuple(roots)
-    declared = list(dict.fromkeys(prepared._slot(root) for root in prepared.roots))
+                          {"slot": labels[construction], "view": "construction"}})
+    declared = list(dict.fromkeys(labels[prepared._slot(root)] for root in prepared.roots))
     table = {"rows": rows, "overlays": overlays, "roots": declared}
     table_key = _digest("dryml-node-table/v1", table)
     prepared.counts["block_hashes"] += 1
-    views = [{"table": table_key, "slot": prepared._slot(root), "view": prepared.view.name,
+    views = [{"table": table_key, "slot": labels[prepared._slot(root)], "view": prepared.view.name,
               "key_format": EXACT_KEY_VERSION, "expected_key": prepared.exact_key(root).decode("ascii")}
              for root in selected]
     packet = {"format": NODE_GRAPH_VERSION, "identity_version": NODE_IDENTITY_VERSION,
@@ -596,6 +629,8 @@ def _decode_node_graph_views(packet, *, with_owner=False):
 
     with_owner retains only decoded immutable metadata and exact semantic facts;
     it is not Store authority. Callers must validate fresh bytes/cuts separately.
+    Its private transport maps bind each decoded handle to the authenticated
+    table/overlay address, independent of unordered presentation-path ordinals.
     """
     try:
         return _decode(packet, 0, packet["views"][0]["view"], _all_views=True, _with_owner=with_owner)
@@ -756,6 +791,12 @@ def _decode(packet, selected, expected_view, *, _all_views=False, _with_owner=Fa
     # Validate every advertised key; unrelated storage roots do not enter any
     # selected semantic preimage. No policy is inferred from an untrusted name.
     prepared = NodePreparation(node for table in built_tables.values() for node in table.values())
+    # These addresses are scoped to authenticated transport bytes, unlike a
+    # GraphPath's process-local ordinal among recipe-equal unordered members.
+    prepared._transport_nodes = {(table, slot): node for table, nodes in built_tables.items()
+                                 for slot, node in nodes.items()}
+    prepared._transport_locators = {id(node): {"table": table, "slot": slot}
+                                    for (table, slot), node in prepared._transport_nodes.items()}
     for root_view in packet["views"]:
         slot = root_view["slot"]
         if type(slot) is not int or slot < 0:

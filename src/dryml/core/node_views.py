@@ -5,7 +5,7 @@ never enter quotations, and use NodePreparation's collision-independent verifier
 Payload availability and runtime application belong to the consuming operation.
 """
 
-from .node_prepare import NodePreparation, PreparationView
+from .node_prepare import NodePreparation, PreparationView, _owned_preparation
 
 
 def _concrete(root):
@@ -38,7 +38,7 @@ def creation_cdef(root):
     return _clone(source, None, source.parameters, _Facets(), reset_construction=True)
 
 
-def _project(root, *, compatibility):
+def _project(root, *, compatibility, _memo=None, _adapted=None):
     from .config import ConfigRef
     from .definition import ConcreteDefinition
     from .factory import FactorySpec
@@ -80,9 +80,9 @@ def _project(root, *, compatibility):
             return _RepeatExpr(visit(current.group), visit(current.count), current.shared)
         return NotImplemented
 
-    adapted = {}
+    adapted = {} if _adapted is None else _adapted
     return _rewrite(_as_node_view(root, adapted), enter_quoted=False,
-                    node_transform=node, value_transform=value)
+                    node_transform=node, value_transform=value, memo=_memo)
 
 
 def state_compatibility_view(root):
@@ -136,9 +136,11 @@ def view_digest(root, view):
     Raises:
         TypeError, ValueError: On invalid policy, values or graph structure.
     Side Effects:
-        Computes only operation-owned pure facts, without IO or resolution.
+        Retains bounded pure preparation on the immutable source handle, without
+        IO or resolution. Resident repeated requests reuse discovery and folds;
+        eviction changes work only, never the requested policy or digest.
     """
-    prepared = NodePreparation((root,), view=view)
+    prepared = _owned_preparation(root)._prepared_view(root, view)
     return prepared.digest(prepared.roots[0], domain=view.name)
 
 
@@ -153,9 +155,11 @@ def view_equal(left, right, view):
     Raises:
         TypeError, ValueError: On invalid roots, policy or graph structure.
     Side Effects:
-        Only owned preparation work; no Store, hook or arbitrary compatibility call.
+        Reuses bounded handle-owned pure views/keys, then compares exact evidence
+        each time; no Store, hook or arbitrary compatibility call is cached.
     """
-    a, b = NodePreparation((left,), view=view), NodePreparation((right,), view=view)
+    a = _owned_preparation(left)._prepared_view(left, view)
+    b = _owned_preparation(right)._prepared_view(right, view)
     x, y = a.roots[0], b.roots[0]
     return a.exact_key(x) == b.exact_key(y) and a.exact_equal(x, b, y)
 

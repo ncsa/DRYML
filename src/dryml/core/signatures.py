@@ -96,8 +96,11 @@ class AutoRef:
     """Annotation-only marker for automatic selection via ``Ref[AutoRef]``.
 
     Use the class itself, not an instance. At an activated Ref boundary, it
-    preserves supplied resolved Node metadata, or selects an existing CDef,
-    ObjectRef, or StateRef from a live Object without saving or materializing it.
+    preserves supplied resolved Node metadata. A live stateful graph yields its
+    complete last saved Node when its object projection matches, or an
+    identity-bound construction Node otherwise; an entirely stateless graph
+    yields its construction definition. Supplied legacy ObjectRef/StateRef values
+    retain their kind. Selection performs no Store IO, saving, or materialization.
     Soft Definitions require an explicit Ref assertion; unresolved metadata and
     unsupported inputs raise ``SignatureError``. Selection never manufactures a
     saved refinement by capturing state.
@@ -1340,7 +1343,7 @@ def _select_automatic(value: Any, name: str) -> Any:
     from .definition import ConcreteDefinition
     from .object import Object
     from .reference_values import ObjectRef, StateRef
-    from .node import Node
+    from .node import Node, require_saved
 
     if isinstance(value, Node):
         from .template import _contains_expression
@@ -1355,7 +1358,19 @@ def _select_automatic(value: Any, name: str) -> Any:
     if not has_stateful_materialization(cdef):
         return cdef
     receipt = value.last_state_ref
-    if receipt is not None and receipt.object == value.object_ref:
+    if isinstance(cdef, Node):
+        construction = getattr(value, "_construction_node", cdef)
+        receiver = construction.with_realization(identities=value.object_ref.objects)
+        if isinstance(receipt, Node):
+            try:
+                require_saved(receipt)
+            except (TypeError, ValueError):
+                pass
+            else:
+                if receipt.object_projection_equal(receiver):
+                    return receipt
+        return receiver
+    if isinstance(receipt, StateRef) and receipt.object == value.object_ref:
         return receipt
     return value.object_ref
 
@@ -1597,7 +1612,7 @@ def _as_state_ref(value: Any, name: str, controls: _Controls, *,
         if not has_stateful_materialization(value.definition):
             raise _SelectionUnavailable()
         receipt = value.last_state_ref
-        if receipt is None or receipt.object != value.object_ref:
+        if not isinstance(receipt, StateRef) or receipt.object != value.object_ref:
             raise _SelectionUnavailable()
         if selection is not None and selection.object_ref != receipt.object:
             raise SignatureError("selection topology does not match the slot", name)

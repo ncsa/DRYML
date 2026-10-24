@@ -88,7 +88,7 @@ def test_storage_snapshot_uses_one_export_and_survives_later_topology_changes(tm
 
         prepared = SharedDirStoreStrategy().prepare(
             _pinned_value, (), {}, repo=repo, control_store=None, update_args=False,
-            selections={"pin": ReferenceSelection(pinned.object, first)},
+            selections={"pin": ReferenceSelection(pinned.object_view(), first)},
             _frozen_storage=snapshot.frozen_storage,
         )
         _, _, _, _, selections, _ = decode_invocation(
@@ -101,7 +101,7 @@ def test_storage_snapshot_uses_one_export_and_survives_later_topology_changes(tm
             with pytest.raises(CoreCallCodecError, match="unsupported selected Store"):
                 SharedDirStoreStrategy().prepare(
                     _pinned_value, (), {}, repo=repo, control_store=None, update_args=False,
-                    selections={"pin": ReferenceSelection(pinned.object, wrong)},
+                    selections={"pin": ReferenceSelection(pinned.object_view(), wrong)},
                     _frozen_storage=snapshot.frozen_storage,
                 )
         finally:

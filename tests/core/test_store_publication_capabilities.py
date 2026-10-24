@@ -117,6 +117,7 @@ def test_fence_failure_unwinds_prior_fences_and_topology(tmp_path, monkeypatch):
     """Failed ordered fence admission releases only successfully entered owners."""
     first = DirStore(tmp_path / "first", query_index="none")
     second = DirStore(tmp_path / "second", query_index="none")
+    repo = Repo([second, first])
     events = []
 
     @contextmanager
@@ -136,7 +137,6 @@ def test_fence_failure_unwinds_prior_fences_and_topology(tmp_path, monkeypatch):
     monkeypatch.setattr(second, "authority_fence_key", lambda: "2")
     monkeypatch.setattr(first, "authority_read_fence", first_fence)
     monkeypatch.setattr(second, "authority_read_fence", fail_fence)
-    repo = Repo([second, first])
     with pytest.raises(KeyboardInterrupt):
         with repo._read_cut():
             pytest.fail("fence failure must precede reads")
@@ -147,12 +147,12 @@ def test_fence_failure_unwinds_prior_fences_and_topology(tmp_path, monkeypatch):
 def test_unsupported_fence_is_not_replaced_by_validation_memo(tmp_path, monkeypatch):
     """An unsupported authority cut keeps its established capability failure."""
     store = DirStore(tmp_path / "store", query_index="none")
+    repo = Repo(store)
 
     def unsupported():
         raise StoreCapabilityError("no stable authority cut")
 
     monkeypatch.setattr(store, "authority_fence_key", unsupported)
-    repo = Repo(store)
     with pytest.raises(StoreCapabilityError, match="no stable"):
         with repo._read_cut():
             pytest.fail("unsupported fence must precede reads")
@@ -190,8 +190,10 @@ def test_exact_inputs_and_captured_selections_precede_fence_admission(tmp_path, 
 
     store = DirStore(tmp_path / "store", query_index="none")
     repo = Repo(store)
-    from dryml.core import Definition, ObjectRef, StateRef
-    state = StateRef(ObjectRef(Definition(ArchiveRoot).concretize(), {}), {})
+    from dryml.core import Definition, LocalState, ObjectId, StateKey
+    from tests.core.test_live_reuse import ReuseValue
+    state = Definition(ReuseValue, 1).concretize().with_identity(ObjectId())
+    state = state.with_state(LocalState(StateKey(state.creation_digest(), "pkl-" + "a" * 64), state.creation_view()))
     detached = DirStore(tmp_path / "detached", query_index="none")
     attempts = []
 
@@ -200,10 +202,10 @@ def test_exact_inputs_and_captured_selections_precede_fence_admission(tmp_path, 
         raise StoreCapabilityError("unexpected fence admission")
 
     monkeypatch.setattr(store, "authority_fence_key", unsupported)
-    with pytest.raises(TypeError, match="StateRef"):
+    with pytest.raises(TypeError, match="ConcreteNode"):
         build_exact_state_load_plan(repo, object())
-    with pytest.raises(TypeError, match="Store handle"):
-        build_exact_state_load_plan(repo, state, source_stores={state: None})
+    with pytest.raises(TypeError, match="full StateKeys to connected Stores"):
+        build_exact_state_load_plan(repo, state, source_stores={state.state.key: None})
     with pytest.raises(ValueError, match="connected"):
         build_exact_state_load_plan(repo, state, source_store=detached)
     assert not attempts

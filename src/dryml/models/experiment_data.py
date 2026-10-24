@@ -341,15 +341,14 @@ class ExperimentData(Serializable):
 
     @classmethod
     def _load_current(cls, experiment: Node, *, repo, store):
-        cdef = cls._definition(experiment)
         name = store.read_node_name(cls._current_name(experiment))
         if name is None:
-            return None, None, cdef
+            return None, None
         current = store.read_node(name.root_digest, kind="saved")
         loaded = repo.load_state_ref(current, reuse_live="never", cache="none", source_store=store)
         if not isinstance(loaded, cls) or not loaded.experiment.graph_equal(experiment):
             raise StoreAuthorityError("Current ExperimentData alias has incompatible history authority.")
-        return loaded, current, cdef
+        return loaded, current
 
     @staticmethod
     def _current_name(experiment):
@@ -389,7 +388,7 @@ class ExperimentData(Serializable):
         experiment = cls._subject_reference(experiment)
         if store is None:
             store = repo._selected_writable_physical_store(None, "find ExperimentData", record_family="dryml-node-graph/v1")
-        loaded, _, _ = cls._load_current(experiment, repo=repo, store=store)
+        loaded, _ = cls._load_current(experiment, repo=repo, store=store)
         return loaded
 
     @classmethod
@@ -424,7 +423,7 @@ class ExperimentData(Serializable):
 
         experiment = cls._subject_reference(experiment)
         selected = repo._selected_writable_physical_store(store, "create ExperimentData", record_family="dryml-node-graph/v1")
-        loaded, _, _ = cls._load_current(experiment, repo=repo, store=selected)
+        loaded, _ = cls._load_current(experiment, repo=repo, store=selected)
         if loaded is not None:
             return loaded
         candidates = tuple(selected.query().saved().sel(cls._definition(experiment)).iter())

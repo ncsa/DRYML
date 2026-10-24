@@ -1,4 +1,4 @@
-"""Store-owned schema-10 projection completion, independent of Repo consumers."""
+"""Store-owned schema-11 projection completion, independent of Repo consumers."""
 
 from pathlib import Path
 from contextlib import contextmanager
@@ -14,7 +14,7 @@ from dryml.core import Definition, Object, ObjectId, Repo
 from dryml.core.node_prepare import NodePreparation
 from dryml.core.query.model import QueryIndexDirty, QueryIndexIncompatible, QueryIndexUnavailable, QueryStats
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig
-from dryml.core.query.sqlite.schema import STORE_PROJECTION_FAMILIES
+from dryml.core.query.sqlite.schema import STORE_PROJECTION_FAMILIES, SQLITE_QUERY_INDEX_SCHEMA_VERSION, STORE_COVERAGE_VERSION
 from dryml.core.store import authority
 from dryml.core.store.authority import StoreMutationError, PreparedChange
 from dryml.core.store.dir import DirStore
@@ -60,7 +60,7 @@ def test_publication_is_visible_without_query_refresh(tmp_path):
     store.compare_and_set_node_name(name, expected=None)
     index = store.open_query_index()
     index.refresh(False)
-    assert index.status().schema_version == 10
+    assert index.status().schema_version == SQLITE_QUERY_INDEX_SCHEMA_VERSION == 11
     assert index.status().state == "ready"
     assert not store.authority_cut().pending
     assert len(index.projection_rows("recipe_root", refresh=False)) == 1
@@ -133,10 +133,10 @@ def test_root_membership_state_and_names_remain_separate_after_rebuild(tmp_path,
     assert index.validate(thorough=True).ok
 
 
-@pytest.mark.parametrize("damage", ["missing", "corrupt", "schema9", "incomplete"])
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "schema9", "schema10", "coverage2", "incomplete"])
 def test_missing_stale_or_owned_incompatible_sidecar_rebuilds_metadata_only(tmp_path, monkeypatch, capsys, damage):
     store = indexed_store(tmp_path / "store")
-    root = store.publish_node(creation())
+    store.publish_node(creation())
     index = store.open_query_index()
     before = authority_bytes(store)
     index.close()
@@ -146,8 +146,10 @@ def test_missing_stale_or_owned_incompatible_sidecar_rebuilds_metadata_only(tmp_
         index.path.write_bytes(b"broken owned derived file")
     else:
         with sqlite3.connect(index.path) as con:
-            if damage == "schema9":
-                con.execute("PRAGMA user_version=9")
+            if damage in {"schema9", "schema10"}:
+                con.execute("PRAGMA user_version=" + damage.removeprefix("schema"))
+            elif damage == "coverage2":
+                con.execute("UPDATE store_projection_cut SET contract_version=2")
             else:
                 con.execute("DELETE FROM store_projection_coverage WHERE family='availability'")
     assert index.status().state != "ready"
@@ -172,10 +174,10 @@ def test_foreign_future_sidecar_refused_intact_before_effects(tmp_path, damage):
         if damage == "foreign":
             con.execute("UPDATE catalog_state SET store_key='other-store'")
         elif damage == "future":
-            con.execute("PRAGMA user_version=11")
+            con.execute("PRAGMA user_version=" + str(SQLITE_QUERY_INDEX_SCHEMA_VERSION + 1))
         else:
             con.execute("PRAGMA user_version=9")
-            con.execute("UPDATE store_projection_cut SET contract_version=2" if damage == "future-coverage-on-old-schema"
+            con.execute("UPDATE store_projection_cut SET contract_version=" + str(STORE_COVERAGE_VERSION + 1) if damage == "future-coverage-on-old-schema"
                         else "UPDATE catalog_state SET canonical_version=canonical_version+1")
     before, data, cut = authority_bytes(store), index.path.read_bytes(), store.authority_cut()
     for action in (lambda: store.publish_node(creation(2)), index.rebuild):
@@ -228,7 +230,7 @@ def test_ambiguous_sql_commit_requires_receipt_reread_before_ack(tmp_path, monke
     index, calls = store.open_query_index(), []
     original_write, original_ack = index._run_write_transaction, authority.acknowledge
     def commit(operation):
-        result = original_write(operation)
+        original_write(operation)
         calls.append("committed")
         raise OSError("lost commit response")
     def ack(*args):
@@ -262,16 +264,17 @@ def test_closed_coverage_families_are_guarded_or_explicitly_unavailable(tmp_path
     store = indexed_store(tmp_path / "store")
     store.publish_node(creation())
     index = store.open_query_index()
-    if family == "lifecycle":
-        with pytest.raises(QueryIndexUnavailable):
+    from dryml.core.query.authority import lifecycle_projection_supported
+    if family == "lifecycle" and not lifecycle_projection_supported():
+        with pytest.raises(QueryIndexUnavailable, match="owner is not integrated"):
             values(index, family)
-    else:
-        values(index, family)
-        with sqlite3.connect(index.path) as con:
-            con.execute("DELETE FROM store_projection_coverage WHERE family=?", (family,))
-        assert index.status().state == "dirty"
-        with pytest.raises(QueryIndexDirty):
-            values(index, "recipe_root")
+        return
+    values(index, family)
+    with sqlite3.connect(index.path) as con:
+        con.execute("DELETE FROM store_projection_coverage WHERE family=?", (family,))
+    assert index.status().state == "dirty"
+    with pytest.raises(QueryIndexDirty):
+        values(index, "recipe_root")
 
 
 def test_unmanaged_posting_change_trips_guard_and_rebuild_restores_it(tmp_path):
@@ -490,7 +493,8 @@ def _spawn_indexed_writer(path, ready, release, result, value):
         install(store, bytes([value]))
         result.put((store.store_uuid, store.authority_cut().epoch))
     except BaseException as error:
-        result.put(repr(error))
+        import traceback
+        result.put(repr(error) + "\n" + traceback.format_exc())
     finally:
         store.close()
 
@@ -513,11 +517,17 @@ def test_spawned_sibling_writers_preserve_complete_index_cut_and_full_keys(tmp_p
         outcomes = [result.get(timeout=10) for _ in workers]
         # A competing detached cut may explicitly report retryable instability,
         # but complete successes must always leave a certified combined cut.
-        assert all(isinstance(item, tuple) or "StoreMutationError" in item for item in outcomes)
+        assert all(isinstance(item, tuple) or "StoreMutationError" in item for item in outcomes), outcomes
         store.open_query_index().maintain_store()
         assert len(values(store.open_query_index(), "manifest")) == 2
         assert len(values(store.open_query_index(), "availability")) == 2
         assert not store.authority_cut().pending
+        local = tuple(store.query().local_states().collect())
+        assert len({state.key for state in local}) == 2
+        assert len({state.key.cdef_digest for state in local}) == 1
+        with store.read_states(state.key for state in local) as sources:
+            assert {Path(source.data_directory, "value").read_bytes() for source in sources.values()} == {b"\x01", b"\x02"}
+        assert store.open_query_index().status().state == "ready"
     finally:
         release.set()
         for worker in workers:
@@ -525,6 +535,88 @@ def test_spawned_sibling_writers_preserve_complete_index_cut_and_full_keys(tmp_p
             if worker.is_alive():
                 worker.terminate()
                 worker.join(5)
+
+
+def test_sibling_writer_advancing_after_declined_rebuild_retries_its_preflight(tmp_path, monkeypatch):
+    """A ready claimant's later write is cut drift, not pre-effect rebuild busy.
+
+    Two independent handles recover a lost derived sidecar. The waiter observes
+    the first complete replacement, then its sibling publishes before the waiter
+    rechecks readiness. Both original full-key publications must finish.
+    """
+    store = indexed_store(tmp_path / "store")
+    store.install_creation(creation())
+    store.open_query_index().close()
+    Path(store.query_index_path).unlink()
+    first, second = indexed_store(store.base_dir), indexed_store(store.base_dir)
+    one, two = first.open_query_index(), second.open_query_index()
+    staged, waiting, declined, pending, finished = (Event() for _ in range(5))
+    errors, results = [], []
+    write, stale, claim, apply = one._write_store_projection, two._claim_is_stale, two._build_claim, authority.apply
+
+    def stage(*args, **kwargs):
+        result = write(*args, **kwargs)
+        staged.set()
+        assert waiting.wait(10)
+        return result
+
+    def saw_claim(path):
+        waiting.set()
+        return stale(path)
+
+    @contextmanager
+    def decline(*args, **kwargs):
+        with claim(*args, **kwargs) as acquired:
+            if not acquired:
+                declined.set()
+                assert pending.wait(10)
+            yield acquired
+
+    def publish(owner, facts, **kwargs):
+        if owner is first:
+            assert declined.wait(10)
+        result = apply(owner, facts, **kwargs)
+        if owner is first:
+            pending.set()
+            assert finished.wait(10)
+        return result
+
+    def writer(owner, payload):
+        try:
+            results.append(install(owner, payload).state.key)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            if owner is second:
+                finished.set()
+            owner.close()
+
+    monkeypatch.setattr(one, "_write_store_projection", stage)
+    monkeypatch.setattr(two, "_claim_is_stale", saw_claim)
+    monkeypatch.setattr(two, "_build_claim", decline)
+    monkeypatch.setattr(authority, "apply", publish)
+    workers = [Thread(target=writer, args=(first, b"first")), Thread(target=writer, args=(second, b"second"))]
+    workers[0].start()
+    try:
+        assert staged.wait(10)
+        workers[1].start()
+        for worker in workers:
+            worker.join(20)
+        assert all(not worker.is_alive() for worker in workers)
+        assert declined.is_set() and pending.is_set(), [(type(e).__name__, str(e)) for e in errors]
+        assert not errors, [(type(e).__name__, str(e)) for e in errors]
+        assert len(set(results)) == 2
+        index = store.open_query_index()
+        assert len(values(index, "manifest")) == len(values(index, "availability")) == 2
+        assert index.status().state == "ready" and not store.authority_cut().pending
+    finally:
+        waiting.set()
+        declined.set()
+        pending.set()
+        finished.set()
+        for worker in workers:
+            if worker.ident is not None:
+                worker.join(20)
 
 
 def test_new_coverage_version_and_missing_guards_never_advertise_ready(tmp_path):
@@ -537,7 +629,7 @@ def test_new_coverage_version_and_missing_guards_never_advertise_ready(tmp_path)
     index.maintain_store()
     assert index.status().state == "ready"
     with sqlite3.connect(index.path) as con:
-        con.execute("UPDATE store_projection_cut SET contract_version=2")
+        con.execute("UPDATE store_projection_cut SET contract_version=" + str(STORE_COVERAGE_VERSION + 1))
     before = index.path.read_bytes()
     with pytest.raises(QueryIndexIncompatible, match="Future"):
         store.publish_node(creation(2))
@@ -639,7 +731,7 @@ def test_authority_classification_is_independent_of_derived_destination(tmp_path
         with pytest.raises(StoreMutationError):
             store.publish_node(creation(2))
     with sqlite3.connect(index.path) as con:
-        con.execute("PRAGMA user_version=11")
+        con.execute("PRAGMA user_version=" + str(SQLITE_QUERY_INDEX_SCHEMA_VERSION + 1))
     records = store.recover_authority()
     assert records and all(record.intent["status"] == "classified" for record in records)
     with pytest.raises(QueryIndexIncompatible):

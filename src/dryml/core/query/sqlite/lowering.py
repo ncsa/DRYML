@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 
-def _store_discovery_relation(query):
+def _store_discovery_relation(query, *, scan_admission=None):
     """Compile necessary format-4 predicates with occurrence correlation intact.
 
-    Returns (family, where SQL, parameters). Predicates are prefilters only;
-    detached authority and exact Node residuals establish the answer. Boolean
-    predicates without a safe conjunct retain the complete domain.
+    Returns (family, where SQL, parameters, required seek index). Prefilters only;
+    detached authority and exact Node residuals establish the answer. Identity,
+    full-StateKey and scalar anchors seek local postings, propagating only through
+    direct occurrence-correlated edges. Unsupported predicates call the terminal's
+    scan admission before source inventory or index recovery.
     """
-    import json
     from ...selector import QueryPredicate, Selector
     from ...node import Node
-    from ...definition import ConcreteDefinition
-    from ..relationships import _discovery_features
+    from ..relationships import _local_discovery_tokens, _local_discovery_edges
+    from ...store.records import _json_bytes
     kinds = [r.value for r in query.restrictions if r.kind == "kind"]
     local = "local_state" in kinds
     family, terms, params = ("manifest" if local else "discovery"), [], []
@@ -29,7 +30,13 @@ def _store_discovery_relation(query):
                              "(SELECT json_extract(CAST(c.payload AS TEXT),'$.digest') FROM store_projection_rows c "
                              "WHERE c.family='creation' AND json_extract(CAST(c.payload AS TEXT),'$.compatibility_digest')=?)")
                 params.append(item.value.compatibility_fingerprint())
-        return family, " AND ".join(terms) or "1", tuple(params)
+        if any(r.kind == "compatible" for r in query.restrictions) and not any(r.kind in {"origin", "state_key"} for r in query.restrictions):
+            if scan_admission is not None:
+                scan_admission()
+        if any(r.kind == "sel" for r in query.restrictions) and not any(r.kind in {"origin", "state_key"} for r in query.restrictions):
+            if scan_admission is not None:
+                scan_admission()
+        return family, " AND ".join(terms) or "1", tuple(params), None
     for kind in kinds:
         terms.append(f"json_extract({payload}, '$.kind')=?")
         params.append(kind)
@@ -39,46 +46,118 @@ def _store_discovery_relation(query):
     if isinstance(query.source, RetainedRepoLookupSource):
         terms.append(f"json_extract({payload}, '$.stored')=1")
 
+    ctes, arguments, compiled = [], [], {}
+    def field(alias, name):
+        return f"json_extract(CAST({alias}.payload AS TEXT),'$.{name}')"
+
+    def node_relation(value):
+        marker = id(value)
+        if marker in compiled:
+            return compiled[marker]
+        tokens = list(_local_discovery_tokens(value))
+        children = [(path, role, node_relation(child)) for path, role, child in _local_discovery_edges(value)]
+        children = [(path, role, relation) for path, role, relation in children if relation is not None]
+        if not tokens and not children:
+            compiled[marker] = None
+            return None
+        name = "dn" + str(len(ctes))
+        # Prefer exact facets; then an anchored child over broad local scalars.
+        anchor = next((token for token in tokens if token[0] in {"identity", "state"}), None)
+        if anchor is None and not children:
+            anchor = tokens[0]
+        filters, values = [], []
+        if anchor is not None:
+            body = ("SELECT " + field("f", "node") + " AS node FROM store_projection_rows f INDEXED BY store_discovery_token "
+                    "WHERE f.family='discovery_feature' AND " + field("f", "token") + "=?")
+            values.append(_json_bytes(anchor).decode("ascii"))
+        else:
+            path, role, relation = children[0]
+            body = ("SELECT DISTINCT " + field("e", "parent") + " AS node FROM " + relation +
+                    " a CROSS JOIN store_projection_rows e INDEXED BY store_discovery_child WHERE e.family='discovery_link' AND " +
+                    field("e", "child") + "=a.node AND " + field("e", "role") + "=?")
+            values.append(role)
+            if not any(s["kind"] == "set_member" for s in path.to_data()["segments"]):
+                body += " AND " + field("e", "path") + "=json(?)"
+                values.append(_json_bytes(path.to_data()).decode("ascii"))
+        for token in tokens:
+            if token == anchor:
+                continue
+            filters.append("EXISTS (SELECT 1 FROM store_projection_rows t INDEXED BY store_discovery_token "
+                           "WHERE t.family='discovery_feature' AND " + field("t", "token") + "=? AND " +
+                           field("t", "node") + "=base.node)")
+            values.append(_json_bytes(token).decode("ascii"))
+        for path, role, relation in children:
+            condition = ("EXISTS (SELECT 1 FROM store_projection_rows e INDEXED BY store_discovery_parent WHERE "
+                         "e.family='discovery_link' AND " + field("e", "parent") + "=base.node AND " +
+                         field("e", "role") + "=? AND " + field("e", "child") + " IN (SELECT node FROM " + relation + ")")
+            values.append(role)
+            if not any(s["kind"] == "set_member" for s in path.to_data()["segments"]):
+                condition += " AND " + field("e", "path") + "=json(?)"
+                values.append(_json_bytes(path.to_data()).decode("ascii"))
+            filters.append(condition + ")")
+        ctes.append(name + "(node) AS (SELECT node FROM (" + body + ") base" +
+                    (" WHERE " + " AND ".join(filters) if filters else "") + ")")
+        arguments.extend(values)
+        compiled[marker] = name
+        return name
+
     def pattern(value):
         if isinstance(value, Selector):
             value = value.root
         if isinstance(value, QueryPredicate):
             if value.kind == "and":
-                for operand in value.operands:
-                    pattern(operand)
+                relations = [pattern(operand) for operand in value.operands]
+                relations = [r for r in relations if r is not None]
+                if relations:
+                    name = "dn" + str(len(ctes))
+                    ctes.append(name + "(node) AS (" + " INTERSECT ".join("SELECT node FROM " + r for r in relations) + ")")
+                    return name
+            elif value.kind == "or":
+                relations = [pattern(operand) for operand in value.operands]
+                if all(r is not None for r in relations):
+                    name = "dn" + str(len(ctes))
+                    ctes.append(name + "(node) AS (" + " UNION ".join("SELECT node FROM " + r for r in relations) + ")")
+                    return name
             elif value.kind == "node":
-                pattern(value.value)
-            return
+                return pattern(value.value)
+            return None
         if not isinstance(value, Node):
-            return
-        for feature in _discovery_features(value):
-            # Partial unordered members do not have the candidate's fingerprint
-            # or ordinal. Keep same-occurrence facets correlated, but leave the
-            # unordered assignment/path proof to the exact matcher.
-            unordered = any(segment["kind"] == "set_member" for segment in feature["path"]["segments"])
-            parts, values = [], []
-            if not unordered:
-                parts.append("json_extract(f.value,'$.path')=json(?)")
-                values.append(json.dumps(feature["path"], sort_keys=True, separators=(",", ":")))
-            parts.append("json_extract(f.value,'$.role')=?")
-            values.append(feature["role"])
-            for field in ("identity", "state"):
-                if feature[field] is not None:
-                    parts.append(f"json_extract(f.value,'$.{field}')=json(?)")
-                    values.append(json.dumps(feature[field], sort_keys=True, separators=(",", ":")))
-            for name, scalar in feature["scalars"].items():
-                parts.append("EXISTS (SELECT 1 FROM json_each(f.value,'$.scalars') s WHERE s.key=? AND s.value=json(?))")
-                values.extend((name, json.dumps(scalar, separators=(",", ":"))))
-            if isinstance(value, ConcreteDefinition) and feature["class"] is not None:
-                parts.append("json_extract(f.value,'$.class')=json(?)")
-                values.append(json.dumps(feature["class"], separators=(",", ":")))
-            terms.append(f"EXISTS (SELECT 1 FROM json_each({payload}, '$.features') f WHERE " + " AND ".join(parts) + ")")
-            params.extend(values)
+            return None
+        return node_relation(value)
 
+    relations = []
     for restriction in query.restrictions:
         if restriction.kind == "sel":
-            pattern(restriction.value)
-    return family, " AND ".join(terms) or "1", tuple(params)
+            relation = pattern(restriction.value)
+            if relation is not None:
+                relations.append(relation)
+        elif restriction.kind == "object_id":
+            from ...definition import Definition
+            relations.append(node_relation(Definition().with_identity(restriction.value)))
+    if relations:
+        relation_sql = " INTERSECT ".join("SELECT node FROM " + relation for relation in relations)
+        terms.append(field("p", "fact") + " IN (WITH " + ",".join(ctes) + " " + relation_sql + ")")
+        params.extend(arguments)
+    elif any(r.kind in {"sel", "object_id", "namespace", "contains"} for r in query.restrictions):
+        if scan_admission is not None:
+            scan_admission()
+    return family, " AND ".join(terms) or "1", tuple(params), "store_discovery_fact" if relations else None
+
+
+def _store_discovery_page_sql(plan, *, after=None, page_size):
+    """Build a bounded keyset page, forcing the selective contribution seek.
+
+    SQLite otherwise prefers its ordering index and scans every contribution,
+    even when the independently evaluated posting relation is empty.
+    """
+    family, where, params, seek_index = plan
+    order = ("p.source,p.row_key" if family == "manifest" else
+             "json_extract(CAST(p.payload AS TEXT),'$.key_kind'),json_extract(CAST(p.payload AS TEXT),'$.digest'),p.source,p.row_key")
+    clause, arguments = ("", ()) if after is None else (
+        " AND (" + order + ") > (" + ",".join("?" for _ in after) + ")", after)
+    table = "store_projection_rows p" + (" INDEXED BY " + seek_index if seek_index else "")
+    return ("SELECT p.source,p.row_key,p.payload FROM " + table + " WHERE p.family=? AND (" + where + ")" +
+            clause + " ORDER BY " + order + " LIMIT ?", (family, *params, *arguments, page_size))
 
 import warnings
 from dataclasses import dataclass

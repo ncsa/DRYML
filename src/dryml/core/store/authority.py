@@ -28,8 +28,9 @@ class StoreCutChanged(StoreAuthorityError):
 class StoreMutationError(StoreAuthorityError, OSError):
     """Failed mutation with inspectable confirmed references and repair evidence.
 
-    mutation_id, cut, confirmed_refs and index_disposition describe actual
-    persisted evidence, not rollback or complete publication. recovery_attempt
+    mutation_id, cut, confirmed_refs and index_disposition describe observed
+    publication and journal evidence, not confirmed durability, rollback or
+    complete publication. recovery_attempt
     identifies the attempted classification/index-maintenance recovery. The original IO or
     classification failure is retained as the exception cause.
     """
@@ -74,6 +75,9 @@ class PreparedMutation:
     the exact resulting record bytes and full state metadata from these changes.
     owner is the opaque preparing Store handle's token; another handle refuses it.
     Applying stale facts raises StoreCutChanged before effects.
+    Pending, classified and acknowledged journal frames are budgeted before IO,
+    including the largest intermediate value for every repeated path. Oversized
+    evidence raises StoreRecordError before intent or authority publication.
     """
 
     cut: AuthorityRecord
@@ -98,22 +102,55 @@ class PreparedMutation:
         if any(type(change) is not PreparedChange for change in self.changes):
             raise TypeError("Prepared changes cannot contain callbacks.")
         # The same closed decoder validates externally supplied prepared facts.
-        _intent(self, str(uuid4())).to_bytes()
+        _preflight_journal(_intent(self, str(uuid4())))
 
 
 def _intent(batch, identity):
     return MutationIntentRecord(_json_bytes({
         "mutation_id": identity, "store_uuid": batch.cut.store_uuid, "base_epoch": batch.cut.epoch,
         "scopes": list(batch.scopes), "transitions": [c.to_data() for c in batch.changes],
-        "confirmed": [], "projection": [], "epoch": None, "status": "pending"}))
+        "confirmed": [], "projection": [], "epoch": None, "status": "pending",
+        "persistence_confirmed": False}))
+
+
+def _preflight_journal(record):
+    record.to_bytes()
+    data = record.intent
+    largest = {}
+    for transition in data["transitions"]:
+        key = (transition["path"], transition["kind"])
+        candidates = (largest.get(key), transition["before"], transition["after"])
+        # Classification observes initial bytes or any installed intermediate,
+        # not necessarily the last transition's after value. Base64 is ASCII,
+        # so string length orders its exact canonical JSON byte contribution.
+        largest[key] = max(candidates, key=lambda value: 4 if value is None else len(value) + 2)
+    data.update(confirmed=[path for path, _ in largest],
+                projection=[{"path": path, "kind": kind, "value": value}
+                            for (path, kind), value in largest.items()],
+                epoch=data["base_epoch"] + 1)
+    for status in ("classified", "acknowledged"):
+        data["status"] = status
+        data["persistence_confirmed"] = status == "acknowledged"
+        MutationIntentRecord(_json_bytes(data)).to_bytes()
 
 
 _READ = ContextVar("dryml_store_detached_read", default=None)
 
 
 def raw(store, relative):
-    """Read bounded regular-file bytes or None, without graph decoding."""
+    """Read bounded regular-file bytes or None, without graph decoding.
+
+    Store-relative journal paths use MutationIntentRecord's family bound; all
+    product witnesses retain the 16 MiB record bound. Invalid paths, nonregular
+    files and oversized bytes raise Store authority/record errors before use.
+    """
     _normalized_file_path(relative)
+    limit = _MAX_RECORD_BYTES
+    if relative == "mutation-prepare.record":
+        limit = MutationIntentRecord.max_bytes
+    elif os.path.dirname(relative) == "mutations" and relative.endswith(".record"):
+        _uuid_value(os.path.basename(relative)[:-7])
+        limit = MutationIntentRecord.max_bytes
     path = os.path.join(store.base_dir, relative)
     try:
         mode = os.lstat(path).st_mode
@@ -123,8 +160,8 @@ def raw(store, relative):
     if not stat.S_ISREG(mode):
         raise StoreAuthorityError("Authority byte witness is not a regular file.")
     with open(path, "rb") as source:
-        result = source.read(_MAX_RECORD_BYTES + 1)
-    if len(result) > _MAX_RECORD_BYTES:
+        result = source.read(limit + 1)
+    if len(result) > limit:
         raise StoreAuthorityError("Oversized authority byte witness.")
     observe(store, path, result)
     return result
@@ -239,7 +276,7 @@ def variant_evidence(store, path):
                         "data": os.path.isdir(os.path.join(store.base_dir, path, "data"))})
 
 
-def _classify(store, record, cut):
+def _classify(store, record, cut, *, persistence_confirmed=False):
     data = record.intent
     if data["status"] != "pending":
         if data["epoch"] > cut.epoch:
@@ -259,7 +296,8 @@ def _classify(store, record, cut):
             confirmed.append(transition["path"])
         projection.append({"path": transition["path"], "kind": transition["kind"], "value": encode(actual)})
     epoch = cut.epoch + int(changed)
-    data.update(confirmed=confirmed, projection=projection, epoch=epoch, status="classified")
+    data.update(confirmed=confirmed, projection=projection, epoch=epoch, status="classified",
+                persistence_confirmed=persistence_confirmed)
     classified = MutationIntentRecord(_json_bytes(data))
     # Persist classification before its cut, so a failed cut write is replayable.
     store._atomic_write(_path(store, data["mutation_id"]), classified.to_bytes())
@@ -269,12 +307,35 @@ def _classify(store, record, cut):
     return classified, result
 
 
+def _confirm_persistence(store, record, cut):
+    data = record.intent
+    if data["persistence_confirmed"]:
+        return record
+    try:
+        store._persist_authority_projection(record)
+        data["persistence_confirmed"] = True
+        confirmed = MutationIntentRecord(_json_bytes(data))
+        store._atomic_write(_path(store, data["mutation_id"]), confirmed.to_bytes())
+        return confirmed
+    except BaseException as error:
+        if not isinstance(error, Exception):
+            error.mutation_id, error.cut = data["mutation_id"], cut
+            error.confirmed_refs, error.index_disposition = tuple(data["confirmed"]), "repair_pending"
+            error.recovery_attempt = "authority-persistence"
+            raise
+        outcome = StoreMutationError(str(error), data["mutation_id"], cut, data["confirmed"])
+        outcome.recovery_attempt = "authority-persistence"
+        raise outcome from error
+
+
 def recover(store):
-    """Classify only captured pending intents under the writer fence.
+    """Classify captured intents and confirm their native persistence barriers.
 
     Returns their immutable records. No authoritative records are deleted or
     missing transitions executed. Corrupt/ambiguous evidence fails explicitly;
     no hooks, payload authentication or graph preparation runs during recovery.
+    Visibility classification survives failed barrier retries; StoreMutationError
+    retains the mutation/cut receipt until persistence can be confirmed.
     """
     with store.writer_lock():
         cut = read_cut(store)
@@ -304,6 +365,7 @@ def recover(store):
             if record is None or record.intent["mutation_id"] != identity or record.intent["store_uuid"] != cut.store_uuid:
                 raise StoreAuthorityError("Missing or mismatched pending mutation intent.")
             record, cut = _classify(store, record, cut)
+            record = _confirm_persistence(store, record, cut)
             results.append(record)
         return tuple(results)
 
@@ -314,6 +376,9 @@ def acknowledge(store, identity, epoch):
     The caller must have incorporated its replay projection/coverage at epoch.
     Returns the resulting AuthorityRecord. Wrong/missing evidence raises
     StoreAuthorityError before acknowledgement; failures retain pending evidence.
+    Store-owned native persistence repair precedes acknowledgement even when a
+    caller already holds an exact SQLite receipt. Barrier failures carry the
+    mutation/cut in StoreMutationError rather than promoting visible authority.
     """
     with store.writer_lock():
         cut = read_cut(store)
@@ -324,6 +389,7 @@ def acknowledge(store, identity, epoch):
             raise StoreAuthorityError("Acknowledgement does not match classified mutation/cut.")
         if identity not in cut.pending:
             return cut
+        record = _confirm_persistence(store, record, cut)
         data = record.intent
         data["status"] = "acknowledged"
         store._atomic_write(_path(store, identity), MutationIntentRecord(_json_bytes(data)).to_bytes())
@@ -360,8 +426,9 @@ def apply(store, batch, *, _acknowledge_nonpersistent=False):
             if (pending is None or pending.intent["mutation_id"] != pending_id
                     or pending.intent["store_uuid"] != batch.cut.store_uuid):
                 raise StoreAuthorityError("Missing or mismatched pending mutation evidence.")
-            if pending.intent["status"] == "pending" or pending.intent["epoch"] > batch.cut.epoch:
-                raise StoreCutChanged("Unclassified publication is pending; recover authority and reprepare.")
+            if (pending.intent["status"] == "pending" or not pending.intent["persistence_confirmed"]
+                    or pending.intent["epoch"] > batch.cut.epoch):
+                raise StoreCutChanged("Unclassified or persistence-pending publication; recover authority and reprepare.")
         predicted, initial = {}, {}
         for change in batch.changes:
             key = (change.path, change.kind)
@@ -395,7 +462,7 @@ def apply(store, batch, *, _acknowledge_nonpersistent=False):
                                       cleanup_directory=os.path.dirname(target), missing_ok=True)
                 else:
                     store._atomic_write(target, change.after)
-            record, cut = _classify(store, record, cut)
+            record, cut = _classify(store, record, cut, persistence_confirmed=True)
             if _acknowledge_nonpersistent:
                 cut = acknowledge(store, identity, record.intent["epoch"])
             return identity, cut

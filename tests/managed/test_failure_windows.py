@@ -5,7 +5,6 @@ from __future__ import annotations
 import multiprocessing
 import os
 import shutil
-import warnings
 from uuid import UUID
 
 import pytest
@@ -14,9 +13,8 @@ pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 
 from dryml.core import Repo
 from dryml.core.object import Pickleable
-from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
-from dryml.managed import ManagedConfig, ManagedControlError, ManagedInterrupted, ManagedPublicationError, managed_operation
+from dryml.managed import ManagedConfig, ManagedInterrupted, managed_operation
 from dryml.managed.control import ManagedControlStore
 from dryml.managed import context as context_module
 from dryml.managed import runtime as runtime_module
@@ -104,7 +102,6 @@ def test_u15_post_hook_failure_invalidates_live_but_preserves_old_current(tmp_pa
 
 def test_u15_interrupt_during_preparation_fences_next_admission_cas(tmp_path, monkeypatch):
     from tests.managed.u15_fixtures import Value, enter, seed, setup
-    from dataclasses import replace
     control, live, saved = setup(tmp_path)
     old = seed(control, live, saved, state="running")
     original = control.state_repo.prepare_restore
@@ -202,7 +199,7 @@ def test_u15_interrupt_after_admission_preserves_new_run_and_blocks_execution(tm
 
 @pytest.mark.parametrize("failure", ["grant_error", "disconnected", "physical_garbage"])
 def test_u15_only_unreferenced_physical_garbage_failure_is_a_cleanup_report(tmp_path, monkeypatch, failure):
-    from tests.managed.u15_fixtures import Value, enter, setup
+    from tests.managed.u15_fixtures import enter, setup
     from dryml.core.store.retention import RetentionAuthority, StateRemovalOutcome
     from dataclasses import replace
     control, live, saved = setup(tmp_path)
@@ -886,6 +883,36 @@ def test_spawned_result_finalization_recovery_terminates_without_hooks(tmp_path,
                 for publication in root.publications:
                     assert store.retention.read(publication.retention_token).disposition == "released"
     assert (CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores) == counts
+
+
+@pytest.mark.parametrize("stale", ["run_id", "invocation_id", "generation", "release_pending"])
+def test_finalization_recovery_refuses_stale_prepared_final(tmp_path, stale):
+    """Adopted physical grants cannot promote a retired or mismatched final intent."""
+    from dataclasses import replace
+    from pathlib import Path
+    from uuid import UUID, uuid4
+
+    store, live = _terminate_at_boundary(tmp_path, "complete", "provisional_handoff")
+    repo = Repo._for_state_io((store,))
+    try:
+        control = ManagedControlStore(store, repo)
+        operation_id = live.complete.status(state_repo=repo).operation_id
+        preparation = control.read_preparation(operation_id)
+        root, = preparation.proposed.intents
+        assert root.kind == "final" and root.disposition == "prepared"
+        assert store.retention.read(str(UUID(root.token))).disposition == "adopted"
+        changes = ({"disposition": stale} if stale == "release_pending" else
+                   {stale: root.generation - 1 if stale == "generation" else uuid4().hex})
+        changed = replace(preparation, proposed=replace(preparation.proposed,
+            intents=(replace(root, **changes),)))
+        Path(control._preparation_path(operation_id)).write_bytes(changed.to_bytes())
+        counts = CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores
+        outcome = live.complete(managed=ManagedConfig(state_repo=repo))
+        assert outcome.disposition == "finalization_incomplete"
+        assert outcome.current.state == "failed" and outcome.current.final is None
+        assert (CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores) == counts
+    finally:
+        repo.close(flush=False)
 
 
 def test_spawned_incomplete_finalization_keeps_latest_then_separate_resume_restores(tmp_path):

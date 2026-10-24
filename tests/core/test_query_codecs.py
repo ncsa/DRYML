@@ -38,7 +38,7 @@ class CodecLeaf(Object):
 def test_cdef_codec_roundtrip():
     cdef = CodecLeaf("roundtrip").definition
 
-    assert decode_cdef(encode_cdef(cdef)) == cdef
+    assert decode_cdef(encode_cdef(cdef)).graph_equal(cdef)
 
 
 def test_cdef_codec_roundtrips_inert_concrete_factory_values():
@@ -86,7 +86,7 @@ def test_query_index_codec_facade_roundtrips_all_payloads():
     path = GraphPath((Arg(0), Kwarg("items"), Index(1), Key("name"), SetMember("abc", 2)))
 
     assert codec.version == QUERY_INDEX_CODEC_VERSION
-    assert codec.decode_cdef(codec.encode_cdef(cdef)) == cdef
+    assert codec.decode_cdef(codec.encode_cdef(cdef)).graph_equal(cdef)
     assert codec.decode_feature_token(codec.encode_feature_token(token)) == token
     assert codec.decode_graph_path(codec.encode_graph_path(path)) == path
     assert codec.digest_blob(b"payload") == digest_blob(b"payload")

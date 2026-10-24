@@ -214,6 +214,7 @@ def test_private_v2_pipeline_binds_declared_defaults_without_constructor_hooks(m
         "parameters",
         "stateful_role",
         "stable_hash_cache",
+        "node_view",
     }
     assert state["parameters"] == cdef["parameters"]
     assert state["stateful_role"] is False
@@ -221,9 +222,9 @@ def test_private_v2_pipeline_binds_declared_defaults_without_constructor_hooks(m
         "dryml.core.canonical.resolve_symbol",
         lambda *args, **kwargs: pytest.fail("persisted V2 decoding must not resolve classes"),
     )
-    restored = object.__new__(ConcreteDefinition)
+    restored = object.__new__(type(cdef))
     restored.__setstate__(state)
-    assert restored == cdef
+    assert restored.graph_equal(cdef)
 
 
 def test_public_exact_constructor_uses_v2_binding_and_compatibility_projection():
@@ -246,7 +247,7 @@ def test_v2_thaw_uses_current_signature_projection_for_all_parameter_kinds():
 
     thawed = thaw_concrete(cdef)
 
-    assert thawed.concretize() == cdef
+    assert thawed.concretize().graph_equal(cdef)
 
 
 def test_private_v2_defaults_are_snapshotted_and_change_identity_later():

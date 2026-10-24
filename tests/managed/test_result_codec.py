@@ -100,6 +100,185 @@ def test_unordered_metadata_keeps_independent_equal_nodes_aliases_quotes_and_con
     assert details["external"].state != details["external"].construction_view.state
 
 
+def related_metadata_result():
+    """Return related roots, an independent equal root, specs and container aliases."""
+    from dryml.core import Definition
+    from tests.managed.test_control_codec import unordered_saved_receiver
+    from tests.managed.test_u14_authority import Experiment
+    parent = unordered_saved_receiver()
+    details = parent.parameters["dataset"]
+    child = details["external"]
+    independent = next(v for v in details["members"] if v is not details["chosen"]
+                       and v.graph_equal(details["chosen"]))
+    roots = [parent, child, details["chosen"], Definition(Experiment, child).concretize(),
+             independent, parent.identity_spec(), parent.state_spec(), child.construction_view,
+             child.state, child.state.key, child.object_id, details["quoted"].value,
+             details["reference"].target]
+    return {"roots": roots, "again": roots}
+
+
+def assert_related_metadata_result(value):
+    """Check cross-root occurrences, exact facets, roles and retained construction."""
+    (parent, child, chosen, second_parent, independent, identities, states,
+     construction, state, key, identity, quoted, referenced) = value["roots"]
+    assert value["again"] is value["roots"]
+    details = parent.parameters["dataset"]
+    assert details["external"] is child
+    assert details["chosen"] is chosen
+    assert chosen.parameters["dataset"] is second_parent.parameters["dataset"] is child
+    assert independent.graph_equal(chosen) and independent is not chosen
+    assert independent.parameters["dataset"] is child
+    assert identities.root is states.root is parent
+    assert construction is child.construction_view
+    assert state == child.state and key == child.state.key and identity == child.object_id
+    assert child.state != child.construction_view.state
+    assert details["reference"].target is referenced
+    assert any(v is referenced for v in details["members"])
+    assert details["quoted"].value is quoted
+
+
+def test_related_metadata_roots_share_occurrences_and_recompose_exactly(monkeypatch):
+    from dryml.core import Definition
+    from tests.managed.test_control_codec import force_fresh_handle_order
+    from tests.managed.test_u14_authority import Experiment
+    flip = force_fresh_handle_order(monkeypatch)
+    value = related_metadata_result()
+    payload = encode_result(value)
+    flip()
+    restored = decode_result(payload)
+    assert_related_metadata_result(restored)
+    assert Definition(Experiment, value["roots"][:5]).graph_equal(Definition(Experiment, restored["roots"][:5]))
+
+
+def test_metadata_is_encoded_and_decoded_once_for_all_result_views(monkeypatch):
+    from dryml.core import node_codec
+    calls = []
+    original_encode, original_decode = node_codec.encode_node_graph, node_codec._decode_node_graph_views
+    def encode(prepared, *args, **kwargs):
+        calls.append(("encode", len(prepared.roots)))
+        return original_encode(prepared, *args, **kwargs)
+    def decode(graph, *args, **kwargs):
+        calls.append(("decode", len(graph["views"])))
+        return original_decode(graph, *args, **kwargs)
+    monkeypatch.setattr(node_codec, "encode_node_graph", encode)
+    monkeypatch.setattr(node_codec, "_decode_node_graph_views", decode)
+    payload = encode_result(related_metadata_result())
+    packet = json.loads(payload)
+    rows = [row for row in packet["nodes"] if row[0] == "metadata"]
+    assert rows == [["metadata", index] for index in range(len(rows))]
+    assert len(packet["metadata"]["tables"]) == 1
+    assert_related_metadata_result(decode_result(payload))
+    assert calls == [("encode", len(rows)), ("decode", len(rows))]
+
+
+@pytest.mark.parametrize("change", ["old_result", "old_graph", "missing_graph", "shared_blocks",
+    "block_hash", "unused_block", "missing_block", "view_kind", "view_key", "view_table",
+    "view_slot", "bool_slot", "duplicate_view", "unadvertised_root", "result_view", "bool_view",
+    "unused_view", "broader_metadata", "wrapper_facets", "extra_table"])
+def test_malformed_shared_metadata_refuses_before_resources_or_materialization(monkeypatch, change):
+    from dryml.core import Definition, ObjectId, Repo
+    from dryml.core import node_codec, node_prepare, symbol
+    from dryml.core.store.dir import DirStore
+    from tests.managed.test_u14_authority import Dataset
+    node = Definition(Dataset).concretize()
+    packet = json.loads(encode_result([node, Definition(Dataset, value=2).concretize()]))
+    graph = packet["metadata"]
+    row = next(row for row in packet["nodes"] if row[0] == "metadata")
+    if change == "old_result": packet["version"] = 1
+    elif change == "old_graph": graph["identity_version"] = 2
+    elif change == "missing_graph": packet["metadata"] = None
+    elif change == "shared_blocks": graph["tables"] = []
+    elif change == "block_hash": next(iter(graph["values"].values()))["extra"] = True
+    elif change == "unused_block":
+        record = {"tag": "str", "value": "unused"}
+        graph["values"][node_prepare._digest("dryml-node-values/v1", record)] = record
+    elif change == "missing_block": graph["values"].pop(next(iter(graph["values"])))
+    elif change == "view_kind": graph["views"][0]["view"] = "creation"
+    elif change == "view_key": graph["views"][0]["expected_key"] = "forged"
+    elif change == "view_table": graph["views"][0]["table"] = "0" * 64
+    elif change == "view_slot": graph["views"][0]["slot"] = 99999
+    elif change == "bool_slot": graph["views"][0]["slot"] = False
+    elif change == "duplicate_view": graph["views"].append(dict(graph["views"][0]))
+    elif change == "unadvertised_root": graph["views"].pop()
+    elif change == "result_view": row[1] = 99999
+    elif change == "bool_view": row[1] = False
+    elif change == "unused_view": row[:] = ["none"]
+    elif change in {"broader_metadata", "wrapper_facets"}:
+        wrapper = Definition._from_prepared_parameters(None, {"value": (1,) if change == "broader_metadata" else node})
+        if change == "wrapper_facets": wrapper = wrapper.with_identity(ObjectId())
+        packet = json.loads(encode_result(node))
+        packet["metadata"] = node_codec.encode_node_graph(node_prepare.NodePreparation((wrapper,)))
+    else: graph["tables"]["0" * 64] = next(iter(graph["tables"].values()))
+    payload = json.dumps(packet).encode()
+    def forbidden(*args, **kwargs): pytest.fail("result decoder opened a resource or materialized metadata")
+    monkeypatch.setattr("builtins.open", forbidden)
+    monkeypatch.setattr(DirStore, "__init__", forbidden)
+    monkeypatch.setattr(Repo, "load", forbidden)
+    monkeypatch.setattr(symbol, "resolve_symbol", forbidden)
+    with pytest.raises(ManagedResultError): decode_result(payload)
+
+
+def test_result_and_shared_metadata_bounds_remain_closed(monkeypatch):
+    from dryml.managed import result_codec as codec
+    from dryml.core import Definition
+    from tests.managed.test_u14_authority import Dataset
+    shallow = [Definition(Dataset).concretize()]
+    payload = encode_result(shallow)
+    with monkeypatch.context() as patch:
+        patch.setattr(codec, "_MAX_NODES", 3)
+        with pytest.raises(ManagedResultError): encode_result(shallow)
+        with pytest.raises(ManagedResultError): decode_result(payload)
+    graph = Definition(Dataset)
+    for _ in range(4): graph = Definition(Dataset, value=graph)
+    payload = encode_result(graph)
+    with monkeypatch.context() as patch:
+        patch.setattr(codec, "_MAX_DEPTH", 3)
+        with pytest.raises(ManagedResultError): encode_result(graph)
+        with pytest.raises(ManagedResultError): decode_result(payload)
+    nested = 1
+    for _ in range(81): nested = [nested]
+    with pytest.raises(ManagedResultError): encode_result(nested)
+    packet = {"schema": "dryml-managed-result", "version": 2, "metadata": None,
+              "nodes": [["none"]] + [["list", [i]] for i in range(81)], "root": 81}
+    with pytest.raises(ManagedResultError): decode_result(json.dumps(packet).encode())
+    packet["nodes"] = [["none"]] * (codec._MAX_NODES + 1)
+    with pytest.raises(ManagedResultError): decode_result(json.dumps(packet).encode())
+
+
+def test_v1_result_bytes_references_and_namespace_refuse_intact(tmp_path, monkeypatch):
+    import hashlib
+    from pathlib import Path
+    from uuid import uuid4
+    from dryml.managed import results
+    from dryml.managed.control import _projection_reader, _validate_projection_namespace
+    from dryml.managed.errors import ManagedControlError
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+    from dryml.managed.control import ManagedControlStore
+    store = DirStore(tmp_path / "state", query_index="none")
+    ManagedControlStore(store, Repo(store)).initialize()
+    payload = b'{"nodes":[["str","old"]],"root":0,"schema":"dryml-managed-result","version":1}'
+    key = hashlib.sha256(payload).hexdigest()
+    path = Path(store.base_dir, "managed", "results", "v1", key[:2], key, "current.json")
+    path.parent.mkdir(parents=True)
+    path.write_bytes(payload)
+    with pytest.raises(ManagedResultError): decode_result(path.read_bytes())
+    with pytest.raises(ManagedResultError): results.ResultReference.from_data({"kind": "dryml-managed-result", "version": 1, "key": key})
+    with pytest.raises(ManagedControlError): _projection_reader(store._relative(path))
+    with pytest.raises(ManagedControlError, match="legacy result"): _validate_projection_namespace(store)
+    def forbidden(*args, **kwargs): pytest.fail("old result reached source open/publication")
+    monkeypatch.setattr(store, "_prepare_and_apply", forbidden)
+    with pytest.raises(ManagedResultError): results.publish_result(store, payload)
+    assert "/results/v2/" in results.result_path(store, key)
+    reference = results.ResultReference(key)
+    object.__setattr__(reference, "version", 1)
+    source = results.ResultSource(str(tmp_path / "missing"), str(uuid4()))
+    monkeypatch.setattr(results, "DirStore", forbidden)
+    monkeypatch.setattr(results.os.path, "isfile", forbidden)
+    with pytest.raises(ManagedResultError, match="invalid_result_reference"): source.read(reference)
+    assert path.read_bytes() == payload
+
+
 def test_content_address_collision_never_substitutes_hash_for_complete_bytes(tmp_path, monkeypatch):
     from tests.managed.u16_fixtures import setup
     from dryml.managed import results

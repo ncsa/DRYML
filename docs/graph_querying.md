@@ -3,8 +3,8 @@
 ## Current Node Sources and Local-State Discovery
 
 `Repo.query()` and `Store.query()` execute against Store 4 authority. Ready SQLite
-schema-10 indexes supply contribution-scoped discovery postings. Rows reference
-the existing authenticated root/block and typed occurrence path; they are derived
+schema-11/coverage-3 indexes supply contribution-scoped discovery postings. Rows reference
+the existing authenticated root/block and portable table/overlay occurrence locator; they are derived
 postings, not another authoritative graph representation.
 
 Choose the question explicitly:
@@ -60,6 +60,18 @@ ObjectId anchors are checked in every participating Store, including Stores whos
 candidate relation is empty. Missing/incompatible established anchors refuse the
 query. Negative/count answers require the complete requested coverage and mutation
 guards, independently of returned candidates.
+
+ObjectId, full-StateKey and supplied local string/integer/boolean/None constraints
+seek indexed local postings and direct occurrence-correlated edges, then join root
+contributions. Local facts are stored once per block/view, not as each descendant's
+complete feature list. Tied-set ordinals are presentation paths, never persisted
+occurrence identity. Aliases, unordered assignment and quotations remain exact
+residual obligations. A predicate without a supported safe anchor (for example,
+class-only, negation-only or unsupported scalar/support-only selection) visibly
+uses scan policy; `require_indexed()` and `scan_policy("forbid")` refuse before
+refresh/recovery inventory. Explicit domain enumeration without a selector remains
+available from its complete certified relation. Compatibility-only local-state
+discovery currently needs scan admission; exact-origin discovery seeks its bucket.
 
 `page_size(n)` bounds candidate pages. A short Store/SQLite cut captures candidate
 keys and immutable authority bytes. Connections/transactions and writer-blocking
@@ -119,6 +131,11 @@ members use a whole-assignment witness, including joins outside the set.
 `categorical(...)` can explicitly weaken recipe fields while retaining facets,
 aliases and roles. Existing `Match` leaves remain supported; a runtime
 `Satisfies` callable is not executed or serialized during graph preparation.
+`Exact(...)` compares nested Node values semantically, including their alias
+partition, roles, facets and quoted data; independent decoded handles need not
+compare equal in Python. A fully specified `FactorySpec` matches its complete
+argument/keyword shape. A factory containing `Match` leaves instead constrains
+the supplied pattern fields and permits additional candidate keyword fields.
 
 Use `QueryPredicate` only for the additional closed forms:
 
@@ -190,8 +207,14 @@ existing API returns multiple retained Objects.
 from dryml.core import Definition
 
 models = repo.query().sel(Definition(Model)).cdefs().stored().collect()
-model = repo.load_object(models.one())
+model = repo.build(models.one())
 ```
+
+`cdefs()` returns concrete recipe Nodes, not necessarily complete saved graphs.
+`repo.build(concrete_recipe_node)` constructs the selected recipe, allocating
+missing identities and initializing unspecified state. To restore a complete
+SavedNode selected with `saved()` / `state_refs()`, use `repo.load(saved_node)` or
+`repo.load_state_ref(saved_node)`; loading does not initialize omitted state.
 
 `sel()` composes structural Definitions, complete CDefs, `Selector` values,
 Generator selectors, and exact references. Complete Definitions remain structural;
@@ -387,6 +410,9 @@ Direct occurrence terminals and both projections combine complete root-producer
 authority with external target metadata scopes before root or target filtering,
 including empty domains. Metadata holders contribute authority proof only, not
 candidate admissions or additional roots/targets.
+Fixed occurrence refinements retain their captured paths while reading explicit
+metadata scopes afresh at each terminal; those scopes remain subject to refresh,
+scan, and coverage controls without becoming discovery producers.
 
 ## Refresh Lifecycle And Scan Controls
 

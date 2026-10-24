@@ -219,94 +219,210 @@ def _definition_edges(value: ConcreteDefinition) -> Iterator[DirectRelationship]
         yield from _value_edges(value_edge.value, GraphPath((value_edge.segment,)))
 
 
-def _node_occurrences(root):
-    """Yield typed, role-preserving paths to unique immutable Node occurrences.
+def _local_discovery_fields(node):
+    """Read available field names without resolving an inert authored call.
 
-    Quoted configuration is a traversal barrier. Repeated aliases use their first
-    canonical path; the exact residual still compares the complete alias graph.
-    This private projection helper performs no authority or payload IO.
+    Unresolved soft calls retain positional paths and explicit keyword names.
+    Their positional values cannot supply named scalar postings, but real Node
+    children remain discoverable when the soft recipe is an independent root.
     """
-    from ..node import Node
-    seen = set()
+    from .node_pattern import _parameters
+    from ..utils.graph.path import Arg, Parameter
+
+    if not isinstance(node, ConcreteDefinition) and not isinstance(node.cls, type):
+        yield from ((Arg(index), value) for index, value in enumerate(node.args or ()))
+        yield from ((Parameter(name), value) for name, value in node.kwargs.items())
+    else:
+        yield from ((Parameter(name), value) for name, value in _parameters(node).items())
+
+
+def _local_discovery_edges(node):
+    """Yield direct Node edges only; paths are local presentation, never identity."""
+    from ..quoted import QuotedDef, SelectorSpec
 
     def walk(value, path, role="materialize"):
         if isinstance(value, DefLink):
             yield from walk(value.target, path, value.kind.value)
-        elif isinstance(value, (Node, ConcreteDefinition)):
-            key = value._view if isinstance(value, Node) else value._node_id
-            if key in seen:
-                return
-            seen.add(key)
+        elif isinstance(value, Node):
             yield path, role, value
-            if isinstance(value, Node):
-                from .node_pattern import _parameters
-                from ..utils.graph.path import Parameter
-                for name, child in _parameters(value).items():
-                    yield from walk(child, path.child(Parameter(name)))
-            else:
-                for edge in iter_value_edges(value):
-                    yield from walk(edge.value, path.child(edge.segment))
-        elif isinstance(value, (ObjectRef, StateRef)):
+        elif isinstance(value, (ObjectRef, StateRef, QuotedDef, SelectorSpec)):
             return
         else:
-            from ..quoted import QuotedDef, SelectorSpec
-            if isinstance(value, (QuotedDef, SelectorSpec)):
-                return
             for edge in iter_value_edges(value):
                 yield from walk(edge.value, path.child(edge.segment), role)
 
-    yield from walk(root, GraphPath())
+    for segment, value in _local_discovery_fields(node):
+        yield from walk(value, GraphPath((segment,)))
 
 
-def _discovery_features(root):
-    """Return necessary correlated occurrence facts, never a semantic proof."""
-    from ..symbol import maybe_symbol_ref, ImportRef
-    from .node_pattern import _parameters
-    result = []
-    for path, role, node in _node_occurrences(root):
-        cls = maybe_symbol_ref(node.cls)
-        scalars = {name: [type(value).__name__, value] for name, value in _parameters(node).items()
-                   if type(value) in (str, int, bool, type(None))}
-        result.append({"path": path.to_data(), "role": role,
-                       "identity": None if getattr(node, "object_id", None) is None else node.object_id.to_data(),
-                       "state": None if getattr(node, "state", None) is None else
-                       [node.state.key.cdef_digest, node.state.key.codec_hash],
-                       "class": [cls.module, cls.qualname] if isinstance(cls, ImportRef) else None, "scalars": scalars})
-    return result
+def _local_discovery_tokens(node):
+    """Return exact necessary local anchors, excluding subclass and absent facets."""
+    from ..utils.graph.path import Parameter
+    if node.object_id is not None:
+        yield ["identity", node.object_id.to_data()]
+    if node.state is not None:
+        yield ["state", node.state.key.cdef_digest, node.state.key.codec_hash]
+    for segment, value in _local_discovery_fields(node):
+        if isinstance(segment, Parameter) and type(value) in (str, int, bool, type(None)):
+            yield ["scalar", segment.name, type(value).__name__, value]
 
 
-def _discovery_rows(root, record):
-    """Derive contribution-scoped discovery postings from an authenticated root.
+class _DiscoveryPreparation:
+    """Operation-local shared semantic tables, without external authority proofs."""
 
-    Rows reference the original root/path; they do not persist a second graph.
-    Independent membership and each represented identity domain remain distinct.
+    def __init__(self, decoded_owner, block_digest):
+        from ..node_prepare import NodePreparation
+        from ..node_views import _project, OBJECT_PROJECTION_VIEW
+        from ..definition import ConcreteNode
+        self.decoded, self.block_digest = decoded_owner, block_digest
+        sources = [node for _, node in sorted(decoded_owner._transport_nodes.items())]
+        memo, adapted = {}, {}
+        self.creation = {id(n): n.creation_view() if isinstance(n, ConcreteDefinition) else n for n in sources}
+        self.objects = {id(n): _project(n, compatibility=False, _memo=memo, _adapted=adapted) for n in sources}
+        self.owner = NodePreparation((*sources, *self.creation.values(), *self.objects.values()), previous=decoded_owner,
+                                     max_cached_keys=decoded_owner.max_cached_keys,
+                                     max_cached_bytes=max(1, decoded_owner.max_cached_bytes // 8))
+        self.fact_keys = {}
+        # Preparation slots can change when tied unordered values are traversed
+        # in a different order. A later membership delta must still join facts
+        # written earlier for the same immutable block, without rewriting it.
+        for node in sources:
+            locator = decoded_owner._transport_locators[id(node)]
+            self.fact_keys[node._view] = block_digest + ":" + locator["table"] + ":" + str(locator["slot"])
+        for projection, selections in (("creation", self.creation), ("object", self.objects)):
+            for node in sources:
+                selected = selections[id(node)]
+                self.fact_keys.setdefault(selected._view, self.fact_keys[node._view] + ":" + projection)
+        self.edges = {id(n): tuple(_local_discovery_edges(n)) for n in self.owner.nodes}
+        self.summaries = {}
+        identities, occurrences = {}, {}
+
+        def summary(node):
+            marker = id(node)
+            if marker in self.summaries:
+                return self.summaries[marker]
+            occurrence = occurrences.setdefault(node._occurrence, len(occurrences))
+            stateful = isinstance(node, ConcreteNode) and node._stateful_role
+            oid = node.object_id
+            identity = 0 if not stateful or oid is None else 1 << identities.setdefault(oid, len(identities))
+            owned = (1 << occurrence) if stateful else 0
+            has_id, has_state = oid is not None, node.state is not None
+            complete = isinstance(node, ConcreteNode) and (not stateful or has_id and has_state)
+            # Legacy references are not admitted by require_saved's owned grammar.
+            def legacy(value):
+                if isinstance(value, (ObjectRef, StateRef)):
+                    return True
+                if isinstance(value, DefLink):
+                    return value.kind.value == "materialize" and legacy(value.target)
+                if isinstance(value, Node):
+                    return False
+                return any(legacy(edge.value) for edge in iter_value_edges(value))
+            complete &= not any(legacy(v) for _, v in _local_discovery_fields(node))
+            for _, role, child in self.edges[marker]:
+                if role != "materialize":
+                    continue
+                ci, cs, cc, co, ids = summary(child)
+                has_id |= ci
+                has_state |= cs
+                complete &= cc
+                owned |= co
+                identity |= ids
+            result = has_id, has_state, complete and owned.bit_count() == identity.bit_count(), owned, identity
+            self.summaries[marker] = result
+            return result
+        for node in sources:
+            summary(node)
+        self.object_domain = OBJECT_PROJECTION_VIEW.name
+
+    def fact_key(self, node):
+        return self.fact_keys[node._view]
+
+    def object_digest(self, node):
+        import hashlib
+        key = self.owner.semantic_key(node, policy=self.object_domain)
+        return hashlib.sha256(self.object_domain.encode("ascii") + b"\0" + key).hexdigest()
+
+    def facts(self):
+        """Yield each local token/edge once per authenticated block, not per root."""
+        from ..store.records import _json_bytes
+        for node in self.owner.nodes:
+            parent = self.fact_key(node)
+            for token in _local_discovery_tokens(node):
+                encoded = _json_bytes(token).decode("ascii")
+                yield "discovery_feature", parent + ":" + encoded, {"node": parent, "token": encoded}
+            for ordinal, (path, role, child) in enumerate(self.edges[id(node)]):
+                # Unordered ordinals/fingerprints are intentionally not persisted.
+                unordered = any(s["kind"] == "set_member" for s in path.to_data()["segments"])
+                yield "discovery_link", parent + ":" + str(ordinal), {
+                    "parent": parent, "child": self.fact_key(child), "role": role,
+                    "path": None if unordered else path.to_data()}
+
+
+def _discovery_preparation(decoded_owner, block_digest):
+    """Borrow bounded immutable query facts under the decoded owner's existing LRU.
+
+    Eviction/clear changes work only. Reserve the entire child fact budget, charge
+    derived tables/handles conservatively, and retain no membership/availability
+    or validation verdict. The caller still authenticates fresh source bytes.
     """
-    from ..node import _as_node_view, require_saved
-    from ..node_prepare import NodePreparation
-    for path, _, value in _node_occurrences(root):
-        node = _as_node_view(value)
-        choices = [("cdef", "creation", node.creation_view())] if isinstance(node, ConcreteDefinition) else [("cdef", "recipe", node)]
-        if node.identity_spec() or record.root_kind == "saved":
-            choices.append(("object_ref", "object", node.object_view()))
-        if node.state_spec() or record.root_kind == "saved":
-            try:
-                require_saved(node)
-            except (TypeError, ValueError):
-                pass
-            else:
-                choices.append(("state_ref", "saved", node))
+    from ..node_prepare import _metadata_size
+    key = ("discovery-preparation", block_digest)
+    with decoded_owner._lock:
+        cached = decoded_owner._facts.get(key)
+        if cached is not None:
+            decoded_owner._facts.move_to_end(key)
+            return cached
+        p = _DiscoveryPreparation(decoded_owner, block_digest)
+        edges = {marker: tuple((path.to_data(), role, id(child)) for path, role, child in links)
+                 for marker, links in p.edges.items()}
+        metadata = (p.owner._rows, p.owner._children, p.owner._closures, p.owner._incidences,
+                    p.owner._construction, edges, p.summaries,
+                    tuple(p.creation), tuple(p.objects), tuple(p.fact_keys.values()))
+        size = 2048 + 4096 * len(p.owner.nodes) + 4 * _metadata_size(metadata, decoded_owner.max_cached_bytes // 4)
+        decoded_owner._cache_put(key, p, size + p.owner.max_cached_bytes)
+        return p
+
+
+def _discovery_rows(root, record, *, preparation=None):
+    """Yield compact source contributions using portable authenticated locators.
+
+    A supplied block preparation serves every requested descendant/domain. Local
+    facts are exported separately once for the block; no row embeds a subtree.
+    The private convenience form decodes the block representation when no owner
+    is supplied, so it follows the same portable-locator contract.
+    """
+    if preparation is None:
+        from ..node_codec import encode_node_graph, _decode_node_graph_views
+        from ..node_prepare import NodePreparation
+        packet = encode_node_graph(NodePreparation((root,)))
+        roots, owner = _decode_node_graph_views(packet, with_owner=True)
+        preparation = _discovery_preparation(owner, record.block_digest)
+        root = roots[0]
+    p = preparation
+    pending, seen = [root], set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        pending.extend(child for _, _, child in reversed(p.edges[id(node)]))
+        has_id, has_state, saved, _, _ = p.summaries[id(node)]
+        choices = [("cdef", "creation" if isinstance(node, ConcreteDefinition) else "recipe", p.creation[id(node)])]
+        if has_id or record.root_kind == "saved":
+            choices.append(("object_ref", "object", p.objects[id(node)]))
+        if saved and (has_state or record.root_kind == "saved"):
+            choices.append(("state_ref", "saved", node))
         for kind, projection, selected in choices:
-            prepared = NodePreparation((selected,))
-            yield {"kind": kind, "digest": prepared.digest(selected), "root": record.to_data(),
-                   "key_kind": kind,
-                   "object_digest": selected.object_projection_digest() if kind in {"object_ref", "state_ref"} else None,
-                   "recipe_digest": prepared.digest(selected, domain="dryml-recipe-root/v1") if kind == "cdef" else None,
-                   "saved_digest": (prepared.digest(selected, domain="dryml-saved-root/v1")
-                                    if kind == "state_ref" else None),
-                   "path": path.to_data(), "projection": projection,
-                   "stored": (kind == "object_ref" or not path and
-                              record.root_kind == ("recipe" if kind == "cdef" else "saved")),
-                   "features": _discovery_features(selected)}
+            obj = p.objects[id(node)]
+            yield {"kind": kind, "digest": p.owner.digest(selected), "root": record.to_data(),
+                   "key_kind": kind, "fact": p.fact_key(selected),
+                   "object_digest": (p.object_digest(obj)
+                                     if kind in {"object_ref", "state_ref"} else None),
+                   "recipe_digest": p.owner.digest(selected, domain="dryml-recipe-root/v1") if kind == "cdef" else None,
+                   "saved_digest": p.owner.digest(selected, domain="dryml-saved-root/v1") if kind == "state_ref" else None,
+                   "locator": p.decoded._transport_locators[id(node)], "projection": projection,
+                   "is_root": node is root,
+                   "stored": kind == "object_ref" or node is root and record.root_kind == ("recipe" if kind == "cdef" else "saved")}
 
 
 def _value_edges(value: Any, path: GraphPath) -> Iterator[DirectRelationship]:

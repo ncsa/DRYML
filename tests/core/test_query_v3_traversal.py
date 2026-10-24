@@ -306,6 +306,8 @@ def test_v3_occurrence_metadata_filters_targets_with_shared_authority(tmp_path):
 
 
 def test_v3_fixed_occurrence_metadata_requires_explicit_scope(tmp_path):
+    """Fixed paths stay detached while explicit scope metadata is fresh per terminal."""
+
     from dryml.core import Repo, SaveAnnotations
     from dryml.core.query.model import QueryDomainError
     from dryml.core.store.dir import DirStore
@@ -320,7 +322,14 @@ def test_v3_fixed_occurrence_metadata_requires_explicit_scope(tmp_path):
 
     with pytest.raises(QueryDomainError, match="explicit scope"):
         result.query().where(field("object", "team").eq("selected"))
-    assert result.query().where(field("object", "team").eq("selected"), scope=store).one().target.graph_equal(state.object_view())
+    query = result.query().where(field("object", "team").eq("selected"), scope=store)
+    assert query.one().target.graph_equal(state.object_view())
+    assert query.targets().one().graph_equal(state.object_view())
+    repo.set_metadata(state.object_view(), {"team": "changed"}, store=store, scope="object")
+    assert query.count() == 0
+    assert query.targets().count() == 0
+    assert list(query.iter()) == []
+    assert result.count() == 1
 
 
 def test_v3_occurrence_selector_cannot_hide_invalid_later_metadata(tmp_path):

@@ -74,9 +74,9 @@ _BUILD_CLAIM_STALE_SECONDS = 300.0
 _BUILD_CLAIM_WAIT_SECONDS = 30.0
 
 
-def _store_family_supported(family):
+def _store_family_supported(family, store):
     from ..authority import lifecycle_projection_supported
-    return family not in STORE_UNAVAILABLE_FAMILIES or lifecycle_projection_supported()
+    return family not in STORE_UNAVAILABLE_FAMILIES or lifecycle_projection_supported(store)
 
 
 def _store_row_digest(row):
@@ -92,7 +92,10 @@ def _store_intent_digest(record):
 
 def _store_intent_data_digest(data):
     from ...store.records import _json_bytes
+    # SQL certifies the observed cut, not native durability. Lifecycle progress
+    # must not invalidate that cut's receipt; Store acknowledgement gates it.
     data["status"] = "classified"
+    data["persistence_confirmed"] = True
     return hashlib.sha256(b"dryml-store-projection-receipt/v1\0" + _json_bytes(data)).digest()
 
 
@@ -173,7 +176,9 @@ class SQLiteStoreQueryIndex:
     ``maintain_store`` and read through ``projection_rows``. Legacy Query V3 views
     are refused. Ready refresh uses the current authority certificate; explicit
     rebuild inventories metadata without payload IO. Public Store mutations own
-    projection completion and exact journal acknowledgement synchronously.
+    projection completion and exact journal acknowledgement synchronously. Coverage
+    is Store-local: absent owner namespaces need no process-local adapter; present
+    owner authority requires its complete reader before readiness or maintenance.
     """
 
     def __init__(
@@ -261,13 +266,17 @@ class SQLiteStoreQueryIndex:
             "SELECT family, supported, row_count, row_digest, dirty FROM store_projection_coverage"
         ).fetchall()
         if ({row[0] for row in coverage} != set(STORE_PROJECTION_FAMILIES)
-                or any(row[1] != int(_store_family_supported(row[0]))
+                or any(row[1] != 1 or not _store_family_supported(row[0], self.store)
                        or row[2] < 0 or len(row[3]) != 32 or row[4] for row in coverage)):
             raise QueryIndexDirty("Closed Store coverage contract is incomplete or changed.")
         guards = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='trigger' "
                     "AND name IN ('store_projection_insert','store_projection_update','store_projection_delete')")}
         if len(guards) != 3:
             raise QueryIndexDirty("Store projection publication guards are missing.")
+        seeks = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='index' "
+                    "AND name IN ('store_discovery_fact','store_discovery_token','store_discovery_parent','store_discovery_child')")}
+        if len(seeks) != 4:
+            raise QueryIndexDirty("Store discovery seek indexes are missing; rebuild derived state.")
         if cut.pending:
             if not allow_pending:
                 raise QueryIndexDirty("Store publication has unacknowledged projection work.")
@@ -327,8 +336,10 @@ class SQLiteStoreQueryIndex:
         maintenance; True permits replay/rebuild before the short read cut. Returns
         sorted (source path, correlation key, canonical JSON bytes) tuples. Missing,
         stale, pending or incomplete coverage raises QueryIndexDirty. Lifecycle
-        coverage requires a complete registered owner reader; otherwise it raises
-        QueryIndexUnavailable. This is an index-level seam, not a Repo terminal.
+        reads require a complete registered owner reader even for an absent owner
+        namespace; otherwise they raise QueryIndexUnavailable. General certificate
+        checks require adapters only for owner namespaces actually present in the
+        Store. This is an index-level seam, not a Repo terminal.
         """
         if type(family) is not str or type(refresh) is not bool:
             raise TypeError("Projection reads require a string family and boolean refresh.")
@@ -365,7 +376,13 @@ class SQLiteStoreQueryIndex:
         only rebuild; ``rebuild=True`` requests unconditional replacement. Returns
         None only after captured work is acknowledged. Later writers cause bounded
         retry or StoreCutChanged and are never acknowledged by an earlier cut.
+        A declined rebuild claim is revalidated against its captured authority
+        cut; a claimant's subsequent publication is retryable cut drift, not a
+        claim-contention failure for the completed replacement.
         SQL ambiguity is resolved by rereading exact committed receipts before ack.
+        Store-owned native persistence recovery precedes projection reuse/ack;
+        visible classification or a SQL commit alone cannot confirm durability.
+        Unresolved native barriers raise StoreMutationError with pending evidence.
         Foreign/future destinations and incomplete authority are preserved/refused.
         ``quarantine_existing=True`` preserves the owned old sidecar on replacement;
         ``stats`` optionally receives started inventory work and refresh action.
@@ -418,6 +435,8 @@ class SQLiteStoreQueryIndex:
                 if not acquired:
                     if self.status().state == "ready":
                         return
+                    if self.store.authority_cut() != cut:
+                        raise a.StoreCutChanged("Store changed after the competing projection rebuild; retry preparation.")
                     raise QueryIndexBusy("Store projection replacement belongs to another maintainer; retry.")
                 self.preflight_store()
                 if stats is not None:
@@ -480,7 +499,9 @@ class SQLiteStoreQueryIndex:
         ``identity``/``epoch`` name a classified Store mutation. Returns the current
         authority cut; missing/mismatched receipts raise QueryIndexDirty before
         consuming any pending work. Later pending mutations remain untouched.
-        No graph preparation, SQL write or application work runs here.
+        Store-owned persistence confirmation is required independently of the SQL
+        receipt; unresolved native barriers raise StoreMutationError with pending
+        evidence. No graph preparation, SQL write or application work runs here.
         """
         from ...store import authority as a
         from ...store.records import MutationIntentRecord
@@ -539,7 +560,7 @@ class SQLiteStoreQueryIndex:
                 raise QueryIndexDirty("Projection replay cut changed; retry metadata rebuild.")
         else:
             con.executemany("INSERT INTO store_projection_coverage VALUES (?, ?, 0, ?, 0)",
-                ((family, int(_store_family_supported(family)), bytes(32))
+                ((family, int(_store_family_supported(family, self.store)), bytes(32))
                  for family in STORE_PROJECTION_FAMILIES))
         witnesses = {f: [n, int.from_bytes(d, "big")] for f, n, d in con.execute(
             "SELECT family, row_count, row_digest FROM store_projection_coverage")}

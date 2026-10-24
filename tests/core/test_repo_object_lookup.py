@@ -1,9 +1,8 @@
 import pytest
 
-from dryml.core import ObjectRef, Repo, Serializable, object_namespace
-from dryml.core.repo import RepoLoadError
+from dryml.core import Definition, Repo, Serializable, object_namespace
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DeclarationRecord
+from dryml.core.query.model import QueryError
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
@@ -29,9 +28,9 @@ def test_authoritative_scans_find_ids_namespaces_and_containing_refs(tmp_path):
     with object_namespace("experiment", "blue"):
         state = repo.save_object(LookupValue(1, repo=repo))
 
-    assert repo.lookup_object_ref(state.object_id) == state.object
-    assert repo.find_object_refs(namespace=("experiment",)) == ((repo.default_store, state.object),)
-    assert repo.find_object_refs(contains=state.object) == ((repo.default_store, state.object),)
+    assert repo.query().object_refs().object_id(state.object_id).one().graph_equal(state.object_view())
+    assert repo.query().object_refs().namespace(("experiment",)).one().graph_equal(state.object_view())
+    assert not repo.query().object_refs().contains(state.object_view()).exists()
 
 
 def test_incompatible_object_id_authority_rejects_without_a_query_index(tmp_path):
@@ -39,14 +38,11 @@ def test_incompatible_object_id_authority_rejects_without_a_query_index(tmp_path
     second = DirStore(tmp_path / "second", query_index="memory")
     repo = Repo([first, second])
     state = repo.save_object(LookupValue(1, repo=repo), store=first)
-    incompatible = ObjectRef(
-        LookupValue(2).definition,
-        {"$": state.object_id},
-    )
-    second.write_declaration_record(DeclarationRecord(incompatible))
+    incompatible = Definition(LookupValue, 2).with_identity(state.object_id).concretize()
+    second.publish_node(incompatible)
 
-    with pytest.raises(RepoLoadError, match="incompatible closed-subtree authority"):
-        repo.lookup_object_ref(state.object_id)
+    with pytest.raises(QueryError, match="conflicts"):
+        repo.query().object_refs().object_id(state.object_id).one()
 
 
 def test_lookup_returns_closed_child_subtree_and_containment_returns_aggregate(tmp_path):
@@ -54,5 +50,6 @@ def test_lookup_returns_closed_child_subtree_and_containment_returns_aggregate(t
     child = repo.save_object(LookupValue(1, repo=repo))
     aggregate = repo.save_object(LookupAggregate(child, repo=repo))
 
-    assert repo.lookup_object_ref(child.object_id) == child.object
-    assert (repo.default_store, aggregate.object) in repo.find_object_refs(contains=child.object)
+    assert repo.query().object_refs().sel(child.object_view()).one().graph_equal(child.object_view())
+    owners = tuple(repo.query().object_refs().contains(child.object_view()).collect())
+    assert any(node.graph_equal(aggregate.object_view()) for node in owners)

@@ -30,5 +30,5 @@ def test_owned_schema9_index_rebuilds_with_visible_progress(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "older" in captured.err
     assert "metadata-only rebuild" in captured.err
-    assert index.status().schema_version == 10
+    assert index.status().schema_version == 11
     assert len(index.projection_rows("recipe_root", refresh=False)) == 1

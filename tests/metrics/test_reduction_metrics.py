@@ -158,7 +158,7 @@ def _native_tensor(backend, values, dtype):
         import torch
 
         return torch.tensor(values, dtype=getattr(torch, dtype))
-    import dryml.tf
+    import dryml.tf  # noqa: F401 - activate the explicit TensorFlow adapter
     import tensorflow as tf
 
     return tf.constant(values, dtype=getattr(tf, dtype))
@@ -242,7 +242,7 @@ def test_confusion_counts_preserve_native_integer_carry_on_required_backends(bac
         import torch
         labels = lambda values: torch.tensor(values, dtype=torch.int64)
     else:
-        import dryml.tf
+        import dryml.tf  # noqa: F401 - activate the explicit TensorFlow adapter
         import tensorflow as tf
         labels = lambda values: tf.constant(values, dtype=tf.int64)
     observation = {"prediction": labels([1, 0, 1]), "target": labels([0, 1, 1])}
@@ -308,10 +308,8 @@ def test_confusion_rejects_invalid_domains_labels_and_overflow_before_mutation()
         counts({"prediction": np.array(0), "target": np.array(0)}, state)
     assert state[0, 0] == _MAX_INT64
     with pytest.raises(ValueError, match="positive_index"):
-        from dryml.metrics import F1FromConfusion
         F1FromConfusion(average="binary")
     with pytest.raises(ValueError, match="positive_index"):
-        from dryml.metrics import F1FromConfusion
         F1FromConfusion(average="macro", positive_index=0)
     with pytest.raises(ValueError, match="exactly two"):
         F1FromConfusion(average="binary", positive_index=0)(np.ones((3, 3), dtype=np.int64))
@@ -458,7 +456,6 @@ def test_symbolic_metric_factories_validate_known_controls_immediately(monkeypat
 
     from dryml.core import Definition, Par
     from dryml.metrics import classifier_accuracy, classifier_f1, regressor_mae
-    from dryml.metrics import reductions
 
     with pytest.raises(ValueError, match="mode"):
         regressor_mae(Par("data"), Par("model"), mode="invalid")
@@ -508,9 +505,8 @@ def test_symbolic_metric_factories_validate_known_controls_immediately(monkeypat
 
 
 def test_symbolic_metric_factory_concretizes_to_the_direct_fold_definition(tmp_path):
-    """Complete binding produces the same Fold CDef as the direct helper call."""
+    """Complete binding preserves the direct Fold's exact graph, not its handle."""
 
-    from dryml.artifacts import Fold
     from dryml.core import Definition, Par, Repo
     from dryml.metrics import regressor_mae
 
@@ -529,7 +525,7 @@ def test_symbolic_metric_factory_concretizes_to_the_direct_fold_definition(tmp_p
     )
 
     assert isinstance(bound, Definition)
-    assert bound.concretize(repo=repo) == direct.definition
+    assert bound.concretize(repo=repo).graph_equal(direct.definition)
 
 
 def test_metric_factories_share_expression_detection_and_bind_compound_controls(tmp_path):
@@ -543,7 +539,7 @@ def test_metric_factories_share_expression_detection_and_bind_compound_controls(
     model_ref = repo.save_object(IdentityModel())
     recipe = regressor_mae(source_ref, model_ref, x=Par("index") * 2, mode="global")
     assert isinstance(recipe, Definition)
-    assert recipe.sub(index=0, traverse_refs=True).concretize(repo=repo) == (
+    assert recipe.sub(index=0, traverse_refs=True).concretize(repo=repo).graph_equal(
         regressor_mae(source_ref, model_ref, x=0, mode="global").definition
     )
 

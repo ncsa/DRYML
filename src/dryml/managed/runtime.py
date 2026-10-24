@@ -258,6 +258,10 @@ def admit_execution(identity, descriptor, config, control, *, realize, execute):
         if current is not None and current.state == "finalizing":
             disposition, current = _recover_finalization(control, owner, current)
             return AdmissionOutcome(disposition, current.run_id, owner.invocation_id, current)
+        if current is not None and _live_start_debts(current):
+            _retire_live_start_debts(control, owner, current)
+            return AdmissionOutcome("projection_reconciled", current.run_id, owner.invocation_id,
+                                    control.inspect(identity.operation_id), owner.cleanup_report)
         if current is not None and not config.rerun:
             if current.argument_digest != identity.argument_digest:
                 raise ManagedRerunRequiredError("argument_mismatch", "changed ordinary arguments require explicit rerun")
@@ -310,18 +314,40 @@ def admit_execution(identity, descriptor, config, control, *, realize, execute):
             if not _same_snapshot_bytes(control.inspect(identity.operation_id), current) or current.interrupt_request is not None:
                 raise ManagedConflictError("interrupted", "admission was fenced before execution")
             return execute(owner, current, live, resuming)
-        except Exception:
+        except BaseException as error:
             observed = control.inspect(identity.operation_id)
-            if _same_snapshot_bytes(observed, current) and current.interrupt_request is None:
+            if isinstance(error, Exception) and _same_snapshot_bytes(observed, current) and current.interrupt_request is None:
                 control.transition(identity.operation_id, replace(current, generation=current.generation + 1,
                     state="failed", failure_code="execution_error"), owner=owner,
                     expected_generation=current.generation, expected_run_id=current.run_id,
                     expected_invocation_id=current.invocation_id)
+            try:
+                observed = control.inspect(identity.operation_id)
+                if observed is not None:
+                    _retire_live_start_debts(control, owner, observed)
+            except BaseException as cleanup_error:
+                error.cleanup_error = cleanup_error
+                error.cleanup_outcomes = getattr(cleanup_error, "cleanup_outcomes", ())
+                error.add_note("Superseded live-start grant cleanup remains pending; reconcile before retry.")
             raise
 
 
 def _stores(control):
     return tuple(dict.fromkeys((*control.state_repo.stores, control.control_store)))
+
+
+def _live_start_debts(current):
+    return tuple(v.token for v in current.intents if v.kind == "final"
+                 and v.disposition == "release_pending" and v.run_id != current.run_id)
+
+
+def _retire_live_start_debts(control, owner, current):
+    from .storage import _cleanup_checkpoints
+    tokens = _live_start_debts(current)
+    if tokens:
+        outcomes = _cleanup_checkpoints(control, owner, current.operation_id, tokens=tokens)
+        _record_cleanup(owner, outcomes)
+        _require_cleanup(outcomes)
 
 
 def _prepare_run(control, owner, previous, selected, resuming):
@@ -334,6 +360,13 @@ def _prepare_run(control, owner, previous, selected, resuming):
         previous.result_reference),)
     retained = () if previous is None else tuple(v for v in previous.intents if
         v.kind in {"initial", "durable", "root"})
+    if previous is not None and selected is None and not resuming:
+        # A live start may still borrow deferred payloads from the former final.
+        # Retire its association now, but carry its grant debt until the new final
+        # has been published. The ordinary final replacement settles that debt;
+        # persisted release_pending evidence also survives interruption/restart.
+        retained += tuple(replace(v, disposition="release_pending") for v in previous.intents
+                          if v.kind == "final" and v.disposition in {"adopted", "release_pending"})
     proposed = ControlSnapshot(identity.receiver, identity.member, identity.argument_digest,
         run_id, owner.invocation_id, generation, "running", checkpoint=selected,
         history=history, intents=retained)
@@ -400,7 +433,12 @@ def _recover_final_association(control, owner, preparation):
     from .results import read_result_bytes
     from dryml.core.materialization import build_exact_state_load_plan
     proposed = preparation.proposed
-    roots = [v for v in proposed.intents if v.kind == "final"]
+    # A crash can precede the ready sidecar after physical adoption. Only this
+    # preparation's final may be promoted, never a former run's retained debt.
+    roots = [v for v in proposed.intents if v.kind == "final"
+             and v.disposition in {"prepared", "adopted"}
+             and (v.token, v.run_id, v.invocation_id, v.generation) ==
+                 (preparation.token, proposed.run_id, proposed.invocation_id, proposed.generation)]
     if len(roots) != 1 or proposed.result_reference is None:
         return preparation
     root = roots[0]

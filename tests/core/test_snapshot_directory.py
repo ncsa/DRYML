@@ -17,13 +17,17 @@ class SnapshotDirectoryValue(Serializable):
 @pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_saved_state_is_complete_snapshot_local_authority(tmp_path):
     store = DirStore(tmp_path / "store")
-    state_ref = Repo(store).save_object(SnapshotDirectoryValue())
+    state_ref = Repo(store).save_object(SnapshotDirectoryValue(), alias="snapshot")
 
-    snapshot = Path(store.base_dir, "snapshots", state_ref.digest()[:2], state_ref.digest())
-    assert snapshot.is_dir()
-    assert {path.name for path in snapshot.iterdir()} == {
-        "state-ref.record", "placement.json", "metadata.json", "snapshot.json", "local-state",
-    }
+    assert store.read_node(store.read_node_name("snapshot").root_digest, kind="saved").graph_equal(state_ref)
+    key = state_ref.state.key
+    bucket = Path(store.base_dir, "states", key.cdef_digest[:2], key.cdef_digest)
+    assert (bucket / "def.pkl").is_file()
+    assert (bucket / key.codec_hash / "manifest.record").is_file()
+    with store.read_state(key) as read:
+        assert Path(read.data_directory, "value.txt").read_text() == "payload"
+    assert not Path(store.base_dir, "snapshots").exists()
     assert not Path(store.base_dir, "state-refs").exists()
     assert not Path(store.base_dir, "local-state").exists()
-    assert store.get_snapshot_directory(state_ref) == snapshot
+    with pytest.raises(TypeError, match="StateRef"):
+        store.get_snapshot_directory(state_ref)

@@ -7,7 +7,6 @@ the still-unported owning scenarios remain in test_failure_windows.py.
 
 from contextlib import contextmanager
 from dataclasses import replace
-import hashlib
 import multiprocessing
 import os
 from pathlib import Path
@@ -19,7 +18,7 @@ import pytest
 from dryml.core import Repo
 from dryml.core.store.dir import DirStore
 from dryml.core.store.authority import StoreMutationError
-from dryml.managed.control import ControlHistory, ControlIntent, ControlSnapshot, ManagedControlStore, StartPreparation, _PendingIntent
+from dryml.managed.control import ControlHistory, ControlIntent, ManagedControlStore, StartPreparation, _PendingIntent
 from dryml.managed.errors import ManagedConflictError, ManagedControlError
 from tests.managed.test_u14_authority import adapter, facts, receiver, running
 from tests.managed.test_control_codec import force_fresh_handle_order, unordered_saved_receiver
@@ -160,7 +159,7 @@ def test_replace_failure_reconciles_only_exact_old_or_new_current(tmp_path, monk
 def test_pending_neither_current_fails_closed(tmp_path):
     control, identity = adapter(tmp_path), facts(receiver())
     with control.admission(identity) as owner:
-        initial = control.create_initial(running(identity, owner), owner=owner)
+        control.create_initial(running(identity, owner), owner=owner)
         path = control._pending_path(control._operation_path(identity.operation_id))
         intent = _PendingIntent(identity.operation_id, 1, "d" * 64, 2, "e" * 64, uuid4().hex)
         control._replace_file(path, intent.to_bytes())
@@ -211,7 +210,7 @@ def test_builder_and_graph_preparation_run_outside_short_control_and_writer(tmp_
                 held.pop()
     monkeypatch.setattr(control, "_control_lock", short)
     with control.admission(identity) as owner:
-        initial = control.create_initial(running(identity, owner), owner=owner)
+        control.create_initial(running(identity, owner), owner=owner)
         def build(current):
             from dryml.core.store.retention import _writers
             assert not held and not _writers()
@@ -290,8 +289,10 @@ def test_exact_source_witness_rejects_real_raw_byte_change(tmp_path, monkeypatch
             if seam == "start_previous":
                 current_path.write_bytes(previous.to_bytes() + b"\n")
                 assert control.inspect(identity.operation_id) == previous
-                with pytest.raises(ManagedConflictError, match="exact current changed"):
+                with pytest.raises(ManagedConflictError, match="authority or interrupt fence changed") as raised:
                     control.admit_prepared(observed, owner=owner)
+                assert raised.value.reason == "generation_conflict"
+                assert current_path.read_bytes() == previous.to_bytes() + b"\n"
             else:
                 path.write_bytes(observed.to_bytes() + b"\n")
                 assert control.read_preparation(identity.operation_id) == ready

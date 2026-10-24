@@ -6,19 +6,43 @@ import subprocess
 import sys
 import textwrap
 
+from dryml.core import Repo, Serializable
+from dryml.core.store.dir import DirStore
+from dryml.environments import req
+
+
+@req(requirements=("metadata-boundary<1",))
+class MetadataLeaf(Serializable):
+    """Synthetic private-state owner with one passive requirement declaration."""
+
+    def save_state_to_dir_imp(self, destination, *, codec):
+        """Write a deterministic payload into the test-owned staging directory."""
+        Path(destination, "value").write_bytes(b"payload")
+
+
+@req(requirements=("metadata-boundary>=1",))
+class MetadataConflictRoot(MetadataLeaf):
+    """Combine contradictory passive declarations for metadata-only query proof."""
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "store_v3"
 
 
-def test_fresh_process_inspects_metadata_without_heavy_imports_or_probes(tmp_path):
+def test_fresh_process_inspects_metadata_without_heavy_imports_or_probes(tmp_path, fixed_snapshot_environment):
     """Core metadata inspection stays lightweight and never observes the host."""
 
+    current = tmp_path / "current-store"
+    repo = Repo(DirStore(current))
+    repo.save_object(MetadataLeaf(repo=repo), alias="plain")
+    repo.save_object(MetadataConflictRoot(repo=repo), alias="conflict")
+    repo.close(flush=False)
     script = textwrap.dedent(
         f"""
         import json
         from pathlib import Path
         import shutil
         import sys
+        import hashlib
+        import pytest
 
         heavy = {{"jax", "tensorflow", "torch"}}
         assert not heavy.intersection(sys.modules)
@@ -36,13 +60,21 @@ def test_fresh_process_inspects_metadata_without_heavy_imports_or_probes(tmp_pat
         source = Path({str(FIXTURE_ROOT)!r})
         destination = Path({str(tmp_path / "store")!r})
         shutil.copytree(source / "dir-store", destination)
-        manifest = json.loads((source / "manifest.json").read_text(encoding="ascii"))
-        store = DirStore.open_existing(destination)
+        before = {{str(p.relative_to(destination)): hashlib.sha256(p.read_bytes()).hexdigest()
+                   for p in destination.rglob("*") if p.is_file()}}
+        from dryml.core.store.store import StoreAuthorityError
+        with pytest.raises(StoreAuthorityError):
+            DirStore.open_existing(destination)
+        assert before == {{str(p.relative_to(destination)): hashlib.sha256(p.read_bytes()).hexdigest()
+                          for p in destination.rglob("*") if p.is_file()}}
+        store = DirStore.open_existing({str(current)!r})
         repo = core.Repo(store)
-        states = list(repo.query().state_refs().collect())
-        assert len(states) == len(manifest["snapshots"])
-        assert all(repo.get_snapshot_metadata(state, store=store).environment_status == "known" for state in states)
-        assert repo.query().where(core.field("snapshot", "requirements_status").eq("conflict")).state_refs().count() == 1
+        states = list(repo.query().saved().collect())
+        assert len(states) == 2
+        captures = [store.read_node(store.read_node_name(name).root_digest, kind="saved")
+                    for name in ("plain", "conflict")]
+        assert all(repo.get_snapshot_metadata(state, store=store).environment_status == "known" for state in captures)
+        assert repo.query().where(core.field("snapshot", "requirements_status").eq("conflict")).saved().count() == 1
 
         assert not heavy.intersection(sys.modules)
         assert "dryml.code" not in sys.modules

@@ -108,17 +108,18 @@ class _MetadataTarget:
 
 
 class ManagedExecuteAdapter:
-    """Closed managed transport v1 supplied by managed values, not Core imports.
+    """Closed managed transport v2 supplied by managed values, not Core imports.
 
     Core calls encode/validate/decode with its bounded graph owner. Validation
     returns graph references for Core range checks; reconstruction opens config
     descriptors only after the entire graph and adapter version validate. Result
-    decoding returns detached InvocationResult metadata and performs no result IO.
+    decoding requires result-reference v2, returns detached InvocationResult
+    metadata and performs no result IO. Adapter v1 is incompatible.
     All methods raise CoreCallCodecError for malformed owned wire data; supported
     source opening and managed invocation errors retain their owning types.
     """
 
-    version = 1
+    version = 2
     schemas = {
         "managed_declaration": {"tag", "authored", "executable", "owner", "member", "resumable", "store_parameter", "invocation_parameters"},
         "managed_composite": {"tag", "declaration", "outer", "owner", "member"},

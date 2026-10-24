@@ -2,15 +2,15 @@
 
 from dataclasses import replace
 from pathlib import Path
+import subprocess
+import sys
 from uuid import uuid4
 
 import pytest
 
-from dryml.core.query.model import QueryIndexUnavailable
 from dryml.core.utils.graph.path import Parameter
 from dryml.managed import ManagedConfig
 from dryml.managed.results import ResultReference
-from dryml.managed.errors import ManagedControlError
 from tests.managed.test_control_codec import saved_receiver
 from tests.managed.test_u14_authority import Experiment, adapter, facts, receiver, running
 
@@ -72,6 +72,70 @@ def test_lifecycle_projection_has_complete_registered_owner_coverage(tmp_path):
     control = adapter(tmp_path, index="sqlite")
     index = control.control_store.open_query_index()
     assert index.projection_rows("lifecycle", refresh=True) == ()
+
+
+@pytest.mark.parametrize("incomplete", [False, True], ids=["missing-owner", "incomplete-owner"])
+def test_cold_core_refuses_actual_managed_authority_without_complete_owner(tmp_path, incomplete):
+    """Persisted lifecycle rows cannot substitute for an available owner reader."""
+    control = adapter(tmp_path, index="sqlite")
+    identity = facts(receiver())
+    with control.admission(identity) as owner:
+        current = control.create_initial(running(identity, owner), owner=owner)
+    store = control.control_store
+    index = store.open_query_index()
+    rows = index.projection_rows("lifecycle", refresh=False)
+    assert any(key == "current" for _, key, _ in rows)
+    cut = store.authority_cut()
+    generation = index.status().generation
+    file_identity = index._connections._path_identity()
+    script = f'''
+import sys
+import sqlite3
+from dryml.core import Definition
+from dryml.core.store.dir import DirStore
+from dryml.core.store.store import StoreAuthorityError
+from dryml.core.query.authority import register_control_projection
+from dryml.core.query.model import QueryIndexDirty, QueryIndexUnavailable
+assert "dryml.managed" not in sys.modules
+if {incomplete!r}:
+    register_control_projection("managed", "managed", lambda path: None)
+store = DirStore({store.base_dir!r}, query_index="sqlite")
+index = store.open_query_index()
+assert index.status().state != "ready"
+# An older/incomplete owner feed may have explicitly marked lifecycle unsupported.
+with sqlite3.connect(index.path) as con:
+    con.execute("UPDATE store_projection_coverage SET supported=0 WHERE family='lifecycle'")
+assert index.status().state != "ready"
+for query in (store.query().cdefs().stored(), store.query().cdefs().stored().sel(Definition(int))):
+    try:
+        query.refresh(False).count()
+    except QueryIndexDirty:
+        pass
+    else:
+        raise AssertionError("Missing owner certified a count")
+try:
+    index.projection_rows("lifecycle", refresh=False)
+except QueryIndexUnavailable:
+    pass
+else:
+    raise AssertionError("Missing owner certified lifecycle rows")
+try:
+    index.maintain_store(rebuild=True)
+except StoreAuthorityError:
+    pass
+else:
+    raise AssertionError("Missing owner rebuilt incomplete coverage")
+assert "dryml.managed" not in sys.modules
+'''
+    completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr
+    assert store.authority_cut() == cut
+    assert control.inspect(identity.operation_id) == current
+    assert index.status().generation == generation
+    assert index._connections._path_identity() == file_identity
+    # A refused rebuild marks derived state dirty; the loaded owner can repair it.
+    index.maintain_store()
+    assert index.projection_rows("lifecycle", refresh=False) == rows
 
 
 def test_completion_projection_error_retains_completion_and_mutation_cut(tmp_path, monkeypatch):

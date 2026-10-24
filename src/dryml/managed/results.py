@@ -94,7 +94,7 @@ class StoreAcknowledgement:
 class ResultReference:
     """Typed immutable value address; no IO, resources or availability proof.
 
-    key is lowercase SHA-256; kind/version select the sole supported result codec.
+    key is lowercase SHA-256; kind/version select the sole supported v2 result codec.
     Invalid fields raise ManagedResultError. This address grants no private state.
     """
 
@@ -149,9 +149,11 @@ class ResultSource:
         Every access reopens and validates authority and bytes, even after prior
         successful decoding. Raises ManagedResultError on any unavailable, invalid
         or replaced source; never executes workload or serializes live resources.
+        Reference kind/version/key validation precedes opening the source.
         """
         if type(reference) is not ResultReference:
             raise ManagedResultError("invalid_result_reference", "expected typed result address")
+        ResultReference(reference.key, reference.kind, reference.version)
         store = None
         try:
             if not os.path.isfile(os.path.join(self.path, "authority.record")):
@@ -174,10 +176,10 @@ def result_path(store, key):
     """Return the immutable result byte path for DirStore/key; performs no IO.
 
     Invalid keys raise ManagedResultError. Bytes live outside private StateKey
-    storage and carry no state-retention grant.
+    storage in the closed result-v2 namespace and carry no state-retention grant.
     """
     ResultReference(key)
-    return os.path.join(store.base_dir, "managed", "results", "v1", key[:2], key, "current.json")
+    return os.path.join(store.base_dir, "managed", "results", f"v{RESULT_VERSION}", key[:2], key, "current.json")
 
 
 def read_result_bytes(store, reference):

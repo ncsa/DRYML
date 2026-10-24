@@ -85,8 +85,11 @@ The manifest binds a fixed `jax_seed` and exact `jax`, `jaxlib`, `flax`, and
 TensorFlow, Torch, and Parquet evidence. JAX cells remain CPU-only; the two GPU
 gates remain TensorFlow/W1 and Torch/W3.
 
-This expansion is baseline and fixture-manifest schema version 2. Version 1
+The workload baseline remains version 2. Current fixture manifests use schema
+version 3 and Core's shared SavedNode graph codec. Earlier manifest/reference
+layouts are rejected intact; opening or converting old user Stores is unsupported.
+The original version 1
 authority lacks the JAX seed and dependency evidence and is rejected as
-unsupported rather than reinterpreted. Prepare version 2 authority under new,
+unsupported rather than reinterpreted. Prepare current authority under new,
 empty manifest and fixture Store roots; preparation never replaces version 1
 files or their authoritative Store contents.

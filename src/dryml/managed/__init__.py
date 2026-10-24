@@ -1,4 +1,13 @@
-"""Synchronous managed-operation declaration, lifecycle, and safe-point authority."""
+"""Synchronous managed lifecycle, detached results and safe-point authority.
+
+managed_operation declarations return InvocationResult after successful execution
+or replay. Its SavedNode/status/identity metadata is detached; value access opens
+fresh result authority and may raise ManagedResultError without reexecution.
+ManagedConfig selects invocation resources and explicit rerun/start controls.
+Imports expose owner-defined types without activating execution backends or
+materializing receivers; declaration and invocation validation raise ManagedError
+subclasses at their documented boundaries.
+"""
 
 from .config import ManagedConfig
 from .descriptor import managed_operation

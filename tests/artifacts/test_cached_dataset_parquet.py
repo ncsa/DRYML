@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import hashlib
 import subprocess
 import sys
 
@@ -15,6 +14,7 @@ from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import Dynamic, TensorSpec
 from dryml.data import Dataset
 from dryml.managed import ManagedConfig
+from tests.cached_dataset_corruption import capture_cache_payload, publish_cache_payload
 
 
 class ArrayDataset(Dataset):
@@ -31,6 +31,21 @@ class ArrayDataset(Dataset):
 
     def __len__(self):
         return Cardinality.finite(len(self.values))
+
+
+class ByteRangeDataset(Dataset):
+    """Generate bounded large-yield fixtures from compact size/count metadata."""
+
+    def __init__(self, size, count=1, dtype="uint8"):
+        self.size, self.count, self.dtype = size, count, dtype
+        super().__init__(TensorSpec(dtype, shape=(size,), backend="numpy"))
+
+    def __iter__(self):
+        for index in range(self.count):
+            yield np.arange(self.size, dtype=self.dtype) + index
+
+    def __len__(self):
+        return Cardinality.finite(self.count)
 
 
 def _require_supported_pyarrow():
@@ -106,7 +121,7 @@ def test_parquet_cache_round_trips_nested_dynamic_typed_values(tmp_path):
         codec="parquet", target_chunk_bytes=1,
         managed=ManagedConfig(state_repo=repo),
     )
-    restored = next(iter(repo.load_state_ref(state, reuse_live="never")))
+    restored = next(iter(repo.load_state_ref(state.final_state_ref, reuse_live="never")))
 
     np.testing.assert_equal(restored["unsigned"], value["unsigned"])
     np.testing.assert_equal(restored["nested"][0], value["nested"][0])
@@ -155,8 +170,7 @@ def test_parquet_reads_multiple_bounded_batches_and_chunks(tmp_path, monkeypatch
             yield batch
 
     monkeypatch.setattr(_cache_parquet.pq.ParquetFile, "iter_batches", observed_iter_batches)
-    values = [np.arange(3 * 1024 * 1024, dtype=np.uint8) + index for index in range(2)]
-    cache = CachedDataset(ArrayDataset(values, TensorSpec("uint8", shape=(3 * 1024 * 1024,), backend="numpy")))
+    cache = CachedDataset(ByteRangeDataset(3 * 1024 * 1024, count=2))
     cache.compute(codec="parquet", target_chunk_bytes=1024 * 1024, managed=ManagedConfig(state_repo=_repo(tmp_path)))
 
     assert len(cache._cache_payload["chunks"]) == 2
@@ -207,9 +221,7 @@ def test_parquet_oversized_yield_segments_and_reconstructs_once(tmp_path):
     import pyarrow.parquet as pq
 
     value = np.arange(3 * 1024 * 1024, dtype=np.uint8)
-    cache = CachedDataset(ArrayDataset(
-        [value], TensorSpec("uint8", shape=value.shape, backend="numpy"),
-    ))
+    cache = CachedDataset(ByteRangeDataset(value.size))
     cache.compute(codec="parquet", target_chunk_bytes=1024 * 1024, managed=ManagedConfig(state_repo=_repo(tmp_path)))
 
     assert pq.ParquetFile(_chunk_path(cache)).metadata.num_rows == 3
@@ -295,11 +307,12 @@ def test_parquet_exhaustive_malformed_physical_layouts_fail_before_yield(tmp_pat
     import pyarrow.parquet as pq
 
     value = np.arange(512 * 1024, dtype=np.int32)
-    cache = CachedDataset(ArrayDataset(
-        [value], TensorSpec("int32", shape=value.shape, backend="numpy"),
-    ))
-    cache.compute(codec="parquet", target_chunk_bytes=1024 * 1024, managed=ManagedConfig(state_repo=_repo(tmp_path)))
-    path = _chunk_path(cache)
+    cache = CachedDataset(ByteRangeDataset(value.size, dtype="int32"))
+    repo = _repo(tmp_path)
+    cache.compute(codec="parquet", target_chunk_bytes=1024 * 1024, managed=ManagedConfig(state_repo=repo))
+    directory = tmp_path / "codec-payload"
+    capture_cache_payload(cache, directory)
+    path = directory / "chunks" / "chunk-00000000.parquet"
     table = pq.read_table(path)
     if mutation == "null":
         field = table.schema.field("values_int32")
@@ -325,19 +338,7 @@ def test_parquet_exhaustive_malformed_physical_layouts_fail_before_yield(tmp_pat
     else:  # pragma: no cover - the parameter list is closed above.
         raise AssertionError(mutation)
     pq.write_table(table, path, compression="NONE")
-    descriptor = cache._cache_payload["chunks"][0]
-    descriptor["size"] = os.path.getsize(path)
-    descriptor["sha256"] = _sha256(path)
+    restored = publish_cache_payload(cache, repo, directory)
 
     with pytest.raises(CacheIntegrityError):
-        next(iter(cache))
-
-
-def _sha256(path):
-    """Return one test chunk digest after a controlled physical rewrite."""
-
-    digest = hashlib.sha256()
-    with open(path, "rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+        next(iter(restored))

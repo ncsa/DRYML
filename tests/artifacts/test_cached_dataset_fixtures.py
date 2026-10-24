@@ -1,4 +1,4 @@
-"""Direct-reader compatibility tests for committed CachedDataset v1 fixtures."""
+"""Reject frozen incompatible Stores and qualify current cache reader fidelity."""
 
 from __future__ import annotations
 
@@ -10,13 +10,18 @@ import shutil
 import numpy as np
 import pytest
 
+from dryml.artifacts import CachedDataset
 from dryml.core import Repo
+from dryml.core.node_prepare import NodePreparation
 from dryml.core.store.dir import DirStore
+from dryml.core.store.store import StoreAuthorityError
 from dryml.data import Batch, Map, Select, Unbatch
+from dryml.managed import ManagedConfig
 from tests import cached_dataset_fixture_types as fixture_types
 
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "cached_dataset" / "v1"
+pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 
 
 def _manifest() -> dict:
@@ -25,8 +30,8 @@ def _manifest() -> dict:
     return json.loads((FIXTURE_ROOT / "manifest.json").read_text(encoding="ascii"))
 
 
-def _fresh_repo(tmp_path) -> tuple[Repo, dict]:
-    """Copy committed authority bytes and open them through one fresh Repo."""
+def test_v1_store_is_rejected_intact_before_source_or_codec_input(tmp_path):
+    """All frozen codecs share an incompatible Store gate; none is converted."""
 
     manifest = _manifest()
     authority_root = FIXTURE_ROOT / "dir-store"
@@ -40,18 +45,39 @@ def _fresh_repo(tmp_path) -> tuple[Repo, dict]:
         assert hashlib.sha256((authority_root / relative).read_bytes()).hexdigest() == expected
     destination = tmp_path / "store"
     shutil.copytree(FIXTURE_ROOT / "dir-store", destination)
-    return Repo(DirStore.open_existing(destination, query_index="none")), manifest
+    before = {p.relative_to(destination): p.read_bytes() for p in destination.rglob("*") if p.is_file()}
+    with pytest.raises(StoreAuthorityError) as caught:
+        DirStore.open_existing(destination, query_index="none")
+    assert "Unsupported Store format version 3" in str(caught.value.__cause__)
+    assert {p.relative_to(destination): p.read_bytes() for p in destination.rglob("*") if p.is_file()} == before
+
+
+def _fresh_repo(tmp_path, codecs) -> tuple[Repo, dict]:
+    """Publish current inputs, then reopen their exact reader authority."""
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    states = {}
+    for codec in codecs:
+        states[codec] = {}
+        for kind in ("fidelity", "empty", "polynomial"):
+            result = CachedDataset(fixture_types.FixtureDataset(kind)).compute(
+                codec=codec, managed=ManagedConfig(state_repo=repo),
+            )
+            states[codec][kind] = NodePreparation((result.final_state_ref,)).digest(
+                result.final_state_ref, domain="dryml-saved-root/v1",
+            )
+    repo.close(flush=False)
+    return Repo(DirStore.open_existing(tmp_path / "store", query_index="none")), {"states": states}
 
 
 def _load(repo: Repo, digest: str):
     """Restore one exact fixture state while forbidding source construction."""
 
-    record = repo.default_store.read_state_ref_record(digest)
+    record = repo.default_store.read_node(digest, kind="saved")
     assert record is not None
     before = fixture_types.CONSTRUCTION_COUNT
     fixture_types.REJECT_CONSTRUCTION = True
     try:
-        cache = repo.load_state_ref(record.state_ref, reuse_live="never")
+        cache = repo.load_state_ref(record, reuse_live="never")
     finally:
         fixture_types.REJECT_CONSTRUCTION = False
     assert fixture_types.CONSTRUCTION_COUNT == before
@@ -68,12 +94,12 @@ def _require_codec(codec: str) -> None:
 
 
 @pytest.mark.parametrize("codec", ("numpy", "parquet", "netcdf"))
-def test_v1_fixtures_restore_in_a_fresh_repo_without_source_or_codec_input(
+def test_current_fixtures_restore_in_a_fresh_repo_without_source_or_codec_input(
         tmp_path, codec):
-    """Read every committed codec, nested value, and empty cache directly."""
+    """Read current codec states, nested values, and empty caches directly."""
 
     _require_codec(codec)
-    repo, manifest = _fresh_repo(tmp_path)
+    repo, manifest = _fresh_repo(tmp_path, (codec,))
     fidelity = _load(repo, manifest["states"][codec]["fidelity"])
     empty = _load(repo, manifest["states"][codec]["empty"])
 
@@ -102,7 +128,7 @@ def test_polynomial_numpy_and_parquet_fixtures_are_equivalent_and_reusable(
     """Reuse one exact saved NumPy cache across two ordinary workflow runs."""
 
     _require_codec("parquet")
-    repo, manifest = _fresh_repo(tmp_path)
+    repo, manifest = _fresh_repo(tmp_path, ("numpy", "parquet"))
     numpy_digest = manifest["states"]["numpy"]["polynomial"]
     parquet_cache = _load(repo, manifest["states"]["parquet"]["polynomial"])
     numpy_cache = _load(repo, numpy_digest)

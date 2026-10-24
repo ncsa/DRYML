@@ -1389,6 +1389,9 @@ def execute_routed_save_plan(
     receipt. No graph preparation, hook or payload authentication runs under a
     Store writer fence. Buffered durable ownership and unsupported metadata feeds
     fail explicitly before capture. Repair uses Store journal APIs, never capture.
+    A live root's existing saved receipt is checked for malformed destination
+    capture metadata before hooks. Absent associations remain admissible; this
+    validation neither proves current payload availability nor infers state reuse.
     """
     from contextlib import ExitStack
     import shutil
@@ -1411,6 +1414,19 @@ def execute_routed_save_plan(
         raise StoreCapabilityError("Legacy exact-reference seed publication requires the Node materialization cutover.")
     for target in targets:
         target.preflight_save_batch()
+    prior = root_obj.last_state_ref
+    if prior is not None:
+        from .store.store import StoreAuthorityError
+        from .store.authority import StoreCutChanged
+        for target in targets:
+            try:
+                repo.get_snapshot_metadata(prior, store=target)
+            except KeyError:
+                pass
+            except StoreCutChanged:
+                raise
+            except StoreAuthorityError as error:
+                raise RepoSaveError("Existing saved metadata is malformed; repair before capture.") from error
     from .node import _owned_nodes
     from .node_prepare import NodePreparation
     selected = plan.node.with_realization(states={p: None for p, _ in _owned_nodes(plan.node)})

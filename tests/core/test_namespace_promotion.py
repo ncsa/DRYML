@@ -50,12 +50,12 @@ def test_promoted_package_keeps_the_destination_export_manifest():
 
     assert core.__all__ == [
         "load_object", "save_object", "load_state_ref", "LiveReusePolicy", "StoreReport", "SavePublication", "SavedSnapshot", "PublicationPhase", "PublicationStatus", "SaveRouting", "StateGraphReservation", "Object", "Serializable",
-        "Compute", "Definition", "categorical_definition", "ConcreteDefinition", "DefLink", "Ref", "Mat", "AutoRef",
+        "Compute", "Definition", "Node", "ConcreteNode", "SavedNode", "require_saved", "StateKey", "LocalState", "IdentitySpec", "StateSpec", "categorical_definition", "ConcreteDefinition", "DefLink", "Ref", "Mat", "AutoRef",
         "normalize_args", "normalize_return", "signature_context", "function", "authoring_helper", "SignatureError",
         "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace",
         "REFERENCE_JSON_SCHEMA", "REFERENCE_JSON_VERSION", "ReferenceJSONCodecError",
         "decode_reference_json", "encode_reference_json", "freeze",
-        "QuotedDef", "SelectorSpec", "Selector", "ObjectSelector", "selector", "Par", "Expr", "Shared", "Template", "Generator", "GeneratorSelector", "repeat", "Match", "Distribution", "ParameterizationError", "UnresolvedDefinitionError", "ParameterizationLimitError", "UnsupportedGeneratorVerificationError", "Present",
+        "QuotedDef", "SelectorSpec", "Selector", "QueryPredicate", "ObjectSelector", "selector", "Par", "Expr", "Shared", "Template", "Generator", "GeneratorSelector", "repeat", "Match", "Distribution", "ParameterizationError", "UnresolvedDefinitionError", "ParameterizationLimitError", "UnsupportedGeneratorVerificationError", "Present",
         "Missing", "AnyValue", "Exact", "Choice", "IntRange", "SubclassOf", "Satisfies",
         "UniformIntRange", "UniformFromSet", "SKIP_ARGS", "Repo", "MetadataConflictError", "RepoDefinition", "RepoDefinitionError", "RepoReconstructionError", "configure",
         "reset_config", "status", "definition_mode", "selector_mode", "dtype",
@@ -70,7 +70,7 @@ def test_promoted_package_keeps_the_destination_export_manifest():
         "CoreExecutionError", "CoreExecutionFuture", "CoreExecutionSnapshot", "CoreOptions",
         "CoreOutcomeEvidence", "CorePublicationEvidence", "CoreRefreshEvidence", "Executor",
         "ExecutorView", "PreparedCoreCall", "SharedDirStoreStrategy", "run", "submit",
-        "SaveAnnotations", "LineageMetadata", "SnapshotCapture", "SnapshotMetadata",
+        "SaveAnnotations", "LineageMetadata", "NodeLineageMetadata", "NodeSnapshotMetadata", "SnapshotCapture", "SnapshotMetadata",
         "encode_metadata_mapping", "decode_metadata_mapping", "timestamp_to_seconds",
         "timestamp_from_seconds", "encode_current_annotations", "decode_current_annotations",
         "encode_lineage_metadata", "decode_lineage_metadata", "encode_snapshot_metadata",

@@ -257,8 +257,9 @@ def test_selector_13(tmp_path):
     assert not sel(obj2)
     assert not sel(obj2.definition)
 
-    first_repo = tmp_path / 'test1.dry'
-    second_repo = tmp_path / 'test2.dry'
+    from dryml.core.store.dir import DirStore
+    first_repo = DirStore(tmp_path / 'test1')
+    second_repo = DirStore(tmp_path / 'test2')
     core.save_object(obj1, repo=first_repo)
     core.save_object(obj2, repo=second_repo)
 

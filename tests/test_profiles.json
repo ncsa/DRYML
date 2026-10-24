@@ -78,12 +78,13 @@
           ]
         },
         "tests/models/test_qualification_persistence_fixtures.py": {
-          "rationale": "Retain source-controlled v1 history/reference and TrainState observation compatibility without pandas analysis or live payloads.",
+           "rationale": "Retain intact incompatible history/progress refusal, current observation fidelity and unchanged Value receipt compatibility.",
             "functions": [
-                "test_experiment_data_v1_fixture_round_trips_actual_reader_input_without_payloads",
-                "test_value_receipt_fixture_round_trips_actual_value_reader_input",
-                "test_train_state_named_state_vector_restores_observation_and_historical_defaults",
-                "test_qualification_fixture_generator_reproduces_the_committed_bytes"
+                 "test_experiment_data_v1_fixture_is_rejected_without_partial_install",
+                 "test_value_receipt_fixture_round_trips_actual_value_reader_input",
+                 "test_current_history_preserves_original_fixture_facts_and_missing_columns",
+                 "test_train_state_old_named_and_tuple_vectors_are_rejected_atomically",
+                 "test_qualification_frozen_inputs_remain_immutable_after_reader_refusal"
             ]
         },
         "tests/models/test_experiment_data_codec.py": {
@@ -143,7 +144,8 @@
         "tests/qualification/test_ml_workflow_local.py": {
           "rationale": "Retain explicit no-download fixture preparation and fixed-case construction only; real TFDS/training remains opt-in.",
           "functions": [
-            "test_preparation_requires_opt_in_and_never_overwrites_authority",
+             "test_preparation_requires_opt_in_and_never_overwrites_authority",
+             "test_old_fixture_manifest_versions_are_rejected_intact_before_store_open",
             "test_all_workload_artifact_definitions_preflight_without_framework_imports",
             "test_workload_cache_uses_selected_control_store",
             "test_case_is_closed_and_carries_manifest_environment_seed_and_fixture_identity"
@@ -166,7 +168,7 @@
         "tests/core/test_live_reuse.py": {
           "rationale": "Retain matching, never-reuse, unique greedy restore, ambiguous fallback, and failed-restore eviction; exhaustive mode covers equivalent stale/equal-node combinations.",
           "functions": [
-            "test_matching_reuses_current_checkpoint_without_restoring",
+             "test_matching_reuses_current_checkpoint_and_restores_once",
             "test_never_constructs_a_new_live_object_under_the_saved_id",
             "test_greedy_restores_one_unique_stale_candidate_in_place",
             "test_ambiguous_eligible_candidates_build_fresh",
@@ -178,6 +180,7 @@
           "functions": [
             "test_core_setup_failure_withholds_payload_from_a_real_subprocess",
             "test_real_subprocess_core_default_raw_workload_failure_is_visible",
+            "test_real_subprocess_saved_live_automatic_reference",
             "test_real_setup_and_teardown_output_flood_drains_before_payload_completion",
             "test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_keeps_control_store_separate",
             "test_real_subprocess_core_setup_reports_unresolved_cache_cleanup_after_workload_failure",
@@ -192,12 +195,14 @@
           ]
         },
         "tests/core/test_execute_managed_integration.py": {
-          "rationale": "Retain one decorator-order product, malformed-config and independent-normalization validation, plus typed abstract-worker rejection; scoped result restoration runs in the isolated orchestrator bucket.",
+          "rationale": "Retain one decorator-order product, malformed-config and independent-normalization validation, typed abstract-worker rejection, reclaimed-receiver completion replay and recovery-only worker admission; scoped result restoration runs in the isolated orchestrator bucket.",
           "functions": [
             "test_managed_decorator_orders_materialize_once_and_publish_one_final_state",
             "test_direct_bound_operation_rejects_malformed_config_before_mutation",
             "test_unrelated_nested_function_keeps_its_own_normalization_boundary",
-            "test_abstract_worker_materialization_keeps_remote_type_evidence_and_dependencies_inert"
+            "test_abstract_worker_materialization_keeps_remote_type_evidence_and_dependencies_inert",
+            "test_u19_subprocess_completed_target_replays_after_receiver_cleanup",
+            "test_u19_worker_recovery_transports_exact_current_witness_without_execution"
           ]
         },
         "tests/artifacts/test_fold_execution.py": {
@@ -219,9 +224,7 @@
             "test_fold_resume_crosses_a_fresh_process_without_cursor_transport",
             "test_fold_resumes_reservoir_and_confusion_carry_without_losing_components",
             "test_fold_failed_read_retains_active_authority_before_repaired_resume",
-            "test_fold_frozen_progress_compatible_recovery",
-            "test_fold_legacy_exhausted_admission_preserves_valid_receiver_and_provenance",
-            "test_fold_frozen_progress_roundtrip_and_downgrade_gate",
+             "test_fold_frozen_progress_rejected_intact_before_carry_use",
             "test_fold_malformed_progress_does_not_partially_install",
             "test_fold_incompatible_progress_rejected_before_runtime_effects"
           ]
@@ -230,7 +233,15 @@
           "rationale": "Retain finite admission, exact post-completion retry delivery, and managed same-instance conflict; exhaustive mode retains larger cache products.",
           "functions": [
             "test_cache_rejects_nonfinite_and_mismatched_cardinality_before_completion",
-            "test_cache_construction_keeps_live_and_saved_sources_inert",
+             "test_cache_construction_keeps_live_and_saved_sources_inert",
+             "test_same_codec_rerun_republishes_without_source_traversal",
+             "test_live_rerun_keeps_borrowed_final_chunks_until_republication",
+             "test_failed_live_rerun_retires_its_superseded_final_grant",
+             "test_cache_cursor_holds_native_lease_until_termination",
+             "test_cache_concurrent_cursors_own_independent_native_leases",
+             "test_restored_cache_reacquires_native_full_key_use",
+             "test_cache_cursor_revalidates_stale_source_before_decoding",
+             "test_cache_capture_holds_fresh_native_source_lease",
             "test_post_completion_cleanup_failure_retries_exact_state_without_source_traversal",
             "test_same_instance_overlap_is_a_managed_conflict"
           ]
@@ -296,9 +307,10 @@
           ]
         },
         "tests/artifacts/test_cached_dataset_fixtures.py": {
-          "rationale": "Retain direct v1 reader compatibility for all codecs and one polynomial NumPy/Parquet ordinary-consumer workflow; exhaustive mode owns broader codec/lifecycle cross-products.",
+           "rationale": "Retain frozen Store-v3 rejection intact plus current codec fidelity and polynomial ordinary-consumer reuse; optional codec prerequisites remain explicit.",
           "functions": [
-            "test_v1_fixtures_restore_in_a_fresh_repo_without_source_or_codec_input",
+             "test_v1_store_is_rejected_intact_before_source_or_codec_input",
+             "test_current_fixtures_restore_in_a_fresh_repo_without_source_or_codec_input",
             "test_polynomial_numpy_and_parquet_fixtures_are_equivalent_and_reusable"
           ]
         },
@@ -359,7 +371,7 @@
           "functions": [
             "test_identity_set_characterizes_graph_identity_without_changing_cdef_equality",
             "test_ordering_avoids_extra_graph_encoding_without_digest_ties",
-            "test_complete_identity_digests_are_cached_across_query_operators"
+             "test_complete_identity_graph_keys_are_stable_across_query_operators"
           ]
         },
         "tests/core/test_query_v3_sources.py": {
@@ -473,23 +485,21 @@
         "tests/core/test_query_v3_index.py": {
           "rationale": "Retain graph-exact explicit reconciliation (including main-only collision ties and malformed authority), U6 budgets and U7 main/empty-page completeness, retained non-repairing cuts, entry failure, derived-only policy recovery, and cumulative fallback; the larger main policy product is exhaustive-only.",
           "functions": [
-            "test_explicit_cycle_repairs_graph_distinct_main_without_dirty_token",
-            "test_explicit_cycle_compares_encoded_collision_ties",
-            "test_explicit_cycle_rejects_malformed_ready_store_authority",
-            "test_corrupt_sidecar_rebuild_preserves_authoritative_record_bytes",
+             "test_explicit_cycle_preserves_graph_distinct_roots_and_current_main",
+             "test_immutable_root_collision_refuses_without_replacing_authority",
+             "test_missing_projection_family_guard_refuses_empty_and_count",
+             "test_missing_projection_row_is_not_a_certified_negative",
+             "test_sidecar_policy_and_derived_only_recovery",
+             "test_foreign_sidecar_query_is_refused_intact",
+             "test_future_sidecar_is_refused_intact",
             "test_metadata_rebuild_keeps_overlapping_dirty_token_without_payload_access",
             "test_incremental_v3_publication_does_not_rescan_historical_projection_rows",
-            "test_clean_incremental_save_does_not_enumerate_historical_references",
-            "test_u6_indexed_take_admissions_replicas_and_ordering_lookahead",
-            "test_u6_paging_fallback_readmits_domain_and_retains_expenditure",
-            "test_u6_collision_bucket_verified_lookahead_is_charged",
-            "test_u6_disabled_refresh_retains_one_view_through_pages",
-            "test_u7_main_outside_ready_index_requires_complete_fallback",
-            "test_u7_empty_index_inspects_replaced_main_and_missing_target",
-            "test_u7_malformed_main_is_visible_before_empty_page",
-            "test_u7_sidecar_policy_and_derived_only_recovery",
-            "test_u7_entry_readiness_failure_releases_cut_before_inventory",
-            "test_u7_failed_direct_proof_discards_selective_cut_without_refund"
+             "test_clean_incremental_save_and_metadata_do_not_inventory_history",
+             "test_indexed_admissions_share_replicas_and_do_not_charge_ordering_lookahead",
+             "test_header_and_names_cannot_promote_dependency_roots",
+             "test_name_authority_errors_precede_empty_alias_pages",
+             "test_nonpersistent_sources_observe_current_names_and_membership",
+             "test_interrupted_staged_rebuild_preserves_authority_and_releases_resources"
           ]
         },
         "tests/core/test_query_v3_acceptance.py": {
@@ -541,10 +551,11 @@
           "functions": [
             "test_main_module_object_save_load_preserves_definition",
             "test_main_module_state_load_without_live_class_preserves_identity",
-            "test_public_save_returns_state_ref_and_publishes_local_state",
-            "test_explicit_store_save_copies_reusable_state_into_its_closure",
-            "test_failed_local_state_save_never_publishes_a_state_ref",
-            "test_structural_load_without_state_restore_builds_from_definition_authority",
+             "test_public_save_returns_saved_node_and_publishes_local_state",
+             "test_explicit_store_save_copies_reusable_state_into_its_closure",
+             "test_save_quoted_checkpoint_preserves_exact_data_and_canonical_declarations",
+             "test_failed_local_state_save_never_publishes_a_state_ref",
+             "test_explicit_build_uses_construction_defaults_instead_of_saved_state",
             "test_reopen_v3_query_discovers_definition_authority_without_materializing",
             "test_u7_exact_state_ref_restores_nested_independent_local_states",
             "test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph",
@@ -566,11 +577,12 @@
           ]
         },
         "tests/core/test_state_ref_load.py": {
-          "rationale": "Retain shared-topology restoration, dependency ordering, and failed fresh-load cleanup as the complete exact-load integration boundary.",
+          "rationale": "Retain shared-topology restoration, dependency ordering, failed fresh-load cleanup, and fresh payload refusal/recovery after warm named-view preparation as the exact-load integration boundary.",
           "functions": [
             "test_load_state_ref_restores_saved_identity_and_shared_topology",
             "test_exact_load_restores_dependencies_before_parent_construction",
-            "test_failed_fresh_exact_restore_leaves_no_cache_or_state_hash"
+            "test_failed_fresh_exact_restore_leaves_no_cache_or_state_hash",
+            "test_warm_named_views_and_validation_never_certify_payload_availability"
           ]
         },
         "tests/core/test_state_ref_load_preflight.py": {
@@ -603,9 +615,10 @@
             "test_targeted_restore_preflight_failure_leaves_target_valid_and_pickle_payload_replaces",
             "test_targeted_restore_walks_embedded_reference_closure_once_before_parent_hook",
             "test_pickleable_targeted_restore_preserves_live_graph_bindings",
-            "test_full_restore_checks_original_projection_before_hooks",
-            "test_prepared_restore_handoff_is_one_shot_and_never_a_history_shortcut",
-            "test_prepared_restore_is_owned_and_abandonment_releases_without_hooks",
+             "test_full_restore_checks_original_projection_before_hooks",
+             "test_prepared_restore_handoff_is_one_shot_and_never_a_history_shortcut",
+             "test_full_restore_rebases_decoded_tied_set_states_and_lineages",
+             "test_prepared_restore_is_owned_and_abandonment_releases_without_hooks",
             "test_restore_adopts_s0_construction_after_s1_capture",
             "test_foreign_compatible_apply_keeps_donor_key_and_destination_creation",
             "test_missing_later_selection_preflights_before_earlier_hook"
@@ -619,7 +632,7 @@
             "test_ephemeral_root_has_topology_but_only_child_state_paths",
             "test_shared_node_is_saved_once_and_independent_equal_nodes_twice",
             "test_deep_capture_serializes_reused_owned_nodes_again",
-            "test_zip_store_publishes_the_same_state_ref_authority"
+             "test_zip_retained_save_refuses_before_capture"
           ]
         },
         "tests/core/test_zipstore_identity.py": {
@@ -645,13 +658,12 @@
         "tests/managed/test_callbacks.py": {
           "rationale": "Retain ordered receipt delivery, callback failure, disjoint and overlapping nested operations, checkpoint requests, and caught interruption; exhaustive mode covers repeated terminal/callback timing shapes.",
           "functions": [
-            "test_callbacks_receive_exact_committed_receipt_in_list_order",
-            "test_callback_error_stops_later_callbacks_retains_checkpoint_and_fails",
-            "test_callback_can_save_and_manage_a_disjoint_derived_object",
-            "test_callback_cannot_begin_an_overlapping_managed_operation",
-            "test_request_arriving_during_callbacks_is_honored_at_that_checkpoint",
-            "test_post_callback_decision_revalidates_deleted_checkpoint",
-            "test_caught_local_interruption_remains_terminal_and_rejects_safe_points"
+             "test_callbacks_receive_committed_latest_in_order_outside_state_reservations",
+             "test_callback_error_preserves_C_and_caught_error_permits_finalization",
+             "test_recursive_checkpoint_is_rejected_but_association_survives",
+             "test_callback_can_run_distinct_operation_sharing_same_live_object",
+             "test_request_during_callbacks_is_honored_at_same_checkpoint",
+             "test_caught_confirmed_checkpoint_association_error_can_select_prior_final"
           ]
         },
         "tests/managed/test_execute_defaults.py": {
@@ -669,63 +681,57 @@
         "tests/managed/test_lifecycle.py": {
           "rationale": "Retain completion, descendant persistence, primary application failure, late requests, indeterminate completion, final-save failure, and runtime admission; exhaustive mode covers a second failure-recording composition.",
           "functions": [
-            "test_start_deep_saves_completes_and_returns_the_ordinary_result",
-            "test_stateless_root_deep_saves_its_stateful_descendant",
-            "test_method_error_is_recorded_without_replacing_the_application_exception",
-            "test_late_request_does_not_stale_owner_completion_or_failure",
-            "test_indeterminate_completion_preserves_pending_authority_and_withholds_result",
-            "test_final_save_failure_records_failed_without_a_completion_association",
-            "test_managed_workload_requires_a_materialized_receiver_and_runtime_admission",
-            "test_integrated_checkpoint_final_phase_budget"
+             "test_public_checkpoint_final_work_budget",
+             "test_completion_own_projection_failure_withholds_success_and_repairs_without_effects",
+             "test_consumer_failure_preserves_completion_and_is_never_replayed",
+             "test_cancelled_completion_CAS_keeps_exact_cut_and_reconciles_without_effects",
+             "test_mismatched_provisional_receipt_cannot_release_an_independent_user_root"
           ]
         },
         "tests/managed/test_repo_routing.py": {
-          "rationale": "Retain checkpoint/final replica routing, direct unequal-coverage and override fallback, independent Zip durability/cleanup failures, route-stable resume, warm deletion rejection, partial-publication rejection, and required seed coverage; exhaustive mode covers repeated closure/seed layouts.",
+           "rationale": "Retain current routed replica/closure publication, changed-route resume, partial/index/cancellation faults, pre-capture buffered-retention refusal, selected-reader freshness and public cleanup. Core owns buffered archive commit faults.",
           "functions": [
             "test_checkpoint_and_final_preserve_per_object_replica_closures",
             "test_resume_uses_retained_checkpoint_authority_after_routes_change",
-            "test_zip_commit_failure_has_report_and_never_associates_checkpoint",
-            "test_interrupted_completed_zip_commit_preserves_prior_checkpoint",
+             "test_checkpoint_and_final_preserve_first_match_closure_child_authority",
             "test_replica_or_index_failure_never_associates_partial_state",
-            "test_missing_committed_replica_cannot_be_hidden_by_a_valid_replica",
-            "test_reopened_nested_payloads_are_validated_once_per_durable_closure",
-            "test_reopened_root_closure_rejects_missing_nested_replica_authority",
-            "test_zip_event_follows_independent_durable_cut_and_resource_cleanup",
-            "test_uncertain_zip_commit_mints_no_event_and_retains_prior_checkpoint",
-            "test_missing_required_embedded_seed_cannot_reuse_connected_proof",
+             "test_buffered_retained_publication_refuses_before_capture_or_commit",
+             "test_live_repo_result_is_rejected_before_capture",
             "test_overridden_direct_reader_preserves_independent_publication_validation",
             "test_direct_replica_lifecycle_keeps_required_coverage_independent",
             "test_warm_status_and_resume_reject_deleted_associated_checkpoint",
-            "test_reopened_selected_replica_payload_corruption_cannot_hide_behind_first",
-            "test_replica_promotion_opens_once_and_checks_every_local_path",
-            "test_routed_stateful_parent_replica_cuts_keep_complete_view_evidence"
+             "test_retention_cleanup_reports_every_routed_child_authority"
           ]
         },
         "tests/managed/test_signature_integration.py": {
           "rationale": "Retain StateRef delivery, opposing-input and preflight rejection, return failure, interruption, pinned arguments, resume overlap, and claim-transfer failure; signature unit suites cover omitted normalization repetitions.",
           "functions": [
-            "test_managed_mat_state_ref_digests_selected_snapshot_and_delivers_live_state",
-            "test_managed_signature_rejects_opposing_input_before_body_or_control_creation",
-            "test_managed_return_normalization_records_failure_without_completion",
-            "test_managed_terminal_interrupt_suppresses_return_realization",
-            "test_managed_resume_preflights_checkpoint_with_overlapping_mat_state_ref",
-            "test_managed_argument_claim_transfer_survives_later_final_publication_failure"
+             "test_mat_input_is_delivered_live_but_result_is_supported_data",
+             "test_opposing_input_fails_before_body_and_control_creation",
+             "test_return_normalization_failure_keeps_checkpoint_and_avoids_final_capture",
+             "test_return_and_argument_normalization_once_nested_independent_replay_zero_return",
+             "test_metadata_return_is_normalized_once_and_codec_never_materializes_it",
+             "test_excluded_receiver_and_context_are_not_converted_but_live_results_refuse"
           ]
         },
         "tests/managed/test_interruption.py": {
           "rationale": "Retain explicit checkpoint interruption, external requests, checkpoint-backed keyboard interruption, and malformed-cause rejection; exhaustive mode covers no-checkpoint and disjoint nesting compositions.",
           "functions": [
-            "test_explicit_interrupt_associates_checkpoint_then_preserves_exact_cause",
-            "test_external_request_is_honored_at_the_next_checkpoint",
-            "test_keyboard_interrupt_retains_checkpoint_for_resume_restoration",
+             "test_explicit_interrupt_retains_checkpoint_and_exact_cause",
+             "test_interrupt_is_responsive_under_lifetime_owner_and_cannot_be_swallowed",
+             "test_interrupt_immediately_before_or_after_completion_CAS",
+             "test_keyboard_interrupt_preserves_latest_without_extra_capture",
             "test_invalid_explicit_interrupt_cause_fails_before_checkpoint_mutation"
           ]
         },
         "tests/managed/test_rerun.py": {
           "rationale": "Acceptance lifecycle retains completed-state rerun; keep pending-completion reconciliation and later checkpoint argument identity here.",
           "functions": [
-            "test_invocation_reconciles_a_pending_completed_authority_before_deciding",
-            "test_rerun_replaces_argument_digest_for_a_later_checkpoint_resume"
+             "test_override_b_never_opens_unavailable_unselected_initial_a",
+             "test_invalid_selected_b_never_falls_back_to_initial_a",
+             "test_rerun_initial_seeds_recovery_and_resume_does_not_resave",
+             "test_selected_prior_start_has_new_grant_before_old_root_release",
+             "test_retired_invocation_cannot_reconcile_or_release_new_run_grants"
           ]
         },
         "tests/managed/test_status.py": {
@@ -734,8 +740,9 @@
             "test_absent_status_read_only_and_selected_domain_specific",
             "test_detached_status_and_replay_admission_after_checkpoint_reclamation",
             "test_external_request_preconditions_and_dead_owner_are_read_only",
-            "test_legacy_runtime_explicit_refusal_precedes_work_or_publication",
-            "test_lifecycle_projection_does_not_claim_empty_supported_coverage",
+             "test_actual_failed_body_retains_detached_failure_status",
+              "test_lifecycle_projection_has_complete_registered_owner_coverage",
+             "test_cold_core_refuses_actual_managed_authority_without_complete_owner",
             "test_completion_projection_error_retains_completion_and_mutation_cut",
             "test_accepted_interrupt_preserves_phase_and_fences_completion"
           ]
@@ -831,6 +838,7 @@
         "tests/runtime/test_publication_concurrency.py": "Runtime publication concurrency proof."
       },
       "must_run": {
+        "tests/managed/test_result_codec.py::test_related_metadata_roots_share_occurrences_and_recompose_exactly": "Pin result-wide metadata alias preservation, independent equal occurrences, retained construction and exact recomposition.",
         "tests/core/test_repo_query_refresh.py::test_u2_same_producer_operands_preserve_external_scope_bindings[True-False-union-True]": "Pin completed independent requests from one shared base so sibling scopes cannot repeat maintenance.",
         "tests/core/test_repo_query_refresh.py::test_u2_same_producer_operands_preserve_external_scope_bindings[True-True-intersection-True]": "Pin the shared-base completed intersection in reversed order alongside marginal pending and separate-base coverage.",
         "tests/core/test_execute_managed_integration.py::test_managed_decorator_orders_materialize_once_and_publish_one_final_state[subprocess-operation_afm-written_order0]": "Keep the real managed worker boundary even if parameter collection order changes.",

@@ -299,7 +299,7 @@ def test_incompatible_area_rejected_by_mutating_bootstrap_without_changes(tmp_pa
     assert tuple(Path(control.root).iterdir()) == (path,)
 
 
-@pytest.mark.parametrize("field", ["old_current", "old_root", "result", "result_ack", "provisional_ack"])
+@pytest.mark.parametrize("field", ["old_current", "old_root", "result", "old_result", "result_ack", "provisional_ack"])
 def test_u17_nested_result_and_publication_versions_refuse_without_mutation(tmp_path, field):
     from dryml.managed import ManagedConfig
     from tests.managed.u16_fixtures import Value, setup
@@ -311,6 +311,7 @@ def test_u17_nested_result_and_publication_versions_refuse_without_mutation(tmp_
     if field == "old_current": data["version"] = 3
     elif field == "old_root": data["intents"][-1]["version"] = 2
     elif field == "result": data["result_reference"]["version"] = 99
+    elif field == "old_result": data["result_reference"]["version"] = 1
     elif field == "result_ack": data["result_ack"]["version"] = 99
     else: data["intents"][-1]["publications"][0]["version"] = 99
     payload = json.dumps(data).encode()

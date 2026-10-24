@@ -1,4 +1,11 @@
-"""Lazy public facade for core definitions, persistence, and query APIs."""
+"""Lazy public facade for Node authoring, persistence, realization and queries.
+
+Definition authors the common Node carrier; ConcreteNode and SavedNode describe
+capabilities of that graph, not independent persistence models. require_saved
+validates completeness without opening payloads. Export access imports its owning
+module on demand and raises AttributeError for unknown names; it performs no
+Store publication or optional-backend activation.
+"""
 
 from __future__ import annotations
 

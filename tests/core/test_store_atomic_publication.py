@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import dryml.filesystem as filesystem
-from dryml.core import Definition, Object, Repo, StateRef
+from dryml.core import Definition, Object, Repo, Serializable, StateRef
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord, MainRefRecord, NodeNameRecord
 from dryml.core.store.authority import StoreMutationError
@@ -18,6 +18,11 @@ from dryml.core.store.store import StoreAuthorityError, StoreCapabilityError
 
 
 class AtomicRecordObject(Object):
+    def __init__(self, value=1):
+        self.value = value
+
+
+class LegacyPublicationValue(Serializable):
     def __init__(self, value=1):
         self.value = value
 
@@ -164,8 +169,66 @@ def test_legacy_publication_and_coverage_are_refused_without_effects(tmp_path, o
         "Repo": lambda: Repo(store).save_object(AtomicRecordObject()),
         "query": store.query,
     }
+    if operation == "Repo":
+        state = actions[operation]()
+        assert store.query().saved().one().graph_equal(state)
+        assert store.authority_cut().epoch > before.epoch
+        return
+    if operation == "query":
+        assert actions[operation]().cdefs().count() == 0
+        assert store.authority_cut() == before
+        return
     with pytest.raises(StoreCapabilityError):
         actions[operation]()
     assert store.authority_cut() == before
     assert not Path(store.base_dir, "mutations").exists()
     assert not Path(store.base_dir, "states").exists()
+
+
+@pytest.mark.parametrize("backend", ["dir", "zip"])
+def test_legacy_rejection_entrypoints_preserve_current_authority(tmp_path, backend):
+    """Legacy writers refuse while Node queries and buffered metadata remain usable."""
+    from contextlib import closing
+    from dryml.core import ObjectId, ObjectRef
+    from dryml.core.utils.graph.path import GraphPath
+    from dryml.core.metadata import LineageMetadata
+    from dryml.core.store.records import (ClaimRecord, DeclarationRecord, ObjectAliasRecord,
+                                          StateAliasRecord)
+    from dryml.core.store.zip import ZipStore
+
+    store = (DirStore(tmp_path / "store", query_index="none") if backend == "dir"
+             else ZipStore(tmp_path / "store.zip"))
+    with closing(store):
+        node = creation().with_identity(ObjectId())
+        published = store.publish_node(node)
+        store.write_metadata(node, {"current": "supported"})
+        if backend == "zip":
+            store.commit()
+        old = ObjectRef(Definition(LegacyPublicationValue).concretize(), {GraphPath(): ObjectId()})
+        state = StateRef(old, {GraphPath(): "Test-" + "1" * 64})
+        actions = (
+            lambda: store.write_definition_record(DefinitionRecord(creation())),
+            lambda: store.write_declaration_record(DeclarationRecord(old)),
+            lambda: store.write_claim_record(ClaimRecord(old.digest(), 0, "available")),
+            lambda: store.write_main_ref(MainRefRecord("1" * 64)),
+            lambda: store.write_object_alias(ObjectAliasRecord("old", old)),
+            lambda: store.write_state_alias(StateAliasRecord("old", old, state.digest())),
+            lambda: store.write_metadata(old, {"legacy": True}),
+            lambda: store.delete_metadata(old),
+            lambda: store.write_lineage_metadata(LineageMetadata(old, "unknown", None)),
+            lambda: store.publish_snapshot(state, evidence=None, local_states={},
+                                           _before_annotation_write=lambda *a: pytest.fail("retired callback")),
+        )
+        before = {str(p.relative_to(store.base_dir)): p.read_bytes()
+                  for p in Path(store.base_dir).rglob("*") if p.is_file()}
+        archive = (tmp_path / "store.zip").read_bytes() if backend == "zip" else None
+        for action in actions:
+            with pytest.raises(StoreCapabilityError):
+                action()
+        assert {str(p.relative_to(store.base_dir)): p.read_bytes()
+                for p in Path(store.base_dir).rglob("*") if p.is_file()} == before
+        assert store.read_node(published.digest).graph_equal(node)
+        assert store.read_metadata(node) == {"current": "supported"}
+        if backend == "zip":
+            assert not store._archive_dirty
+            assert (tmp_path / "store.zip").read_bytes() == archive

@@ -216,6 +216,8 @@ class Node(Generic[T]):
             states (Mapping | None): Paths to captured LocalStates or None.
         Returns:
             An immutable Node whose construction pins remain separately inspectable.
+            Aliases outside quotations receive the overlay together; quoted values
+            retain their exact facets and sharing, even for the same occurrence.
         Raises:
             TypeError, ValueError, GraphPathError: As for ``replace_bindings``.
         Side Effects:
@@ -391,7 +393,9 @@ class Node(Generic[T]):
         """Return the creation-view SHA-256 in ``dryml-creation-cdef/v1``.
 
         Returns str; nonconcrete roots raise TypeError. Updates only owned pure
-        preparation facts. This digest is an address, not an equality proof.
+        preparation facts retained within bounded handle ownership. Resident
+        repeated requests reuse discovery/folds; eviction changes work only.
+        This digest is an address, not an equality proof.
         """
         from .node_views import CREATION_VIEW, view_digest
         return view_digest(self, CREATION_VIEW)
@@ -410,8 +414,9 @@ class Node(Generic[T]):
         """Return a necessary compatibility key, never sufficient admission evidence.
 
         Returns str in ``dryml-state-compatibility/v1``. Nonconcrete roots raise
-        TypeError; only pure preparation facts are computed. Use LocalState's
-        ``validate_for`` for creation-evidence, exact-graph and codec checks.
+        TypeError; only bounded handle-owned pure preparation facts are retained.
+        Resident requests reuse discovery/folds; eviction changes work only. Use
+        LocalState's ``validate_for`` for creation-evidence, exact-graph and codec checks.
         """
         from .node_views import COMPATIBILITY_VIEW, view_digest
         return view_digest(self, COMPATIBILITY_VIEW)
@@ -422,6 +427,8 @@ class Node(Generic[T]):
         Returns str, retaining required identities and exact quoted data. Performs
         no IO or resolution; unsupported values raise TypeError/ValueError. Digest
         equality alone is not proof; use ``object_projection_equal`` for authority.
+        Reuses resident bounded handle-owned pure preparation without caching
+        external evidence; eviction changes work only.
         """
         from .node_views import OBJECT_PROJECTION_VIEW, view_digest
         return view_digest(self, OBJECT_PROJECTION_VIEW)
@@ -436,7 +443,8 @@ class Node(Generic[T]):
         Raises:
             TypeError, ValueError: For unsupported graph values or cycles.
         Side Effects:
-            Pure owned preparation only; never restores or consults a Store.
+            Reuses bounded handle-owned pure views/keys, comparing exact evidence
+            each time. Never restores or consults a Store or caches live authority.
         """
         from .node_views import OBJECT_PROJECTION_VIEW, view_equal
         return view_equal(self, other, OBJECT_PROJECTION_VIEW)
@@ -508,7 +516,8 @@ def _at(root, path, *, traverse_refs=False, traverse_quoted=False):
     return current
 
 
-def _all_nodes(root, *, quoted=True):
+def _all_nodes(root, *, quoted=False):
+    """Visit graph Nodes, treating exact quoted configuration as a separate scope."""
     from .links import DefLink
     from .quoted import QuotedDef
     from .utils.graph.value import iter_value_edges
@@ -582,13 +591,13 @@ def _bind(root, identities, states, *, replace, realization):
                 raise ValueError("Node binding conflict with an existing exact assignment.")
             assignments[slot] = value
     facets = {}
-    for node in _all_nodes(root):
+    for node in _all_nodes(root, quoted=not realization):
         assignments = changes.get(node._occurrence)
         if assignments is not None:
             new = _Facets(assignments.get(0, node.object_id), assignments.get(1, node.state))
             if not _facets_equal(new, node._facets):
                 facets[node._occurrence] = new
-    return _rewrite(root, facets=facets, realization=realization)
+    return _rewrite(root, facets=facets, realization=realization, enter_quoted=not realization)
 
 
 def _facet_equal(left, right):
@@ -669,6 +678,8 @@ def _rewrite(root, replacements=None, *, facets=None, realization=False, enter_q
                     object.__setattr__(result, "_node_id", token)
             if node_transform is not None:
                 result = node_transform(value, result)
+                if not fresh and not reset_construction:
+                    result = _reuse_node_view(value, result)
         elif value_transform is not None and (mapped := value_transform(value, visit)) is not NotImplemented:
             result = mapped
         elif isinstance(value, DefLink):
@@ -688,6 +699,33 @@ def _rewrite(root, replacements=None, *, facets=None, realization=False, enter_q
         memo[marker] = result
         return result
     return visit(root)
+
+
+def _reuse_node_view(original, node):
+    """Recover original aliases after no-op transforms or exact overlay removal.
+
+    Reusing the retained handle preserves sharing with inert quoted data; equal
+    independent occurrences and deliberately different facet views stay distinct.
+    """
+    from .definition import ConcreteDefinition
+
+    for source in (node._construction, original):
+        if (source is None or type(source) is not type(node)
+                or source._occurrence is not node._occurrence
+                or source.cls != node.cls or not _facets_equal(source._facets, node._facets)
+                or source is original and source._construction is not node._construction):
+            continue
+        if isinstance(node, ConcreteDefinition):
+            before, after = source.parameters, node.parameters
+        else:
+            if ((source.args is None) != (node.args is None)
+                    or source.args is not None and (len(source.args) != len(node.args)
+                        or any(a is not b for a, b in zip(source.args, node.args)))):
+                continue
+            before, after = source.kwargs, node.kwargs
+        if before.keys() == after.keys() and all(before[k] is v for k, v in after.items()):
+            return source
+    return node
 
 
 def _coalesce(root):

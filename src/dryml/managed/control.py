@@ -674,7 +674,10 @@ class ManagedControlStore:
         """Journal an exact start-intent CAS under lifetime ownership, returning it.
 
         proposed/expected are StartPreparation/optional old intent. Graph encoding
-        happens before Store fences. Stale ownership/evidence fails closed; IO or
+        happens before Store fences. Prepared-to-ready validation permits only
+        root-intent changes, comparing unchanged fields logically when needed;
+        the persisted sidecar CAS still uses exact validated source bytes.
+        Stale ownership/evidence fails closed; IO or
         projection ambiguity preserves the affected-resource ledger. No hooks or
         state leases are acquired under a writer or short control section.
         """
@@ -689,9 +692,10 @@ class ManagedControlStore:
             phases = {"prepared": {"ready", "abandoned"}, "ready": {"admitted", "abandoned"},
                       "admitted": {"admitted"}, "abandoned": {"abandoned"}}
             same_proposal = _same_snapshot_bytes(proposed.proposed, expected.proposed)
-            if expected.phase == "prepared" and proposed.phase == "ready":
-                same_proposal = _same_snapshot_bytes(
-                    replace(proposed.proposed, intents=expected.proposed.intents), expected.proposed)
+            if expected.phase == "prepared" and proposed.phase == "ready" and not same_proposal:
+                # Replacement drops the source witness: this is an invariant
+                # comparison, not a manufactured persisted-byte fingerprint.
+                same_proposal = replace(proposed.proposed, intents=expected.proposed.intents) == expected.proposed
             if (proposed.token != expected.token or not _same_snapshot_bytes(proposed.previous, expected.previous)
                     or proposed.phase not in phases[expected.phase] or not same_proposal):
                 raise ManagedConflictError("preparation_conflict", "preparation dispositions are irreversible")
@@ -1216,7 +1220,8 @@ class ManagedControlStore:
 
 
 def _projection_reader(path):
-    result = re.fullmatch(r"managed/results/v1/([0-9a-f]{2})/([0-9a-f]{64})/current\.json", path)
+    from .result_codec import RESULT_VERSION
+    result = re.fullmatch(rf"managed/results/v{RESULT_VERSION}/([0-9a-f]{{2}})/([0-9a-f]{{64}})/current\.json", path)
     if result is not None:
         from .results import _ResultRecord
         if result[1] != result[2][:2]:
@@ -1258,6 +1263,8 @@ def _validate_projection_namespace(store):
     _closed(_data(gate), "dryml-managed", 2, ())
     if os.path.lexists(os.path.join(root, "operations", "v1")):
         raise ManagedControlError("unsupported_control", "legacy operation namespace cannot be projected")
+    if os.path.lexists(os.path.join(root, "results", "v1")):
+        raise ManagedControlError("unsupported_result", "legacy result namespace cannot be projected")
 
 
 # Core accepts an owner-supplied reader, but never imports this lifecycle package.

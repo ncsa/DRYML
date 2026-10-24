@@ -167,7 +167,7 @@ def test_refresh_preflight_failure_skips_all_restores_and_retains_exact_ledger(
 
     def fail_second(state, **kwargs):
         """Reject the second required snapshot before any caller restore begins."""
-        if state.object == unavailable.object_ref:
+        if state.object_view().graph_equal(repo.describe(unavailable).object_view()):
             raise OSError("StateRef unavailable")
         return load(state, **kwargs)
 

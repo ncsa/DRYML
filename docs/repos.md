@@ -44,7 +44,7 @@ no automatic conversion. The Store-owned APIs currently available are:
   Publishing saved metadata does not automatically publish a recipe root.
 
 Supported mutations are journaled under one Store authority cut and synchronously
-maintain enabled SQLite schema-10/coverage-1 projections before complete success.
+maintain enabled SQLite schema-11/coverage-3 projections before complete success.
 DirStore also supplies physical grants and active-use leases as described below.
 Ordinary Repo saves now use the format-4 Node/state-bucket pipeline described
 below. Node build/load/apply/restore use full-key state readers. Managed lifecycle
@@ -56,17 +56,33 @@ unavailability. Explicit `sqlite` never falls back. One persistent destination
 and compatible settings are bound per Store authority domain before mutation;
 conflicting enabled handles are refused. `store.mutation_index_disposition`
 reports policy, not readiness. The remaining
-legacy consumer documentation after the current-format sections describes
-interfaces awaiting their owning cutover; snapshot-directory workflows are not
-supported against built-in format-4 Stores.
+historical consumer appendix records retired interfaces, not another supported
+runtime or a conversion path. Snapshot-directory workflows are not supported
+against built-in format-4 Stores.
 New consumer preflight must declare `record_family="dryml-node-graph/v1"`; the
 operation's human-readable diagnostic name does not select a persistent format.
+Legacy publication entry points remain explicit `StoreCapabilityError` refusals:
+definition/declaration/claim records, old aliases/main references, V3 snapshots,
+and old reference annotation/lineage writers install nothing. They do not provide
+a Store migration path. This does not reject ordinary legacy reference values at
+their separately supported explicit transport/value-codec boundaries, or change
+current Node queries and buffered archive metadata publication.
 
 DirStore installation primitives return after native filesystem content and
 directory persistence barriers. ZipStore's corresponding receipt is explicitly
 buffered; only successful archive `commit()` establishes durable completion.
 Failed commits propagate and retain dirty evidence; closing discards the buffered
 view. File-like ZipStores permit v4 reads but refuse writable publication.
+
+After interrupted publication, `recover_authority()` records the exact visible cut
+and retries unresolved native persistence barriers before acknowledgement or
+matching-state reuse. A visible variant alone is not a durable installation.
+Repair touches affected metadata/parent entries without capture, restore or body
+execution and never executes missing transitions. Repeated barrier failure raises
+`StoreMutationError` with its mutation/cut receipt and preserves pending evidence;
+SQLite maintenance or automatic query refresh cannot bypass this gate. Unsupported
+standalone directory barriers fail explicitly rather than infer durability from
+visibility. See [Formats](formats.md) for mutation-intent v2 and backend limits.
 
 ### Ordinary Save, Explicit Reuse And Routing
 
@@ -94,6 +110,13 @@ full-StateKey-to-connected-Store overrides. Same-bucket source batches interpret
 their header once at a validated cut. A previous receipt is historical evidence,
 never automatic permission to reuse mutable live state. `deep_capture` remains an
 accepted spelling; ordinary saves already capture every unselected node.
+
+Before hooks, save also freshly validates any destination capture association
+named by the live root's previous saved receipt. Malformed installed metadata
+raises `RepoSaveError` with its authority-error cause, preserving the bytes and
+running neither capture nor environment observation. A missing destination
+association permits a new save. This check does not certify current private
+state or turn a previous receipt into permission to reuse it.
 
 Capture receives only an empty codec-private staging `data/`. Content identity
 includes codec version, interpretation, inventory and bytes. An unchanged capture
@@ -148,12 +171,22 @@ saved completeness, then freshly validate full-key availability. They do not
 initialize omitted state or substitute another checkpoint. Stateless saved graphs
 are valid without captures. Reused eligible live nodes run their selected hooks;
 historical receipts never establish current private state.
+Matching can select a unique whole cached topology even when its stateless Method
+dependencies have no independent cache entries. It still restores selected state;
+ambiguity constructs fresh. Fresh loads attach only the requested root receipt,
+while reused children preserve any independently established historical receipt.
+Every missing full key is reported before construction or live-node reservation;
+malformed selected capture/declaration metadata remains an explicit authority error.
 
 `repo.apply_state(obj, states)` applies only the supplied StateSpec/typed path map,
 preserving unspecified state, identities and sharing. It captures/publishes nothing.
 `repo.restore(obj, saved_node)` checks the **original supplied** canonical object
 projection, restores dependency-first, then adopts supplied construction pins with
 live ObjectIds unchanged. Subsequent captures use those adopted creation views.
+State selections and lineage destinations are matched to the receiver's exact
+occurrences and ObjectIds, including independently decoded recipe-equal set
+members. A `SetMember` ordinal addresses its own graph view; it is not portable
+identity evidence between saved and live graphs.
 Foreign compatible state retains the donor full StateKey rather than being rehomed.
 
 Both operations accept `source_store` and `source_stores` full-StateKey overrides
@@ -210,6 +243,11 @@ Repair a failed index with `store.open_query_index().maintain_store()`. For an
 authority-partial save, reconnect the exact Store and call
 `store.repair_save_batch(publication.mutation_id, publication.retention_token)`.
 Repair uses the persisted journal and owned staging, never another capture.
+Index maintenance (including automatic query refresh) may acknowledge a partial
+projection first; that does not consume the original mutation UUID's repair
+eligibility. Missing transitions are a new journaled publication, while the
+original receipt retains its actual classified before/after/projection evidence.
+An exact completed repeat makes no authority changes.
 It serializes on the owner token, rejects abandoned/retired intents, acquires
 independent nonblocking exclusive key leases and refuses missing staging or a
 conflicting later cut. An uncertain grant remains protective until owner-fenced
@@ -376,7 +414,7 @@ the canonical bucket header, manifest and graph history remain. Old retries may
 remove only those retired remnants, never the new public `data/` directory.
 
 All grant, owner-ledger and availability changes enter the Store journal and
-enabled schema-10/coverage-1 index. The `retention` relation exposes per-key grant
+enabled schema-11/coverage-3 index. The `retention` relation exposes per-key grant
 postings. Requested metadata has its own supported closed relation; managed
 lifecycle associations remain explicitly unsupported. Missing reverse indexes may be rebuilt from authoritative records;
 they never authorize removal. Low-level `apply_prepared_mutation()` acquires key
@@ -435,10 +473,19 @@ the same evidence attributes. Preserve partial staging when recovery is needed.
 Open a compatible Store and call `recover_authority()` to classify interrupted
 work. This reads affected metadata only; it neither runs capture/restore/hooks nor
 deletes authority. `pending_mutations()` supplies exact expected transitions and
-observed projection bytes. `replay_mutation(uuid)` can finish from that prepared
-evidence and surviving staging without graph preparation, then acknowledge only
-the repaired original cut. A later Store epoch, changed byte witnesses or missing
-staging fails explicitly; replay does not guess through ABA changes. Already visible
+observed projection bytes for index consumers. `replay_mutation(uuid)` resolves
+the exact persisted classified intent independently of that pending list: index
+maintenance or automatic query refresh may already have acknowledged its partial
+projection without completing its intended authority transitions. Repair uses the
+original before/after transitions, classified byte witnesses and surviving owned
+staging without graph preparation. Missing transitions publish in a separately
+journaled mutation, with enabled index completion for that new cut; an already
+acknowledged original receipt is neither rewritten nor acknowledged again using
+an obsolete SQLite receipt. Pending original work is acknowledged only at its
+captured cut. A later Store epoch, changed byte witnesses or missing
+staging fails explicitly when transitions remain incomplete; replay does not
+guess through ABA changes. A repeated repair of exact final records (including
+availability incarnation) is a no-op. Already visible
 records still cross native persistence barriers before acknowledgement.
 An earlier repair never acknowledges a later writer. Missing/corrupt/future
 authority or intent versions are errors, not permission to reset the Store.
@@ -470,7 +517,17 @@ See [Formats](formats.md#store-format-4-cdef-owned-state-and-metadata-readers) f
 record families, physical layout and failure rules. Repo and managed integration
 must consume these Store APIs rather than form or mutate bucket paths.
 
-## Saving With Routing
+## Historical Store-3 Consumer Appendix — Unsupported
+
+The discussion below preserves superseded implementation evidence. Its StateRef
+snapshot, claim/declaration, deferred-validation-cache, alias and fork workflows
+are **not current format-4 instructions** and do not authorize conversion or a
+parallel runtime. Use the current Node sections above, [Managed Operations](managed_operations.md),
+and [integrated verification](object_state_lifecycle_verification.md). Current
+StateVariantManifest v1 authenticates all inventoried bytes at use; a codec's
+logical deferred-file annotation does not enable the old deferred-hash proof.
+
+### Historical Saving With Routing
 
 `Repo.save_object()`, `Repo.save()`, `Object.save()`, and module-level
 `save_object()` publish one immutable root `StateRef`. Their shared keywords are
@@ -713,14 +770,18 @@ single-Store universe. Use `sel()` for structural or exact identity restrictions
 `cdefs()`/`object_refs()`/`saved()` for graph domains, `local_states()` for full-key
 variant discovery, and `collect()` or a
 scalar terminal to evaluate. Query terminals never construct Objects or open
-payloads; load an identity explicitly with `load_object()` or an exact-state load
-method. Source graph results are Nodes; use `graph_equal()` for semantic equality
+payloads. Pass a `cdefs()` recipe result to `repo.build(concrete_recipe_node)` for
+construction, allocating missing identities and initializing unspecified state.
+Use `repo.load(saved_node)` or `repo.load_state_ref(saved_node)` only for complete
+SavedNodes, for example from `saved()` / `state_refs()`; loading requires every
+owned stateful occurrence's identity and state and never initializes omitted state.
+Source graph results are Nodes; use `graph_equal()` for semantic equality
 after a fresh decode. See [Graph Querying](graph_querying.md) for current domains,
 bounded cuts, continuation failures, and observable repair/scan/refusal policy.
 `take(0)` reads no source. Exact full-StateKey hit/miss opens no index. Ready
 selective queries use bounded candidate pages, release fences before preparation
 and output, and reject changed continuation evidence explicitly.
-`Repo.load_state_ref(state_ref, reuse_live="matching")` is the exact-state load
+`repo.load_state_ref(saved_node, reuse_live="matching")` is the exact-state load
 operation. It follows records across the connected Stores, not the current route
 map. `matching`, `greedy`, and `never` are live-reuse policies; structural
 similarity cannot substitute for the exact ObjectId and binding requirements.
@@ -834,6 +895,23 @@ normalized routing rules, `config`, lease duration, and deletion-save setting.
 It excludes Store contents, aliases, claims, main definitions, live Object
 affinity, caches, sessions, archive buffers, and runtime resources. It does not
 commit archives, save Objects, resolve symbols, or activate a session.
+
+Routing selectors containing unordered graph-bearing values, normalized Nodes,
+exact identity/state facets, or retained construction views use the closed
+`node-selector` version-1 carrier. Its `graph` is one authenticated
+`dryml-node-graph/v1` table with shared value blocks and an exact root view, not a
+second graph model. Independent equal Nodes remain separate unordered members;
+aliases between members and other branches survive reconstruction. Quotation,
+receiving roles, normalized structure and fixed facets remain exact. Fresh decoded
+handles preserve the graph's alias partition, not process-local handle equality.
+
+Canonical transport placement resolves unordered ties over the complete table,
+including retained construction views and occurrence joins. JSON bytes are stable
+across hash seeds and round trips. This placement does not redefine semantic graph
+identity or substitute for source-byte authentication/CAS. Compatible simple
+selectors retain the existing closed descriptor spelling; its reference-path and
+set-fingerprint checks remain in force. Unknown carrier, graph, identity and key
+versions are rejected. No Store conversion or migration is performed.
 
 `RepoDefinition.to_data()` and `to_json()` expose detached data for caller-owned
 inspection or transport. `from_data()` and `from_json()` only validate and decode

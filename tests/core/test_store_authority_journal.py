@@ -14,7 +14,7 @@ from dryml.core.node_views import CREATION_VIEW, view_digest
 from dryml.core.store.authority import StoreCutChanged, StoreMutationError
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import MutationIntentRecord, NodeNameRecord
-from dryml.core.store.store import StoreAuthorityError, StoreCapabilityError
+from dryml.core.store.store import StoreAuthorityError
 from dryml.core.store.zip import ZipStore
 
 
@@ -428,6 +428,41 @@ def test_replay_refuses_to_overwrite_later_name_writer(tmp_path, monkeypatch):
     assert store.read_node_name("main") == second and store.authority_cut() == before
 
 
+def test_acknowledged_partial_replay_preserves_receipt_and_rejects_new_incarnation(tmp_path, monkeypatch):
+    """Exact UUID replay survives index ack, but never overwrites a same-key republish."""
+    import dryml.filesystem as fs
+    from dryml.core.store.records import StateAvailabilityRecord
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    with monkeypatch.context() as patch:
+        def fail_variant(*args):
+            raise OSError("before variant")
+        patch.setattr(fs, "publish_directory", fail_variant)
+        with pytest.raises(StoreMutationError) as raised:
+            install(store)
+    mutation_id = raised.value.mutation_id
+    store.open_query_index().maintain_store()
+    path = Path(store.base_dir, "mutations", mutation_id + ".record")
+    original = path.read_bytes()
+    assert MutationIntentRecord.from_bytes(original).intent["status"] == "acknowledged"
+    repaired = store.replay_mutation(mutation_id)
+    assert not repaired.pending and path.read_bytes() == original
+    assert store.replay_mutation(mutation_id) == repaired
+    descriptor, = store.inspect_states(view_digest(creation(), CREATION_VIEW))
+    key = descriptor.state.key
+    availability_path = Path(store.state_data_path(key)).parent / "availability.record"
+    old = StateAvailabilityRecord.from_bytes(availability_path.read_bytes())
+    assert store.delete_state(key).status == "removed"
+    assert install(store).state.key == key
+    new_bytes = availability_path.read_bytes()
+    assert StateAvailabilityRecord.from_bytes(new_bytes).incarnation != old.incarnation
+    before = store.authority_cut()
+    with pytest.raises(StoreCutChanged, match="stale|conflicts"):
+        store.replay_mutation(mutation_id)
+    assert store.authority_cut() == before
+    assert availability_path.read_bytes() == new_bytes and path.read_bytes() == original
+    assert Path(store.state_data_path(key), "value").read_bytes() == b"state"
+
+
 def test_prepared_batch_seam_leaves_exact_projection_pending_for_owner_ack(tmp_path):
     store = DirStore(tmp_path / "store", query_index="none")
     other = DirStore(store.base_dir, query_index="none")
@@ -473,7 +508,7 @@ def test_incompatible_or_missing_journal_authority_is_never_reinitialized(tmp_pa
         path.unlink()
     else:
         data = record_type.from_bytes(path.read_bytes()).to_data()
-        data["version"] = 2
+        data["version"] = record_type.version + 1
         path.write_bytes(encode_metadata_frame(record_type.schema, 1, data))
     before = {str(p): p.read_bytes() for p in Path(store.base_dir).rglob("*") if p.is_file()}
     with pytest.raises(StoreAuthorityError):
@@ -623,3 +658,139 @@ def test_prepared_adapter_cannot_overwrite_unregistered_intent_bridge(tmp_path, 
     assert store.read_node_name("main") is None
     records = store.recover_authority()
     assert records and records[-1].intent["status"] == "classified"
+
+
+@pytest.mark.parametrize("boundary,repair,policy", [
+    ("variant", "maintain", "sqlite"),
+    ("variant", "refresh", "sqlite"),
+    ("variant", "reuse", "sqlite"),
+    ("variant", "reuse", "none"),
+    ("variant", "interrupt", "sqlite"),
+    ("variant-source", "maintain", "sqlite"),
+    ("name", "maintain", "sqlite"),
+    ("name", "refresh", "sqlite"),
+    ("name", "ack", "none"),
+    ("name", "ack", "sqlite"),
+    ("header", "maintain", "sqlite"),
+])
+def test_native_barrier_failure_requires_store_persistence_recovery(
+        tmp_path, monkeypatch, boundary, repair, policy):
+    """Visible native rename is classified, but never substitutes for fsync."""
+    import dryml.filesystem as fs
+    store = DirStore(tmp_path / "store", query_index=policy)
+    root = store.publish_node(creation()) if boundary == "name" else None
+    if policy == "sqlite":
+        store.open_query_index().maintain_store()
+    attempts, completed = [], []
+    sync = fs._backend.sync_directory
+    armed = [True]
+
+    def native_barrier(path):
+        directory = Path(path)
+        matched = ((boundary == "variant" and len(directory.name) == 64
+                    and any(p.is_dir() and p.name.startswith("Test-") for p in directory.iterdir()))
+                   or (boundary == "variant-source" and directory == Path(store.base_dir, ".staging")
+                       and not any(p.is_dir() and len(p.name) == 32 for p in directory.iterdir()))
+                   or (boundary == "name" and (directory / "main.record").is_file())
+                   or (boundary == "header" and (directory / "def.pkl").is_file()))
+        if matched:
+            attempts.append(directory)
+            if armed[0]:
+                if repair == "interrupt":
+                    raise KeyboardInterrupt("native parent barrier unavailable")
+                raise OSError("native parent barrier unavailable")
+        result = sync(path)
+        if matched:
+            completed.append(directory)
+        return result
+
+    monkeypatch.setattr(fs._backend, "sync_directory", native_barrier)
+    failure_type = KeyboardInterrupt if repair == "interrupt" else StoreMutationError
+    with pytest.raises(failure_type, match="native parent barrier") as raised:
+        if boundary == "name":
+            store.compare_and_set_node_name(NodeNameRecord("main", "recipe", root.digest), expected=None)
+        else:
+            install(store)
+    error = raised.value
+    assert attempts and not completed
+    receipt, = store.pending_mutations()
+    assert receipt.intent["mutation_id"] == error.mutation_id
+    assert receipt.intent["status"] == "classified" and receipt.intent["projection"]
+    assert receipt.intent["persistence_confirmed"] is False
+    assert receipt.intent["confirmed"]
+    cut = store.authority_cut()
+    store.close()
+    reopened = DirStore(store.base_dir, query_index=policy)
+    index = reopened.open_query_index()
+    if repair == "ack" and index is not None:
+        # A SQL receipt can certify the visible cut independently of persistence.
+        from dryml.core.query.authority import capture_store_projection
+        prepared = capture_store_projection(reopened)
+        index._run_write_transaction(lambda con: index._write_store_projection(con, prepared))
+
+    def recover():
+        if repair == "maintain":
+            index.maintain_store()
+        elif repair == "refresh":
+            tuple(reopened.query().local_states().collect()) if boundary == "variant" else tuple(reopened.query().collect())
+        elif repair == "ack":
+            reopened.acknowledge_mutation(error.mutation_id, receipt.intent["epoch"])
+        else:
+            return install(reopened)
+
+    for _ in range(2):
+        before = len(attempts)
+        with pytest.raises(failure_type, match="native parent barrier") as failed:
+            recover()
+        assert failed.value.mutation_id == error.mutation_id
+        assert failed.value.cut == cut and failed.value.index_disposition == "repair_pending"
+        assert len(attempts) > before and not completed
+        assert reopened.authority_cut() == cut
+        assert reopened.pending_mutations() == (receipt,)
+
+    armed[0] = False
+    # Repair must be metadata/barrier work, without graph or lifecycle execution.
+    with monkeypatch.context() as patch:
+        patch.setattr(reopened, "_prepare_node_roots", lambda *a: pytest.fail("capture during repair"))
+        patch.setattr(reopened, "_authenticate_state_data", lambda *a: pytest.fail("payload restore during repair"))
+        patch.setattr(Object, "save_state_to_dir", lambda *a, **kw: pytest.fail("capture hook during repair"))
+        patch.setattr(Object, "restore_state_from_dir", lambda *a, **kw: pytest.fail("restore hook during repair"))
+        patch.setattr(JournalObject, "__init__", lambda *a, **kw: pytest.fail("Object body during repair"))
+        if repair in {"reuse", "interrupt"}:
+            reopened.recover_authority()
+        else:
+            recover()
+    assert completed
+    repaired = reopened._read_file(Path(reopened.base_dir, "mutations", error.mutation_id + ".record"), MutationIntentRecord)
+    assert repaired.intent["projection"] == receipt.intent["projection"]
+    assert repaired.intent["confirmed"] == receipt.intent["confirmed"]
+    assert repaired.intent["persistence_confirmed"] is True
+    if boundary == "header":
+        assert reopened.inspect_states(view_digest(creation(), CREATION_VIEW)) == ()
+    if repair in {"reuse", "interrupt"}:
+        reused = install(reopened)
+        assert not reused.installed and reused.durability == "durable"
+    reopened.publish_node(creation(99))
+    if index is not None:
+        index.maintain_store()
+    assert reopened.authority_cut().epoch > cut.epoch
+
+
+@pytest.mark.parametrize("status,confirmation", [
+    ("pending", True), ("classified", 1), ("classified", "true"), ("acknowledged", False),
+])
+def test_intent_persistence_confirmation_is_closed_and_disposition_checked(tmp_path, status, confirmation):
+    from dryml.core.store import authority
+    from dryml.core.store.records import StoreRecordError, _json_bytes
+    store = DirStore(tmp_path / "store", query_index="none")
+    with store._metadata_read() as captured:
+        batch = captured.batch([], ())
+    record = authority._intent(batch, str(__import__("uuid").uuid4()))
+    assert record.to_data()["version"] == 2
+    assert record.to_data()["domain"] == "dryml-store-mutation-intent/v2"
+    assert MutationIntentRecord.from_bytes(record.to_bytes()) == record
+    data = record.intent
+    data.update(status=status, persistence_confirmed=confirmation,
+                epoch=None if status == "pending" else batch.cut.epoch)
+    with pytest.raises(StoreRecordError, match="persistence confirmation"):
+        MutationIntentRecord(_json_bytes(data))

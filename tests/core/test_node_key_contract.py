@@ -1008,3 +1008,88 @@ def test_pure_symbolic_sharing_is_not_node_occurrence_identity():
     assert prepared.exact_equal(roots[0], prepared, roots[1])
     restored = decode_node_graph(encode_node_graph(prepared), view=1)
     assert restored.graph_equal(roots[0])
+
+
+@pytest.mark.parametrize("size", [10, 12])
+@pytest.mark.parametrize("concrete", [False, True])
+def test_canonical_ordered_transport_avoids_artificial_symmetry(monkeypatch, size, concrete):
+    """Ordered equal siblings need no search, without collapsing occurrences."""
+    import dryml.core.node_prepare as preparation
+    from dryml.core.node_codec import encode_node_graph, decode_node_graph
+
+    candidates = 0
+    labelings = preparation._labelings
+
+    def bounded_labelings(cells, index=0, prefix=()):
+        nonlocal candidates
+        for labeling in labelings(cells, index, prefix):
+            if index == 0:
+                candidates += 1
+                assert candidates <= 4, "Ordered transport is enumerating artificial symmetry."
+            yield labeling
+
+    monkeypatch.setattr(preparation, "_labelings", bounded_labelings)
+    children = [Definition(KeyNode, "equal") for _ in range(size)]
+    root = Definition(KeyNode, [*children, children[0]])
+    wrong = Definition(KeyNode, [*children, children[-1]])
+    if concrete:
+        root, wrong = root.concretize(), wrong.concretize()
+    prepared = preparation.NodePreparation((root,))
+    packet = encode_node_graph(prepared, canonical=True)
+    assert candidates == 0
+    assert prepared.counts["partition_rows"] == prepared.counts["unordered_ties"] == 0
+    assert prepared.counts["discovery"] == prepared.counts["export_rows"] == size + 1
+    table = next(iter(packet["tables"].values()))
+    assert len(table["rows"]) == len(table["overlays"]) == size + 1
+
+    restored = decode_node_graph(packet)
+    values = restored.parameters["value"] if concrete else restored.args[0]
+    assert len(set(values[:size])) == size
+    assert values[-1] is values[0]
+    assert all(left is not right for left, right in zip(values[:size], children))
+    assert restored.graph_equal(root)
+    assert encode_node_graph(preparation.NodePreparation((restored,)), canonical=True) == packet
+    assert encode_node_graph(preparation.NodePreparation((root.copy_graph(),)), canonical=True) == packet
+    assert encode_node_graph(preparation.NodePreparation((wrong,)), canonical=True) != packet
+    assert wrong.exact_key() != root.exact_key()
+    assert candidates == 0
+
+
+@pytest.mark.parametrize("case", ["unordered", "multiview", "construction"])
+def test_canonical_transport_keeps_exact_fallback_for_real_view_choices(case):
+    """Unordered aliases and distinct occurrence views retain full-table search."""
+    from dryml.core.node_prepare import NodePreparation
+    from dryml.core.node_codec import encode_node_graph, decode_node_graph
+    from dryml.core.state_values import LocalState, StateKey
+
+    original = Definition(KeyNode, 1).concretize()
+    identity = ObjectId(("canonicaltransport",))
+    state = LocalState(StateKey("a" * 64, "pkl-" + "b" * 64), original)
+    if case == "unordered":
+        root = Definition(KeyNode, [{original, original.copy_graph()}, original])
+    elif case == "multiview":
+        selected = original.with_identity(identity)
+        root = Definition(KeyNode, [selected, selected, original.quote()])
+    else:
+        pinned = original.with_state(state)
+        realized = pinned.with_realization(identities={"$": identity}, states={"$": None})
+        root = Definition(KeyNode, [realized, realized, pinned.quote()])
+    prepared = NodePreparation((root,))
+    packet = encode_node_graph(prepared, canonical=True)
+    assert prepared.counts["partition_rows"] > 0
+    restored = decode_node_graph(packet)
+    assert restored.graph_equal(root)
+    assert encode_node_graph(NodePreparation((restored,)), canonical=True) == packet
+    if case == "unordered":
+        members, selected = restored.args[0]
+        assert len(members) == 2 and selected in members
+    else:
+        selected, alias, quoted = restored.args[0]
+        retained = quoted.value
+        assert alias is selected
+        assert selected is not retained
+        assert selected._occurrence is retained._occurrence
+        assert selected.object_id == identity and retained.object_id is None
+        if case == "construction":
+            assert selected.state is None and retained.state == state
+            assert selected.construction_view is retained

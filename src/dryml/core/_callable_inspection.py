@@ -204,7 +204,8 @@ def _known_instance_owner(target: Callable[..., Any]) -> CallableOwner | None:
 
     if Method in classes:
         return "method"
-    if any(_native_dict(cls).get("__dryml_execute_owner__") == "managed"
+    if any(type(_native_dict(cls).get("__dryml_execute_owner__")) is str
+           and _native_dict(cls).get("__dryml_execute_owner__") == "managed"
            and _native_dict(cls).get("__dryml_execute_adapter__") is not None for cls in classes):
         return "managed"
     return None

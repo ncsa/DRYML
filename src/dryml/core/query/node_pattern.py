@@ -3,6 +3,10 @@
 This semantic adapter provides no Store inventory, source cut or index-coverage
 claim. Legacy posting plans retain it as an exact residual and must visibly scan
 or refuse until the format-4 source/lowering consumer is available.
+
+Exact matcher values use graph semantics (including shared occurrence partitions),
+not Python Node-handle equality. Fully specified factories retain closed call
+shape; factories containing Match leaves retain their supplied-pattern behavior.
 """
 
 from collections.abc import Mapping
@@ -140,9 +144,9 @@ def _node_matches(pattern, target, pattern_parameters=None, target_parameters=No
                   *, class_match="selector", strict=False):
     """Backtrack whole assignments, retaining a bijection across unordered joins."""
     from ..canonical import container_family
-    from ..factory import FactorySpec
+    from ..factory import FactorySpec, _contains_match
     from ..links import DefLink
-    from ..params import Match
+    from ..params import Match, ExactMatcher
     from ..quoted import QuotedDef, SelectorSpec
     from .query import _query_match_class, _query_match_leaf
 
@@ -179,6 +183,9 @@ def _node_matches(pattern, target, pattern_parameters=None, target_parameters=No
         # 2 exact quotation (including missing facets and raw omission spelling).
         # An alias revisited through quotation must upgrade its earlier proof.
         if isinstance(left, Match) and not exact:
+            if type(left.matcher) is ExactMatcher:
+                yield from compare(left.matcher.value, right, forward, reverse, 2)
+                return
             if left.matches(right):
                 yield forward, reverse
             return
@@ -256,8 +263,9 @@ def _node_matches(pattern, target, pattern_parameters=None, target_parameters=No
         if isinstance(left, FactorySpec):
             if not isinstance(right, FactorySpec):
                 return
-            yield from sequence([(left.target, right.target, True), (left.args, right.args, exact),
-                                 (left.kwargs, right.kwargs, exact)], forward, reverse)
+            strength = exact or (0 if _contains_match(left) else 2)
+            yield from sequence([(left.target, right.target, 2), (left.args, right.args, strength),
+                                 (left.kwargs, right.kwargs, strength)], forward, reverse)
             return
         if isinstance(left, Mapping):
             if not isinstance(right, Mapping) or exact and set(left) != set(right):

@@ -94,27 +94,20 @@ def test_loose_projection_preserves_fixed_cdef_anchors_in_queries(tmp_path, quer
 
     store = DirStore(tmp_path / "store", query_index=query_index)
     repo = Repo(store)
-    repo.declare_object(candidate)
-    repo.declare_object(other)
+    store.publish_node(candidate)
+    store.publish_node(other)
 
     assert repo.query().sel(loose).cdefs().one().graph_equal(candidate)
     assert repo.query().sel(support).cdefs().one().graph_equal(candidate)
 
-    from dryml.core.query.graph_plan import graph_candidate_ids
-    from dryml.core.query.selector_graph import compile_selector_graph
-
-    index = store.open_query_index() if query_index == "sqlite" else repo._query_catalog
-    index.refresh(True)
-    compiled = compile_selector_graph(loose)
-    assert not compiled.requires_scan
-    with index.read_view(include_cached=False) as view:
-        anchor_ids = view.exact_ids(child)
-        assert len(anchor_ids) == 1
-        assert next(iter(view.cdefs_by_id(anchor_ids).values())).graph_equal(child)
-        monkeypatch.setattr(type(view), "all_definition_ids", lambda self: pytest.fail("fixed anchor fell back to full index enumeration"))
-        candidate_ids = graph_candidate_ids(view, compiled, None)
-        assert len(candidate_ids) == 1
-        assert next(iter(view.cdefs_by_id(candidate_ids).values())).graph_equal(candidate)
+    if query_index == "sqlite":
+        from dryml.core.store import authority
+        monkeypatch.setattr(authority._DetachedRead, "directory", lambda *args: pytest.fail("fixed anchor inventoried the Store"))
+    selected = tuple(repo.query().refresh(False).sel(loose).cdefs().collect())
+    assert len(selected) == 1
+    assert selected[0].graph_equal(candidate)
+    from dryml.core import DefinitionPath, Parameter
+    assert selected[0].at(DefinitionPath((Parameter("child"),))).graph_equal(child)
 
 
 @pytest.mark.parametrize("query_index", ("memory", "sqlite"))
@@ -130,8 +123,8 @@ def test_fixed_cdef_query_anchor_keeps_exact_topology_after_decode(tmp_path, que
     candidate = authored.sub(width=32).concretize()
     other = Definition(ProjectionOwner, child=different_topology, width=32).concretize()
     repo = Repo(DirStore(tmp_path / "store", query_index=query_index))
-    repo.declare_object(candidate)
-    repo.declare_object(other)
+    repo.default_store.publish_node(candidate)
+    repo.default_store.publish_node(other)
 
     support = Generator(authored, {"width": UniformFromSet((32, 64))}).support_selector()
     for selector in (authored.loose_selector(), support):

@@ -19,11 +19,10 @@ import os
 from pathlib import Path
 import struct
 import sys
-from types import MappingProxyType
 
 from .ml_workflow_fixtures import (
     FixtureManifestError, QualificationUnrun, installed_environment, load_manifest,
-    preflight_manifest, validate_fixture_reference_metadata,
+    validate_fixture_reference_metadata,
 )
 from .ml_workflow_workloads import QualificationCase, accelerated_cases, cpu_matrix, selected_gpu_device
 
@@ -522,7 +521,7 @@ def run_real_worker_request(data: Mapping[str, object]) -> Mapping[str, object]:
     request = QualificationWorkerRequest.from_data(data)
     preflight_worker_request(request)
     from .ml_workflow_fixtures import installed_environment, load_manifest, preflight_manifest
-    from .ml_workflow_workloads import QualificationEvidence, validate_evidence
+    from .ml_workflow_workloads import QualificationEvidence
     from tests.qualification.test_ml_workflow_local import _real_runner
 
     previous = {
@@ -839,7 +838,7 @@ def _observed_local_evidence(evidence, request: QualificationWorkerRequest, obse
         },
         "submitted": {
             "request_digest": request.request_id, "submission_id": f"isolation:{observation['pid']}",
-            "result_ref": evidence.final_experiment_ref.digest(),
+            "result_ref": evidence.final_experiment_ref.exact_digest(),
         },
         "shared_authority": {
             "fixture_store": os.fspath(Path(request.case.fixture_store).resolve()),
@@ -884,7 +883,7 @@ def _observed_core_evidence(evidence, request: QualificationWorkerRequest, snaps
         },
         "submitted": {
             "request_digest": request.request_id, "submission_id": backend.submission_id,
-            "result_ref": evidence.final_experiment_ref.digest(),
+            "result_ref": evidence.final_experiment_ref.exact_digest(),
         },
         "shared_authority": {
             "fixture_store": os.fspath(Path(request.case.fixture_store).resolve()),
@@ -892,8 +891,8 @@ def _observed_core_evidence(evidence, request: QualificationWorkerRequest, snaps
         },
         "core_outcome": {
             "kind": observed_backend,
-            "publication_refs": tuple(item.state_ref.digest() for item in snapshot.evidence.publications),
-            "update_refs": tuple(item.digest() for item in snapshot.evidence.updates),
+            "publication_refs": tuple(item.state_ref.exact_digest() for item in snapshot.evidence.publications),
+            "update_refs": tuple(item.exact_digest() for item in snapshot.evidence.updates),
         },
         "coordinator_validated_refs": None,
     })
@@ -905,29 +904,39 @@ def _observed_core_evidence(evidence, request: QualificationWorkerRequest, snaps
 def _validate_coordinator_reference_metadata(evidence, *, output_store) -> None:
     """Validate every final exact reference without restoring any payload.
 
-    Exact-load plans establish StateRef closure, projected/reference bindings,
-    definitions, snapshot metadata, and selected-Store availability.  Model and
+    Detached Node graphs and full-key metadata establish reference bindings,
+    creation/manifest consistency and selected-Store availability. Model and
     Dataset references intentionally stop here: a coordinator never restores
     their native payloads.
     """
 
     from dryml.core import Repo
-    from dryml.core.materialization import build_exact_state_load_plan
+    from dryml.core import require_saved, Parameter
+    from dryml.core.node_prepare import NodePreparation
     from dryml.core.store.dir import DirStore
 
     output = DirStore.open_existing(output_store)
     fixture = DirStore.open_existing(evidence.case.fixture_store)
     repo = Repo((output, fixture))
     try:
-        expected_model = evidence.final_experiment_ref.at("model")
-        expected_test = evidence.final_experiment_ref.at("test_data")
-        if expected_model != evidence.model_ref or expected_test != evidence.test_ref:
+        expected_model = evidence.final_experiment_ref.at((Parameter("model"),))
+        expected_test = evidence.final_experiment_ref.at((Parameter("test_data"),))
+        if not expected_model.graph_equal(evidence.model_ref) or not expected_test.graph_equal(evidence.test_ref):
             raise FixtureManifestError("Evidence model/test bindings disagree with final Experiment StateRef.")
         for reference in (
                 evidence.final_experiment_ref, evidence.model_ref, evidence.test_ref,
                 evidence.history_ref, evidence.artifact_ref):
-            reference.object_projection()
-            build_exact_state_load_plan(repo, reference, _defer_payload=True)
+            require_saved(reference)
+            if reference in (evidence.final_experiment_ref, evidence.history_ref, evidence.artifact_ref):
+                digest = NodePreparation((reference,)).digest(reference, domain="dryml-saved-root/v1")
+                roots = [s.read_node(digest, kind="saved") for s in repo.stores]
+                if not any(root is not None and root.graph_equal(reference) for root in roots):
+                    raise FixtureManifestError("Qualification result lacks published SavedNode membership.")
+            for local in reference.state_spec().values():
+                descriptors = [d for s in repo.stores for d in s.inspect_states(local.key.cdef_digest)
+                               if d.state.key == local.key]
+                if not descriptors or not any(d.available and d.state == local for d in descriptors):
+                    raise FixtureManifestError("Qualification selected StateKey is unavailable or incompatible.")
     except Exception as error:
         if isinstance(error, FixtureManifestError):
             raise
@@ -975,9 +984,10 @@ def _load_selected_coordinator_results(repo, *, history_ref, artifact_ref):
     from dryml.artifacts import Fold, Value
     from dryml.core.symbol import ImportRef
     from dryml.models import ExperimentData
+    from .ml_workflow_workloads import _QualificationMetric
 
     def root_import(reference):
-        candidate = reference.definition.cls
+        candidate = reference.cls
         if isinstance(candidate, ImportRef):
             return candidate
         if isinstance(candidate, type):
@@ -993,7 +1003,7 @@ def _load_selected_coordinator_results(repo, *, history_ref, artifact_ref):
     admit(history_ref, {ImportRef.from_object(ExperimentData)}, "history")
     admit(
         artifact_ref,
-        {ImportRef.from_object(Value), ImportRef.from_object(Fold)},
+        {ImportRef.from_object(Value), ImportRef.from_object(Fold), ImportRef.from_object(_QualificationMetric)},
         "Artifact",
     )
 
@@ -1011,13 +1021,13 @@ def _validate_loaded_coordinator_results(evidence, final_receipt, history, artif
     from dryml.artifacts import Value
     from dryml.models import ExperimentData
 
-    if final_receipt != evidence.final_experiment_ref:
+    if not final_receipt.graph_equal(evidence.final_experiment_ref):
         raise FixtureManifestError("Qualification final receipt is not the metadata-validated Experiment StateRef.")
     if not isinstance(history, ExperimentData):
         raise FixtureManifestError("Qualification history receipt is not ExperimentData.")
     if not isinstance(artifact, Value) or not artifact.ready:
         raise FixtureManifestError("Qualification Artifact receipt is not a ready Value.")
-    if history.last_state_ref != evidence.history_ref or artifact.last_state_ref != evidence.artifact_ref:
+    if not history.last_state_ref.graph_equal(evidence.history_ref) or not artifact.last_state_ref.graph_equal(evidence.artifact_ref):
         raise FixtureManifestError("Qualification result receipt does not equal selected Store authority.")
 
 
@@ -1034,9 +1044,9 @@ def _finalize_coordinator_evidence(*, manifest, evidence, request: Qualification
             tfds_data_dir=request.tfds_data_dir, environment=installed_environment(),
         )
     refs = {
-        "experiment": evidence.final_experiment_ref.digest(), "model": evidence.model_ref.digest(),
-        "test": evidence.test_ref.digest(), "history": evidence.history_ref.digest(),
-        "artifact": evidence.artifact_ref.digest(),
+        "experiment": evidence.final_experiment_ref.exact_digest(), "model": evidence.model_ref.exact_digest(),
+        "test": evidence.test_ref.exact_digest(), "history": evidence.history_ref.exact_digest(),
+        "artifact": evidence.artifact_ref.exact_digest(),
     }
     _validate_coordinator_reference_metadata(evidence, output_store=request.output_store)
     final_receipt, history, artifact = _load_coordinator_results(
@@ -1114,7 +1124,7 @@ def validate_request_evidence(request: QualificationWorkerRequest, evidence) -> 
     }
     if submitted["request_digest"] != request.request_id or authority != expected_authority:
         raise FixtureManifestError("Qualification result request or shared Store authority was substituted.")
-    if submitted["result_ref"] != evidence.final_experiment_ref.digest():
+    if submitted["result_ref"] != evidence.final_experiment_ref.exact_digest():
         raise FixtureManifestError("Qualification result receipt is not bound to its final Experiment reference.")
     if (
             evidence.runtime["process_id"] != evidence.worker["worker_pid"]

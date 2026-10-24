@@ -316,13 +316,31 @@ def register_control_projection(namespace, root, reader, *, validate=None, relat
     _CONTROL_PROJECTIONS[namespace] = root, reader, validate, relations
 
 
-def lifecycle_projection_supported():
+def lifecycle_projection_supported(store=None):
     """Return whether registered owners supply complete lifecycle contributions.
 
-    No IO occurs. A cold/unregistered owner refuses lifecycle reads rather than
-    certifying an empty relation; Store capture separately guards its namespace.
+    Args:
+        store: Optional open format-4 DirStore. When supplied, check only owner
+            namespaces present in that Store, including the known managed area.
+            Namespace absence proves no contribution at the caller's authority
+            cut; unrelated process imports cannot change that coverage.
+
+    Returns:
+        bool: With no Store, whether complete readers are registered for explicit
+        lifecycle reads (no IO). With a Store, whether every present owner has a
+        complete reader; absent namespaces require no adapter. Only bounded
+        namespace existence checks occur, never owner imports or inventory.
+
+    Callers checking Store coverage retain its authority fence or revalidate a
+    detached cut. Missing/incomplete owners never certify existing owner records.
+    No Store state is changed.
     """
-    return bool(_CONTROL_PROJECTIONS) and all(v[3] is not None for v in _CONTROL_PROJECTIONS.values())
+    if store is None:
+        return bool(_CONTROL_PROJECTIONS) and all(v[3] is not None for v in _CONTROL_PROJECTIONS.values())
+    import os
+    return all(namespace in _CONTROL_PROJECTIONS and _CONTROL_PROJECTIONS[namespace][3] is not None
+               for namespace in {"managed", *_CONTROL_PROJECTIONS}
+               if os.path.lexists(os.path.join(store.base_dir, namespace)))
 
 
 def projection_record_type(path):
@@ -448,7 +466,9 @@ def capture_store_projection(store, *, rebuild=False):
     StoreProjection. Graph-block decoding/validation is shared once per block and
     runs outside short Store fences. Missing/malformed authority raises
     StoreAuthorityError; changed cuts raise StoreCutChanged. No authority writes,
-    payload reads, application capture or restore occur.
+    payload reads, application capture or restore occur. Present control namespaces
+    require complete owner readers even for incremental replay; absent namespaces
+    contribute no rows regardless of process-local owner registration.
     """
     import json
     import os
@@ -459,6 +479,8 @@ def capture_store_projection(store, *, rebuild=False):
     from ..node_views import COMPATIBILITY_VIEW
 
     with store._metadata_read() as captured:
+        if not lifecycle_projection_supported(store):
+            raise StoreAuthorityError("Control projection adapter is missing or incomplete; import its owner before maintenance.")
         for _, _, validate, _ in _CONTROL_PROJECTIONS.values():
             if validate is not None:
                 validate(store)
@@ -479,9 +501,6 @@ def capture_store_projection(store, *, rebuild=False):
                         paths.add(path)
             for area in ("definitions", "graphs", "membership", "declarations", "names", "states", "retention", "metadata"):
                 inventory(area)
-            if (os.path.exists(os.path.join(store.base_dir, "managed"))
-                    and "managed" not in _CONTROL_PROJECTIONS):
-                raise StoreAuthorityError("Managed control projection adapter is not loaded; import its owner before rebuilding.")
             for root, _, _, _ in _CONTROL_PROJECTIONS.values():
                 def control_inventory(relative):
                     for name in captured.directory(relative):
@@ -667,9 +686,14 @@ def capture_store_projection(store, *, rebuild=False):
                 by_view = {r._json_bytes(view): root for view, root in zip(selected, roots)}
                 validate_node_root_views(((header, by_view[header.view_bytes])
                                           for header in root_records.get(path, {}).values()), decoded_owner)
-                from .relationships import _discovery_rows
+                from .relationships import _discovery_rows, _discovery_preparation
+                discovery_owner = _discovery_preparation(decoded_owner, block.digest)
+                if path in paths:
+                    for family, key, value in discovery_owner.facts():
+                        emit(family, path, key, value)
                 for source, header in discovery.get(block.digest, ()):
-                    for ordinal, row in enumerate(_discovery_rows(by_view[header.view_bytes], header)):
+                    for ordinal, row in enumerate(_discovery_rows(by_view[header.view_bytes], header,
+                                                                 preparation=discovery_owner)):
                         emit("discovery", source, str(ordinal), row)
                 for view_bytes, identity in anchors.get(block.digest, ()):
                     if by_view[view_bytes].object_id != identity:

@@ -236,6 +236,132 @@ def test_prepared_restore_handoff_is_one_shot_and_never_a_history_shortcut(tmp_p
     assert obj.value == 1 and CountingEmbeddedValue.restores == 2
 
 
+@pytest.mark.parametrize("entrypoint", ("prepare", "restore"))
+def test_full_restore_rebases_decoded_tied_set_states_and_lineages(
+        tmp_path, monkeypatch, entrypoint):
+    """Unordered path ordinals cannot transfer state or lineage between identities."""
+    import builtins
+    import json
+    import subprocess
+    import sys
+    from datetime import datetime, timezone
+
+    from dryml.core.node import _owned_nodes
+    from dryml.core.node_codec import decode_node_graph, encode_node_graph
+    from dryml.core.node_prepare import NodePreparation
+    from dryml.core.snapshot_capture import install_lineage_fact
+    from dryml.core.utils.graph import value as graph_values
+
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    first = CountingEmbeddedValue(1, repo=repo)
+    second = CountingEmbeddedValue(1, repo=repo)
+    # Align this fixture's initial Node probes with the live set's ordinary repr
+    # order so unrelated construction-path ordering cannot mask the restore case.
+    occurrence_ranks = {
+        child.definition._node_id: rank
+        for rank, child in enumerate(sorted((first, second), key=repr))
+    }
+    monkeypatch.setattr(
+        graph_values, "id", lambda token: occurrence_ranks.get(token, builtins.id(token)), raising=False,
+    )
+    root = RestoreIntoPair([{first, second}, first], repo=repo)
+    expected_values = {first.object_id: 11, second.object_id: 22}
+    expected_lineages = {
+        first.object_id: datetime(2024, 1, 1, tzinfo=timezone.utc),
+        second.object_id: datetime(2024, 1, 2, tzinfo=timezone.utc),
+    }
+    for child in (first, second):
+        child.value = expected_values[child.object_id]
+        install_lineage_fact(child, child.object_id, expected_lineages[child.object_id])
+    saved = repo.save(root)
+    packet = encode_node_graph(NodePreparation((saved,)))
+    if entrypoint == "prepare":
+        process = subprocess.run(
+            [sys.executable, "-c", """
+import json, sys
+from dryml.core.node_codec import decode_node_graph, encode_node_graph
+from dryml.core.node_prepare import NodePreparation
+saved = decode_node_graph(json.load(sys.stdin))
+json.dump(encode_node_graph(NodePreparation((saved,))), sys.stdout)
+"""], input=json.dumps(packet), text=True, capture_output=True,
+            check=True, timeout=30,
+        )
+        packet = json.loads(process.stdout)
+    supplied = decode_node_graph(packet)
+    receiver = repo.describe(root)
+    live_members = graph_values.iter_set_members(receiver.parameters["child"][0])
+    assert len({segment.fingerprint for segment, _ in live_members}) == 1
+    assert len(live_members) == 2
+    live_tokens = {node.object_id: node._occurrence for _, node in live_members}
+    supplied_members = supplied.parameters["child"][0]
+    assert all(node._occurrence is not live_tokens[node.object_id] for node in supplied_members)
+
+    # Model the opposite fresh-token address order without changing live paths or
+    # relying on allocator luck. Only the separately decoded occurrence probes vary.
+    opposite_ranks = {
+        node._occurrence: graph_values.id(live_members[1 - index][1]._occurrence)
+        for index, (_, live) in enumerate(live_members)
+        for node in supplied_members if node.object_id == live.object_id
+    }
+    occurrence_ranks.update(opposite_ranks)
+    supplied_order = graph_values.iter_set_members(supplied_members)
+    assert [node.object_id for _, node in supplied_order] == [node.object_id for _, node in reversed(live_members)]
+    assert supplied.object_projection_equal(receiver)
+
+    targets = {child.object_id: child for child in (first, second)}
+    calls = []
+    original_restore = CountingEmbeddedValue.restore_state_from_dir_imp
+
+    def restore(target, directory, *, codec):
+        calls.append(target.object_id)
+        original_restore(target, directory, codec=codec)
+
+    monkeypatch.setattr(CountingEmbeddedValue, "restore_state_from_dir_imp", restore)
+    for child in targets.values():
+        child.value = 99
+        if entrypoint == "prepare":
+            del child._lineage_fact_object_id
+            del child._lineage_created_at
+    if entrypoint == "prepare":
+        with repo.prepare_restore(root, supplied) as prepared:
+            assert calls == []
+            assert all(child.value == 99 for child in targets.values())
+            assert prepared.apply() is supplied
+        with pytest.raises(RuntimeError, match="consumed"):
+            prepared.apply()
+    else:
+        assert repo.restore(root, supplied) is supplied
+
+    assert sorted(calls, key=str) == sorted(targets, key=str)
+    assert {
+        identity: (child.value, child._lineage_fact_object_id, child._lineage_created_at)
+        for identity, child in targets.items()
+    } == {
+        identity: (expected_values[identity], identity, expected_lineages[identity])
+        for identity in targets
+    }
+    for identity, child in targets.items():
+        assert child.object_id == identity
+        assert child._lineage_fact_object_id == identity
+        assert child._lineage_created_at == expected_lineages[identity]
+        assert child._construction_node._occurrence is live_tokens[identity]
+    assert root.first is root.second
+    assert root.first[1] is first and root.first[0] == {first, second}
+    assert root.last_state_ref is supplied
+    assert repo.describe(root).object_projection_equal(supplied)
+    recaptured = repo.save(root)
+    assert recaptured.exact_digest() == saved.exact_digest()
+
+    first.value, second.value = 77, 88
+    calls.clear()
+    destination = next(path for path, node in _owned_nodes(receiver) if node.object_id == first.object_id)
+    selected = next(node.state for _, node in _owned_nodes(supplied) if node.object_id == first.object_id)
+    assert repo.apply_state(root, {destination: selected}) is None
+    assert calls == [first.object_id]
+    assert first.value == 11 and second.value == 88
+    assert root.first is root.second and root.first[1] is first
+
+
 def test_prepared_restore_is_owned_and_abandonment_releases_without_hooks(tmp_path):
     from threading import Thread
     repo = Repo(DirStore(tmp_path / "store"))

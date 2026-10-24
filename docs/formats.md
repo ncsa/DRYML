@@ -44,6 +44,19 @@ Construction handles must select the associated occurrence and the declared view
 kind. General metadata can retain a supplied soft view across concretization;
 the later creation-policy boundary owns normalized creation-authority admission.
 
+`encode_node_graph(prepared, canonical=True)` additionally selects deterministic
+storage placement for a single declared root. It reuses preparation's exact
+whole-table labeling machinery, including storage-only construction links and
+the occurrence partition, then rebases slots and orders unordered values before
+authenticating blocks. It does not merge equal occurrences or change semantic
+key domains. Default multi-root/shared-table exports still permit incidental
+storage placement. Exact unordered symmetry can require a labeling search.
+Ordered value graphs with one view per occurrence and no retained construction
+links use the same labeler's typed-position traversal, even when independent
+siblings have equal recipes. Singleton occurrence-bookkeeping sets add no ordering
+choice. Genuine unordered values, multiple occurrence views, and retained
+construction links retain exact whole-table labeling with every member and alias.
+
 The grammar preserves list/tuple/set/frozenset distinctions, exact string/integer
 map keys (not bool keys), symbolic ImportRef/SourceSpec values, supported symbolic
 arithmetic/repetition and Match leaves, factories, immutable Core semantic leaves,
@@ -104,10 +117,11 @@ New DirStores have a `store-format.record` containing exact integer
 Stores are rejected before authority effects. There is no conversion or dual
 reader. The format gate retains its closed trusted Store-record frame; the new
 Node/state families use canonical JSON frames:
-`DRYML-METADATA/<kind>/1\n<canonical-json>`.
+`DRYML-METADATA/<kind>/<version>\n<canonical-json>`.
 
 Every new record, including nested records, requires its exact `kind`, integer
-`version=1`, `domain="<kind>/v1"`, and integer `identity_version=3`. Families are
+`version`, matching `domain="<kind>/v<version>"`, and integer `identity_version=3`.
+Mutation intents use version 2; the other families below use version 1. Families are
 separately named: `dryml-state-key`, `dryml-node-blocks`, `dryml-node-root`,
 `dryml-state-variant`, `dryml-state-availability`, `dryml-node-membership`,
 `dryml-declaration-anchor`, `dryml-declaration-retired-anchor`,
@@ -123,7 +137,7 @@ authentication and path/semantic-key mismatches are errors, never repair inputs.
 store-format.record
 authority.record                            # Store UUID / committed epoch / pending UUIDs
 mutation-prepare.record                     # bounded intent-registration crash bridge, when present
-mutations/<mutation-uuid>.record             # separately named v1 intent / classification / replay
+mutations/<mutation-uuid>.record             # separately named v2 intent / classification / replay
 retention/intents/<root-intent-uuid>.record   # exact affected-resource ledger / disposition
 retention/pending.record                     # unsettled tokens; no operation-history inventory
 definitions/blocks/<hh>/<block-digest>.record  # shared Node tables and values
@@ -231,6 +245,21 @@ variant child installs independently; a populated CDef bucket is never replaced.
 `def.pkl` equality is verified semantically before the fence. A no-op at a current
 cut creates no intent, epoch or projection churn.
 
+Mutation-intent frames have a separate **64 MiB** encoded-byte budget; ordinary
+Store records keep their **16 MiB** bound and managed results keep their **8 MiB**
+encoded-result budget. Journal writers, framed readers, and detached journal byte
+witnesses enforce the same family bound. Before publishing any intent or product
+authority, prepared mutations validate pending, classified, and acknowledged
+representations, reserving base64 before/after evidence, confirmed paths, and one
+projection value per affected path/kind. The projection reservation uses the
+largest initial or intermediate value, including repeated mutable transitions,
+rather than just the final value. An over-budget batch fails before publication.
+Store format remains 4. Mutation-intent v2 adds the exact boolean
+`persistence_confirmed`; v1 intents are refused intact without conversion.
+Pending v2 receipts below the former 16 MiB frame limit can still be classified
+with their full larger byte evidence, including already-installed large results;
+recovery does not truncate evidence, discard result bytes, or invent acknowledgement.
+
 After effects, classify actual affected records and persist classification **before**
 the resulting authority cut. An interrupted cut publication can finish from that
 persisted epoch without incrementing twice. An error after visibility is a partial
@@ -239,9 +268,18 @@ failure, never a rollback: `StoreMutationError` (also an `OSError`) exposes
 the original cause. Cancellation propagates with the same evidence attributes.
 Unconsumed staging and authoritative partial work are preserved.
 
-`recover_authority()` classifies exact persisted work only, without graph preparation,
-payload IO, capture, restore, body execution or deletion of authoritative files.
-It leaves work pending; it does not claim missing transitions happened. This
+Classification describes the **visible actual cut**, not durable installation.
+`persistence_confirmed` is false until all native publication barriers succeed.
+`recover_authority()` classifies exact work and repairs unresolved persistence by
+flushing affected record files and directory chains, including both installed-child
+rename parents. Child payload/tree barriers preceded the visibility move, so repair
+requires no payload IO, graph preparation, capture, restore, body execution or
+deletion of authoritative files. Repeated barrier failure retains the classified
+receipt and pending UUID, raising `StoreMutationError` with the actual cut and
+`recovery_attempt="authority-persistence"`. Standalone directory barriers unavailable
+on a backend (including Windows write-through-only publication) are refused with
+the same pending evidence; visibility is never substituted for a missing barrier.
+Recovery leaves work pending; it does not claim missing transitions happened. This
 authority boundary remains usable independently of SQLite compatibility or
 availability.
 `replay_mutation(uuid)` can finish prepared transitions from their exact persisted
@@ -250,7 +288,11 @@ re-persists already visible metadata/parent entries, journals repair, and refuse
 a later Store epoch, changed authority or missing staging rather than
 recapturing or overwriting a later writer. `pending_mutations()` exposes exact
 projection work; `acknowledge_mutation(uuid, epoch)` acknowledges only that captured
-classified mutation/cut, requiring its exact committed SQLite receipt when enabled.
+classified mutation/cut, requiring its exact committed SQLite receipt when enabled
+and Store-owned persistence confirmation in every policy. Index maintenance,
+automatic query refresh, direct acknowledgement and matching-state reuse share
+this gate. SQL coverage of an actual partial cut cannot complete unexecuted work
+or turn an unresolved publication into successful durable installation.
 Later pending work remains pending even after an earlier
 repair. Missing/corrupt/future journal records are refused intact, not reset.
 
@@ -268,13 +310,14 @@ refused; the reader does not invent an empty replacement. Old Store formats and
 pre-journal format-4 roots without the required cut are not converted.
 
 Legacy Repo snapshot writers and Query V3 views/coverage remain explicit format-4
-refusals. The Store-owned persistent projection uses **SQLite schema 10 / coverage
-contract 1**. It keeps source records, independent recipe/saved memberships,
+refusals. The Store-owned persistent projection uses **SQLite schema 11 / coverage
+contract 3**. It keeps source records, independent recipe/saved memberships,
 declarations, creation compatibility prefilters, full-StateKey manifests and
 availability, per-key retention grants, typed block/table/overlay postings, and names distinct. Capability
-entries for requested metadata and lifecycle remain explicitly
-unavailable until their owning adapters integrate their authority and guards.
-Neither old schema 9 nor incomplete coverage is ready. Owned derived state can be
+entries require their owning adapters' authority and guards where their namespaces
+are populated. Discovery adds portable block/table/overlay locators, local token
+postings and direct occurrence links, without per-descendant subtree copies.
+Neither old schema 9/10 nor incomplete coverage is ready. Owned derived state can be
 rebuilt from compatible metadata without payload reads or source-format changes;
 foreign/future sidecars are refused intact. A detected incomplete authority cut
 invalidates old derived coverage and fails rebuild rather than certify omissions.
@@ -338,6 +381,8 @@ and reference identity without loading Objects or state. Store authority records
 continue to use their separate trusted dill frame; `StateRef.to_data()` alone is
 a token-neutral Python record and is not promised to be JSON-compatible.
 
+### Rejected Historical Store Formats
+
 DirStore format v3 previously published a `store-format.record`, digest-sharded
 DefinitionRecords, explicit `stored-roots/` membership records, declarations,
 claims, aliases, lineage/current-metadata records, and complete snapshot
@@ -362,7 +407,7 @@ same generic envelope family. Snapshot capture is immutable and write once.
 ObjectRef/StateRef current mappings are separate atomic whole-map LWW records.
 Environment and requirement values retain their closed v1.1 domain envelopes.
 
-Store format v2 is unsupported. Opening a v2, malformed, incomplete, or mixed
+Store formats v2 and v3 are unsupported. Opening an old, malformed, incomplete, or mixed
 layout raises an authority error without rewriting it. There is no in-place
 migration, dual reader, or fallback to top-level `state-refs/` or shared
 `local-state/` authority.
@@ -379,8 +424,8 @@ sibling bootstrap lock derived from the canonical root; aliases of that root sha
 the lock. This coordinates trusted local creation and is not a distributed or
 hostile-race guarantee.
 
-Path-backed ZipStore contains the same v3 tree in one buffered transaction.
-Completing an extracted snapshot does not commit archive authority;
+Current path-backed ZipStore contains the format-4 tree in one buffered transaction.
+Completing extracted state does not commit archive authority;
 `ZipStore.commit()` validates and atomically replaces a non-stale archive.
 Borrowed snapshot/payload paths point into the extraction and expire on
 `ZipStore.close()`.
@@ -404,8 +449,8 @@ The checked-in `tests/fixtures/store_v3/` directory and committed archive carry
 fixed public synthetic timestamps, identities, environment fields, requirement
 outcomes, annotations, local payloads, and routed-child placement. Its manifest
 records byte hashes and semantic expectations. This beta fixture commitment
-covers framework-owned v3 records and associations, not arbitrary author codec
-migration or Python API stability.
+covers frozen historical records and associations. Current tests require intact
+incompatible-version rejection, not successful conversion or codec migration.
 
 Fixture authority is checked out byte-for-byte via `.gitattributes`, without
 line-ending conversion. Git for Windows needs long-path support to check out the
@@ -467,9 +512,9 @@ runtime Template value.
 Fresh `Ref[Definition]` and Template-role constructor values persist as a Ref
 link to `QuotedDef`. The quoted payload is terminal local data, opaque to
 materialization and ordinary symbolic traversal unless an operation explicitly
-opts into Ref traversal. Existing Store-v3 authority is unchanged; query sidecar
-version changes invalidate derived indexes only and never rewrite definitions or
-Store records.
+opts into Ref traversal. This value codec does not authorize opening an old Store.
+Query sidecar version changes invalidate derived indexes only and never rewrite
+definitions or Store records.
 
 ## Workflow Records
 
@@ -496,15 +541,14 @@ Pending observations carry `pending_observation_run_id`, with occurrence keys
 artifact mappings persist individual Template-role Definitions as quotation data
 in canonical key order; there is no aggregate recipe-container format.
 
-The small `tests/fixtures/qualification_reader_v1/` fixtures are reproducible reader inputs
-generated by `generate.py`. Use `PYTHONPATH=src python
-tests/fixtures/qualification_reader_v1/generate.py --output <empty-directory>` to make a
-clean candidate; omitting `--output` deliberately regenerates the source
-directory. The ExperimentData and Value fixtures exercise their actual readers.
-`TrainState` is a code-free named `__setstate__` compatibility vector, not a
-portable pickle codec claim. The manifest schema pins every payload filename and
-SHA-256 before reader tests decode it. The fixtures contain no backend objects,
-TFDS content, Store snapshots, or live payloads.
+The small `tests/fixtures/qualification_reader_v1/` fixtures are frozen historical
+reader inputs. The manifest pins every payload filename and SHA-256. Old history
+and named/tuple TrainState vectors now prove incompatible-version rejection with
+no partial installation; the unchanged Value v1 receipt still round-trips. Current
+format fixtures separately preserve observation, scalar/column, and reference
+fidelity. These inputs contain no backend objects, TFDS content, Store snapshots,
+or live payloads. Their old generator is historical provenance, not a supported
+command for regenerating current authority or replacing these frozen bytes.
 
 ## Repo Definition V1
 
@@ -521,6 +565,30 @@ positional arguments, links, selector-as-data wrappers, supported `Match` tags,
 symbol representation, and exact ObjectRef/StateRef leaves. Symbolic Definition
 quotation and generator-selector domain payloads use the separate bounded codecs
 above; retired SearchSpace generator tags are not accepted.
+Unordered graph-bearing values, normalized Nodes, exact facets and retained
+construction views explicitly select a separate nested carrier:
+
+```json
+{"kind":"node-selector","version":1,"strict":false,"cls_policy":"selector","graph":{"format":"dryml-node-graph/v1","identity_version":3,"tables":{},"values":{},"views":[]}}
+```
+
+The empty packet above illustrates fields only; a valid packet requires its
+authenticated reachable table, value blocks and one exact root view. Carrier
+fields are exact, `version` must be integer 1 (not bool), and graph identity/key
+versions are independently checked. Decoding validates the shared Node grammar,
+portable admission and canonical re-encoding before live reconstruction. The
+same occurrence table preserves independent equal unordered members, joins to
+ordered branches, normalized structure, fixed facets, quotation and retained
+construction views. Compatible simple descriptors retain their original closed
+grammar, including pre-resolution validation of reference paths/fingerprints.
+This is configuration transport, not a Store migration or a new semantic graph
+authority. Block authentication/source-byte CAS and graph identity stay distinct.
+
+The Node carrier retains the portable scalar/container and semantic-depth bounds,
+rejects unfinalized active receiving roles and callback matchers, and refuses
+enum/core-type/extension-dtype leaf codecs that require type resolution before
+decoding. Quoted role data remains inert. Ordinary recipe symbols stay symbolic;
+subclass matcher types resolve only at explicit live Repo reconstruction.
 It does not permit arbitrary Python objects or live Store handles. The codec
 rejects duplicate mapping keys, unknown fields/tags, invalid selector/reference
 depth 32, 65,536 nodes, 4,096 entries per container, 1 MiB strings, 4,096-bit
@@ -587,9 +655,10 @@ manifest stores mode, selected built-in codec, encoded NumPy-backed SpecTree,
 total yield count, and closed codec descriptors. It stores no source value,
 absolute path, work token, attempt identity, iterator, or live backend object.
 Restore validates format, fields, spec, names, counts, descriptor shape, and
-declared file presence before installing readiness. Store deferred-file manifests
-authenticate chunk bytes; iteration then performs codec-level validation before
-delivering any yield from a chunk.
+declared file presence before installing readiness. Current StateVariantManifest
+v1 authenticates all inventoried bytes at the Core read boundary; interpretation
+metadata does not grant the old snapshot-v3 deferred-hash policy. Iteration then
+performs codec-level validation before delivering any yield from a chunk.
 
 NumPy chunks are non-pickle NPZ component arrays with explicit logical dtype,
 shape, and bounded-segment descriptors. Parquet chunks use typed value streams,
@@ -625,22 +694,38 @@ part of the fixture commitment.
 
 Managed lifecycle control is separate bounded canonical-JSON authority in the
 caller-selected control DirStore. Its records are independently versioned:
-`dryml-managed` **format 2** is the area gate, `dryml-managed-current` **record 3**
-is current generation authority, and `dryml-managed-pending` **record 2** identifies
+`dryml-managed` v2 is the area gate, `dryml-managed-current` v4
+is current generation authority, and `dryml-managed-pending` v2 identifies
 exact previous/proposed generation and byte fingerprints. Area format 2 explicitly
 rejects old current-record version 2 and the retired operation namespace.
 Current records contain detached receiver Node metadata, projection-plus-member
 operation identity, separate ordinary-argument evidence, run/invocation/producer
 UUIDs, generation, lifecycle state, targeted interruption, saved checkpoint/final
-metadata, and bounded history/resource-intent evidence. Named managed Node,
-history and root-intent records use their own version 1; nested Node graph,
+metadata, and bounded history/resource-intent evidence. Named managed
+Node records use version 1; `dryml-managed-history` v2 and
+`dryml-managed-root-intent` v3 retain run/result and publication evidence; nested Node graph,
 reference and StateKey versions are validated independently. No Object payload,
 Repo handle, portable Repo definition or Python continuation is stored.
+
+Durable ordinary values use `dryml-managed-result` version 2, independent of the
+current-control record version. Its closed envelope contains exactly `schema`,
+`version`, `nodes`, `root`, and `metadata`. Metadata rows select exact authenticated
+views in a single shared Node graph block, decoded with one owner for the whole
+result. Parent/subtree and cross-parent aliases, independent equal occurrences,
+edge/quotation roles, exact facets and retained construction survive together.
+Typed references contain exactly `kind="dryml-managed-result"`, `version=2`, and
+the content-address `key`; storage is
+`managed/results/v2/<shard>/<sha256>/current.json`. Managed Execute adapter version 2
+requires those nested references before reconstruction or resource opening; the
+managed projection reader requires the same v2 namespace and payload. Old result
+packets/references, result-v1 paths and adapter-v1 packets are rejected intact,
+without automatic conversion. The result byte bound remains 8 MiB; the separate
+mutation-intent v2 journal retains its 64 MiB preflight and read/write bound.
 
 One nonblocking operation-lifetime lock is independent of short same-host control
 locks. Journal invalidation precedes short CAS; classification, projection/SQL and
 acknowledgement follow control release. Generic current-record projection is
-integrated; full lifecycle-relation coverage remains explicitly unavailable.
+integrated with schema-11/coverage-3 lifecycle relations.
 Status validates historical metadata without opening private state. Pending
 intents and replacement snapshots are written as same-directory temporary files
 before publication. POSIX publication syncs the parent directory; the Windows
@@ -648,5 +733,6 @@ adapter syncs regular files and atomic replacement without claiming unsupported
 directory-descriptor fsync. Unsupported, malformed, incomplete, unreadable, or
 pending control authority fails reconciliation rather than becoming a fabricated
 status. Old authority is preserved unchanged; there is no compatibility reader or
-automatic conversion. See [Managed Operations](managed_operations.md) for U14's
-foundation boundary and the later start/checkpoint/result/transport integrations.
+automatic conversion. See [Managed Operations](managed_operations.md) for start,
+checkpoint, retention and result semantics, and [verification evidence](object_state_lifecycle_verification.md)
+for measured qualification and pending coordinator gates.

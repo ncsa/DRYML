@@ -44,6 +44,7 @@ _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _CODEC_RE = re.compile(r"^[A-Za-z0-9]{1,32}$")
 _FORMAT_MAGIC = b"DRYML-STORE-RECORD/"
 _MAX_RECORD_BYTES = 16 * 1024 * 1024
+_MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 _MAX_FILES = 100_000
 _MAX_PATH_BYTES = 4096
 _DEFINITION_GRAPH_DECODER = decode_cdef_graph
@@ -873,19 +874,20 @@ class _NodeRecord:
     """Closed identity-3 metadata; never admits the legacy dill record family."""
 
     version = 1
+    max_bytes = _MAX_RECORD_BYTES
     fields = frozenset()
 
     def to_data(self):
         """Return detached closed family/version/domain/identity-3 authority."""
-        return {"kind": self.schema, "version": 1, "domain": self.schema + "/v1",
+        return {"kind": self.schema, "version": self.version, "domain": self.schema + f"/v{self.version}",
                 "identity_version": 3, **self._payload()}
 
     @classmethod
     def from_data(cls, data):
         """Validate exact nested family fields; return fresh metadata or raise StoreRecordError."""
         data = _require_exact(data, set(cls.fields) | {"kind", "version", "domain", "identity_version"}, cls.schema)
-        if (data["kind"] != cls.schema or type(data["version"]) is not int or data["version"] != 1
-                or data["domain"] != cls.schema + "/v1" or type(data["identity_version"]) is not int
+        if (data["kind"] != cls.schema or type(data["version"]) is not int or data["version"] != cls.version
+                or data["domain"] != cls.schema + f"/v{cls.version}" or type(data["identity_version"]) is not int
                 or data["identity_version"] != 3):
             raise StoreRecordError(f"Incompatible {cls.schema} kind/version/domain/identity.")
         try:
@@ -899,10 +901,10 @@ class _NodeRecord:
         """Return canonical framed JSON bytes; performs no IO or symbol resolution."""
         from ...formats.envelope import encode_metadata_frame
         try:
-            encoded = encode_metadata_frame(self.schema, 1, self.to_data())
+            encoded = encode_metadata_frame(self.schema, self.version, self.to_data())
         except ValueError as error:
             raise StoreRecordError(f"Invalid {self.schema} JSON metadata.") from error
-        if len(encoded) > _MAX_RECORD_BYTES:
+        if len(encoded) > self.max_bytes:
             raise StoreRecordError(f"Oversized {self.schema} record.")
         return encoded
 
@@ -912,7 +914,7 @@ class _NodeRecord:
         from ...formats.envelope import decode_metadata_frame
         from ...formats.errors import EnvelopeError
         try:
-            return cls.from_data(decode_metadata_frame(data, schema=cls.schema, version=1, max_bytes=_MAX_RECORD_BYTES))
+            return cls.from_data(decode_metadata_frame(data, schema=cls.schema, version=cls.version, max_bytes=cls.max_bytes))
         except EnvelopeError as error:
             raise StoreRecordError(f"Malformed or incompatible {cls.schema} frame.") from error
 
@@ -1324,15 +1326,22 @@ class AuthorityRecord(_NodeRecord):
 
 @dataclass(frozen=True, slots=True)
 class MutationIntentRecord(_NodeRecord):
-    """Replayable v1 mutation evidence, independent of the Store format marker.
+    """Replayable v2 mutation evidence, independent of the Store format marker.
 
     content is immutable canonical JSON with a stable mutation/store UUID, base
     cut, affected scopes, expected byte transitions, confirmed references, exact
-    observed projection work and classification/acknowledgement state. Invalid
+    observed projection work and classification/acknowledgement state. The boolean
+    persistence_confirmed distinguishes observed visibility from completed native
+    barriers; acknowledgement requires it. Invalid
     fields raise StoreRecordError; decoding never runs graph or lifecycle hooks.
+    Complete frames have a journal-only 64 MiB bound, including base64 transition
+    and projection copies. Product records retain their separate 16 MiB bound.
+    Older intent versions are refused without conversion; Store format remains 4.
     """
 
     schema = "dryml-store-mutation-intent"
+    version = 2
+    max_bytes = _MAX_JOURNAL_BYTES
     fields = frozenset({"intent"})
     content: bytes
 
@@ -1341,7 +1350,7 @@ class MutationIntentRecord(_NodeRecord):
             raise StoreRecordError("Intent content must be immutable bytes.")
         data = self.intent
         _require_exact(data, {"mutation_id", "store_uuid", "base_epoch", "scopes", "transitions",
-                              "confirmed", "projection", "epoch", "status"}, self.schema)
+                              "confirmed", "projection", "epoch", "status", "persistence_confirmed"}, self.schema)
         _uuid_value(data["mutation_id"])
         _uuid_value(data["store_uuid"])
         if type(data["base_epoch"]) is not int or data["base_epoch"] < 0:
@@ -1350,6 +1359,10 @@ class MutationIntentRecord(_NodeRecord):
             raise StoreRecordError("Invalid classified cut.")
         if data["status"] not in {"pending", "classified", "acknowledged"}:
             raise StoreRecordError("Invalid intent disposition.")
+        if (type(data["persistence_confirmed"]) is not bool
+                or (data["status"] == "pending" and data["persistence_confirmed"])
+                or (data["status"] == "acknowledged" and not data["persistence_confirmed"])):
+            raise StoreRecordError("Invalid intent persistence confirmation.")
         for field_name in ("scopes", "transitions", "confirmed", "projection"):
             if type(data[field_name]) is not list:
                 raise StoreRecordError("Invalid intent work list.")

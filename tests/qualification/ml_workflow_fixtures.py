@@ -18,12 +18,14 @@ import stat
 import tempfile
 from types import MappingProxyType
 
-from dryml.core import StateRef
+from dryml.core import Node, SavedNode, require_saved
+from dryml.core.node_codec import encode_node_graph, decode_node_graph
+from dryml.core.node_prepare import NodePreparation
 from dryml.locking import LockError, interprocess_lock
 
 
 MANIFEST_FORMAT = "dryml-ml-workflow-fixtures"
-MANIFEST_VERSION = 2
+MANIFEST_VERSION = 3
 BASELINE_PATH = Path(__file__).with_name("ml_workflow_baseline.json")
 REQUIRED_ENVIRONMENT_KEYS = (
     "python", "dryml", "flax", "jax", "jaxlib", "optax", "pandas", "pyarrow",
@@ -207,24 +209,15 @@ def _absolute(path: str | Path) -> Path:
     return Path(path).expanduser().resolve(strict=False)
 
 
-def _reference_to_json(value: object) -> dict[str, object]:
-    """Encode StateRef data through the manifest's legacy v2 grammar."""
-
-    from dryml.core.reference_json import _encode_legacy_reference_json
-
-    return _encode_legacy_reference_json(
-        StateRef.from_data(value), version=MANIFEST_VERSION,
-    )
+def _reference_to_json(value: Node) -> dict[str, object]:
+    """Encode exact SavedNode metadata without availability or resource handles."""
+    require_saved(value)
+    return encode_node_graph(NodePreparation((value,)))
 
 
 def _reference_from_json(value: object) -> object:
-    """Decode the manifest's legacy v2 StateRef tree to ordinary data."""
-
-    from dryml.core.reference_json import _decode_legacy_reference_json
-
-    return _decode_legacy_reference_json(
-        value, kind="state_ref", version=MANIFEST_VERSION,
-    ).to_data()
+    """Decode current SavedNode metadata; old reference trees are incompatible."""
+    return require_saved(decode_node_graph(value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,21 +232,24 @@ class FixtureReferences:
     :func:`validate_fixture_references` at preparation and execution boundaries.
     """
 
-    numpy: StateRef
-    parquet: StateRef
+    numpy: SavedNode
+    parquet: SavedNode
 
     def __post_init__(self) -> None:
         """Reject floating, malformed, or aliased reference authority."""
 
-        if type(self.numpy) is not StateRef or type(self.parquet) is not StateRef:
-            raise FixtureManifestError("W3 fixtures require exact StateRefs.")
-        if self.numpy == self.parquet:
+        try:
+            require_saved(self.numpy)
+            require_saved(self.parquet)
+        except (TypeError, ValueError) as error:
+            raise FixtureManifestError("W3 fixtures require complete SavedNodes.") from error
+        if self.numpy.graph_equal(self.parquet):
             raise FixtureManifestError("W3 NumPy and Parquet fixtures must be distinct complete states.")
 
     def to_data(self) -> dict[str, object]:
         """Encode exact references without opening Store payloads."""
 
-        return {"numpy": _reference_to_json(self.numpy.to_data()), "parquet": _reference_to_json(self.parquet.to_data())}
+        return {"numpy": _reference_to_json(self.numpy), "parquet": _reference_to_json(self.parquet)}
 
     @classmethod
     def from_data(cls, value: object) -> "FixtureReferences":
@@ -263,8 +259,8 @@ class FixtureReferences:
             raise FixtureManifestError("W3 fixture references require numpy and parquet records.")
         try:
             return cls(
-                StateRef.from_data(_reference_from_json(value["numpy"])),
-                StateRef.from_data(_reference_from_json(value["parquet"])),
+                _reference_from_json(value["numpy"]),
+                _reference_from_json(value["parquet"]),
             )
         except (TypeError, ValueError) as error:
             raise FixtureManifestError("W3 fixture references are malformed.") from error
@@ -681,33 +677,21 @@ def validate_fixture_reference_metadata(references: FixtureReferences, *, store)
     """Validate retained W3 receipt closure from Store metadata only.
 
     This is the coordinator-side preflight.  It deliberately checks immutable
-    StateRef records, definition records, and snapshot metadata without opening
+    SavedNode membership, full-key creation/manifest and availability metadata without opening
     local-state payloads, restoring CachedDatasets, or iterating fixture data.
     The worker repeats the payload/codec equivalence check immediately before it
     materializes a selected workload.
     """
 
-    from dryml.core.metadata import read_snapshot_metadata
-    from dryml.core.store.records import DefinitionRecord
-
     for reference in (references.numpy, references.parquet):
-        record = store.read_state_ref_record(reference.digest())
-        if record is None or record.state_ref != reference:
-            raise FixtureManifestError("W3 fixture StateRef receipt is absent or inconsistent.")
-        definition = store.read_definition_record(DefinitionRecord(reference.object.definition).digest)
-        if definition is None:
-            raise FixtureManifestError("W3 fixture definition receipt is absent.")
-        for state_ref in reference.states.values():
-            # State hashes are not independently addressable StateRefs; the root
-            # record and snapshot metadata bind their complete exact closure.
-            if not isinstance(state_ref, str) or len(state_ref) != 64:
-                raise FixtureManifestError("W3 fixture StateRef closure is malformed.")
-        try:
-            metadata = read_snapshot_metadata(store.get_snapshot_directory(reference))
-        except Exception as error:
-            raise FixtureManifestError("W3 fixture snapshot metadata is absent or corrupt.") from error
-        if metadata.state_ref != reference:
-            raise FixtureManifestError("W3 fixture snapshot metadata names another receipt.")
+        digest = NodePreparation((reference,)).digest(reference, domain="dryml-saved-root/v1")
+        record = store.read_node(digest, kind="saved")
+        if record is None or not record.graph_equal(reference):
+            raise FixtureManifestError("W3 fixture SavedNode membership is absent or inconsistent.")
+        for local in reference.state_spec().values():
+            matches = [d for d in store.inspect_states(local.key.cdef_digest) if d.state.key == local.key]
+            if len(matches) != 1 or not matches[0].available or matches[0].state != local:
+                raise FixtureManifestError("W3 fixture selected state is unavailable or inconsistent.")
 
 
 def preflight_manifest(manifest: FixtureManifest) -> None:
@@ -726,7 +710,7 @@ def preflight_manifest(manifest: FixtureManifest) -> None:
     validate_fixture_references(manifest.references, repo=Repo(DirStore(manifest.fixture_store)))
 
 
-def verify_codec_equivalence(references: FixtureReferences, *, load: Callable[[StateRef], Sequence[object]]) -> None:
+def verify_codec_equivalence(references: FixtureReferences, *, load: Callable[[SavedNode], Sequence[object]]) -> None:
     """Verify retained cache values with an explicit caller loader.
 
     This test seam retains the same strict leaf comparison as the real Store

@@ -42,19 +42,29 @@ refinements are invalid metadata targets; legacy `Mat[Definition]` and
 `Mat[ConcreteDefinition]` remain available for existing consumers.
 Exact requests deliver that exact authority: a `StateRef` supplied to
 `Ref[ObjectRef]` delivers its `ObjectRef`, for example. `Ref[AutoRef]` retains an
-incoming reference kind; for a live Object it selects CDef for an entirely
-stateless materializing graph, its known last `StateRef` for a stateful graph, or
-its `ObjectRef` otherwise. Automatic selection never saves or searches for a new
-receipt. A bare soft `Definition` is ambiguous and fails with guidance to wrap it
+incoming Node or explicitly supplied legacy reference kind. For a live Object it
+selects the construction definition for an entirely stateless materializing graph.
+For a stateful graph (including an ephemeral root with stateful descendants), it
+returns the known last complete saved Node when that receipt's object projection
+matches the receiver's retained construction and live identities; otherwise it
+returns the identity-bound construction Node. A mutated live payload does not
+invalidate that historical receipt. Automatic selection performs no Store IO,
+capture, restore, or search for a new receipt, and does not certify current payload
+availability. A Node receipt is not converted to the legacy `StateRef` type:
+requesting that unsupported delivery from a live Object raises `SignatureError`.
+A bare soft `Definition` is ambiguous and fails with guidance to wrap it
 in `Ref(...)`; that explicit assertion retains the Definition as reference data.
 `AutoRef` is an annotation-only marker class; use `Ref[AutoRef]`, not
 `Ref[AutoRef()]`, on every supported Python version.
 
-Artifact Folds use `Ref[AutoRef]` for their source/model-facing inputs. This keeps
-the selected CDef, ObjectRef, or StateRef as data in the declaration and prevents
+Artifact Folds and CachedDataset use `Ref[AutoRef]` for their source-facing inputs.
+This keeps the selected Node as data in the declaration and prevents
 automatic input saving or materialization during construction, readiness, value
 access, and result restoration. Fold's managed compute boundary deliberately
 materializes that reference through its selected state Repo.
+When passing a live source through recipe authoring, use the lossless assertion
+`CachedDataset(Ref(source))` to retain the live value until automatic selection;
+ordinary bare Object recipe values are snapshotted as construction definitions.
 
 Same-role unions use a capability partial order, independent of member order.
 For example, `Ref[Node | ConcreteNode | SavedNode]` selects the uniquely available
@@ -129,6 +139,20 @@ unbound variadic paths, malformed selection values, and unknown paths raise befo
 authority reads or realization.
 
 ## Authority And Effects
+
+Current Node references inspect only the supplied graph: `Ref[ConcreteNode]`
+does not search for identities, and `Ref[SavedNode]` does not search for a
+checkpoint or certify available bytes. Discover alternatives explicitly with a
+Repo query, choose one, then pass that Node to the signature boundary. `Mat[T]`
+for an Object class freshly preflights the supplied selected state before
+construction/restore. `ReferenceSelection(node, store)` pins that source; stale
+or disconnected source authority fails instead of falling back to another
+replica. Read-only source use admits multiple DirStore handles naming one
+physical domain; writable save destinations continue to reject that overlap.
+
+The following declaration/ClaimRecord discussion describes retained legacy
+reference adapters, whose Store-3 publication APIs are unsupported on built-in
+format-4 Stores. It does not add claims or automatic discovery to Node refinements.
 
 Definition-to-CDef reference strengthening requires an already fully bound
 expression; it cannot fill defaults or run a search. CDef-to-ObjectRef selection

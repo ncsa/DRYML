@@ -9,12 +9,11 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import ConcreteDefinition, Definition, Object, Repo, Serializable
+from dryml.core import ConcreteDefinition, ConcreteNode, Definition, Node, Object, ObjectId, Repo, SavedNode, Serializable
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
 from dryml.core.repo import RepoLoadError
 from dryml.core.quoted import QuotedDef, SelectorSpec
-from dryml.core.reference_values import ObjectRef, StateRef
 from dryml.core.selector import Selector
 from dryml.core.signatures import (
     AutoRef,
@@ -26,8 +25,7 @@ from dryml.core.signatures import (
     signature_context,
 )
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import ClaimRecord, DeclarationRecord, DefinitionRecord
-from dryml.core.store.store import StoreCapabilityError
+from dryml.core.store.store import StoreAuthorityError
 
 
 class SignatureCounter(Serializable):
@@ -38,6 +36,9 @@ class SignatureCounter(Serializable):
 
     def save_state_to_dir_imp(self, dest_dir, *, codec):
         Path(dest_dir, "value").write_text(str(self.value), encoding="ascii")
+
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
+        self.value = int(Path(src_dir, "value").read_text(encoding="ascii"))
 
 
 class SignatureStateless(Object):
@@ -52,6 +53,13 @@ class SignatureWrapper(Object):
 
     def __init__(self, child):
         self.child = child
+
+
+class SignatureObjectParameter(SignatureCounter):
+    """Stateful fixture whose ordinary constructor data is named ``object``."""
+
+    def __init__(self, object=None):
+        self.value = 0
 
 
 def _plan(annotation):
@@ -75,30 +83,20 @@ def _pair_plan(annotation):
 
 
 def _stateful_reference(repo: Repo):
-    """Declare, build, and save one exact Counter reference for selection tests."""
+    """Build a bound Node and save it; selection itself performs neither action."""
 
-    reference = repo.declare_object(SignatureCounter(1).definition)
-    live = repo.build_object_ref(reference)
+    reference = Definition(SignatureCounter, 1).with_identity(ObjectId()).concretize()
+    live = reference.build(repo=repo)
     state = repo.save_object(live)
     return reference, live, state
 
 
-def _replicate_declaration(store: DirStore, reference: ObjectRef, claim: ClaimRecord) -> None:
-    """Install equal declaration authority in a separate Store without building."""
-
-    store.write_definition_record(DefinitionRecord(reference.definition), stored_root=False)
-    store.write_claim_record(claim)
-    store.write_declaration_record(DeclarationRecord(reference))
-
-
-def _replicate_snapshot(source: DirStore, target: DirStore, state: StateRef) -> None:
-    """Publish a complete borrowed-source snapshot replica without v2 authority."""
-
-    target.publish_snapshot(
-        state,
-        evidence=source.read_snapshot_metadata(state.digest()),
-        local_states={path: source.open_local_state(state, path) for path in state.states},
-    )
+def _replicate_snapshot(source: DirStore, target: DirStore, state) -> None:
+    """Copy selected full keys through an ordinary current-Node save."""
+    repo = Repo((source, target))
+    live = repo.load(state)
+    replica = repo.save(live, store=target, states=state.state_spec(), source_store=source)
+    assert replica.graph_equal(state)
 
 
 def test_automatic_and_exact_live_projections_do_not_query_snapshots(tmp_path):
@@ -109,17 +107,16 @@ def test_automatic_and_exact_live_projections_do_not_query_snapshots(tmp_path):
     stateful = SignatureCounter(1)
 
     assert _plan(Ref[AutoRef]).prepare_args((stateless,), {}).authority["value"] == stateless.definition
-    assert _plan(Ref[AutoRef]).prepare_args((stateful,), {}).authority["value"] == stateful.object_ref
-    assert _plan(Ref[ConcreteDefinition]).prepare_args((stateful,), {}).authority["value"] == stateful.definition
-    assert _plan(Ref[ObjectRef]).prepare_args((stateful,), {}).authority["value"] == stateful.object_ref
+    assert _plan(Ref[Node]).prepare_args((stateful,), {}).authority["value"] == stateful.definition
+    assert _plan(Ref[ConcreteNode]).prepare_args((stateful,), {}).authority["value"] == stateful.definition
     with pytest.raises(SignatureError, match="unavailable"):
-        _plan(Ref[StateRef]).prepare_args((stateless,), {})
+        _plan(Ref[SavedNode]).prepare_args((stateful,), {})
 
     reference, live, state = _stateful_reference(repo)
     live.value = 99
-    assert _plan(Ref[AutoRef]).prepare_args((live,), {}).authority["value"] == state
-    assert _plan(Ref[StateRef]).prepare_args((live,), {}).authority["value"] == state
-    assert reference == live.object_ref
+    assert _plan(Ref[Node]).prepare_args((live,), {}).authority["value"] == live.definition
+    assert _plan(Ref[SavedNode]).prepare_args((state,), {}).authority["value"] is state
+    assert repo.describe(live).object_view().graph_equal(reference.object_view())
 
 
 def test_automatic_selection_counts_stateful_descendants_but_not_ref_data(tmp_path):
@@ -132,68 +129,152 @@ def test_automatic_selection_counts_stateful_descendants_but_not_ref_data(tmp_pa
         DefLink.finalized(EdgeKind.REF, stateful.definition), repo=repo
     )
 
-    assert _plan(Ref[AutoRef]).prepare_args((materializing,), {}).authority["value"] == materializing.object_ref
+    described = repo.describe(materializing)
+    assert _plan(Ref[Node]).prepare_args((described,), {}).authority["value"] is described
+    with pytest.raises(SignatureError, match="unavailable"):
+        _plan(Ref[SavedNode]).prepare_args((described,), {}, repo=repo)
     assert _plan(Ref[AutoRef]).prepare_args((reference_only,), {}).authority["value"] == reference_only.definition
 
 
+@pytest.mark.parametrize("ephemeral_root", (False, True))
+def test_automatic_saved_live_receipt_is_metadata_only(tmp_path, monkeypatch, ephemeral_root):
+    """Saved live roots and owned descendants select their receipt without IO/hooks."""
+    from dryml.core import StateRef, function, require_saved
+
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    child = SignatureCounter(3)
+    live = SignatureWrapper(child) if ephemeral_root else child
+    saved = repo.save(live)
+    child.value = 99
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("automatic Ref performed IO, capture, or restore")
+
+    for name in ("save", "save_object", "load", "describe", "reference_evidence"):
+        monkeypatch.setattr(repo, name, forbidden)
+    monkeypatch.setattr(repo.default_store, "authority_cut", forbidden)
+    monkeypatch.setattr(repo.default_store, "read_states", forbidden)
+    monkeypatch.setattr(SignatureCounter, "save_state_to_dir_imp", forbidden)
+    monkeypatch.setattr(SignatureCounter, "restore_state_from_dir_imp", forbidden)
+
+    @function
+    def select(value: Ref[AutoRef]) -> Ref[AutoRef]:
+        return value
+
+    with signature_context(repo=repo):
+        assert select(live) is saved
+    boundary = _plan(Ref[AutoRef]).prepare_args((live,), {}, repo=repo)
+    assert boundary.authority["value"] is saved
+    assert boundary.deliver_args()[0][0] is saved
+    assert require_saved(saved) is saved
+    assert saved.object_id is None if ephemeral_root else saved.object_id == child.object_id
+    with pytest.raises(SignatureError, match="unavailable"):
+        _plan(Ref[StateRef]).prepare_args((live,), {}, repo=repo)
+
+
+def test_automatic_receipt_checks_projection_not_constructor_object(tmp_path):
+    """An ordinary ``object`` parameter cannot impersonate a receipt's authority."""
+    from dryml.core import StateRef
+
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    live = SignatureObjectParameter()
+    saved = repo.save(live)
+    assert _plan(Ref[AutoRef]).prepare_args((live,), {}).authority["value"] is saved
+
+    unrelated = Definition(SignatureObjectParameter, live.object_ref).concretize().with_realization(
+        identities={"$": live.object_id}, states={"$": saved.state},
+    )
+    assert unrelated.object == live.object_ref
+    live._last_state_ref = unrelated
+    selected = _plan(Ref[AutoRef]).prepare_args((live,), {}).deliver_args()[0][0]
+    assert isinstance(selected, ConcreteNode)
+    assert selected.object_id == live.object_id
+    assert selected.state is None
+    assert not selected.object_projection_equal(unrelated)
+    with pytest.raises(SignatureError, match="unavailable"):
+        _plan(Ref[StateRef]).prepare_args((live,), {})
+
+    live._last_state_ref = saved.without_state()
+    incomplete = _plan(Ref[AutoRef]).prepare_args((live,), {}).authority["value"]
+    assert incomplete.state is None and incomplete.object_id == live.object_id
+
+
+def test_explicit_legacy_reference_values_keep_their_supported_roles():
+    """Supplied old reference values retain Ref/Mat selection without conversion."""
+    from dryml.core import ObjectRef, StateRef
+
+    live = SignatureCounter(1)
+    reference = live.object_ref
+    state = StateRef(reference, {path: "pickle-" + "a" * 64 for path in reference.objects})
+    assert _plan(Ref[AutoRef]).prepare_args((reference,), {}).deliver_args()[0][0] is reference
+    assert _plan(Ref[AutoRef]).prepare_args((state,), {}).deliver_args()[0][0] is state
+    assert _plan(Ref[ObjectRef]).prepare_args((state,), {}).deliver_args()[0][0] is reference
+    assert _plan(Ref[StateRef]).prepare_args((state,), {}).deliver_args()[0][0] is state
+    assert _plan(Mat[StateRef]).prepare_args((state,), {}).authority["value"] is state
+
+
 def test_state_selection_deduplicates_replicas_and_rejects_ambiguity(tmp_path):
-    """Exact ObjectRef snapshot lookup accepts replicas but never chooses a snapshot."""
+    """Explicit query dedupes replicas; a Node signature never invents a checkpoint."""
 
     first = DirStore(tmp_path / "first")
     second = DirStore(tmp_path / "second")
     repo = Repo(first)
     reference, live, state = _stateful_reference(repo)
-    _replicate_declaration(second, reference, first.read_claim_record(reference.digest()))
     _replicate_snapshot(first, second, state)
     replicas = Repo((first, second))
 
-    assert _plan(Ref[StateRef]).prepare_args((reference,), {}, repo=replicas).authority["value"] == state
+    selected = replicas.query().saved().sel(reference).one()
+    assert _plan(Ref[SavedNode]).prepare_args((selected,), {}, repo=replicas).authority["value"].graph_equal(state)
     with signature_context(repo=replicas):
-        with pytest.raises(SignatureError, match="authority is unavailable"):
-            _plan(Ref[StateRef]).prepare_args((reference,), {})
+        with pytest.raises(SignatureError, match="unavailable"):
+            _plan(Ref[SavedNode]).prepare_args((reference,), {})
     live.value = 2
     second_state = repo.save_object(live, deep_capture=True)
     _replicate_snapshot(first, second, second_state)
-    with pytest.raises(SignatureError, match="ambiguous"):
-        _plan(Ref[ObjectRef | StateRef]).prepare_args((reference,), {}, repo=replicas)
-    with pytest.raises(SignatureError, match="ambiguous"):
-        _plan(Ref[StateRef | ObjectRef]).prepare_args((reference,), {}, repo=replicas)
+    from dryml.core.query.model import QueryCardinalityError
+    with pytest.raises(QueryCardinalityError):
+        replicas.query().saved().sel(reference).one()
+    for annotation in (Ref[ConcreteNode | SavedNode], Ref[SavedNode | ConcreteNode]):
+        assert _plan(annotation).prepare_args((state,), {}, repo=replicas).authority["value"] is state
 
 
 @pytest.mark.parametrize("status", ("available", "claimed", "completed"))
-def test_declaration_claim_statuses_remain_reference_eligible(tmp_path, status):
-    """Ref identity selection validates every ClaimRecord status without acquiring it."""
+def test_declaration_claim_statuses_remain_reference_eligible(tmp_path, status, monkeypatch):
+    """Recipe-only, live-reserved and saved Nodes remain inert reference metadata."""
 
     store = DirStore(tmp_path / "store")
     repo = Repo(store, clock=lambda: 10.0)
-    reference = repo.declare_object(SignatureCounter(1).definition)
-    old = store.read_claim_record(reference.digest())
-    if status == "available":
-        claim = ClaimRecord(reference.digest(), old.generation, status)
-    elif status == "claimed":
-        claim = ClaimRecord(reference.digest(), old.generation + 1, status, "other", 20.0)
-    else:
-        claim = ClaimRecord(reference.digest(), old.generation + 1, status, state_ref_digest="a" * 64)
-    store.write_claim_record(claim)
-
-    result = _plan(Ref[ObjectRef]).prepare_args((reference.definition,), {}, repo=repo)
-    assert result.authority["value"] == reference
-    assert store.read_claim_record(reference.digest()) == claim
+    reference = Definition(SignatureCounter, 1).with_identity(ObjectId()).concretize()
+    record = store.publish_node(reference)
+    from contextlib import ExitStack
+    with ExitStack() as lifetime:
+        if status in {"claimed", "completed"}:
+            live = reference.build(repo=repo)
+            if status == "claimed":
+                lifetime.enter_context(repo.reserve_state_graph(live))
+            else:
+                reference = repo.save(live)
+        before = store.authority_cut()
+        constructions = repo._num_constructions
+        monkeypatch.setattr(store, "read_states", lambda *_a, **_kw: pytest.fail("Ref read payloads"))
+        result = _plan(Ref[ConcreteNode]).prepare_args((reference,), {}, repo=repo)
+        assert result.authority["value"] is reference
+        assert store.authority_cut() == before
+        assert repo._num_constructions == constructions
+    assert store.read_node(record.digest).object_id == reference.object_id
 
 
 def test_retained_live_claim_remains_reference_eligible_without_acquisition(tmp_path):
-    """A real live construction lease is selection evidence, never Ref permission to build."""
+    """A real reservation remains owned while Ref inspects supplied Node metadata."""
 
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
-    reference = repo.declare_object(SignatureCounter(1).definition)
-    live = repo.build_object_ref(reference)
-
-    selected = _plan(Ref[ObjectRef]).prepare_args((reference.definition,), {}, repo=repo)
-
-    assert selected.authority["value"] == reference
-    assert store.read_claim_record(reference.digest()).status == "claimed"
-    assert live._claim_lease is not None
+    reference = Definition(SignatureCounter, 1).with_identity(ObjectId()).concretize()
+    live = reference.build(repo=repo)
+    with repo.reserve_state_graph(live) as reservation:
+        selected = _plan(Ref[ConcreteNode]).prepare_args((reference,), {}, repo=repo)
+        assert selected.authority["value"] is reference
+        assert reservation.active and live.last_state_ref is None
 
 
 def test_explicit_selection_and_definition_strengthening_guards(tmp_path):
@@ -202,17 +283,18 @@ def test_explicit_selection_and_definition_strengthening_guards(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     cdef = SignatureCounter(1).definition
-    first = repo.declare_object(cdef)
-    second = repo.declare_object(cdef)
-    plan = _plan(Ref[ObjectRef])
-    with pytest.raises(SignatureError, match="ambiguous"):
-        plan.prepare_args((cdef,), {}, repo=repo)
+    first = cdef.with_identity(ObjectId())
+    second = cdef.with_identity(ObjectId())
+    store.publish_node(first)
+    store.publish_node(second)
+    plan = _plan(Ref[ConcreteNode])
+    assert plan.prepare_args((cdef,), {}, repo=repo).authority["value"] is cdef
     selected = plan.prepare_args(
-        (cdef,), {}, repo=repo, selections={"value": ReferenceSelection(second, store)}
+        (second,), {}, repo=repo, selections={"value": ReferenceSelection(second, store)}
     )
     assert selected.authority["value"] == second
-    unrelated = repo.declare_object(SignatureCounter(2).definition)
-    with pytest.raises(SignatureError, match="topology"):
+    unrelated = Definition(SignatureCounter, 2).concretize()
+    with pytest.raises(SignatureError, match="unavailable"):
         plan.prepare_args((cdef,), {}, repo=repo, selections={"value": unrelated})
 
     assert _plan(Ref[ConcreteDefinition]).prepare_args((Definition(SignatureCounter, 1),), {}).authority["value"].graph_equal(cdef)
@@ -226,20 +308,20 @@ def test_materializing_selection_claims_only_the_pinned_replica(tmp_path):
     first = DirStore(tmp_path / "first")
     second = DirStore(tmp_path / "second")
     source = Repo(first)
-    reference = source.declare_object(SignatureCounter(7).definition)
-    _replicate_declaration(second, reference, first.read_claim_record(reference.digest()))
+    live_source = SignatureCounter(7, repo=source)
+    reference = source.save(live_source)
+    _replicate_snapshot(first, second, reference)
     repo = Repo((first, second))
 
-    boundary = _plan(Mat[ObjectRef]).prepare_args(
-        (reference.definition,), {}, repo=repo,
+    boundary = _plan(Mat[SignatureCounter]).prepare_args(
+        (reference,), {}, repo=repo,
         selections={"value": ReferenceSelection(reference, second)},
     )
     live = boundary.deliver_args()[0][0]
 
-    assert live.object_ref == reference
-    assert live._claim_lease.store is second
-    assert first.read_claim_record(reference.digest()).status == "available"
-    assert second.read_claim_record(reference.digest()).status == "claimed"
+    assert live.object_id == reference.object_id and live.value == 7
+    assert live.definition.graph_equal(live_source.definition)
+    assert live.last_state_ref.graph_equal(reference)
 
 
 def test_materializing_selection_revalidates_stale_and_disconnected_stores(tmp_path, monkeypatch):
@@ -248,26 +330,31 @@ def test_materializing_selection_revalidates_stale_and_disconnected_stores(tmp_p
     first = DirStore(tmp_path / "first")
     second = DirStore(tmp_path / "second")
     repo = Repo(first)
-    reference = repo.declare_object(SignatureCounter(8).definition)
-    _replicate_declaration(second, reference, first.read_claim_record(reference.digest()))
+    reference = repo.save(SignatureCounter(8, repo=repo))
+    _replicate_snapshot(first, second, reference)
     connected = Repo((first, second))
-    stale = _plan(Mat[ObjectRef]).prepare_args(
+    stale = _plan(Mat[SignatureCounter]).prepare_args(
         (reference,), {}, repo=connected,
         selections={"value": ReferenceSelection(reference, second)},
     )
-    monkeypatch.setattr(second, "read_claim_record", lambda digest: None)
-    with pytest.raises(RepoLoadError, match="claim authority"):
+    @contextmanager
+    def unavailable(*args, **kwargs):
+        raise StoreAuthorityError("selected source unavailable")
+        yield
+    monkeypatch.setattr(second, "read_states", unavailable)
+    with pytest.raises(RepoLoadError, match="invalid source") as raised:
         stale.deliver_args()
-    assert first.read_claim_record(reference.digest()).status == "available"
+    assert isinstance(raised.value.__cause__, StoreAuthorityError)
+    assert connected._num_constructions == 0
 
     disconnected = DirStore(tmp_path / "disconnected")
-    boundary = _plan(Mat[ObjectRef]).prepare_args(
+    boundary = _plan(Mat[SignatureCounter]).prepare_args(
         (reference,), {}, repo=repo,
         selections={"value": ReferenceSelection(reference, disconnected)},
     )
-    with pytest.raises(RepoLoadError, match="not connected"):
+    with pytest.raises((RepoLoadError, ValueError), match="connected"):
         boundary.deliver_args()
-    assert first.read_claim_record(reference.digest()).status == "available"
+    assert connected._num_constructions == 0
 
 
 def test_conflicting_replica_pins_fail_before_claims_but_same_domain_handles_agree(tmp_path):
@@ -276,10 +363,10 @@ def test_conflicting_replica_pins_fail_before_claims_but_same_domain_handles_agr
     first = DirStore(tmp_path / "first")
     second = DirStore(tmp_path / "second")
     source = Repo(first)
-    reference = source.declare_object(SignatureCounter(9).definition)
-    _replicate_declaration(second, reference, first.read_claim_record(reference.digest()))
+    reference = source.save(SignatureCounter(9, repo=source))
+    _replicate_snapshot(first, second, reference)
     repo = Repo((first, second))
-    conflicting = _pair_plan(Mat[ObjectRef]).prepare_args(
+    conflicting = _pair_plan(Mat[SignatureCounter]).prepare_args(
         (reference, reference), {}, repo=repo,
         selections={
             "first": ReferenceSelection(reference, first),
@@ -289,16 +376,13 @@ def test_conflicting_replica_pins_fail_before_claims_but_same_domain_handles_agr
 
     with pytest.raises(SignatureError, match="conflicting declaration Store"):
         conflicting.deliver_args()
-    assert first.read_claim_record(reference.digest()).status == "available"
-    assert second.read_claim_record(reference.digest()).status == "available"
+    assert repo._num_constructions == 0
 
     shared_first = DirStore(tmp_path / "shared")
     shared_second = DirStore(tmp_path / "shared")
     shared_repo = Repo((shared_first, shared_second))
-    shared_ref = shared_repo.declare_object(
-        SignatureCounter(10).definition, store=shared_first
-    )
-    agreeing = _pair_plan(Mat[ObjectRef]).prepare_args(
+    shared_ref = Repo(shared_first).save(SignatureCounter(10))
+    agreeing = _pair_plan(Mat[SignatureCounter]).prepare_args(
         (shared_ref, shared_ref), {}, repo=shared_repo,
         selections={
             "first": ReferenceSelection(shared_ref, shared_first),
@@ -314,22 +398,22 @@ def test_source_guards_and_quotation_data_are_preserved(tmp_path):
 
     repo = Repo(DirStore(tmp_path / "store"))
     reference, live, state = _stateful_reference(repo)
-    no_receipt = repo.build_object_ref(repo.declare_object(SignatureCounter(2).definition))
+    no_receipt = SignatureCounter(2, repo=repo)
     with pytest.raises(SignatureError, match="unavailable"):
-        _plan(Ref[StateRef]).prepare_args((no_receipt,), {}, repo=repo)
-    assert _plan(Ref[StateRef]).prepare_args((reference,), {}, repo=repo).authority["value"] == state
+        _plan(Ref[SavedNode]).prepare_args((no_receipt,), {}, repo=repo)
+    assert _plan(Ref[SavedNode]).prepare_args((state,), {}, repo=repo).authority["value"] is state
 
     quoted = QuotedDef(Definition(SignatureCounter, 1))
-    assert _plan(Ref[Definition]).prepare_args((quoted,), {}).authority["value"] == quoted.value
-    assert isinstance(_plan(Ref[QuotedDef]).prepare_args((reference,), {}).authority["value"], QuotedDef)
+    assert _plan(Ref[Node]).prepare_args((quoted,), {}).authority["value"] == quoted.value
+    assert _plan(Ref[Node]).prepare_args((quoted,), {}).authority["value"].object_id is None
     selector_spec = SelectorSpec(Selector(Definition(SignatureCounter)))
     assert _plan(Ref[Selector]).prepare_args((selector_spec,), {}).authority["value"] == selector_spec.selector
     with pytest.raises(SignatureError, match="quoted input"):
-        _plan(Mat[ConcreteDefinition]).prepare_args((quoted,), {})
-    assert _plan(Ref[ConcreteDefinition | ObjectRef | StateRef]).prepare_args(
-        (reference,), {}, repo=repo
-    ).authority["value"] == state
-    assert live.object_ref == reference
+        _plan(Mat[SignatureCounter]).prepare_args((quoted,), {})
+    assert _plan(Ref[Node | ConcreteNode | SavedNode]).prepare_args(
+        (state,), {}, repo=repo
+    ).authority["value"] is state
+    assert repo.describe(live).object_view().graph_equal(reference.object_view())
 
 
 def test_state_only_and_store_failures_are_not_treated_as_absence(tmp_path, monkeypatch):
@@ -339,21 +423,23 @@ def test_state_only_and_store_failures_are_not_treated_as_absence(tmp_path, monk
     repo = Repo(store)
     reference, _, state = _stateful_reference(repo)
     state_only = DirStore(tmp_path / "state-only")
-    _replicate_snapshot(store, state_only, state)
-    assert _plan(Ref[StateRef]).prepare_args((reference,), {}, repo=Repo(state_only)).authority["value"] == state
+    state_only.publish_node(state, kind="saved")
+    detached = Repo(state_only)
+    assert _plan(Ref[SavedNode]).prepare_args((state,), {}, repo=detached).authority["value"] is state
+    with pytest.raises(RepoLoadError, match="unavailable"):
+        _plan(Mat[SignatureCounter]).prepare_args((state,), {}, repo=detached).deliver_args()
+    @contextmanager
+    def offline(*args, **kwargs):
+        raise OSError("offline")
+        yield
+    monkeypatch.setattr(store, "read_states", offline)
+    with pytest.raises(RepoLoadError, match="invalid source") as raised:
+        _plan(Mat[SignatureCounter]).prepare_args((state,), {}, repo=repo).deliver_args()
+    assert isinstance(raised.value.__cause__, OSError)
 
-    read_claim_record = store.read_claim_record
-    monkeypatch.setattr(store, "read_claim_record", lambda digest: None)
-    with pytest.raises(RepoLoadError, match="lacks authoritative ClaimRecord"):
-        repo.reference_evidence(reference.definition)
-    monkeypatch.setattr(store, "read_claim_record", read_claim_record)
-    monkeypatch.setattr(store, "iter_state_ref_records", lambda: (_ for _ in ()).throw(OSError("offline")))
-    with pytest.raises(RepoLoadError, match="could not be read"):
-        repo.reference_evidence(reference.definition)
 
-
-def test_evidence_fences_duplicate_handles_once_and_reject_unsupported(tmp_path):
-    """One ordered evidence cut fences duplicate Store handles once and fails closed otherwise."""
+def test_evidence_fences_duplicate_handles_once_and_reject_unsupported(tmp_path, monkeypatch):
+    """Metadata-only Ref does not acquire source fences, even with duplicate handles."""
 
     class CountingStore(DirStore):
         fences = 0
@@ -366,23 +452,22 @@ def test_evidence_fences_duplicate_handles_once_and_reject_unsupported(tmp_path)
 
     store = CountingStore(tmp_path / "store")
     repo = Repo((store, store))
-    reference = repo.declare_object(SignatureCounter(1).definition)
-    evidence = repo.reference_evidence(reference.definition)
-    assert len(evidence.declarations) == 1
-    assert CountingStore.fences == 1
+    CountingStore.fences = 0
+    reference = Definition(SignatureCounter, 1).with_identity(ObjectId()).concretize()
+    selected = _plan(Ref[ConcreteNode]).prepare_args((reference,), {}, repo=repo)
+    assert selected.authority["value"] is reference
+    assert CountingStore.fences == 0
 
-    class UnsupportedStore(CountingStore):
-        def authority_fence_key(self):
-            raise StoreCapabilityError("no stable snapshot")
-
-    with pytest.raises(StoreCapabilityError, match="stable snapshot"):
-        Repo(UnsupportedStore(tmp_path / "unsupported")).reference_evidence(reference.definition)
+    unsupported = Repo(CountingStore(tmp_path / "unsupported"))
+    monkeypatch.setattr(unsupported.default_store, "authority_fence_key",
+                        lambda: pytest.fail("Ref must not acquire an availability fence"))
+    assert _plan(Ref[ConcreteNode]).prepare_args((reference,), {}, repo=unsupported).authority["value"] is reference
 
 
 def test_immutable_snapshot_store_uses_its_read_fence_not_a_writer_fence(tmp_path):
     """Read-only snapshot authority can select/restore without mutable fencing."""
 
-    source = DirStore(tmp_path / "store")
+    source = DirStore(tmp_path / "store", query_index="none")
     writable = Repo(source)
     reference, _, state = _stateful_reference(writable)
 
@@ -397,6 +482,7 @@ def test_immutable_snapshot_store_uses_its_read_fence_not_a_writer_fence(tmp_pat
         def writer_lock(self):
             raise AssertionError("immutable snapshot selection must not take a writer fence")
 
-    readonly = Repo(ImmutableSnapshotStore.open_existing(tmp_path / "store"))
+    readonly = Repo(ImmutableSnapshotStore.open_existing(tmp_path / "store", query_index="none"))
 
-    assert _plan(Ref[StateRef]).prepare_args((reference,), {}, repo=readonly).authority["value"] == state
+    assert _plan(Ref[SavedNode]).prepare_args((state,), {}, repo=readonly).authority["value"] is state
+    assert _plan(Mat[SignatureCounter]).prepare_args((state,), {}, repo=readonly).deliver_args()[0][0].value == 1

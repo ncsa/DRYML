@@ -2302,6 +2302,11 @@ class IdentityQuery:
         if self.take_limit != 0:
             capture.index_presentations = self._index_presentations(capture, occurrence=occurrence)
             current_projection = all(hasattr(item.store, "store_uuid") for item in capture.index_presentations)
+            from .source import _node_discovery_plan
+            for producer in {id(item.producer): item.producer for item in capture.index_presentations}.values():
+                # Occurrence presentations bind metadata scopes, not discovery sources.
+                if isinstance(producer, IdentityQuery) and node_query_stores(producer, capture) is not None:
+                    _node_discovery_plan(producer, capture)
             if capture.refresh_policy is True or capture.refresh_policy == "always":
                 # Configured SQLite can be refused before IO; optional targets must resolve first.
                 if not current_projection and any(

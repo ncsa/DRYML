@@ -239,8 +239,10 @@ def test_invalid_value_restore_uses_core_invalidation_after_hooks_begin(tmp_path
     state = repo.save_object(target)
     _install(target, 3)
 
-    with pytest.raises(RepoLoadError, match="supported domain"):
+    with pytest.raises(RepoLoadError, match="requires fresh materialization") as caught:
         repo.restore_state_ref_into(target, state)
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert "supported domain" in str(caught.value.__cause__)
     assert HookedValue.restore_calls == 1
     assert target.value() == 3
     assert target._restore_failed is True
@@ -293,7 +295,7 @@ def test_value_results_do_not_change_cdef_identity_or_capture_transient_fields(t
     _install(left, {"nested": [1, 2]})
     _install(right, {"nested": [3, 4]})
 
-    assert left.definition == right.definition
+    assert left.definition.graph_equal(right.definition)
     left.save_state_to_dir(str(tmp_path), codec="pkl")
     payload = pickle_load(tmp_path / "value.pkl")
     assert payload == {

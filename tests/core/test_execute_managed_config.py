@@ -7,7 +7,7 @@ import shutil
 import dill
 import pytest
 
-from dryml.core import Repo, Node, Ref
+from dryml.core import Node, Ref, Repo
 from dryml.core.symbol import ImportRef
 from dryml.core.execute_codec import (
     CoreCallCodecError,
@@ -149,7 +149,7 @@ def test_managed_config_policy_and_callbacks_round_trip_detached_from_caller(tmp
     assert outcome["success"]
     assert outcome["result"] == (True, 1)
     assert graph["version"] == 3
-    assert graph["adapters"] == {ADAPTER: 1}
+    assert graph["adapters"] == {ADAPTER: 2}
     assert {node["tag"] for node in graph["nodes"]} >= {"managed_config", "function"}
 
 
@@ -257,7 +257,7 @@ def test_managed_config_result_decode_rejects_before_opening_resources(
         "callbacks": [],
     }
     graph = {
-        "version": 3, "graphs": None, "adapters": {ADAPTER: 1},
+        "version": 3, "graphs": None, "adapters": {ADAPTER: 2},
         "root": 1 if nested else 0,
         "nodes": [config] if not nested else [config, {"tag": "list", "items": [0]}],
     }
@@ -316,7 +316,7 @@ def test_malformed_managed_graph_nodes_fail_before_import_or_resource_open(
     elif malformation == "reference":
         node[reference] = True
     graph = {
-        "version": 3, "graphs": None, "adapters": {ADAPTER: 1},
+        "version": 3, "graphs": None, "adapters": {ADAPTER: 2},
         "root": 1,
         "nodes": [
             {"tag": "import", "module": "math", "qualname": None},
@@ -441,23 +441,23 @@ def test_unsupported_callback_and_mutated_config_policy_fail_before_invocation(t
         ({"version": 1, "root": 0, "nodes": []}, "malformed call graph"),
         ({"version": 2, "root": 0, "nodes": []}, "malformed call graph"),
         ({"version": 2, "root": 0, "nodes": [], "extra": None}, "malformed call graph"),
-        ({"version": 3, "root": 0, "nodes": [{"tag": "unknown"}], "graphs": None, "adapters": {ADAPTER: 1}}, "malformed graph node"),
+        ({"version": 3, "root": 0, "nodes": [{"tag": "unknown"}], "graphs": None, "adapters": {ADAPTER: 2}}, "malformed graph node"),
         ({
-            "version": 3, "root": 0, "graphs": None, "adapters": {ADAPTER: 1},
+            "version": 3, "root": 0, "graphs": None, "adapters": {ADAPTER: 2},
             "nodes": [{
                 "tag": "managed_config", "state_repo": None, "control_store": None,
                 "rerun": True, "start_from": None, "callbacks": [], "extra": None,
             }],
         }, "malformed graph node"),
         ({
-            "version": 3, "root": 0, "graphs": None, "adapters": {ADAPTER: 1},
+            "version": 3, "root": 0, "graphs": None, "adapters": {ADAPTER: 2},
             "nodes": [{
                 "tag": "managed_config", "state_repo": None, "control_store": None,
                 "rerun": 1, "start_from": None, "callbacks": [],
             }],
         }, "malformed managed config"),
         ({
-            "version": 3, "root": 0, "graphs": None, "adapters": {ADAPTER: 1},
+            "version": 3, "root": 0, "graphs": None, "adapters": {ADAPTER: 2},
             "nodes": [{
                 "tag": "managed_config", "state_repo": None, "control_store": None,
                 "rerun": True, "start_from": None, "callbacks": [0] * 65,
@@ -479,7 +479,7 @@ def test_malformed_config_resource_fails_before_opening_any_store(tmp_path, monk
 
     repo = Repo(DirStore(tmp_path / "state", query_index="none"))
     graph = {
-        "version": 3, "root": 0, "graphs": None, "adapters": {ADAPTER: 1},
+        "version": 3, "root": 0, "graphs": None, "adapters": {ADAPTER: 2},
         "nodes": [{
             "tag": "managed_config",
             "state_repo": {
@@ -543,14 +543,15 @@ def test_worker_can_construct_an_ordinary_local_managed_config(tmp_path):
 
 
 @pytest.mark.parametrize("purpose", ["invocation", "result"])
-def test_u19_adapter_version_rejects_before_reconstruction(tmp_path, monkeypatch, purpose):
+@pytest.mark.parametrize("version", [1, 999])
+def test_u19_adapter_version_rejects_before_reconstruction(tmp_path, monkeypatch, purpose, version):
     """The owning adapter version is checked before target/config/result decoding."""
     from dryml.managed.execute_adapter import ManagedExecuteAdapter
     from dryml.core.execute_codec import _Encoder
     repo = Repo(DirStore(tmp_path / "state", query_index="none"))
     encoder = _Encoder(limit_bytes=1_000_000)
     packet = dill.loads(encoder.finish(encoder.value(ManagedConfig(state_repo=repo), "$")))
-    packet["adapters"][ADAPTER] = 999
+    packet["adapters"][ADAPTER] = version
     monkeypatch.setattr(ManagedExecuteAdapter, "decode", lambda *args: pytest.fail("adapter reconstructed"))
     monkeypatch.setattr(Store, "from_definition", lambda *args: pytest.fail("resource opened"))
     with pytest.raises(CoreCallCodecError, match="incompatible adapter version"):
@@ -562,7 +563,6 @@ def test_u19_adapter_version_rejects_before_reconstruction(tmp_path, monkeypatch
 
 def test_u19_config_start_uses_shared_node_table_and_preserves_full_keys(tmp_path):
     """Config start and ordinary reference roots share one exact authenticated table."""
-    from dryml.core import Node, Ref
     from dryml.core.execute_codec import decode_invocation
     repo = Repo(DirStore(tmp_path / "state", query_index="none"))
     value = _ManagedValue(repo=repo)
@@ -581,7 +581,7 @@ def test_u19_config_start_uses_shared_node_table_and_preserves_full_keys(tmp_pat
     assert outcome["success"] and outcome["result"] == (True, True)
 
 
-@pytest.mark.parametrize("fault", ["reference_version", "source_fields", "execution_node", "node_view"])
+@pytest.mark.parametrize("fault", ["reference_version", "old_reference", "source_fields", "execution_node", "node_view"])
 def test_u19_malformed_detached_result_refuses_before_source_or_resource_use(tmp_path, monkeypatch, fault):
     """Result metadata is closed and decoding never borrows its source lifetime."""
     from dryml.managed.results import ResultSource
@@ -593,6 +593,8 @@ def test_u19_malformed_detached_result_refuses_before_source_or_resource_use(tmp
     owned = next(node for node in packet["nodes"] if node["tag"] == "managed_result")
     if fault == "reference_version":
         owned["reference"]["version"] = 999
+    elif fault == "old_reference":
+        owned["reference"]["version"] = 1
     elif fault == "source_fields":
         owned["source"]["handle"] = None
     elif fault == "execution_node":

@@ -13,14 +13,11 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml import session
-from dryml.core import Object, ObjectRef, Repo, Serializable, StateRef
+from dryml.core import Object, Repo, Serializable
 from dryml.core.repo import make_store
 from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord, MainRefRecord
 from dryml.core.store.zip import ZipStore
-from dryml.runtime.errors import RuntimeTransitionError
 from dryml.core.node import Node
 from dryml.core.node_prepare import NodePreparation
 
@@ -54,6 +51,14 @@ class RestoreValue(Serializable):
 
     def restore_state_from_dir_imp(self, src_dir, *, codec):
         self.value = int(Path(src_dir, "value.txt").read_text(encoding="ascii"))
+
+
+class StatefulSaveLoadNode(RestoreValue):
+    """Stateful parent whose child graph can include inert quoted checkpoints."""
+
+    def __init__(self, children):
+        self.children = children
+        self.value = 30
 
 
 class FailingSave(Serializable):
@@ -242,6 +247,73 @@ def test_explicit_store_save_copies_reusable_state_into_its_closure(tmp_path):
     assert copied_report.required_stores == (copied,)
     with copied.read_state(copied_state.at(copied_path).state.key) as borrowed:
         assert Path(borrowed.data_directory, "value.txt").read_text() == "child"
+
+
+@pytest.mark.parametrize("query_index", ("sqlite", "none"))
+@pytest.mark.parametrize("owned", (False, True), ids=("quote-only", "owned-and-quoted"))
+def test_save_quoted_checkpoint_preserves_exact_data_and_canonical_declarations(
+    tmp_path, query_index, owned,
+):
+    """Quoted state is inert; owned declarations agree across Repo and direct Store."""
+    source = DirStore(tmp_path / "source", query_index="none")
+    destination = DirStore(tmp_path / "destination", query_index=query_index)
+    direct = DirStore(tmp_path / "direct", query_index=query_index)
+    writer = Repo([source, destination])
+    donor = RestoreValue(10, repo=writer)
+    quoted = donor.save(repo=writer, store=source)
+    donor.value = 20
+    parent = StatefulSaveLoadNode({"owned": donor if owned else None, "quoted": quoted.quote()}, repo=writer)
+
+    saved = parent.save(repo=writer, store=destination)
+
+    saved_quote = saved.parameters["children"]["quoted"].value
+    assert saved_quote.graph_equal(quoted)
+    assert saved_quote.object_id == quoted.object_id
+    assert saved_quote.state == quoted.state
+    assert saved.object_view().parameters["children"]["quoted"].value.graph_equal(quoted)
+    assert len(saved.state_spec()) == 1 + int(owned)
+    assert not Path(destination.state_data_path(quoted.state.key)).exists()
+    if owned:
+        selected = saved.parameters["children"]["owned"]
+        assert selected.object_id == quoted.object_id
+        assert selected.state.key != quoted.state.key
+    else:
+        assert destination.read_declaration_anchor(quoted.object_id) is None
+
+    direct_record = direct.publish_node(saved, kind="saved")
+    assert direct.read_node(direct_record.digest, kind="saved").graph_equal(saved)
+    identities = (saved.object_id, quoted.object_id) if owned else (saved.object_id,)
+    for identity in identities:
+        batch_anchor = destination.read_declaration_anchor(identity)
+        direct_anchor = direct.read_declaration_anchor(identity)
+        batch_projection = destination._expand_node_root(batch_anchor.projection)
+        direct_projection = direct._expand_node_root(direct_anchor.projection)
+        assert batch_projection.graph_equal(batch_projection.object_view())
+        assert direct_projection.graph_equal(batch_projection)
+        assert batch_projection.state is None
+    if not owned:
+        assert direct.read_declaration_anchor(quoted.object_id) is None
+    writer.close(flush=False)
+    direct.close()
+
+    reopened = DirStore.open_existing(tmp_path / "destination", query_index="sqlite")
+    reader = Repo(reopened)
+    try:
+        index = reopened.open_query_index()
+        index.rebuild()
+        assert index.status().state == "ready"
+        restored = reopened.read_node(saved_digest(saved), kind="saved")
+        assert restored.graph_equal(saved)
+        loaded = reader.load_state_ref(restored, reuse_live="never")
+        assert loaded.value == 30
+        assert loaded.children["quoted"].value.graph_equal(quoted)
+        if owned:
+            assert loaded.children["owned"].value == 20
+        else:
+            assert loaded.children["owned"] is None
+    finally:
+        reader.close(flush=False)
+
 
 def test_failed_local_state_save_never_publishes_a_state_ref(tmp_path):
     store = DirStore(tmp_path / "store")
@@ -499,11 +571,12 @@ def test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph(tmp
     reopened = Repo(DirStore(store.base_dir))
 
     first = reopened.load_state_ref(state)
+    first.children[0].value = 99
     second = reopened.load_state_ref(state)
 
     assert first.children[0] is first.children[1]
     assert first.children[0].value == 20
-    assert second is not first
+    assert second is first
     assert second.children[0] is first.children[0]
 
 
@@ -515,7 +588,6 @@ def test_real_borrowed_reads_share_budget_but_not_authority_or_public_values(tmp
     and no record, payload or resource leaks into that retired cache facility.
     """
     from dryml.core import SaveAnnotations
-    from dryml.core.cdef_identity import cdef_node_key
     from dryml.core.materialization import build_exact_state_load_plan
     from tests.core.test_exact_load_metadata_evidence import exact_work_counts
 

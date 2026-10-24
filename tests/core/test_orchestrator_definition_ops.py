@@ -34,18 +34,26 @@ def reset_runtime():
 
 
 def test_definition_identity_and_structural_query_paths_remain_available(tmp_path):
-    repo = Repo(DirStore(tmp_path / "store", query_index="memory"))
+    """Named saved Nodes and structural/cache queries stay metadata-only."""
+    store = DirStore(tmp_path / "store", query_index="memory")
+    repo = Repo(store)
     definition = Definition(DefinitionOnlyObject, "planned")
     cdef = definition.concretize(repo=repo)
-    state = repo.save_object(DefinitionOnlyObject("planned", repo=repo))
-    repo.set_alias("planned", state.object)
+    live = DefinitionOnlyObject("planned", repo=repo)
+    state = repo.save_object(live, alias="planned")
+    prepared = DefinitionOnlyObject.prepared
 
     session.set_mode("orchestrator")
 
-    assert cdef.stable_hash()
-    assert repo.get_alias("planned") == state.object
+    assert cdef.creation_digest()
+    name = store.read_node_name("planned")
+    assert name.root_kind == "saved"
+    assert store.read_node(name.root_digest, kind=name.root_kind).graph_equal(state)
     assert repo.definition_graph(cdef).roots == (cdef,)
-    assert list(repo.query().sel(cdef).cdefs().cached(scope=repo).collect()) == [cdef]
+    matches = repo.query().sel(cdef).cdefs().cached(scope=repo).collect()
+    assert len(matches) == 1
+    assert matches.one().graph_equal(cdef)
+    assert DefinitionOnlyObject.prepared == prepared
 
 
 def test_definition_build_rejects_before_preparation_or_constructor():

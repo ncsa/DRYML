@@ -23,16 +23,18 @@ class ReuseValue(Serializable):
         self.value = int(Path(src_dir, "value").read_text(encoding="ascii"))
 
 
-def test_matching_reuses_current_checkpoint_without_restoring(tmp_path):
+def test_matching_reuses_current_checkpoint_and_restores_once(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     saved = ReuseValue(1, repo=repo)
     state = repo.save_object(saved)
+    saved.value = 99
     ReuseValue.restores = 0
 
     loaded = repo.load_state_ref(state, reuse_live="matching")
 
     assert loaded is saved
-    assert ReuseValue.restores == 0
+    assert loaded.value == 1
+    assert ReuseValue.restores == 1
 
 
 def test_never_constructs_a_new_live_object_under_the_saved_id(tmp_path):
@@ -59,7 +61,7 @@ def test_greedy_restores_one_unique_stale_candidate_in_place(tmp_path):
 
     assert loaded is saved
     assert loaded.value == 4
-    assert loaded._last_state_hash == next(iter(state.states.values()))
+    assert loaded._last_state_hash == state.state.key.codec_hash
     assert ReuseValue.restores == 1
 
 
@@ -74,7 +76,7 @@ def test_matching_ignores_stale_candidates_after_exact_hash_filtering(tmp_path):
     loaded = repo.load_state_ref(state, reuse_live="matching")
 
     assert loaded is saved
-    assert ReuseValue.restores == 0
+    assert ReuseValue.restores == 1
 
 
 @pytest.mark.parametrize("reuse_live", ["matching", "greedy"])
@@ -108,7 +110,7 @@ def test_never_preserves_independent_nodes_with_equal_state_hashes(tmp_path):
 
     loaded = Repo(DirStore(tmp_path / "store")).load_state_ref(state, reuse_live="never")
 
-    assert len(set(state.states.values())) == 1
+    assert len({local.key for local in state.state_spec().values()}) == 1
     assert loaded.first is not loaded.second
     assert loaded.first.object_id != loaded.second.object_id
 
@@ -156,12 +158,12 @@ def test_later_greedy_failure_evicts_every_previously_mutated_candidate(tmp_path
     MultiFailureValue.fail_second_restore = True
 
     try:
-        with pytest.raises(RepoLoadError, match="mutated and evicted candidates") as error:
+        with pytest.raises(RepoLoadError, match="fresh materialization") as error:
             repo.load_state_ref(state, reuse_live="greedy")
     finally:
         MultiFailureValue.fail_second_restore = False
 
-    assert str(next(iter(state.states))) in str(error.value)
+    assert any(str(path) in str(error.value) for path in state.state_spec())
     assert candidates.first._last_state_hash is None
     assert candidates.second._last_state_hash is None
     assert candidates.first not in repo._all_live_candidates()

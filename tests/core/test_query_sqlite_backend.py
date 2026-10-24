@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core import ConcreteDefinition, Definition, Object, SKIP_ARGS
+from dryml.core import Definition, Object, SKIP_ARGS
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.query.fingerprint import target_local_fingerprint
 from dryml.core.query.lowering import CandidateRelation, LoweringDiagnostics, ScanPolicy
@@ -62,13 +62,22 @@ def sqlite_rows(path, sql, params=()):
         con.close()
 
 
+def _same_graphs(actual, expected):
+    actual, expected = tuple(actual), tuple(expected)
+    return len(actual) == len(expected) and all(a.graph_equal(b) for a, b in zip(actual, expected))
+
+
+def _same_graph_set(actual, expected):
+    actual, expected = tuple(actual), tuple(expected)
+    return len(actual) == len(expected) and all(sum(a.graph_equal(b) for a in actual) == 1 for b in expected)
+
+
 def test_explicit_cycle_validates_ready_index_without_replacement(tmp_path, monkeypatch):
     """Every direct explicit call validates a fresh cut without replacing ready data."""
     from dryml.core.store.dir import DirStore
-    from dryml.core.store.records import DefinitionRecord
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
-    store.write_definition_record(DefinitionRecord(SQLiteLeaf("ready").definition))
+    store.publish_node(SQLiteLeaf("ready").definition)
     store.rebuild_query_index()
     index = store.open_query_index()
     before = index.status()
@@ -78,7 +87,7 @@ def test_explicit_cycle_validates_ready_index_without_replacement(tmp_path, monk
     for policy in (True, True, "always", "always"):
         stats = QueryStats()
         index.refresh(policy, stats=stats)
-        assert stats.store_scan_count == 1
+        assert stats.store_scan_count == 0
         assert stats.refresh_action == "sqlite-validate"
         assert index.status().generation == before.generation
         assert index.status().diagnostics["index_uuid"] == before.diagnostics["index_uuid"]
@@ -90,20 +99,19 @@ def test_explicit_cycle_validates_ready_index_without_replacement(tmp_path, monk
 def test_failed_explicit_replacement_counts_started_scan(tmp_path, monkeypatch, phase):
     """Failure never refunds an inventory, including after visible activation."""
     from dryml.core.store.dir import DirStore
-    from dryml.core.store.records import DefinitionRecord
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
-    store.write_definition_record(DefinitionRecord(SQLiteLeaf("root").definition))
+    store.publish_node(SQLiteLeaf("root").definition)
     index = store.open_query_index()
-    original_clear = index._clear_dirty
+    original_clear = index._ack_store_projection
 
     def fail(*args, **kwargs):
         raise QueryIndexError("injected " + phase)
 
     if phase == "authority":
-        monkeypatch.setattr(index, "_preflight_store_roots", fail)
+        monkeypatch.setattr("dryml.core.query.authority.capture_store_projection", fail)
     elif phase == "staging":
-        monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", fail)
+        monkeypatch.setattr(index, "_write_store_projection", fail)
     elif phase == "activation":
         monkeypatch.setattr(index, "_activate_replacement", fail)
     elif phase == "activation-visible":
@@ -115,23 +123,24 @@ def test_failed_explicit_replacement_counts_started_scan(tmp_path, monkeypatch, 
 
         monkeypatch.setattr(index, "_activate_replacement", activate)
     else:
-        monkeypatch.setattr(index, "_clear_dirty", fail)
+        monkeypatch.setattr(index, "_ack_store_projection", fail)
     stats = QueryStats()
     with pytest.raises(QueryIndexError, match="injected"):
-        index.refresh(True, stats=stats)
+        index.rebuild(stats=stats)
     assert stats.store_scan_count == 1
     assert not index._build_claim_path().exists()
     assert not index._connections._leases
     assert not tuple(index.path.parent.glob(f"{index.path.name}.rebuild-*.tmp*"))
+    index._mark_dirty()
     report = index.reconcile()
     assert report.action == "rebuild"
     assert report.changed == (phase in {"acknowledgement", "activation-visible"})
-    assert report.validated == (phase != "authority")
+    assert not report.validated
     assert report.diagnostics["store_scan_count"] == 1
-    assert any("injected " + phase in (issue.detail or "") for issue in report.issues)
+    assert any("injected " + phase in issue.message for issue in report.issues)
     if phase == "acknowledgement":
         assert index.path.exists()
-        monkeypatch.setattr(index, "_clear_dirty", original_clear)
+        monkeypatch.setattr(index, "_ack_store_projection", original_clear)
         index.refresh(True)
         assert index.status().state == "ready"
 
@@ -142,15 +151,15 @@ def test_foreign_destination_owner_is_refused_before_scan(tmp_path, monkeypatch,
     """Foreign ownership outranks older-version recovery without changing persisted data."""
     from dryml.core.query.model import QueryIndexIncompatible
     from dryml.core.store.dir import DirStore
-    from dryml.core.store.records import DefinitionRecord
 
     path = tmp_path / "shared.sqlite"
     config = SQLiteQueryIndexConfig(path=path, journal_mode="delete")
-    first, second = (DirStore(tmp_path / name, query_index=config) for name in ("first", "second"))
-    records = tuple(store.write_definition_record(DefinitionRecord(SQLiteLeaf(name).definition))
+    first, second = (DirStore(tmp_path / name, query_index="none") for name in ("first", "second"))
+    records = tuple(store.publish_node(SQLiteLeaf(name).definition)
                     for store, name in ((first, "first"), (second, "second")))
-    authority_paths = tuple(Path(store._definition_path(record.digest)) for store, record in zip((first, second), records))
+    authority_paths = tuple(Path(store._node_path("definitions/roots", record.digest)) for store, record in zip((first, second), records))
     authority_bytes = tuple(path.read_bytes() for path in authority_paths)
+    first, second = (DirStore(store.base_dir, query_index=config) for store in (first, second))
     first.rebuild_query_index()
     owner = first.open_query_index()
     owner.close()
@@ -158,7 +167,9 @@ def test_foreign_destination_owner_is_refused_before_scan(tmp_path, monkeypatch,
         con.execute(f"PRAGMA user_version = {schema_version}")
         assert con.execute("SELECT store_key FROM catalog_state WHERE singleton = 1").fetchone() == (owner.source_key,)
     first.mark_query_index_dirty()
-    index = second.open_query_index()
+    second.mark_query_index_dirty()
+    index = SQLiteStoreQueryIndex(source_key=second.catalog_key(), path=path, config=config,
+                                  store=second, dirty_path=second.query_index_dirty_path)
     identity = (path.stat().st_dev, path.stat().st_ino)
     contents = path.read_bytes()
     tokens = tuple(backend._dirty_markers() for backend in (owner, index))
@@ -190,11 +201,11 @@ def test_ready_validation_failure_retains_scan_and_releases_view(tmp_path, monke
     index = store.open_query_index()
     generation = index.status().generation
 
-    def fail(*args):
-        assert index._connections._leases
+    def fail(*args, **kwargs):
         raise QueryIndexError("injected validation failure")
 
-    monkeypatch.setattr(index, "_validate_decodable_rows", fail)
+    monkeypatch.setattr(index, "_store_certificate", fail)
+    index._mark_dirty()
     stats = QueryStats()
     with pytest.raises(QueryIndexError, match="injected validation failure"):
         index.refresh(True, stats=stats)
@@ -204,7 +215,7 @@ def test_ready_validation_failure_retains_scan_and_releases_view(tmp_path, monke
     report = index.reconcile()
     assert not report.changed
     assert report.diagnostics["store_scan_count"] == 1
-    assert any("injected validation failure" in (issue.detail or "") for issue in report.issues)
+    assert any("injected validation failure" in issue.message for issue in report.issues)
 
 
 def test_explicit_cycle_preserves_unconditional_rebuild_seam(tmp_path):
@@ -237,180 +248,101 @@ def test_strict_refresh_raises_unavailability_while_reconcile_reports_it(tmp_pat
     with pytest.raises(QueryIndexUnavailable, match="injected SQLite absence"):
         index.refresh(True)
     report = index.reconcile()
-    assert not report.changed and not report.validated and report.action == "none"
+    assert not report.changed and not report.validated and report.action == "replay"
     assert report.diagnostics["store_scan_count"] == 0
-    assert any("injected SQLite absence" in (issue.detail or "") for issue in report.issues)
+    assert any("injected SQLite absence" in issue.message for issue in report.issues)
 
 
 def test_empty_marker_rebuild_keeps_required_authority_reads(tmp_path, monkeypatch):
-    """A one-root rebuild skips cleanup reads, retaining inventory and validation."""
+    """A one-root rebuild reads its complete metadata closure, never private data."""
     from dryml.core.store.dir import DirStore
-    from dryml.core.store.records import DefinitionRecord
+    from dryml.core.query import authority as projection
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
     root = SQLiteLeaf("cleanup-count").definition
-    record = store.write_definition_record(DefinitionRecord(root))
-    store.clear_query_index_dirty()
+    record = store.publish_node(root)
     index = store.open_query_index()
-    reads = {"inventory": 0, "root-metadata": 0, "cleanup-node": 0, "cleanup-root": 0}
-    phase = "cleanup-node"
-    original_read = store._read_file
-    original_capture = index._capture_authority_cut
-    original_metadata = SQLiteStoreQueryIndex._root_record_metadata
-    original_key = SQLiteStoreQueryIndex._root_marker_key
-    original_validate = SQLiteStoreQueryIndex._validate_rebuild_before_ready
-    validations = []
+    capture = projection.capture_store_projection
+    captured = []
 
-    def read(path, record_type):
-        value = original_read(path, record_type)
-        if record_type is DefinitionRecord and value is not None:
-            assert value.digest == record.digest
-            reads[phase] += 1
-        return value
+    def observe(*args, **kwargs):
+        prepared = capture(*args, **kwargs)
+        captured.append(prepared)
+        return prepared
 
-    def capture():
-        nonlocal phase
-        phase = "inventory"
-        try:
-            cut = original_capture()
-            assert cut[0] == (root,) and cut[3] == ()
-            return cut
-        finally:
-            phase = "cleanup-node"
-
-    def metadata(backend, cdef):
-        nonlocal phase
-        previous, phase = phase, "root-metadata"
-        try:
-            return original_metadata(backend, cdef)
-        finally:
-            phase = previous
-
-    def key(backend, cdef):
-        nonlocal phase
-        previous, phase = phase, "cleanup-root"
-        try:
-            return original_key(backend, cdef)
-        finally:
-            phase = previous
-
-    def validate(backend, *, roots):
-        assert backend.status().state == "building"
-        validations.append(roots)
-        return original_validate(backend, roots=roots)
-
-    monkeypatch.setattr(store, "_read_file", read)
-    monkeypatch.setattr(index, "_capture_authority_cut", capture)
-    monkeypatch.setattr(SQLiteStoreQueryIndex, "_root_record_metadata", metadata)
-    monkeypatch.setattr(SQLiteStoreQueryIndex, "_root_marker_key", key)
-    monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", validate)
+    monkeypatch.setattr(projection, "capture_store_projection", observe)
+    monkeypatch.setattr(store, "_authenticate_state_data", lambda *args: pytest.fail("rebuild opened payload"))
     stats = QueryStats()
     index.rebuild(stats=stats)
-
-    assert validations == [(root,)]
-    assert stats.store_scan_count == 1 and stats.result_count == 1
-    assert reads == {"inventory": 1, "root-metadata": 2, "cleanup-node": 0, "cleanup-root": 0}
-    assert sqlite_rows(index.path, "SELECT storage_hash FROM stored_roots") == [(bytes.fromhex(record.digest),)]
+    assert len(captured) == 1
+    assert len(captured[0].sources) == 3
+    assert stats.store_scan_count == 1
+    assert len(index.projection_rows("recipe_root")) == 1
+    assert store.read_node(record.digest).graph_equal(root)
     assert index.status().state == "ready"
 
 
 @pytest.mark.parametrize("empty", (True, False))
 def test_empty_marker_registration_skips_cleanup_not_readiness(tmp_path, monkeypatch, empty):
-    """Empty registration checks readiness; clean graph writes read only root metadata."""
+    """Empty metadata work is inert; a clean new root uses bounded journal deltas."""
     from dryml.core.store.dir import DirStore
-    from dryml.core.store.records import DefinitionRecord
+    from dryml.core.store import authority
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
     store.rebuild_query_index()
     root = SQLiteParent(child=SQLiteLeaf("closure"), name="clean").definition
-    store.write_definition_record(DefinitionRecord(root))
-    store.clear_query_index_dirty()
     index = store.open_query_index()
-    roots = () if empty else (root,)
-    graph = ConcreteDefinitionGraph.from_roots(roots)
-    original_markers, original_ready = index._dirty_markers, index._ensure_ready
-    original_read, original_metadata = store.read_definition_record, index._root_record_metadata
-    original_key = index._root_marker_key
-    phase = "cleanup"
-    enumerations, reads, keys = [], [], []
+    before = store.authority_cut()
+    writes, write = [], index._write_store_projection
 
-    def markers():
-        enumerations.append(phase)
-        result = original_markers()
-        assert result == ()
-        return result
+    def observe(con, prepared, **kwargs):
+        writes.append(len(prepared.sources))
+        return write(con, prepared, **kwargs)
 
-    def ready():
-        nonlocal phase
-        phase = "readiness"
-        try:
-            return original_ready()
-        finally:
-            phase = "cleanup"
-
-    def metadata(cdef):
-        nonlocal phase
-        phase = "root-metadata"
-        try:
-            return original_metadata(cdef)
-        finally:
-            phase = "cleanup"
-
-    def read(digest):
-        reads.append(phase)
-        return original_read(digest)
-
-    def key(cdef):
-        keys.append(cdef)
-        return original_key(cdef)
-
-    monkeypatch.setattr(index, "_dirty_markers", markers)
-    monkeypatch.setattr(index, "_ensure_ready", ready)
-    monkeypatch.setattr(index, "_root_record_metadata", metadata)
-    monkeypatch.setattr(store, "read_definition_record", read)
-    monkeypatch.setattr(index, "_root_marker_key", key)
-    generation = index.status().generation
-    enumerations.clear()
-    result = index.register_stored_roots(graph, roots)
-
-    assert result.changed is not empty
-    assert result.generation == generation + (0 if empty else 1)
-    assert result.definitions_added == (0 if empty else 2)
-    assert result.edges_added == (0 if empty else 1)
-    assert result.roots_added == (0 if empty else 1)
-    assert enumerations == (["readiness"] if empty else ["cleanup"])
-    assert reads == ([] if empty else ["root-metadata"])
-    assert keys == []
+    monkeypatch.setattr(index, "_write_store_projection", observe)
+    monkeypatch.setattr(authority._DetachedRead, "directory", lambda *args: pytest.fail("clean registration inventoried"))
+    if empty:
+        assert store.install_creations(()) == ()
+    else:
+        store.publish_node(root)
+    assert store.authority_cut().epoch == before.epoch + (0 if empty else 1)
+    assert writes == ([] if empty else [3])
+    assert len(index.projection_rows("node")) == (0 if empty else 2)
+    assert len(index.projection_rows("edge")) == (0 if empty else 1)
+    assert len(index.projection_rows("recipe_root")) == (0 if empty else 1)
+    assert index.status().state == "ready"
 
 
-def test_registration_acknowledges_only_captured_covered_definitions(tmp_path):
-    """Root and direct closure tokens clear without acknowledging other mutations."""
-    from pathlib import Path
+def test_registration_acknowledges_only_captured_covered_definitions(tmp_path, monkeypatch):
+    """An earlier incorporated token cannot consume a later unacknowledged write."""
     from dryml.core.store.dir import DirStore
-    from dryml.core.store.records import DefinitionRecord
+    from dryml.core.store import authority
+    from dryml.core.store.authority import StoreMutationError
+    from dryml.core.store.records import MutationIntentRecord
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
     store.rebuild_query_index()
     child = SQLiteLeaf("closure-token").definition
     root = SQLiteParent(child=child, name="covered-token").definition
     unrelated = SQLiteLeaf("unrelated-token").definition
-    store.write_definition_record(DefinitionRecord(root))
-    store.write_definition_record(DefinitionRecord(child), stored_root=False)
-    covered = set(store.open_query_index()._dirty_markers())
-    store.write_definition_record(DefinitionRecord(unrelated))
-    unscoped = Path(store.mark_query_index_dirty())
+    store.publish_node(root)
+    first = store.authority_cut()
+    token = next(store._read_file(path, MutationIntentRecord)
+                 for path in Path(store.base_dir, "mutations").glob("*.record"))
+    old_id, old_epoch = token.intent["mutation_id"], token.intent["epoch"]
+    with monkeypatch.context() as patch:
+        patch.setattr(authority, "acknowledge", lambda *args: (_ for _ in ()).throw(OSError("later ack pending")))
+        with pytest.raises(StoreMutationError) as raised:
+            store.publish_node(unrelated)
+    later = raised.value.mutation_id
+    assert first.pending == () and store.authority_cut().pending == (later,)
+    store.acknowledge_mutation(old_id, old_epoch)
+    assert store.authority_cut().pending == (later,)
     index = store.open_query_index()
-    retained = set(index._dirty_markers()) - covered
-    assert len(covered) == 2 and len(retained) == 2 and unscoped in retained
-
-    with store.authority_read_fence():
-        result = index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), (root,))
-
-    assert result.changed and result.definitions_added == 2 and result.roots_added == 1
-    assert not any(marker.exists() for marker in covered)
-    assert set(index._dirty_markers()) == retained
-    assert sqlite_rows(index.path, "SELECT COUNT(*) FROM stored_roots") == [(1,)]
-    assert sqlite_rows(index.path, "SELECT COUNT(*) FROM definitions") == [(2,)]
+    index.maintain_store()
+    assert not store.authority_cut().pending
+    assert len(index.projection_rows("recipe_root")) == 2
+    assert len(index.projection_rows("node")) == 3
 
 
 def test_register_stored_roots_persists_graph_and_is_idempotent(tmp_path):
@@ -439,10 +371,10 @@ def test_register_stored_roots_persists_graph_and_is_idempotent(tmp_path):
         assert view.is_stored_id(owner_id)
         assert not view.is_stored_id(leaf_id)
         assert view.has_stored_ancestor(leaf_id)
-        assert view.cdefs_by_id({owner_id, leaf_id}) == {
-            owner_id: owner.definition,
-            leaf_id: leaf.definition,
-        }
+        decoded = view.cdefs_by_id({owner_id, leaf_id})
+        assert set(decoded) == {owner_id, leaf_id}
+        assert decoded[owner_id].graph_equal(owner.definition)
+        assert decoded[leaf_id].graph_equal(leaf.definition)
 
 
 def test_registered_rows_include_edge_and_root_metadata(tmp_path):
@@ -624,7 +556,7 @@ def test_exact_and_local_candidate_lookup(tmp_path):
         ids = graph_candidate_ids(view, selector_graph, domain)
         cdefs = tuple(view.cdefs_by_id(ids).values())
 
-    assert cdefs == (wanted.definition,)
+    assert _same_graphs(cdefs, (wanted.definition,))
 
 
 def test_u4_prepared_selector_lowers_to_semantic_parameter_candidates(tmp_path):
@@ -648,7 +580,7 @@ def test_u4_prepared_selector_lowers_to_semantic_parameter_candidates(tmp_path):
         ids = graph_candidate_ids(view, selector_graph, StoredDomain(view))
         cdefs = tuple(view.cdefs_by_id(ids).values())
 
-    assert cdefs == (wanted.definition,)
+    assert _same_graphs(cdefs, (wanted.definition,))
 
 
 def test_lowered_exact_anchor_relation_uses_hash_index(tmp_path):
@@ -759,7 +691,7 @@ def test_lowered_child_edge_join_matches_v2_parameter_path(tmp_path):
         batch = next(view.iter_candidate_cdef_batches(plan, batch_size=10))
 
     assert set(batch.ids) == v1_ids
-    assert batch.cdefs == (wanted,)
+    assert _same_graphs(batch.cdefs, (wanted,))
 
 
 def test_lowered_sql_uses_rare_exact_nested_anchor(tmp_path):
@@ -782,7 +714,7 @@ def test_lowered_sql_uses_rare_exact_nested_anchor(tmp_path):
         )
         batch = next(view.iter_candidate_cdef_batches(plan, batch_size=10))
 
-    assert batch.cdefs == (wanted.definition,)
+    assert _same_graphs(batch.cdefs, (wanted.definition,))
     assert "anchor_1" in plan.candidate_sql
     assert "JOIN anchor_1 child_relation" in plan.candidate_sql
     assert diagnostics.anchor_node == 1
@@ -808,7 +740,7 @@ def test_lowered_sql_uses_rare_local_posting_anchor(tmp_path):
         )
         batch = next(view.iter_candidate_cdef_batches(plan, batch_size=10))
 
-    assert batch.cdefs == (wanted.definition,)
+    assert _same_graphs(batch.cdefs, (wanted.definition,))
     assert "anchor_1" in plan.candidate_sql
     assert "SELECT DISTINCT p.def_id" in plan.candidate_sql
     assert "FROM postings p" in plan.candidate_sql
@@ -956,7 +888,7 @@ def test_lowered_multibranch_semijoin_filters_before_cdef_decode(tmp_path, monke
         )
         batch = next(view.iter_candidate_cdef_batches(plan, batch_size=20))
 
-    assert batch.cdefs == (wanted.definition,)
+    assert _same_graphs(batch.cdefs, (wanted.definition,))
     assert len(fetched) == 1
     assert len(fetched[0]) == 1
     assert "EXISTS" in plan.candidate_sql
@@ -1052,11 +984,11 @@ def test_relation_operations_parent_child_domain_and_semijoin(tmp_path):
         child_batch = next(view.iter_relation_cdef_batches(child_relation, batch_size=10))
         semijoin_batch = next(view.iter_relation_cdef_batches(semijoin_relation, batch_size=10))
 
-    assert nested_leaf_batch.cdefs == (leaf.definition,)
+    assert _same_graphs(nested_leaf_batch.cdefs, (leaf.definition,))
     assert stored_leaf_batch is None
-    assert parent_batch.cdefs == (owner.definition,)
-    assert child_batch.cdefs == (leaf.definition,)
-    assert semijoin_batch.cdefs == (owner.definition,)
+    assert _same_graphs(parent_batch.cdefs, (owner.definition,))
+    assert _same_graphs(child_batch.cdefs, (leaf.definition,))
+    assert _same_graphs(semijoin_batch.cdefs, (owner.definition,))
 
 
 def test_relation_set_ops_materialization_and_owner_projection(tmp_path):
@@ -1095,9 +1027,9 @@ def test_relation_set_ops_materialization_and_owner_projection(tmp_path):
         assert materialized_diagnostics.physical_plan.materialized_relations
         assert materialized_diagnostics.temp_rows_inserted == 2
 
-    assert intersected_batch.cdefs == (owner.definition,)
-    assert set(materialized_batch.cdefs) == {owner.definition, other.definition}
-    assert owners_batch.cdefs == (owner.definition,)
+    assert _same_graphs(intersected_batch.cdefs, (owner.definition,))
+    assert _same_graph_set(materialized_batch.cdefs, (owner.definition, other.definition))
+    assert _same_graphs(owners_batch.cdefs, (owner.definition,))
 
     with index.read_view() as view:
         for name in temp_names or ():
@@ -1165,7 +1097,7 @@ def test_materialized_relation_can_be_paged_twice_by_keyset(tmp_path):
         second = next(view.iter_relation_cdef_batches(materialized, after=first.next_cursor, batch_size=2))
 
     observed = first.cdefs + second.cdefs
-    assert observed == tuple(sorted(roots, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
+    assert _same_graphs(observed, sorted(roots, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
 
 
 def test_optimizer_policy_materializes_reused_relation(tmp_path):
@@ -1319,7 +1251,7 @@ def test_candidate_relation_ordering_stable(tmp_path):
 
     observed = first.cdefs + second.cdefs
     assert relation.ordering == ("stable_hash", "collision_ordinal", "definition_id")
-    assert observed == tuple(sorted(roots, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
+    assert _same_graphs(observed, sorted(roots, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
 
 
 def test_lowered_unordered_edge_uses_conservative_edge_relation(tmp_path):
@@ -1348,8 +1280,8 @@ def test_lowered_unordered_edge_uses_conservative_edge_relation(tmp_path):
         )
         batch = next(view.iter_candidate_cdef_batches(plan, batch_size=10))
 
-    assert wanted.definition in batch.cdefs
-    assert other.definition not in batch.cdefs
+    assert any(wanted.definition.graph_equal(cdef) for cdef in batch.cdefs)
+    assert not any(other.definition.graph_equal(cdef) for cdef in batch.cdefs)
 
 
 def test_temp_relation_is_dropped_on_view_exit(tmp_path):
@@ -1394,7 +1326,7 @@ def test_lowered_within_relation_restricts_candidates_with_temp_table(tmp_path):
         )
         batch = next(view.iter_candidate_cdef_batches(plan, batch_size=10))
 
-    assert batch.cdefs == (wanted.definition,)
+    assert _same_graphs(batch.cdefs, (wanted.definition,))
     assert plan.diagnostics.relation_strategy == "cte+temp"
 
 
@@ -1509,7 +1441,7 @@ def test_read_view_estimates_candidates_and_query_stats(tmp_path):
 
         assert view.estimate_exact_ids(wanted.definition) >= len(exact_ids) == 1
         assert view.estimate_local_candidates(requirements) >= len(candidate_ids) == 1
-        assert tuple(view.cdefs_by_id(candidate_ids).values()) == (wanted.definition,)
+        assert _same_graphs(view.cdefs_by_id(candidate_ids).values(), (wanted.definition,))
 
     assert stats.selected_features
     assert stats.posting_sizes
@@ -1530,18 +1462,21 @@ def test_read_view_filter_domain_replica_map_and_capture_occurrences(tmp_path):
 
         assert view.filter_domain(stored_domain, {owner_id, leaf_id}) == {owner_id}
         assert view.filter_nested_ids({owner_id, leaf_id}) == {leaf_id}
-        assert view.replica_map({owner_id, leaf_id}) == {owner.definition: (index.source_key,)}
+        replicas = view.replica_map({owner_id, leaf_id})
+        assert len(replicas) == 1
+        assert next(iter(replicas)).graph_equal(owner.definition)
+        assert next(iter(replicas.values())) == (index.source_key,)
 
         projection = view.project_owners({leaf_id})
         occurrences = view.capture_occurrences({leaf_id})
         all_occurrences = view.capture_occurrences(max_occurrences=1)
 
     assert projection.owner_ids == frozenset({owner_id})
-    assert projection.cdefs == (owner.definition,)
+    assert _same_graphs(projection.cdefs, (owner.definition,))
     assert len(occurrences) == 1
-    assert occurrences[0].owner == owner.definition
-    assert occurrences[0].definition == leaf.definition
-    assert all_occurrences[0].owner == owner.definition
+    assert occurrences[0].owner.graph_equal(owner.definition)
+    assert occurrences[0].definition.graph_equal(leaf.definition)
+    assert all_occurrences[0].owner.graph_equal(owner.definition)
 
 
 def test_read_view_generation_snapshot_and_closed_view_contract(tmp_path):
@@ -1607,7 +1542,7 @@ def test_feature_hash_collision_confirms_full_token_equality(monkeypatch, tmp_pa
         ids = view.local_candidates(requirements, domain=domain)
         cdefs = tuple(view.cdefs_by_id(ids).values())
 
-    assert cdefs == (wanted.definition,)
+    assert _same_graphs(cdefs, (wanted.definition,))
 
 
 def test_path_hash_collision_confirms_full_path_equality(monkeypatch, tmp_path):
@@ -1663,9 +1598,9 @@ def test_owner_projection_and_occurrence_capture(tmp_path):
         projection = view.project_owners({leaf_id})
         occurrences = tuple(view.occurrence_snapshot_for_nested_ids({leaf_id}).iter_occurrences())
 
-    assert set(projection.cdefs) == {owner1.definition, owner2.definition}
-    assert {occ.owner for occ in occurrences} == {owner1.definition, owner2.definition}
-    assert {occ.definition for occ in occurrences} == {leaf.definition}
+    assert _same_graph_set(projection.cdefs, (owner1.definition, owner2.definition))
+    assert _same_graph_set((occ.owner for occ in occurrences), (owner1.definition, owner2.definition))
+    assert all(occ.definition.graph_equal(leaf.definition) for occ in occurrences)
     assert all(str(occ.path) == '$[@param("child")]' for occ in occurrences)
 
 

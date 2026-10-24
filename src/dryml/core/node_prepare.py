@@ -4,7 +4,8 @@ One occurrence table serves all requested roots. Exact keys use the v1 hybrid
 contract: disjoint child closures compose with a direct-alias partition; joins
 use root-relative adjacency. Unordered incidence is canonicalized as a whole,
 never by independently ordering graph-bearing members. No external validity
-evidence, resolved targets, or process-global cache is retained here.
+evidence, resolved targets, or process-global cache is retained here. Ordinary
+named-view consumers retain a bounded owner on their immutable source handle.
 """
 
 from collections import OrderedDict
@@ -235,6 +236,46 @@ class PreparationView:
 EXACT_VIEW = PreparationView()
 
 
+_OWNER_LOCK = RLock()
+
+
+def _owned_preparation(root):
+    """Borrow a handle-local pure owner, never a live or external validity proof."""
+    from .definition import ConcreteDefinition
+    from .node import Node
+
+    if not isinstance(root, (Node, ConcreteDefinition)):
+        raise TypeError("Preparation roots must be Nodes or CDefs.")
+    # Do not use CDef's parameter fallback for private cache ownership. Creation
+    # is serialized, while each owner serializes its own pure requests and clear.
+    with _OWNER_LOCK:
+        owner = vars(root).get("_pure_preparation")
+        if owner is None:
+            owner = NodePreparation(())
+            object.__setattr__(root, "_pure_preparation", owner)
+        return owner
+
+
+def _metadata_size(value, limit):
+    """Bound a primitive metadata DAG without expanding shared value containers."""
+    pending, seen, size = [value], set(), 0
+    while pending and size <= limit:
+        current = pending.pop()
+        if type(current) in (dict, list, tuple):
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            size += 128 + 16 * len(current)
+            if type(current) is dict:
+                size += sum(96 + _primitive_size(key) for key in current)
+                pending.extend(current.values())
+            else:
+                pending.extend(current)
+        else:
+            size += _primitive_size(current)
+    return size
+
+
 class NodePreparation:
     """Prepare one shared unique table and bounded pure facts for Node roots.
 
@@ -397,6 +438,10 @@ class NodePreparation:
         if len(fact) >= 3:
             fact = (*fact[:2], dict(fact[2]), *fact[3:])
         size = 192 + _primitive_size(fact)
+        self._cache_put(slot, fact, size)
+
+    def _cache_put(self, slot, fact, size):
+        """Charge keys and optional metadata owners to the same bounded LRU."""
         self._cache_bytes -= self._fact_sizes.pop(slot, 0)
         self._facts.pop(slot, None)
         if size > self.max_cached_bytes:
@@ -408,6 +453,31 @@ class NodePreparation:
         while len(self._facts) > self.max_cached_keys or self._cache_bytes > self.max_cached_bytes:
             evicted, _ = self._facts.popitem(last=False)
             self._cache_bytes -= self._fact_sizes.pop(evicted)
+
+    def _prepared_view(self, root, view=EXACT_VIEW):
+        """Reuse a pure transformed table under this owner's existing LRU budget.
+
+        The table charge conservatively covers derived carriers and bookkeeping;
+        reserve its entire child fact budget so later folds cannot exceed the
+        parent's bound. Oversized views remain valid operation-local work only.
+        Policy identity, not just its name, separates transformation implementations.
+        """
+        if not isinstance(view, PreparationView):
+            raise TypeError("view must be a PreparationView.")
+        key = ("prepared-view", id(root), id(view))
+        with self._lock:
+            cached = self._facts.get(key)
+            if cached is not None:
+                self._facts.move_to_end(key)
+                return cached[2]
+            prepared = NodePreparation((root,), view=view,
+                                       max_cached_keys=self.max_cached_keys,
+                                       max_cached_bytes=max(1, self.max_cached_bytes // 8))
+            table_size = 2048 + 2048 * len(prepared.nodes) + 4 * _metadata_size((
+                prepared._rows, prepared._children, prepared._closures,
+                prepared._incidences, prepared._construction), self.max_cached_bytes // 4)
+            self._cache_put(key, (root, view, prepared), table_size + prepared.max_cached_bytes)
+            return prepared
 
     def _slot(self, node):
         try:
@@ -524,10 +594,11 @@ class NodePreparation:
         return self._schemes[self._slot(node)]
 
     def clear(self):
-        """Evict owned value/key/digest facts without changing the immutable table.
+        """Evict owned value/key/digest facts and retained named-view preparations.
 
-        Returns None. Source handles and work counts are preserved; subsequent
-        requests recompute evicted facts under the same contract and budgets.
+        Returns None. This owner's immutable source table and counts are preserved;
+        subsequent requests recompute evicted facts/views under the same contract
+        and budgets. In-flight borrowers may finish with their detached pure view.
         """
         with self._lock:
             self._facts.clear()
@@ -564,27 +635,63 @@ class NodePreparation:
             bit = remaining & -remaining
             slots.append(bit.bit_length() - 1)
             remaining ^= bit
-        if not any(_unordered(self._rows[slot]) for slot in slots):
+        result, evidence = self._label_table(root, self._rows, self._children, slots)
+        return (result, evidence) if retain else result
+
+    def _transport_order(self, root):
+        """Label the same table including storage-only views and occurrence joins."""
+        from .node import Node
+
+        groups = {}
+        for slot, node in enumerate(self.nodes):
+            token = node._occurrence if isinstance(node, Node) else node._node_id
+            groups.setdefault(token, []).append({"tag": "node", "slot": slot})
+        rows = []
+        for slot, node in enumerate(self.nodes):
+            token = node._occurrence if isinstance(node, Node) else node._node_id
+            construction = self._construction.get(slot)
+            rows.append({
+                "value": self._rows[slot],
+                "occurrence_views": {"tag": "set", "items": groups[token]},
+                "construction": None if construction is None else {"tag": "node", "slot": construction},
+            })
+        children = {slot: tuple(dict.fromkeys(_refs(row))) for slot, row in enumerate(rows)}
+        # Singleton occurrence groups add only self-links, not unordered choices.
+        # Keep their full rows, but use the common typed-position traversal when
+        # actual values are ordered. Distinct/retained views still need exact ties.
+        ordered = (not self._construction and all(len(group) == 1 for group in groups.values())
+                   and not any(_unordered(row) for row in self._rows))
+        return self._label_table(root, rows, children, range(len(rows)),
+                                 semantic=False, ordered=ordered)[1][0]
+
+    def _label_table(self, root, rows, children, slots, *, semantic=True, ordered=False):
+        """Label by typed position or exact ties, accepting a proven ordered table.
+
+        ``ordered`` permits transport's singleton bookkeeping self-links without
+        mistaking them for unordered choices; it must follow shape-only evidence.
+        Rows and occurrence membership remain part of the exact normalized result.
+        """
+        if ordered or not any(_unordered(rows[slot]) for slot in slots):
             order, seen = [], set()
             def visit(slot):
                 if slot in seen:
                     return
                 seen.add(slot)
                 order.append(slot)
-                for child in self._children[slot]:
+                for child in children[slot]:
                     visit(child)
             visit(root)
             labels = {slot: index for index, slot in enumerate(order)}
-            result = _bytes(_canonical_values([self._rows[slot] for slot in order], labels.__getitem__))
+            result = _bytes(_canonical_values([rows[slot] for slot in order], labels.__getitem__, semantic=semantic))
             evidence = (tuple(order),)
-            return (result, evidence) if retain else result
+            return result, evidence
         # Equitable refinement uses exact bytes, not hashes. Individualization of
         # remaining color cells considers complete rooted incidence, including all
         # unordered/external aliases. Slot numbers never break a semantic tie.
         colors = {slot: 0 for slot in slots}
         while True:
             signatures = {slot: _bytes([slot == root, colors[slot],
-                                       _canonical_values([self._rows[slot]], colors.__getitem__)]) for slot in slots}
+                                       _canonical_values([rows[slot]], colors.__getitem__, semantic=semantic)]) for slot in slots}
             self.counts["partition_rounds"] += 1
             self.counts["partition_rows"] += len(slots)
             palette = {signature: index for index, signature in enumerate(sorted(set(signatures.values())))}
@@ -600,11 +707,11 @@ class NodePreparation:
         for labeling in _labelings(cells):
             order = [root, *labeling]
             labels = {slot: index for index, slot in enumerate(order)}
-            candidate = _bytes(_canonical_values([self._rows[slot] for slot in order], labels.__getitem__))
+            candidate = _bytes(_canonical_values([rows[slot] for slot in order], labels.__getitem__, semantic=semantic))
             if best is None or candidate < best:
                 best = candidate
                 best_order = tuple(order)
             if any(len(cell) > 1 for cell in cells):
                 self.counts["unordered_ties"] += 1
         evidence = (best_order, *(tuple(cell) for cell in cells))
-        return (best, evidence) if retain else best
+        return best, evidence

@@ -13,7 +13,7 @@ import textwrap
 import pytest
 
 from dryml.core import (
-    AnyValue, Choice, ConcreteDefinition, Definition, Exact, F, IntRange, Mat, Match, Missing, ObjectId,
+    AnyValue, Choice, ConcreteDefinition, Definition, Exact, F, IntRange, Match, Missing, ObjectId,
     ObjectRef, Present, Ref, Repo, RepoDefinition, RepoDefinitionError,
     RepoReconstructionError, SelectorSpec,
     Satisfies, Selector, SKIP_ARGS, StateRef, SubclassOf,
@@ -93,6 +93,20 @@ def _route_data(tmp_path):
         save_routing=SaveRouting(((Selector(Definition(DefinitionTarget, "base")), store),)),
     )
     return repo.to_definition().to_data()
+
+
+def _legacy_route_data(repo, selector):
+    """Exercise the retained closed descriptor reader independently of new output."""
+    from dryml.core.repo_definition import _SelectorEncoder
+
+    encoder = _SelectorEncoder()
+    root = encoder.definition(selector.root, "$.root")
+    data = repo.to_definition().to_data()
+    data["routing"]["routes"][0]["selector"] = {
+        "root": root, "nodes": encoder.nodes,
+        "strict": selector.strict, "cls_policy": selector.cls_policy,
+    }
+    return data
 
 
 def _archive_store(path):
@@ -339,7 +353,7 @@ def test_definition_rejects_physical_store_aliases_before_opening(tmp_path, monk
 
 
 @pytest.mark.parametrize("mutation", ["envelope", "segment", "unversioned"], ids=str)
-def test_definition_rejects_unknown_or_unversioned_nested_graph_paths(tmp_path, mutation):
+def test_definition_rejects_unknown_or_unversioned_nested_graph_paths(tmp_path, monkeypatch, mutation):
     """Reference path envelopes and segments use only the closed portable grammar."""
 
     leaf = Definition(ReferenceLeaf).concretize()
@@ -347,10 +361,12 @@ def test_definition_rejects_unknown_or_unversioned_nested_graph_paths(tmp_path, 
     path = GraphPath((Parameter("child"),))
     reference = ObjectRef(root, {path: ObjectId(("child",))})
     store = DirStore(tmp_path / "store", query_index="none")
-    data = Repo(
+    selector = Selector(Definition(DefinitionTarget, reference))
+    repo = Repo(
         store,
-        save_routing=SaveRouting(((Selector(Definition(DefinitionTarget, reference)), store),)),
-    ).to_definition().to_data()
+        save_routing=SaveRouting(((selector, store),)),
+    )
+    data = _legacy_route_data(repo, selector)
 
     def first_reference(value):
         if isinstance(value, dict):
@@ -376,8 +392,10 @@ def test_definition_rejects_unknown_or_unversioned_nested_graph_paths(tmp_path, 
     else:
         descriptor["objects"][0]["path"] = encoded_path["segments"]
 
-    with pytest.raises(RepoDefinitionError, match="reference path"):
-        RepoDefinition.from_data(data)
+    monkeypatch.setattr(ImportRef, "resolve", lambda *args: pytest.fail("resolved symbol"))
+    for decode in (RepoDefinition.from_data, lambda value: RepoDefinition.from_json(json.dumps(value))):
+        with pytest.raises(RepoDefinitionError, match="reference path"):
+            decode(data)
 
 
 @pytest.mark.parametrize("field, value", [
@@ -434,7 +452,8 @@ def test_definition_encodes_complete_nested_reference_topology_inertly(tmp_path,
         )
     )
     store = DirStore(tmp_path / "store", query_index="none")
-    data = Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition().to_data()
+    repo = Repo(store, save_routing=SaveRouting(((selector, store),)))
+    data = _legacy_route_data(repo, selector)
 
     monkeypatch.setattr(
         ObjectRef,
@@ -503,7 +522,8 @@ def test_definition_validates_materializing_reference_paths_inside_sets(tmp_path
     state = StateRef(reference, {path: _state_hash("d")})
     store = DirStore(tmp_path / "store", query_index="none")
     selector = Selector(Definition(DefinitionTarget, state))
-    data = Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition().to_data()
+    repo = Repo(store, save_routing=SaveRouting(((selector, store),)))
+    data = _legacy_route_data(repo, selector)
 
     assert RepoDefinition.from_data(data).to_data() == data
 
@@ -539,10 +559,12 @@ def test_definition_rejects_forged_set_fingerprints_with_matching_reference_path
     reference = ObjectRef(root, {path: ObjectId(("setchild",))})
     state = StateRef(reference, {path: _state_hash("d")})
     store = DirStore(tmp_path / "store", query_index="none")
-    data = Repo(
+    selector = Selector(Definition(DefinitionTarget, state))
+    repo = Repo(
         store,
-        save_routing=SaveRouting(((Selector(Definition(DefinitionTarget, state)), store),)),
-    ).to_definition().to_data()
+        save_routing=SaveRouting(((selector, store),)),
+    )
+    data = _legacy_route_data(repo, selector)
 
     def first_set(value):
         if isinstance(value, dict):
@@ -778,7 +800,7 @@ def test_definition_set_topology_is_deterministic_across_processes(tmp_path):
 
     script = textwrap.dedent(
         """
-        from dryml.core import Definition, Repo, Selector
+        from dryml.core import Definition, Repo, RepoDefinition, Selector
         from dryml.core.repo_plan import SaveRouting
         from dryml.core.store.dir import DirStore
         from dryml.core.symbol import ImportRef
@@ -788,9 +810,17 @@ def test_definition_set_topology_is_deterministic_across_processes(tmp_path):
         shared = Definition(ImportRef("builtins", "dict"), value="shared")
         left = Definition(ImportRef("builtins", "dict"), value=shared)
         right = Definition(ImportRef("builtins", "dict"), value=shared)
-        root = Definition(ImportRef("builtins", "dict"), values={left, right})
+        root = Definition(ImportRef("builtins", "dict"), values={left, right}, selected=left, shared=shared)
         repo = Repo(store, save_routing=SaveRouting(((Selector(root), store),)))
-        print(repo.to_definition().to_json())
+        definition = repo.to_definition()
+        rebuilt = Repo.from_definition(RepoDefinition.from_json(definition.to_json()))
+        restored = rebuilt.save_routing.routes[0][0].root
+        assert len(restored.kwargs["values"]) == 2
+        assert restored.kwargs["selected"] in restored.kwargs["values"]
+        assert all(member.kwargs["value"] is restored.kwargs["shared"] for member in restored.kwargs["values"])
+        assert rebuilt.to_definition().to_json() == definition.to_json()
+        rebuilt.close(flush=False)
+        print(definition.to_json())
         """
     )
     outputs = []
@@ -798,11 +828,12 @@ def test_definition_set_topology_is_deterministic_across_processes(tmp_path):
         environment = {**os.environ, "PYTHONHASHSEED": seed}
         result = subprocess.run(
             [sys.executable, "-c", script, str(tmp_path / "store")],
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
             env=environment,
         )
+        assert result.returncode == 0, result.stderr
         outputs.append(result.stdout)
     assert outputs[0] == outputs[1]
 
@@ -810,8 +841,264 @@ def test_definition_set_topology_is_deterministic_across_processes(tmp_path):
     shared = Definition(ReferenceLeaf, 1).concretize()
     independent = Definition(ReferenceLeaf, 2).concretize()
     selector = Selector(Definition(DefinitionTarget, values=[shared, shared, independent]))
-    nodes = Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition().to_data()["routing"]["routes"][0]["selector"]["nodes"]
-    assert len(nodes) == 3
+    graph = Repo(store, save_routing=SaveRouting(((selector, store),))).to_definition().to_data()["routing"]["routes"][0]["selector"]["graph"]
+    assert len(next(iter(graph["tables"].values()))["rows"]) == 3
+
+
+@pytest.mark.parametrize("shared_child", [True, False], ids=("joined", "independent"))
+def test_definition_unordered_occurrences_keep_external_aliases(tmp_path, shared_child):
+    """Equal set members retain their partition and joins to ordered branches."""
+    store = DirStore(tmp_path / "store", query_index="none")
+    child = Definition(DefinitionTarget, "child")
+    other = child if shared_child else Definition(DefinitionTarget, "child")
+    left = Definition(DefinitionTarget, child)
+    right = Definition(DefinitionTarget, other)
+    root = Definition(DefinitionTarget, {left, right}, left=left, child=child, type_value=SubclassOf(SelectorParityBase))
+    source = Repo(store, save_routing=SaveRouting(((Selector(root), store),)))
+    definition = source.to_definition()
+    rebuilt = Repo.from_definition(RepoDefinition.from_json(definition.to_json()))
+    try:
+        restored = rebuilt.save_routing.routes[0][0].root
+        members = restored.args[0]
+        assert len(members) == 2
+        selected = restored.kwargs["left"]
+        assert selected in members
+        assert selected.args[0] is restored.kwargs["child"]
+        remaining = next(member for member in members if member is not selected)
+        assert (remaining.args[0] is selected.args[0]) is shared_child
+        assert root.graph_equal(restored)
+        assert restored.kwargs["type_value"].matcher.matches(SelectorParityChild)
+        assert not restored.kwargs["type_value"].matcher.matches(DefinitionTarget)
+        assert rebuilt.to_definition().to_json() == definition.to_json()
+        graph = definition.to_data()["routing"]["routes"][0]["selector"]["graph"]
+        assert len(graph["tables"]) == 1
+        assert len(next(iter(graph["tables"].values()))["rows"]) == (4 if shared_child else 5)
+    finally:
+        rebuilt.close(flush=False)
+
+
+def test_definition_ordered_equal_concrete_children_have_cross_seed_canonical_bytes(tmp_path):
+    """Twelve equal independent children export cheaply through portable Repo routes."""
+    from pathlib import Path
+
+    script = textwrap.dedent(
+        """
+        import json
+        import sys
+        sys.path.insert(0, sys.argv[2])
+        from test_repo_definition import DefinitionTarget
+        from dryml.core import Definition, Repo, RepoDefinition, Selector
+        from dryml.core.node_codec import encode_node_graph, decode_node_graph
+        from dryml.core.repo_plan import SaveRouting
+        from dryml.core.store.dir import DirStore
+        import dryml.core.node_prepare as preparation
+
+        def reject_labelings(*args, **kwargs):
+            raise AssertionError("Ordered transport entered permutation search")
+        preparation._labelings = reject_labelings
+        children = [Definition(DefinitionTarget, "equal") for _ in range(12)]
+        root = Definition(DefinitionTarget, [*children, children[0]]).concretize()
+        prepared = preparation.NodePreparation((root,))
+        packet = encode_node_graph(prepared, canonical=True)
+        assert prepared.counts["unordered_ties"] == prepared.counts["partition_rows"] == 0
+        decoded = decode_node_graph(packet)
+        values = decoded.parameters["value"]
+        assert len(set(values[:12])) == 12 and values[-1] is values[0]
+        assert decoded.graph_equal(root)
+        assert encode_node_graph(preparation.NodePreparation((decoded,)), canonical=True) == packet
+
+        store = DirStore(sys.argv[1], query_index="none")
+        repo = Repo(store, save_routing=SaveRouting(((Selector(root, strict=True), store),)))
+        definition = repo.to_definition()
+        detached = RepoDefinition.from_json(definition.to_json())
+        assert detached.to_json() == definition.to_json()
+        rebuilt = Repo.from_definition(detached)
+        try:
+            selector = rebuilt.save_routing.routes[0][0]
+            restored = selector.root
+            values = restored.parameters["value"]
+            assert len(set(values[:12])) == 12 and values[-1] is values[0]
+            assert restored.graph_equal(root) and selector.strict is True
+            assert rebuilt.to_definition().to_json() == definition.to_json()
+        finally:
+            rebuilt.close(flush=False)
+            repo.close(flush=False)
+            store.close()
+        print(json.dumps({"packet": packet, "repo": definition.to_json()}, sort_keys=True))
+        """
+    )
+    outputs = []
+    for seed in ("1", "98765"):
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path / "store"), str(Path(__file__).parent)],
+            check=False, capture_output=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        )
+        assert result.returncode == 0, result.stderr.decode()
+        outputs.append(result.stdout)
+    assert outputs[0] == outputs[1]
+
+
+def test_definition_unordered_transport_retains_facets_construction_and_quotation(tmp_path, monkeypatch):
+    """Portable shared blocks preserve normalized views, fixed pins and quoted roles."""
+    from dryml.core import ConcreteNode
+    from dryml.core.state_values import LocalState, StateKey
+
+    creation = Definition(ReferenceLeaf, 7).concretize()
+    state = LocalState(StateKey("a" * 64, "pkl-" + "b" * 64), creation)
+    pinned = creation.with_state(state)
+    realized = pinned.with_realization(identities={"$": ObjectId(("transport",))}, states={"$": None})
+    quoted = DefLink.finalized(EdgeKind.REF, pinned.quote())
+    inert = Definition(DefinitionTarget, DefLink.assertion(EdgeKind.REF, creation)).quote()
+    root = Definition(
+        DefinitionTarget, {realized, creation.copy_graph()}, selected=realized, quoted=quoted,
+        inert=inert, mat=DefLink.finalized(EdgeKind.MATERIALIZE, realized),
+    )
+    store = DirStore(tmp_path / "store", query_index="none")
+    source = Repo(store, save_routing=SaveRouting(((Selector(root, strict=True), store),)))
+    definition = source.to_definition()
+    with monkeypatch.context() as inert:
+        inert.setattr(ImportRef, "resolve", lambda *args: pytest.fail("resolved symbol"))
+        detached = RepoDefinition.from_json(definition.to_json())
+        assert detached.to_data() == definition.to_data()
+    rebuilt = Repo.from_definition(detached)
+    try:
+        selector = rebuilt.save_routing.routes[0][0]
+        restored = selector.root
+        selected = restored.kwargs["selected"]
+        assert selector.strict is True
+        assert isinstance(selected, ConcreteNode)
+        assert len(restored.args[0]) == 2
+        assert selected in restored.args[0]
+        assert selected.object_id == realized.object_id
+        assert selected.state is None
+        assert selected.construction_view.state == state
+        assert restored.kwargs["quoted"].kind is EdgeKind.REF
+        assert restored.kwargs["quoted"].target.value.state == state
+        assert restored.kwargs["mat"].kind is EdgeKind.MATERIALIZE
+        assert restored.kwargs["mat"].target is selected
+        assertion = restored.kwargs["inert"].value.args[0]
+        assert assertion.kind is EdgeKind.REF
+        assert assertion.is_finalized is False
+        assert assertion.target._occurrence is selected._occurrence
+        assert assertion.target is not selected
+        assert assertion.target.object_id is None
+        assert assertion.target.state is None
+        assert root.graph_equal(restored)
+        assert rebuilt.to_definition().to_json() == definition.to_json()
+    finally:
+        rebuilt.close(flush=False)
+
+
+def test_definition_node_selector_retains_reference_bindings_inertly(tmp_path, monkeypatch):
+    """Shared-table reference bindings retain pins and joins without rooted exports."""
+    leaf = Definition(ReferenceLeaf).concretize()
+    reference = ObjectRef(leaf, {GraphPath(): ObjectId(("portable",))})
+    state = StateRef(reference, {GraphPath(): _state_hash("c")})
+    root = Definition(DefinitionTarget, {Definition(DefinitionTarget, state), Definition(DefinitionTarget, state)}, leaf=leaf, state=state)
+    store = DirStore(tmp_path / "store", query_index="none")
+    source = Repo(store, save_routing=SaveRouting(((Selector(root), store),)))
+    definition = source.to_definition()
+    with monkeypatch.context() as inert:
+        inert.setattr(ImportRef, "resolve", lambda *args: pytest.fail("resolved symbol"))
+        detached = RepoDefinition.from_json(definition.to_json())
+    rebuilt = Repo.from_definition(detached)
+    try:
+        restored = rebuilt.save_routing.routes[0][0].root
+        selected = restored.kwargs["state"]
+        assert selected.object.definition is restored.kwargs["leaf"]
+        assert selected.object.objects == reference.objects
+        assert selected.states == state.states
+        assert all(member.args[0].object.definition is restored.kwargs["leaf"] for member in restored.args[0])
+        assert root.graph_equal(restored)
+        assert rebuilt.to_definition().to_json() == definition.to_json()
+    finally:
+        rebuilt.close(flush=False)
+
+
+@pytest.mark.parametrize("case", ["unresolved-role", "predicate"])
+def test_definition_node_selector_retains_portable_admission(tmp_path, case):
+    """A Node carrier does not admit unresolved active roles or callback matchers."""
+    leaf = Definition(DefinitionTarget)
+    value = (DefLink.assertion(EdgeKind.REF, leaf) if case == "unresolved-role"
+             else Satisfies(bool))
+    root = Definition(DefinitionTarget, {leaf, Definition(DefinitionTarget)}, value=value)
+    store = DirStore(tmp_path / "store", query_index="none")
+    with pytest.raises(RepoDefinitionError):
+        Repo(store, save_routing=SaveRouting(((Selector(root), store),))).to_definition()
+
+
+def test_definition_node_selector_refuses_type_resolving_leaves_before_decode(tmp_path, monkeypatch):
+    """The portable subset refuses import-requiring value codecs before metadata decode."""
+    from dryml.core.node_codec import encode_node_graph
+    from dryml.core.node_prepare import NodePreparation
+    from dryml.core.tensor_spec import Layout
+
+    root = Definition(DefinitionTarget, Layout.DENSE)
+    graph = encode_node_graph(NodePreparation((root,)), canonical=True)
+    data = _route_data(tmp_path)
+    data["routing"]["routes"][0]["selector"] = {
+        "kind": "node-selector", "version": 1,
+        "strict": False, "cls_policy": "selector", "graph": graph,
+    }
+    monkeypatch.setattr(ImportRef, "resolve", lambda *args: pytest.fail("resolved symbol"))
+    with pytest.raises(RepoDefinitionError, match="Node selector graph"):
+        RepoDefinition.from_data(data)
+
+
+@pytest.mark.parametrize("value", [1 << 4096, float("inf")], ids=("integer", "nonfinite"))
+def test_definition_node_selector_retains_scalar_bounds(tmp_path, value):
+    """Tagged Node scalar representations retain the portable JSON value limits."""
+    from dryml.core.node_codec import encode_node_graph
+    from dryml.core.node_prepare import NodePreparation
+
+    leaf = Definition(DefinitionTarget)
+    root = Definition(DefinitionTarget, {leaf, Definition(DefinitionTarget)}, value=value)
+    store = DirStore(tmp_path / "store", query_index="none")
+    with pytest.raises(RepoDefinitionError):
+        Repo(store, save_routing=SaveRouting(((Selector(root), store),))).to_definition()
+    data = _route_data(tmp_path)
+    data["routing"]["routes"][0]["selector"] = {
+        "kind": "node-selector", "version": 1, "strict": False,
+        "cls_policy": "selector", "graph": encode_node_graph(NodePreparation((root,)), canonical=True),
+    }
+    with pytest.raises(RepoDefinitionError):
+        RepoDefinition.from_data(data)
+
+
+@pytest.mark.parametrize("mutation", ["version", "boolean-version", "graph-version", "identity-version", "key-version", "unknown", "slot", "integer-fields", "float-fields"])
+def test_definition_node_selector_refuses_incompatible_or_malformed_data_before_resolution(tmp_path, monkeypatch, mutation):
+    """Nested transport versions, fields and root slots are checked inertly."""
+    leaf = Definition(ImportRef("builtins", "dict"))
+    root = Definition(ImportRef("builtins", "dict"), {leaf, Definition(ImportRef("builtins", "dict"))})
+    store = DirStore(tmp_path / "store", query_index="none")
+    data = Repo(store, save_routing=SaveRouting(((Selector(root), store),))).to_definition().to_data()
+    route = data["routing"]["routes"][0]["selector"]
+    graph = route["graph"]
+    if mutation == "version":
+        route["version"] = 2
+    elif mutation == "boolean-version":
+        route["version"] = True
+    elif mutation == "graph-version":
+        graph["format"] = "dryml-node-graph/v2"
+    elif mutation == "identity-version":
+        graph["identity_version"] = 2
+    elif mutation == "key-version":
+        graph["views"][0]["key_format"] = "dryml-node-exact/v2"
+    elif mutation == "unknown":
+        route["unknown"] = True
+    elif mutation == "integer-fields":
+        graph["values"]["0" * 64] = {"tag": "leaf", "value": {"type": "int"}}
+    elif mutation == "float-fields":
+        graph["values"]["0" * 64] = {"tag": "float"}
+    else:
+        graph["views"][0]["slot"] = 1000
+    original = deepcopy(data)
+    monkeypatch.setattr(ImportRef, "resolve", lambda *args: pytest.fail("resolved symbol"))
+    for decode in (RepoDefinition.from_data, lambda value: RepoDefinition.from_json(json.dumps(value))):
+        with pytest.raises(RepoDefinitionError):
+            decode(data)
+    assert data == original
 
 
 def test_definition_export_releases_config_lock_before_archive_fence(tmp_path, monkeypatch):

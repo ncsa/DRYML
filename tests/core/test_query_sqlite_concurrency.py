@@ -2223,6 +2223,47 @@ emit({{"count": len(rows), "generation": idx.current_generation()}})
     assert store.query().cdefs().stored().sel(root).refresh(False).count() == 1
 
 
+@pytest.mark.parametrize("managed_in_builder", [False, True], ids=["cold-builder", "cold-reader"])
+def test_store_coverage_survives_cross_process_managed_imports(tmp_path, managed_in_builder):
+    """Import state cannot invalidate a complete Core-only Store cut or its misses."""
+    built = _run_worker(f'''
+import sys
+if {managed_in_builder!r}:
+    import dryml.managed
+assert ("dryml.managed" in sys.modules) is {managed_in_builder!r}
+idx = store_index({str(tmp_path)!r})
+idx.store.publish_node(cdef("cross-process"))
+idx.store.mark_query_index_dirty()
+idx.refresh("auto")
+emit({{"generation": idx.status().generation, "identity": list(idx._connections._path_identity())}})
+''')
+    observed = _run_worker(f'''
+import sys
+from dryml.core.query.model import QueryIndexUnavailable
+if {not managed_in_builder!r}:
+    import dryml.managed
+assert ("dryml.managed" in sys.modules) is {not managed_in_builder!r}
+idx = store_index({str(tmp_path)!r})
+query = idx.store.query().cdefs().stored().refresh(False)
+assert query.sel(cdef("cross-process")).count() == 1
+assert query.sel(cdef("absent")).count() == 0
+assert query.count() == 1
+assert not idx.store.query_index_is_dirty()
+assert idx.status().state == "ready"
+if {not managed_in_builder!r}:
+    assert idx.projection_rows("lifecycle", refresh=False) == ()
+else:
+    try:
+        idx.projection_rows("lifecycle", refresh=False)
+    except QueryIndexUnavailable:
+        pass
+    else:
+        raise AssertionError("Lifecycle reads require their owner")
+emit({{"generation": idx.status().generation, "identity": list(idx._connections._path_identity())}})
+''')
+    assert observed == built
+
+
 def test_crash_mid_rebuild_leaves_building_state_and_recovers(tmp_path):
     ready = tmp_path / "rebuild-started"
     store = DirStore(

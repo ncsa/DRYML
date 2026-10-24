@@ -65,8 +65,10 @@ def test_exact_root_query_reads_definition_record_without_full_hydration(tmp_pat
 
     defs = repo2.query().sel(obj.definition).cdefs().stored().collect()
 
-    assert list(defs) == [obj.definition]
-    assert counting_store.definition_read_count >= 1
+    assert len(defs) == 1 and next(iter(defs)).graph_equal(obj.definition)
+    stats = repo2.query().sel(obj.definition).cdefs().stored().explain(analyze=True)
+    assert stats.cdef_blobs_decoded == 1
+    assert counting_store.definition_read_count == 0
     assert counting_store.hydrate_count == 0
 
 
@@ -85,5 +87,5 @@ def test_query_identities_are_loaded_explicitly_by_the_repo(tmp_path):
     result = repo2.query().sel(Definition(QueryRoot, SKIP_ARGS)).cdefs().stored().collect()
     loaded = repo2.load_object(result.one())
 
-    assert loaded.definition == obj.definition
+    assert loaded.definition.graph_equal(obj.definition)
     assert loaded.name == "saved"

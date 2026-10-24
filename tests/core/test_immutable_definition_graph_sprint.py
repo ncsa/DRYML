@@ -17,7 +17,6 @@ from dryml.core import (
     Selector,
     SelectorSpec,
     Satisfies,
-    Template,
     Generator,
     UniformFromSet,
     UniformIntRange,
@@ -215,7 +214,7 @@ def test_indexed_query_can_inspect_ref_target_subgraph():
     selector = Definition(
         AuditChainNode,
         "A",
-        ref=_ref(Selector(Definition(
+        ref=_ref(Definition(
             AuditChainNode,
             "B",
             child=Definition(
@@ -223,7 +222,7 @@ def test_indexed_query_can_inspect_ref_target_subgraph():
                 "C",
                 ref=_ref(Definition(AuditChainNode, "D", width=512)),
             ),
-        ))),
+        )),
     )
 
     assert list(IdentitySet((a,)).query().sel(selector).collect()) == [a]
@@ -309,7 +308,7 @@ def test_indexed_query_missing_does_not_require_presence():
 
     ref_selector = Definition(
         Nest3,
-        ref=_ref(Selector(Definition(Cls1, x={"missing": Missing()}))),
+        ref=_ref(Definition(Cls1, x={"missing": Missing()})),
     )
     assert list(universe.sel(ref_selector).collect()) == [ref_parent]
 
@@ -495,7 +494,7 @@ def test_nested_concretization_keeps_facets_aliases_and_named_paths():
     assert first is concrete.at(GraphPath((Parameter("kwargs"), Key("other"))))
     assert first.object_id == identity
     assert authored.at(GraphPath((Arg(0),))).object_id == identity
-    with pytest.raises(TypeError, match="Repo build boundary"):
+    with pytest.raises(ValueError, match="Stateless Nodes"):
         authored.build()
 
 

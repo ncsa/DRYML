@@ -141,6 +141,87 @@ def test_capture_retains_construction_pins_and_excludes_own_recursive_key():
     assert decoded.at(CHILD).state == s1
 
 
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("edit", ["identity", "state", "unpin"])
+def test_realization_overlay_keeps_cross_quoted_aliases_exact(pinned, edit):
+    child = model()
+    initial = selection(child)
+    if pinned:
+        child = child.with_identity(ObjectId()).with_state(initial)
+    bundle = Definition(ViewModel, child=[child, child], initializer=child.quote()).quote()
+    root = model(child=[child, child], initializer=bundle)
+    root = root.with_identity(ObjectId()).with_state(selection(root))
+    child_path = GraphPath((Parameter("child"), Index(0)))
+    identities = {child_path: ObjectId()} if edit == "identity" else None
+    states = ({child_path: selection(child, "b")} if edit == "state" else
+              {child_path: None} if edit == "unpin" else None)
+
+    changed = root.with_realization(identities=identities, states=states)
+
+    left, right = changed.parameters["child"]
+    assert left is right
+    assert changed.parameters["initializer"] is root.parameters["initializer"]
+    assert changed.at(GraphPath((Parameter("initializer"),))) is bundle.value
+    assert bundle.value.kwargs["child"][0] is bundle.value.kwargs["child"][1] is child
+    assert left.object_id == (identities[child_path] if identities else child.object_id)
+    assert left.state == (states[child_path] if states else child.state)
+    assert changed.object_id == root.object_id and changed.state == root.state
+    assert changed.construction_view is root
+    assert changed.creation_digest() == root.creation_digest()
+    if edit != "identity":
+        assert changed.object_projection_equal(root)
+
+
+@pytest.mark.parametrize("edit", ["identity", "state"])
+def test_realization_collection_ignores_distinct_quoted_view_of_same_occurrence(edit):
+    child = model()
+    owned = child.with_identity(ObjectId()).with_state(selection(child))
+    quoted = child.with_identity(ObjectId()).with_state(selection(child, "b"))
+    root = model(child=[owned, owned], initializer=quoted.quote())
+    path = GraphPath((Parameter("child"), Index(0)))
+    identity, state = ObjectId(), selection(child, "c")
+
+    changed = root.with_realization(
+        identities={path: identity} if edit == "identity" else None,
+        states={path: state} if edit == "state" else None)
+
+    left, right = changed.parameters["child"]
+    assert left is right
+    assert left.object_id == (identity if edit == "identity" else owned.object_id)
+    assert left.state == (state if edit == "state" else owned.state)
+    assert changed.at(GraphPath((Parameter("initializer"),))) is quoted
+    assert owned._occurrence is quoted._occurrence is left._occurrence
+    assert changed.construction_view is root
+    if edit == "state":
+        assert changed.object_projection_equal(root)
+    eager = NodePreparation((changed,), scheduler="eager")
+    deferred = NodePreparation((changed,))
+    assert eager.exact_key(changed) == deferred.exact_key(changed)
+    restored = decode_node_graph(encode_node_graph(eager))
+    assert restored.graph_equal(changed)
+    assert restored.exact_key() == changed.exact_key()
+    restored_owned = restored.parameters["child"][0]
+    restored_quoted = restored.at(GraphPath((Parameter("initializer"),)))
+    assert restored_owned is restored.parameters["child"][1]
+    assert restored_owned is not restored_quoted
+    assert restored_owned._occurrence is restored_quoted._occurrence
+    assert restored_owned.object_id == left.object_id and restored_owned.state == left.state
+    assert restored_quoted.object_id == quoted.object_id and restored_quoted.state == quoted.state
+
+
+def test_explicit_authoring_bindings_still_edit_cross_quoted_aliases():
+    child = model()
+    root = model(child=[child, child], initializer=child.quote())
+    path = GraphPath((Parameter("child"), Index(0)))
+    identity, state = ObjectId(), selection(child)
+    bound = root.bind(identities={path: identity}, states={path: state})
+    assert bound.at(GraphPath((Parameter("initializer"),))) is bound.at(path)
+    assert bound.at(path).object_id == identity and bound.at(path).state == state
+    replaced = bound.replace_bindings(states={path: None})
+    assert replaced.at(GraphPath((Parameter("initializer"),))) is replaced.at(path)
+    assert replaced.at(path).object_id == identity and replaced.at(path).state is None
+
+
 def test_restore_adoption_checks_original_projection_then_recapture_uses_adopted_pins():
     child = model().with_identity(ObjectId())
     child0 = child.with_state(selection(child))
@@ -260,3 +341,239 @@ def test_nested_factory_reference_states_weaken_but_ordinary_identity_data_does_
     first_id, second_id = model(child=ObjectId()), model(child=ObjectId())
     assert not first_id.compatibility_view().graph_equal(second_id.compatibility_view())
     assert not first_id.object_projection_equal(second_id)
+
+
+@pytest.fixture
+def preparation_work(monkeypatch):
+    """Count actual production discovery and hashing, including disposable owners."""
+    import dryml.core.node_codec as codec
+    import dryml.core.node_prepare as preparation
+
+    work = {"discovery": 0, "folds": 0, "hashes": 0}
+    describe, digest = codec._describe_node, preparation._digest
+
+    def counted_describe(*args, **kwargs):
+        work["discovery"] += 1
+        return describe(*args, **kwargs)
+
+    def counted_digest(*args, **kwargs):
+        work["hashes"] += 1
+        work["folds"] += args[0] == "dryml-node-value/v1"
+        return digest(*args, **kwargs)
+
+    monkeypatch.setattr(codec, "_describe_node", counted_describe)
+    monkeypatch.setattr(preparation, "_digest", counted_digest)
+    return work
+
+
+@pytest.mark.parametrize("method", ["creation_digest", "compatibility_fingerprint", "object_projection_digest"])
+def test_ordinary_named_digest_reuses_resident_preparation(method, preparation_work):
+    child = model().with_identity(ObjectId())
+    root = model(child=[child, child], initializer=child.quote())
+    expected = getattr(root, method)()
+    cold = dict(preparation_work)
+    assert cold["discovery"] > 0 and cold["hashes"] > 0
+    assert getattr(root, method)() == expected
+    assert preparation_work == cold
+
+
+def test_ordinary_named_equality_reuses_resident_preparation(preparation_work):
+    child = model().with_identity(ObjectId())
+    root = model(child=[child, child], initializer=child.quote())
+    copied = root.copy_graph()
+    assert root.object_projection_equal(copied)
+    cold = dict(preparation_work)
+    assert root.object_projection_equal(copied)
+    assert preparation_work == cold
+
+
+def test_same_cdef_multistate_validation_reuses_facts_not_admission(preparation_work):
+    child = model().with_identity(ObjectId())
+    origin = model(child=[child, child])
+    destination = origin.with_realization(identities={"$": ObjectId()})
+    first = selection(origin)
+    second = LocalState(StateKey(first.key.cdef_digest, "pkl-" + "b" * 64), first.creation_cdef)
+    assert first.validate_for(destination, codec="pkl") is first
+    cold = dict(preparation_work)
+    assert second.validate_for(destination, codec="pkl") is second
+    assert first.validate_for(destination, codec="pkl") is first
+    assert preparation_work == cold
+    with pytest.raises(ValueError, match="codec"):
+        second.validate_for(destination, codec="other")
+    forged = LocalState(StateKey("0" * 64, second.key.codec_hash), first.creation_cdef)
+    with pytest.raises(ValueError, match="creation.*digest"):
+        forged.validate_for(destination, codec="pkl")
+    with pytest.raises(ValueError, match="incompatible"):
+        second.validate_for(model(width=8), codec="pkl")
+
+
+def test_named_helpers_clear_eviction_and_schedulers_keep_exact_faceted_keys(preparation_work):
+    from dryml.core.node_prepare import _owned_preparation
+    from dryml.core.node_views import CREATION_VIEW, COMPATIBILITY_VIEW, OBJECT_PROJECTION_VIEW, view_equal
+
+    child = model().with_identity(ObjectId())
+    pinned = child.with_state(selection(child))
+    root = model(child=[{pinned, pinned.copy_graph()}, pinned], initializer=pinned.quote())
+    root = root.with_realization(identities={"$": ObjectId()}, states={"$": selection(root)})
+    copied = root.copy_graph()
+    source_key = root.exact_key()
+    views = (CREATION_VIEW, COMPATIBILITY_VIEW, OBJECT_PROJECTION_VIEW)
+    methods = ("creation_digest", "compatibility_fingerprint", "object_projection_digest")
+    expected = []
+    for view, method in zip(views, methods):
+        eager = NodePreparation((root,), view=view, scheduler="eager")
+        deferred = NodePreparation((root,), view=view, max_cached_keys=1)
+        key = eager.exact_key(eager.roots[0])
+        assert deferred.exact_key(deferred.roots[0]) == key
+        deferred.clear()
+        assert deferred.exact_key(deferred.roots[0]) == key
+        digest = eager.digest(eager.roots[0], domain=view.name)
+        assert getattr(root, method)() == digest
+        assert view_equal(root, copied, view)
+        expected.append(digest)
+
+    owner = _owned_preparation(root)
+    assert owner._cache_bytes <= owner.max_cached_bytes
+    cold = dict(preparation_work)
+    assert [getattr(root, method)() for method in methods] == expected
+    for view in views:
+        assert view_equal(root, copied, view)
+    assert preparation_work == cold
+    owner.clear()
+    assert owner._cache_bytes == 0 and not owner._facts
+    assert [getattr(root, method)() for method in methods] == expected
+    assert preparation_work["discovery"] > cold["discovery"]
+    assert preparation_work["folds"] > cold["folds"]
+    assert root.exact_key() == source_key
+
+    # Both count and byte eviction change only work, including oversized tables
+    # that cannot remain resident at all. The immutable source graph is untouched.
+    owner.clear()
+    owner.max_cached_keys = 1
+    for view, method, digest in zip(views, methods, expected):
+        assert getattr(root, method)() == digest
+        assert view_equal(root, copied, view)
+        assert len(owner._facts) <= 1
+        assert owner._cache_bytes <= owner.max_cached_bytes
+    owner.clear()
+    owner.max_cached_bytes = 1
+    for view, method, digest in zip(views, methods, expected):
+        assert getattr(root, method)() == digest
+        assert view_equal(root, copied, view)
+    assert not owner._facts and owner._cache_bytes == 0
+
+
+def test_same_cdef_validation_after_clear_and_eviction(preparation_work):
+    from dryml.core.node_prepare import _owned_preparation
+
+    origin = model(child=model())
+    destination = origin.with_realization(identities={"$": ObjectId()})
+    first = selection(origin)
+    second = LocalState(StateKey(first.key.cdef_digest, "pkl-" + "b" * 64), first.creation_cdef)
+    assert first.validate_for(destination, codec="pkl") is first
+    cold = dict(preparation_work)
+    assert second.validate_for(destination, codec="pkl") is second
+    assert preparation_work == cold
+    for root in (first.creation_cdef, destination):
+        _owned_preparation(root).clear()
+    assert second.validate_for(destination, codec="pkl") is second
+    assert preparation_work["discovery"] > cold["discovery"]
+    for root in (first.creation_cdef, destination):
+        owner = _owned_preparation(root)
+        owner.clear()
+        owner.max_cached_bytes = 1
+    assert first.validate_for(destination, codec="pkl") is first
+    assert second.validate_for(destination, codec="pkl") is second
+    forged = LocalState(StateKey("0" * 64, first.key.codec_hash), first.creation_cdef)
+    with pytest.raises(ValueError, match="creation.*digest"):
+        forged.validate_for(destination, codec="pkl")
+
+
+def test_handle_owned_views_concurrent_clear_and_lifetime():
+    from concurrent.futures import ThreadPoolExecutor
+    import gc
+    import weakref
+    from dryml.core.node_prepare import _owned_preparation
+
+    root = model(child=[model(), model()])
+    copied = root.copy_graph()
+    owner = _owned_preparation(root)
+    expected = (root.creation_digest(), root.compatibility_fingerprint(), root.object_projection_digest())
+
+    def request(index, owner=owner, root=root):
+        if index % 3 == 0:
+            owner.clear()
+        assert root.object_projection_equal(copied)
+        return root.creation_digest(), root.compatibility_fingerprint(), root.object_projection_digest()
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        assert list(pool.map(request, range(12))) == [expected] * 12
+    assert owner._cache_bytes <= owner.max_cached_bytes
+    reference = weakref.ref(root)
+    del request, root, owner
+    gc.collect()
+    assert reference() is None
+
+
+def test_warm_named_helpers_do_not_transport_owners_or_freeze_codec_admission():
+    import dill
+
+    origin = model(child=model())
+    state = selection(origin)
+    assert state.validate_for(origin, codec="pkl") is state
+    origin.compatibility_fingerprint()
+    origin.object_projection_digest()
+    restored = dill.loads(dill.dumps(origin))
+    assert "_pure_preparation" not in vars(restored)
+    assert restored.creation_digest() == origin.creation_digest()
+    assert restored.object_projection_equal(origin)
+    assert state.validate_for(restored, codec="pkl") is state
+    with pytest.raises(ValueError, match="codec"):
+        state.validate_for(restored, codec="json")
+
+
+def test_named_preparation_separates_same_name_transforms_and_failed_work():
+    from dryml.core.node_prepare import PreparationView, _owned_preparation
+    from dryml.core.node_views import view_digest, view_equal
+
+    root, alternate = model(), model(width=8)
+    first = PreparationView("policy-test", lambda node: node)
+    second = PreparationView("policy-test", lambda node: alternate)
+    expected = [view_digest(root, view) for view in (first, second)]
+    assert expected[0] != expected[1]
+    assert [view_digest(root, view) for view in (first, second)] == expected
+    assert not view_equal(root, alternate, first)
+    assert view_equal(root, alternate, second)
+    owner = _owned_preparation(root)
+    before = len(owner._facts), owner._cache_bytes
+
+    def interrupted(node):
+        raise RuntimeError("view preparation interrupted")
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        view_digest(root, PreparationView("policy-test", interrupted))
+    assert (len(owner._facts), owner._cache_bytes) == before
+    assert [view_digest(root, view) for view in (first, second)] == expected
+
+
+def test_legacy_creation_adaptation_reuses_one_bounded_origin_owner(preparation_work):
+    from dryml.core.definition import ConcreteDefinition
+    from dryml.core.node_prepare import _owned_preparation
+    from dryml.core.node_views import CREATION_VIEW, view_digest
+
+    destination = model(child=model())
+    legacy = ConcreteDefinition._from_bound_record(
+        destination.cls, destination._bound_args, stateful_role=True)
+    first = LocalState(StateKey(view_digest(legacy, CREATION_VIEW), "pkl-" + "a" * 64), legacy)
+    second = LocalState(StateKey(first.key.cdef_digest, "pkl-" + "b" * 64), legacy)
+    assert first.validate_for(destination, codec="pkl") is first
+    cold = dict(preparation_work)
+    assert second.validate_for(destination, codec="pkl") is second
+    assert preparation_work == cold
+    owner = _owned_preparation(legacy)
+    normalized = owner._prepared_view(legacy, CREATION_VIEW).roots[0]
+    assert "_pure_preparation" not in vars(normalized)
+    assert owner._cache_bytes <= owner.max_cached_bytes
+    owner.clear()
+    assert first.validate_for(destination, codec="pkl") is first
+    assert preparation_work["discovery"] > cold["discovery"]

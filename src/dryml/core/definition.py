@@ -33,7 +33,7 @@ from .canonical import (
     node_kind)
 from .symbol import ImportRef, SourceSpec, maybe_symbol_ref, resolve_symbol
 from .bound_args import BoundArguments, validate_canonical_bound_arguments
-from .node import Node, _init_node, _coalesce, concretize_node
+from .node import Node, _init_node, _clone, _coalesce, _reuse_node_view, concretize_node
 
 if TYPE_CHECKING:
     from .object import Object
@@ -198,6 +198,10 @@ class Definition(Node, DefInterface, Mapping):
     hashing identify this occurrence/view; ``recipe_equal`` and ``graph_equal``
     compare semantic structure. Identity/state facets use the Node binding API,
     independently of any constructor parameters with those names.
+    The ``with_*`` recipe editors and ``without_kwarg`` preserve occurrences and
+    exact facets, including incompatible selected state for build-time validation.
+    Changed recipes invalidate retained construction evidence; unchanged recipes
+    preserve it. Only explicit binding-removal methods discard exact facets.
     Definitions may contain :class:`Par` and supported symbolic expressions.
     ``names``, ``is_resolved``, ``sub(...)``, and ``remap(...)`` inspect or
     rewrite authored structure without resolving targets or interpreting
@@ -540,15 +544,60 @@ class Definition(Node, DefInterface, Mapping):
         return concretize_node(self, repo=repo)
 
     def with_cls(self, cls) -> "Definition":
+        """Return an immutable recipe edit with a different target.
+
+        Args:
+            cls (type | Callable | ImportRef | SourceSpec): New target authority.
+        Returns:
+            Definition: Edited recipe retaining the root occurrence and facets.
+                A changed recipe invalidates retained construction evidence.
+        Raises:
+            ValueError: If the target is invalid or embedded aliases conflict.
+            TypeError: If the target cannot be frozen.
+            ParameterizationError: If the target contains unsupported symbolic data.
+        Side Effects:
+            None. Selected-state compatibility is validated when consumed.
+        """
         args = (SKIP_ARGS,) if self.args is None else tuple(self.args)
-        return Definition(cls, *args, **dict(self.kwargs))
+        return self._with_recipe(Definition(cls, *args, **dict(self.kwargs)))
 
     def with_args(self, *args) -> "Definition":
+        """Replace positional call spelling while retaining exact Node facets.
+
+        Args:
+            *args (Any): Replacement positional values, deeply frozen on entry.
+                A classless Definition retains the constructor's call-spelling
+                rules; ``SKIP_ARGS`` marks omitted positional constraints.
+        Returns:
+            Definition: Edited recipe with the same root occurrence. Changed
+                recipes invalidate retained construction evidence.
+        Raises:
+            ValueError: If call spelling is invalid or embedded aliases conflict.
+            TypeError: If a value cannot be frozen.
+            ParameterizationError: If a value contains unsupported symbolic data.
+        Side Effects:
+            None. Does not construct or validate selected-state compatibility.
+        """
         if self.cls is None:
-            return Definition(*args, **dict(self.kwargs))
-        return Definition(self.cls, *args, **dict(self.kwargs))
+            return self._with_recipe(Definition(*args, **dict(self.kwargs)))
+        return self._with_recipe(Definition(self.cls, *args, **dict(self.kwargs)))
 
     def with_arg(self, index, value) -> "Definition":
+        """Replace one positional value without removing identity/state facets.
+
+        Args:
+            index (int): Positional index, supporting negative Python indexing.
+            value (Any): Replacement constructor value, deeply frozen on entry.
+        Returns:
+            Definition: Occurrence-preserving edit as for ``with_args``.
+        Raises:
+            IndexError: If positional constraints are omitted or index is absent.
+            TypeError: If the index or replacement value is unsupported.
+            ValueError: If embedded occurrence views conflict.
+            ParameterizationError: If the value contains unsupported symbolic data.
+        Side Effects:
+            None. Changed recipes invalidate retained construction evidence.
+        """
         if self.args is None:
             raise IndexError("Cannot update positional args on a skip-args Definition.")
         args = list(self.args)
@@ -556,23 +605,73 @@ class Definition(Node, DefInterface, Mapping):
         return self.with_args(*args)
 
     def with_kwargs(self, **kwargs) -> "Definition":
+        """Merge supplied keyword values into an occurrence-preserving recipe edit.
+
+        Args:
+            **kwargs (Any): Constructor values to add or replace, deeply frozen.
+        Returns:
+            Definition: Edited recipe retaining exact identity/state facets and
+                coalescing complementary aliases. Changed recipes invalidate
+                retained construction evidence; unchanged recipes preserve it.
+        Raises:
+            TypeError: If a value cannot be frozen.
+            ValueError: If embedded occurrence views conflict.
+            ParameterizationError: If values contain unsupported symbolic data.
+        Side Effects:
+            None. Incompatible selected state is retained for consuming validation.
+        """
         merged = dict(self.kwargs)
         merged.update(kwargs)
         args = (SKIP_ARGS,) if self.args is None else tuple(self.args)
         if self.cls is None:
-            return Definition(*args, **merged)
-        return Definition(self.cls, *args, **merged)
+            return self._with_recipe(Definition(*args, **merged))
+        return self._with_recipe(Definition(self.cls, *args, **merged))
 
     def with_kwarg(self, key, value) -> "Definition":
+        """Add or replace one keyword value while retaining exact Node facets.
+
+        Args:
+            key (str): Constructor keyword name.
+            value (Any): Replacement value, deeply frozen on entry.
+        Returns:
+            Definition: Occurrence-preserving edit as for ``with_kwargs``.
+        Raises:
+            TypeError: If key is not a string or the value cannot be frozen.
+            ValueError: If embedded occurrence views conflict.
+            ParameterizationError: If the value contains unsupported symbolic data.
+        Side Effects:
+            None. Changed recipes invalidate retained construction evidence.
+        """
         return self.with_kwargs(**{key: value})
 
     def without_kwarg(self, key) -> "Definition":
+        """Remove one supplied keyword constraint, preserving identity and state.
+
+        Args:
+            key (str): Supplied constructor keyword to remove.
+        Returns:
+            Definition: Edited recipe with the same root occurrence and facets,
+                invalidating retained construction evidence for the changed recipe.
+        Raises:
+            KeyError: If the keyword is not supplied.
+        Side Effects:
+            None. Incompatible selected state remains for consuming validation.
+        """
         kwargs = dict(self.kwargs)
         kwargs.pop(key)
         args = (SKIP_ARGS,) if self.args is None else tuple(self.args)
         if self.cls is None:
-            return Definition(*args, **kwargs)
-        return Definition(self.cls, *args, **kwargs)
+            return self._with_recipe(Definition(*args, **kwargs))
+        return self._with_recipe(Definition(self.cls, *args, **kwargs))
+
+    def _with_recipe(self, recipe):
+        """Adopt validated call spelling without discarding this occurrence's facets."""
+        result = _clone(self, recipe.args, recipe.kwargs, self._facets)
+        object.__setattr__(result, "_cls", recipe.cls)
+        result = _coalesce(result)
+        if self._construction is not None and not self.graph_equal(result):
+            object.__setattr__(result, "_construction", None)
+        return _reuse_node_view(self, result)
 
     at = Node.at
 

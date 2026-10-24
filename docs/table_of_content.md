@@ -38,12 +38,13 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 30. [ML Workflow Qualification](ml_workflow_qualification.md)
 31. [ML Workflow Qualification Verification](ml_workflow_qualification_verification.md)
 32. [Release Process](releasing.md)
+33. [Object State Lifecycle Verification](object_state_lifecycle_verification.md)
 
 ## Core Concepts
 
 - DRYML programs are built from object graphs.
-- A `Definition` is a deferred construction recipe.
-- A `ConcreteDefinition` is a fully bound V2 structural identity; graph topology is available through graph equality/hash.
+- `Definition` authors the common immutable Node graph with independently optional identity/state facets.
+- `ConcreteNode` is normalized construction structure; SavedNode is its complete-saved typing refinement, not another graph model.
 - `Ref` records a non-materializing exact or selector reference in a definition graph.
 - An environment record describes observed Python/software facts without changing object identity.
 - An `Annotation` is passive process-local key/value metadata; consumers own its meaning.
@@ -54,7 +55,8 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - `dryml.session` publishes persistent `python`, `managed`, or definition-only `orchestrator` state.
 - An `Object` is the runtime instance associated with a concrete definition.
 - A `Repo` manages live objects, persistent stores, aliases, queries, saves, and loads.
-- `ObjectRef` adds durable ObjectId lineage and `StateRef` adds immutable snapshots.
+- ObjectId and full StateKey selections are independent Node facets. Handle equality
+  identifies occurrences/views; use named graph/projection comparisons for semantics.
 - A `Store` owns immutable graph records and local checkpoint state.
 - A `TensorSpec` describes tensor-like values independently from a specific ML backend.
 - A `Method` is a logical callable with inspectable local implementations and optional process-local preparation.

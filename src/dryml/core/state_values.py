@@ -87,25 +87,30 @@ class LocalState(Generic[T]):
             ValueError: For malformed creation authority/digest, incompatible graph
                 configuration, or a codec not admitted by the destination.
         Side Effects:
-            None beyond owned pure preparation. No target resolution, arbitrary
-            compatibility callback, payload lookup/read, restore hook or publication.
+            Reuses bounded immutable origin/destination preparation, but checks
+            this selection's digest and admitted codec on every call. No target
+            resolution, arbitrary compatibility callback, payload lookup/read,
+            restore hook or publication.
             Success is metadata admission, not payload availability/authentication.
         """
-        from .node_views import (creation_cdef, CREATION_VIEW, COMPATIBILITY_VIEW,
-                                 view_digest, view_equal)
-        from .node_prepare import NodePreparation
+        from .node_views import CREATION_VIEW, COMPATIBILITY_VIEW, view_equal
+        from .node_prepare import _owned_preparation
 
         if type(codec) is not str:
             raise TypeError("The admitted codec must be a string.")
         if self.codec != codec:
             raise ValueError("Selected state codec is not admitted by the destination.")
-        normalized = creation_cdef(self.creation_cdef)
-        a, b = NodePreparation((self.creation_cdef,)), NodePreparation((normalized,))
-        if not a.exact_equal(self.creation_cdef, b, normalized):
-            raise ValueError("Selected state needs normalized creation evidence without own facets.")
-        if view_digest(normalized, CREATION_VIEW) != self.key.cdef_digest:
+        origin = _owned_preparation(self.creation_cdef)
+        creation = origin._prepared_view(self.creation_cdef, CREATION_VIEW)
+        normalized = creation.roots[0]
+        if normalized is not self.creation_cdef:
+            original = origin._prepared_view(self.creation_cdef)
+            normalized_exact = origin._prepared_view(normalized)
+            if not original.exact_equal(self.creation_cdef, normalized_exact, normalized):
+                raise ValueError("Selected state needs normalized creation evidence without own facets.")
+        if creation.digest(normalized, domain=CREATION_VIEW.name) != self.key.cdef_digest:
             raise ValueError("Selected state creation evidence does not match its creation digest.")
-        if not view_equal(normalized, destination, COMPATIBILITY_VIEW):
+        if not view_equal(self.creation_cdef, destination, COMPATIBILITY_VIEW):
             raise ValueError("Selected state is incompatible with the destination configuration.")
         return self
 
@@ -161,6 +166,14 @@ class _FacetSpec(Mapping):
     def items(self):
         """Return one derived path/facet item view from a single ownership walk."""
         return self._mapping().items()
+
+    def values(self):
+        """Return a read-only facet values view from one ownership walk.
+
+        Values retain primary-path order and their ObjectId or LocalState types.
+        Each call derives fresh immutable metadata without IO or authority caching.
+        """
+        return self._mapping().values()
 
     def __reduce__(self):
         return type(self), (self.root,)

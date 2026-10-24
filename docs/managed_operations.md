@@ -1,5 +1,8 @@
 # Managed Operations
 
+Managed member arguments use the shared [signature contract](signatures.md),
+including explicit Node metadata refinements and materializing Object roles.
+
 `dryml.managed` owns the lifecycle of state-mutating Object methods. Its
 durable-result lifecycle supports explicit checkpoints, optional immutable initial state,
 exact final selection, detached completion replay, deterministic starts,
@@ -20,12 +23,30 @@ mutation, even on an older compatible live receiver. A pending-repair
 call returns an explicit `AdmissionOutcome`; that is reconciliation, not ordinary
 method success. Declarations retain their checked synchronous signature rules.
 
-Model/Artifact workflow consumers are not qualified by this direct-call cutover.
-They require their later caller integration; U19 integrates the detached target into
-Core Execute transport. The new `start_from` policy is currently local admission
-policy, not a qualified model-wrapper or Core Execute transport capability.
+Core Execute's managed-owned adapter admits detached targets before materialization;
+it shares direct-call start, replay and recovery policy. Models and Artifacts consume
+the same InvocationResult and SavedNode contracts. Bounded local/subprocess consumer
+proofs and optional-backend limits are recorded in
+[Object State Lifecycle Verification](object_state_lifecycle_verification.md).
 Acquiring low-level admission or constructing metadata alone does not retain
 private state. U15's selected saved-start handshake does acquire physical grants.
+
+### Execute transport boundaries
+
+[Generic Execute](execute.md) supplies detached invocation-graph transport;
+the managed-owned adapter interprets managed declarations, configuration and
+completion results. Generic Execute does not inspect status or
+rerun a managed method automatically. Admission, selected-start restoration and
+completion replay remain managed policy, including when invoked in a worker.
+
+Explicit transported configurations carry supported direct-DirStore descriptors
+and frozen callback membership, rather than live Repo/Store resources. Workers
+reopen those descriptors through their Session resource cache; unsupported
+resource types have no transport fallback. See [Repos and Stores](repos.md) for
+authority and resource lifetimes. Trusted same-host transport does not provision
+environments or promise automatic code migration in long-lived sessions; the
+[code-shift limitation](solutions/architecture-patterns/2026-09-18-code-shift-in-long-lived-sessions.md)
+continues to apply.
 
 ## Caller configuration and start selection
 
@@ -70,6 +91,16 @@ user-save grants survive. Garbage reclamation uses full StateKeys after all
 source leases end. Only already-unreferenced physical garbage-removal OSErrors
 become a cleanup report; grant, publication, control and index failures propagate.
 
+A no-selected-start live rerun may still borrow deferred bytes from its former final
+(for example a completed CachedDataset). Its old final association is retired at
+admission, with the grant carried as explicit `release_pending` debt until the new
+final publication replaces it. This does not select or restore that old checkpoint,
+designate an initial state, or fabricate latest recovery. Failed execution retires
+the debt; a failed retirement remains inspectable on the primary exception as
+`cleanup_error`/`cleanup_outcomes`. A subsequent invocation reconciles that debt
+without execution before a separate retry. Required grant/index failures are never
+converted to successful physical-garbage reports.
+
 Before-hook validation failure leaves the live receiver usable. Hook failure can
 invalidate it while preserving old persisted current; there is no rollback.
 Uncertain CAS retains exact previous/proposed fingerprints and both resource sides.
@@ -83,7 +114,11 @@ recorded completion is inspected without final payload reads. No receiver restor
 capture, callback or body is replayed. A separate invocation must freshly prepare
 or restore for later work. There is no cross-invocation restore receipt. Complete
 result/final evidence is confirmed idempotently and completed without normalizing
-again or replaying consumer hooks. An incomplete capture records failure and
+again or replaying consumer hooks. A prepared final association can be completed
+after a crash only when its token, run, invocation and generation match the
+preparation and its exact saved selection, resources, adopted physical grants,
+result and publication acknowledgements are freshly confirmed. A former run's
+`release_pending` final is not a candidate. An incomplete capture records failure and
 preserves latest recovery; a separate resumable invocation must restore freshly.
 
 ## Author checkpoint and selection controls
@@ -161,6 +196,10 @@ The result grammar is closed:
 - Explicit immutable Core metadata: Definition/ConcreteDefinition/ConcreteNode,
   ObjectId, StateKey, LocalState, IdentitySpec and StateSpec. Graph codecs preserve
   sharing, quotation and retained construction and never materialize metadata.
+  Every metadata root in one result uses one shared Node table and one decode
+  owner. Returning a parent alongside its child, or two parents sharing a child,
+  preserves that same occurrence across values; independent recipe-equal nodes
+  remain independent. IdentitySpec/StateSpec roots use the same table too.
 
 Containers retain distinct tags, dictionary insertion order, DAG aliases and scalar
 floating bits (including negative zero, infinities and NaN payloads). Cycles,
@@ -169,15 +208,28 @@ callables, generators, live Objects/resources and object-dtype arrays are reject
 Return a supported container for a custom summary. There is no pickle/dill or
 resource fallback. The separate managed result codec defaults to an 8 MiB byte
 budget, 65,536 nodes/container entries, depth 80 and 262,144 integer bits;
-malformed tags, references, versions and bounds
-raise `ManagedResultError`. Unsupported returns fail before automatic final capture.
+the node budget includes shared metadata handles and their internal wrappers,
+and metadata graph depth includes retained construction edges. Malformed shared
+views, tags, references, versions and bounds raise `ManagedResultError`.
+Unsupported returns fail before automatic final capture.
 
 Result bytes are immutable and content addressed at
-`managed/results/v1/<shard>/<sha256>/current.json` in the selected control Store.
+`managed/results/v2/<shard>/<sha256>/current.json` in the selected control Store.
 Their result kind/version/key is retained in current and history metadata. Result
 metadata embeds its complete metadata closure; references in a value **do not**
 grant retention of private StateKey data. State cleanup therefore does not prevent
 status, replay or value access while result bytes remain.
+
+The closed `dryml-managed-result` packet and typed result reference are version 2.
+The packet has exactly `schema`, `version`, `nodes`, `root`, and `metadata` fields.
+`metadata` is null when absent, otherwise one `dryml-node-graph/v1` identity-3 block
+with a single shared table and exact authenticated root views. Each `metadata`
+result row contains a view index, rather than a separate graph blob. All views
+must be referenced by reachable result rows; forged views, unused blocks/roots,
+and invalid wrapper values fail closed. Managed Execute adapter version 2 carries
+only the typed v2 reference and detached source descriptor. Result packet/reference
+v1, adapter v1 and the old result storage namespace are incompatible and are
+rejected with original bytes intact, without migration or resource fallback.
 
 InvocationResult retains only detached values and a `ResultSource` (canonical local
 DirStore path plus persistent UUID), never an open Repo/Store, connection, reader,
@@ -421,6 +473,10 @@ The selected control DirStore owns:
   Finalizing current retains the typed result reference and its result publication
   acknowledgement before automatic capture; associated final intents retain capture
   and provisional evidence so recovery can finish token retirement without recapture.
+- Version-2 result packets/references and the `managed/results/v2` namespace;
+  managed Execute adapter version 2 validates nested result references before
+  reconstruction or resource opening. Current record version 4 and history version 2
+  retain these explicitly versioned nested references.
 - Version-1 start/root-association preparation sidecars under
   `managed/operations/v2/starts/v1/<shard>/<operation>/current.json`, containing exact
   previous/proposed current metadata, the physical retention token, disposition
@@ -446,6 +502,10 @@ snapshots preserve their original packet evidence. Logical snapshot, history and
 root-selection equality uses exact Node graph comparison (including facets,
 aliases, roles and quotations), never packet placement or digest equality alone.
 Logically equal graphs need not have identical storage bytes.
+Advancing preparation from prepared to ready validates unchanged non-intent fields
+logically when root intents change; it never manufactures a source-byte witness by
+re-encoding a replacement. The sidecar and previous-current CAS still compare
+their exact expected bytes against freshly read authority.
 
 Current/history snapshots retain bounded detached receiver and SavedNode metadata.
 Status and replay admission do not open any referenced private payload, even after
@@ -456,7 +516,7 @@ those separate contracts at its own admission boundary.
 The managed-owned projection adapter journals current, history, preparation,
 root/finalization associations and ordinary-result records and contributes typed
 `lifecycle` rows alongside Core's generic `record` projection. Core never imports
-the managed owner. Coverage contract 2 certifies the implemented families only when
+the managed owner. Coverage contract 3 certifies the implemented families only when
 the complete owner reader is registered; a cold rebuild with managed authority
 requires that adapter. Pending invalidation blocks refresh-disabled reads, including
 negative/count consumers. Completion journals its **own** invalidation before CAS,
