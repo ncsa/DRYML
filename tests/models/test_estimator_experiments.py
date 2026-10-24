@@ -15,7 +15,8 @@ import tempfile
 import numpy as np
 import pytest
 
-from dryml.core import Definition, Par, Repo, StateRef
+from dryml.core import Definition, Par, Repo, require_saved
+from dryml.core.node_prepare import NodePreparation
 from dryml.core.execute import CoreExecutionError, CoreOptions, Executor, current_context
 from dryml.core.store.dir import DirStore
 from dryml.core.utils.graph.path import GraphPath, Parameter
@@ -108,19 +109,19 @@ def test_terminal_artifacts_callbacks_and_fresh_final_authority(tmp_path, kind):
     observed = []
 
     def terminal(obj, context):
-        row = ExperimentData.find(context.checkpoint_state_ref.object_projection(), repo=repo).data.iloc[0]
+        row = ExperimentData.find(context.latest_checkpoint.object_view(), repo=repo).data.iloc[0]
         _assert_row(repo, row)
-        assert row.state_ref == context.checkpoint_state_ref
+        assert row.state_ref.graph_equal(context.latest_checkpoint)
         observed.append(row.state_ref)
 
     try:
-        final = exp.train(managed=ManagedConfig(state_repo=repo, callbacks=[terminal]))
+        final = exp.train(managed=ManagedConfig(state_repo=repo, callbacks=[terminal])).final_state_ref
         status = exp.train.status(state_repo=repo)
-        assert isinstance(final, StateRef)
-        assert status.state == "completed" and status.final_state_ref == final
+        require_saved(final)
+        assert status.state == "completed" and status.final.graph_equal(final)
         assert len(observed) == 1
-        row = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
-        assert row.state_ref == observed[0]
+        row = ExperimentData.find(final.object_view(), repo=repo).data.iloc[0]
+        assert row.state_ref.graph_equal(observed[0])
         reopened = repo.load_state_ref(final, reuse_live="never", cache="none")
         assert reopened is not exp and reopened.model is not exp.model
         assert (reopened.state.step, reopened.state.epoch, reopened.state.examples_seen) == (1, 1, 48)
@@ -161,12 +162,12 @@ def _worker_fit(kind, failure=None):
             if failure == "workload-cleanup":
                 raise RuntimeError("injected worker workload")
             final = exp.train(managed=ManagedConfig(
-                state_repo=context.repo, control_store=context.control_store))
+                state_repo=context.repo, control_store=context.control_store)).final_state_ref
         except Exception:
             status = exp.train.status(state_repo=context.repo, control_store=context.control_store)
             print(json.dumps({"pid": os.getpid(), "accepted": exp.model._accepted_fit is not None,
                               "step": exp.state.step, "examples": exp.state.examples_seen,
-                              "final": status.final_state_ref is not None,
+                              "final": status.final is not None,
                               "origins": origins}), flush=True)
             raise
         return {"final": final, "pid": os.getpid(), "work": work, "origins": origins,
@@ -232,8 +233,8 @@ def test_core_cpu_worker_publication_fresh_reopen_and_isolation(tmp_path, kind, 
                 fresh = fresh_repo.load_state_ref(result["final"], reuse_live="never", cache="none")
                 np.testing.assert_array_equal(fresh.model(_arrays(kind)[0]), result["prediction"])
                 assert hashlib.sha256(fresh.model._accepted_fit.payload).hexdigest() == result["payload_sha256"]
-                assert fresh.train.status(state_repo=fresh_repo, control_store=control).final_state_ref == result["final"]
-                row = ExperimentData.find(result["final"].object_projection(), repo=fresh_repo).data.iloc[0]
+                assert fresh.train.status(state_repo=fresh_repo, control_store=control).final.graph_equal(result["final"])
+                row = ExperimentData.find(result["final"].object_view(), repo=fresh_repo).data.iloc[0]
                 _assert_row(fresh_repo, row, control=control)
                 results.append((result, fresh.model))
             finally:
@@ -242,7 +243,8 @@ def test_core_cpu_worker_publication_fresh_reopen_and_isolation(tmp_path, kind, 
             snapshot = future.snapshot()
             assert snapshot.cleanup_state == "complete" and not snapshot.cleanup_issues
             record_property(f"worker_{index}", json.dumps({
-                "pid": result["pid"], "final": result["final"].digest(),
+                "pid": result["pid"], "final": NodePreparation((result["final"],)).digest(
+                    result["final"], domain="dryml-saved-root/v1"),
                 "cleanup": snapshot.cleanup_state, "payload": result["payload_sha256"],
                 "origins": result["origins"],
             }, sort_keys=True))
@@ -252,7 +254,7 @@ def test_core_cpu_worker_publication_fresh_reopen_and_isolation(tmp_path, kind, 
             control.close()
     assert results[0][0]["pid"] != results[1][0]["pid"]
     assert results[0][0]["work"] != results[1][0]["work"]
-    assert results[0][0]["final"].object != results[1][0]["final"].object
+    assert not results[0][0]["final"].object_projection_equal(results[1][0]["final"])
     assert results[0][1]._accepted_fit is not results[1][1]._accepted_fit
     assert results[0][1].mdl is not results[1][1].mdl
 

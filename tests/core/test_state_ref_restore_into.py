@@ -462,22 +462,42 @@ def test_missing_later_selection_preflights_before_earlier_hook(tmp_path):
 @pytest.mark.parametrize("store_kind", ("dir", "zip"))
 def test_native_graph_restore_unfitted_fitted_invalidation_and_fresh_recovery(
         tmp_path, monkeypatch, kind, store_kind):
-    """Native candidate isolation cannot rescue a Core-invalidated aliased graph."""
+    """Keep native invalidation and exact reads across durable and archive sources.
+
+    Retained capture uses a DirStore. The archive case rejects buffered retained
+    saves, then packages that completed Store as an independent read-only fixture.
+    """
     import numpy as np
+    from zipfile import ZipFile
+    from dryml.core.store.store import StoreCapabilityError
     from dryml.core.store.zip import ZipStore
     from tests.models.test_estimator_experiments import _arrays, _recipe
 
     destination = tmp_path / ("store" if store_kind == "dir" else "store.zip")
     store_cls = DirStore if store_kind == "dir" else ZipStore
-    repo = Repo(store_cls(destination))
+    repo = Repo(DirStore(tmp_path / "source" if store_kind == "zip" else destination))
     model, _ = _recipe(kind)
     root = RestoreIntoPair(model, repo=repo)
     x, y = _arrays(kind)
     try:
+        if store_kind == "zip":
+            buffered = Repo(ZipStore(destination))
+            try:
+                with pytest.raises(StoreCapabilityError, match="durable publication"):
+                    buffered.save_object(root, deep_capture=True)
+                assert root.last_state_ref is None and model._accepted_fit is None
+            finally:
+                buffered.close(flush=False)
         empty = repo.save_object(root, deep_capture=True)
         model.fit(x, y)
         fitted = repo.save_object(root, deep_capture=True)
         repo.default_store.commit()
+        if store_kind == "zip":
+            with ZipFile(destination, "w") as archive:
+                source = Path(repo.default_store.base_dir)
+                for path in source.rglob("*"):
+                    if path.is_file():
+                        archive.write(path, path.relative_to(source).as_posix())
         payload, metadata = model._accepted_fit.payload, model._accepted_fit.metadata
         expected = model(x)
         object_id = model.object_id
@@ -492,7 +512,7 @@ def test_native_graph_restore_unfitted_fitted_invalidation_and_fresh_recovery(
         assert model._accepted_fit.metadata == metadata
         np.testing.assert_array_equal(model(x), expected)
         prior = model._accepted_fit
-        assert root.last_state_ref == fitted
+        assert root.last_state_ref.graph_equal(fitted)
         assert model._last_state_hash is not None
         for node in (root, model):
             assert any(candidate is node for candidate in repo._all_live_candidates())
@@ -519,12 +539,21 @@ def test_native_graph_restore_unfitted_fitted_invalidation_and_fresh_recovery(
             assert fresh_empty.first._accepted_fit is None
             assert fresh is not root and fresh.first is not model
             assert fresh.first is fresh.second
-            assert fresh.first.object_id == object_id and fresh.object_ref == fitted.object
+            assert fresh.first.object_id == object_id
+            assert fresh_repo.describe(fresh).object_projection_equal(fitted)
             assert not fresh._restore_failed and not fresh.first._restore_failed
-            assert fresh.last_state_ref == fitted
+            assert fresh.last_state_ref.graph_equal(fitted)
             assert fresh.first._accepted_fit.payload == payload
             assert fresh.first._accepted_fit.metadata == metadata
             np.testing.assert_array_equal(fresh.first(x), expected)
+            if store_kind == "zip":
+                fresh_repo.restore_state_ref_into(fresh, empty)
+                assert fresh.first is fresh.second and fresh.first._accepted_fit is None
+                fresh_repo.restore_state_ref_into(fresh, fitted)
+                assert fresh.first is fresh.second and fresh.first.object_id == object_id
+                assert fresh.first._accepted_fit.payload == payload
+                assert fresh.first._accepted_fit.metadata == metadata
+                np.testing.assert_array_equal(fresh.first(x), expected)
         finally:
             fresh_repo.close(flush=False)
     finally:
