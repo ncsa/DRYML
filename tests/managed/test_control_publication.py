@@ -128,6 +128,26 @@ def test_initial_operation_and_expected_transition_are_atomic(tmp_path):
         assert control.inspect(identity.operation_id) == proposed
 
 
+def test_successful_control_publication_carries_native_persistence_confirmation(tmp_path, monkeypatch):
+    """Completed native writes need no unsupported post-hoc directory barrier."""
+    from dryml.core.store.records import MutationIntentRecord
+
+    control, identity = adapter(tmp_path), facts(receiver())
+    store = control.control_store
+    monkeypatch.setattr(store, "_persist_authority_projection",
+                        lambda record: pytest.fail("Successful native publication was treated as ambiguous."))
+    with control.admission(identity) as owner:
+        initial = control.create_initial(running(identity, owner), owner=owner)
+        proposed = replace(initial, generation=2)
+        assert transition(control, owner, initial, proposed) == proposed
+    records = [MutationIntentRecord.from_bytes(path.read_bytes()).intent
+               for path in (Path(store.base_dir) / "mutations").glob("*.record")]
+    current = [record for record in records if "managed-current:" + identity.operation_id in record["scopes"]]
+    assert len(current) == 2
+    assert all(record["persistence_confirmed"] and record["status"] == "acknowledged" for record in current)
+    assert not store.authority_cut().pending
+
+
 def test_absent_operation_hierarchy_is_not_started_without_bootstrap(tmp_path):
     control = adapter(tmp_path)
     assert control.inspect(facts(receiver()).operation_id) is None
@@ -136,6 +156,9 @@ def test_absent_operation_hierarchy_is_not_started_without_bootstrap(tmp_path):
 
 @pytest.mark.parametrize("after", [False, True])
 def test_replace_failure_reconciles_only_exact_old_or_new_current(tmp_path, monkeypatch, after):
+    """Ambiguous native failure retains an unconfirmed exact mutation for recovery."""
+    from dryml.core.store.records import MutationIntentRecord
+
     control, identity = adapter(tmp_path), facts(receiver())
     with control.admission(identity) as owner:
         initial = control.create_initial(running(identity, owner), owner=owner)
@@ -148,8 +171,11 @@ def test_replace_failure_reconciles_only_exact_old_or_new_current(tmp_path, monk
                 raise OSError("replace acknowledgement failed")
             return original(path, payload)
         monkeypatch.setattr(control, "_replace_file", fail)
-        with pytest.raises(StoreMutationError):
+        with pytest.raises(StoreMutationError) as raised:
             transition(control, owner, initial, proposed)
+        record = MutationIntentRecord.from_bytes(
+            (Path(control.control_store.base_dir) / "mutations" / (raised.value.mutation_id + ".record")).read_bytes())
+        assert record.intent["persistence_confirmed"] is False
         with pytest.raises(ManagedControlError, match="pending"):
             control.inspect(identity.operation_id)
         monkeypatch.setattr(control, "_replace_file", original)

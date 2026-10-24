@@ -1121,7 +1121,7 @@ class ManagedControlStore:
                         self._replace_file(pending, intent.to_bytes())
                         self._replace_file(path, new)
                     filesystem.remove_file(pending, cleanup_directory=operation)
-                journal._classify(store, record, cut)
+                journal._classify(store, record, cut, persistence_confirmed=True)
             except BaseException as error:
                 # Classification records actual bytes, never success assumptions.
                 try: _, cut = journal._classify(store, record, journal.read_cut(store))
