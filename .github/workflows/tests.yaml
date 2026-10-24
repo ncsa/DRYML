@@ -35,7 +35,9 @@ jobs:
   lightweight:
     name: Good-enough (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 40 || 20 }}
+    # Native durability/lifecycle representatives exceed the old whole-job budget;
+    # retain the full selection and its independent 180-second per-test timeout.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 180 || 120 }}
     strategy:
       fail-fast: false
       matrix:
