@@ -145,9 +145,9 @@ def test_live_rerun_keeps_borrowed_final_chunks_until_republication(tmp_path, mo
     assert not any(root.run_id == first.execution.run_id and root.kind == "final" for root in roots)
 
 
-@pytest.mark.parametrize("cleanup_fails", (False, True))
-def test_failed_live_rerun_retires_its_superseded_final_grant(tmp_path, monkeypatch, cleanup_fails):
-    """A capture failure remains failed and does not strand the old final grant."""
+@pytest.mark.parametrize("cleanup_fails, notes_available", ((False, True), (True, True), (True, False)))
+def test_failed_live_rerun_retires_its_superseded_final_grant(tmp_path, monkeypatch, cleanup_fails, notes_available):
+    """Preserve capture failure and grant debt with or without exception-note support."""
     from dryml.core import Repo
     from dryml.core.repo import RepoSaveError, RepoLoadError
     from dryml.core.store.dir import DirStore
@@ -159,6 +159,8 @@ def test_failed_live_rerun_retires_its_superseded_final_grant(tmp_path, monkeypa
     first = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
     release = RetentionAuthority.release
     if cleanup_fails:
+        if not notes_available:
+            monkeypatch.setattr(RepoSaveError, "add_note", None, raising=False)
         old_final, = (root for root in ManagedControlStore(store, repo).list_checkpoints(first.execution.operation_id)
                       if root.kind == "final")
         def fail_old_final(self, token, stores):

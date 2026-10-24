@@ -235,6 +235,8 @@ def admit_execution(identity, descriptor, config, control, *, realize, execute):
     errors. Preparation and publication failures preserve exact intent evidence;
     Core owns pre-hook usability and post-hook invalidation. No receipt survives
     this invocation. Caller adapters must not reconstruct receivers before this gate.
+    Cleanup failures attach evidence without replacing the execution error, even
+    on Python versions without exception-note support.
     """
     from .descriptor import ManagedOperation
     _validate_start_control(config)
@@ -328,7 +330,9 @@ def admit_execution(identity, descriptor, config, control, *, realize, execute):
             except BaseException as cleanup_error:
                 error.cleanup_error = cleanup_error
                 error.cleanup_outcomes = getattr(cleanup_error, "cleanup_outcomes", ())
-                error.add_note("Superseded live-start grant cleanup remains pending; reconcile before retry.")
+                add_note = getattr(error, "add_note", None)
+                if add_note is not None:
+                    add_note("Superseded live-start grant cleanup remains pending; reconcile before retry.")
             raise
 
 
