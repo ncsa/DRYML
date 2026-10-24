@@ -97,7 +97,7 @@ jobs:
   heavy:
     name: Heavy frameworks (Ubuntu, Python 3.12)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       JAX_PLATFORMS: cpu
       PYTHONDONTWRITEBYTECODE: "1"

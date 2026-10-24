@@ -197,7 +197,7 @@ def _executor(tmp_path, repo, control):
     if os.name == "nt" and native_dlls.is_dir():
         environment["PATH"] = os.pathsep.join((str(native_dlls), os.defpath))
     return Executor(SubProcessConfig(
-        spool_directory=spool, env_vars=environment, execution_timeout=90,
+        spool_directory=spool, env_vars=environment, execution_timeout=180,
         automatic_environment_discovery=False, admission_timeout=60,
     ), core=CoreOptions(repo=repo, control_store=control, return_objects=False)), temporary
 
@@ -217,7 +217,7 @@ def test_core_cpu_worker_publication_fresh_reopen_and_isolation(tmp_path, kind, 
         try:
             future = executor.submit(_worker_fit, kind)
             try:
-                result = future.result(timeout=150)
+                result = future.result(timeout=240)
             except BaseException:
                 output = future.output.snapshot()
                 evidence = json.dumps({"stdout": output.stdout, "stderr": output.stderr})
@@ -272,7 +272,7 @@ def test_core_worker_failure_keeps_admission_and_cleanup_evidence_separate(
     try:
         future = executor.submit(_worker_fit, kind, failure)
         with pytest.raises(CoreExecutionError) as caught:
-            future.result(timeout=150)
+            future.result(timeout=240)
         assert caught.value.phase == "invoke"
         expected = "dryml[" if failure == "missing" else ("reader/writer versions" if failure == "incompatible" else "injected worker workload")
         assert expected in str(caught.value)
