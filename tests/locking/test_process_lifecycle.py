@@ -44,6 +44,53 @@ def test_spawned_owner_exit_releases_the_kernel_lease(tmp_path):
             owner.join(5)
 
 
+def _hold_compatible_reader(path, ready, release):
+    """Probe the writer, then retain a reader until the controlling process releases it."""
+    writer = FileLock(path)
+    writer_acquired = writer.acquire(blocking=False)
+    writer.release()
+    reader = FileLock(path, shared=True)
+    reader_acquired = reader.acquire(blocking=False)
+    try:
+        ready.send((reader_acquired, writer_acquired))
+        if reader_acquired:
+            assert release.wait(15)
+    finally:
+        reader.release()
+        ready.close()
+
+
+def test_spawned_readers_overlap_while_exclusive_acquisition_stays_blocked(tmp_path):
+    """Native readers share across processes and each independently excludes deletion."""
+    context = multiprocessing.get_context("spawn")
+    receive, send = context.Pipe(duplex=False)
+    release = context.Event()
+    path = tmp_path / "readers.lock"
+    reader = FileLock(path, shared=True)
+    assert reader.acquire()
+    peer = context.Process(target=_hold_compatible_reader, args=(str(path), send, release))
+    peer.start()
+    send.close()
+    writer = FileLock(path)
+    try:
+        assert receive.poll(15)
+        assert receive.recv() == (True, False)
+        reader.release()
+        assert not writer.acquire(blocking=False)
+        release.set()
+        peer.join(15)
+        assert peer.exitcode == 0
+        assert writer.acquire(blocking=False)
+    finally:
+        release.set()
+        reader.release()
+        writer.release()
+        receive.close()
+        if peer.is_alive():
+            peer.terminate()
+            peer.join(5)
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is unavailable on this host")
 def test_fork_child_closes_inherited_lease_without_unlocking_parent(tmp_path):
     """Fork cleanup drops child descriptors but leaves the parent lease effective."""

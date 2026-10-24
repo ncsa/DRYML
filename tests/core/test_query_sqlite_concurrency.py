@@ -1972,13 +1972,12 @@ def test_windows_claim_seam_unlocks_and_closes_before_cleanup(tmp_path, monkeypa
     """The Windows claim path releases its handle before unlinking the claim."""
 
     class FakeMSVCRT:
-        LK_NBLCK = 1
-        LK_UNLCK = 2
         calls = []
+        get_osfhandle = staticmethod(lambda fd: fd)
 
-        @classmethod
-        def locking(cls, fd, operation, size):
-            cls.calls.append((fd, operation, size))
+    def native_range_lock(handle, *, shared=False, blocking=False, unlock=False):
+        assert not closed
+        FakeMSVCRT.calls.append((handle, shared, blocking, unlock))
 
     index = _index(tmp_path / "index.sqlite")
     closed = False
@@ -1996,13 +1995,14 @@ def test_windows_claim_seam_unlocks_and_closes_before_cleanup(tmp_path, monkeypa
 
     monkeypatch.setattr(locking_module, "fcntl", None)
     monkeypatch.setattr(locking_module, "msvcrt", FakeMSVCRT)
+    monkeypatch.setattr(locking_module, "_windows_range_lock", native_range_lock)
     monkeypatch.setattr(sqlite_index_module.os, "close", close)
     monkeypatch.setattr(index, "_unlink_claim_if_owned", unlink_after_close)
 
     with index._build_claim(force=True) as acquired:
         assert acquired
 
-    assert [call[1] for call in FakeMSVCRT.calls] == [FakeMSVCRT.LK_NBLCK, FakeMSVCRT.LK_UNLCK]
+    assert [call[1:] for call in FakeMSVCRT.calls] == [(False, False, False), (False, False, True)]
     assert not index._build_claim_path().exists()
 
 

@@ -9,8 +9,8 @@ policy while using this one implementation.
 
 `interprocess_lock(path)` preserves the Store writer's blocking, same-thread
 recursive exclusive behavior. `interprocess_read_lock(path)` acquires a
-blocking shared reader lease on POSIX. Windows uses its compatible exclusive
-byte-range fallback, so readers remain safe but do not overlap.
+blocking shared reader lease on POSIX and Windows. Independent readers overlap;
+exclusive writers remain incompatible with every reader.
 
 `FileLock(path, shared=False)` owns a retained descriptor. Call
 `acquire(blocking=True)` to wait for a lease or `acquire(blocking=False)` for a
@@ -31,7 +31,9 @@ reported as contention.
 
 ## Support Boundary
 
-The initial adapters are POSIX `flock` and Windows `msvcrt` byte-range locking.
+The adapters are POSIX `flock` and Windows `LockFileEx`/`UnlockFileEx` byte-range
+locking. Windows uses `msvcrt.get_osfhandle` only to borrow the descriptor's native
+handle; the exclusive CRT locking fallback is not used for reader leases.
 `supports_advisory_locking(path)` checks only whether the direct parent has a
 normal local-directory shape; it is not a filesystem qualification or a proof
 of advisory-lock correctness. Current evidence covers the in-house host,
@@ -71,12 +73,12 @@ is refused and requires release/reacquire/revalidation. Nested use of already
 protected keys reuses the calling execution owner's protection. Independent
 threads/tasks and forked processes cannot inherit that protection's lifetime.
 
-On POSIX, independent shared leases overlap. Windows retains the native exclusive
-byte-range fallback, so independent readers serialize; same-thread overlapping
-reader tasks may receive an explicit `LockError` instead of overlapping. No
-in-process-only fallback claims process-shared protection on an unsupported
-platform. Native lock failures propagate rather than becoming evidence that a
-key is free. Windows-host execution remains a separate platform verification gate.
+Independent shared leases overlap on POSIX and Windows. This lets grant retirement
+inspect a key while another process's cache cursor protects its data; subsequent
+exclusive deletion still returns in-use. No in-process-only fallback claims
+process-shared protection on an unsupported platform. Native lock failures
+propagate rather than becoming evidence that a key is free. Windows-host execution
+remains a separate platform verification gate.
 
 Staging allocations separately retain native `.staging/.leases/<allocation>.lock`
 leases and exact owner markers. Recovery/removal probes the named allocation

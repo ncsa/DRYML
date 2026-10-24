@@ -411,10 +411,8 @@ def test_plan_leases_are_globally_ordered_and_growing_sets_require_revalidation(
 
 
 def test_async_child_does_not_inherit_parent_native_lease_lifetime(tmp_path):
+    """Each overlapping task retains its own native reader after its parent releases."""
     import asyncio
-    import dryml.locking as locking
-    if locking.fcntl is None:
-        pytest.skip("Windows native exclusive fallback explicitly refuses same-thread overlapping reader tasks")
     store = DirStore(tmp_path / "store", query_index="none")
     key = install(store)
     async def run():

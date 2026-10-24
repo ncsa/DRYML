@@ -21,7 +21,7 @@ from dryml.locking import (
 
 
 def test_store_compatibility_locks_preserve_writer_recursion_and_shared_reads(tmp_path):
-    """Store wrappers retain same-thread recursion and POSIX shared-reader overlap."""
+    """Store wrappers retain same-thread recursion and native shared-reader overlap."""
 
     path = tmp_path / "store.lock"
     with interprocess_lock(path):
@@ -29,9 +29,8 @@ def test_store_compatibility_locks_preserve_writer_recursion_and_shared_reads(tm
             assert path.exists()
 
     with interprocess_read_lock(path):
-        if locking.fcntl is not None:
-            with interprocess_read_lock(path):
-                pass
+        with interprocess_read_lock(path):
+            pass
 
 
 def test_file_lock_is_non_reentrant_and_release_is_idempotent(tmp_path):
@@ -67,6 +66,28 @@ def test_nonblocking_file_lock_reports_only_contention(tmp_path):
 
     assert contender.acquire(blocking=False)
     contender.release()
+
+
+def test_windows_shared_readers_keep_compatible_local_reservations(tmp_path, monkeypatch):
+    """Local coordination must not turn native shared readers into exclusive owners."""
+    monkeypatch.setattr(locking, "fcntl", None)
+    monkeypatch.setattr(locking, "_lock_file", lambda *args, **kwargs: True)
+    monkeypatch.setattr(locking, "unlock_file", lambda fd: None)
+    left = FileLock(tmp_path / "readers.lock", shared=True)
+    right = FileLock(tmp_path / "readers.lock", shared=True)
+    writer = FileLock(tmp_path / "readers.lock")
+    assert left.acquire()
+    try:
+        assert right.acquire(blocking=False)
+        assert not writer.acquire(blocking=False)
+        left.release()
+        assert not writer.acquire(blocking=False)
+        right.release()
+        assert writer.acquire(blocking=False)
+    finally:
+        left.release()
+        right.release()
+        writer.release()
 
 
 def test_borrowed_descriptor_lock_never_closes_or_reopens_descriptor(tmp_path):
@@ -114,18 +135,12 @@ def test_windows_adapter_does_not_classify_preparation_permission_error_as_conte
     """Only the Windows native lock call may report nonblocking contention."""
 
     class FakeMSVCRT:
-        LK_NBLCK = 1
-
         @staticmethod
-        def locking(fd, operation, size):
-            raise AssertionError("Windows lock preparation must fail before locking")
-
-    def deny_lseek(fd, offset, whence):
-        raise OSError(errno.EACCES, "permission denied")
+        def get_osfhandle(fd):
+            raise OSError(errno.EACCES, "permission denied")
 
     monkeypatch.setattr(locking, "fcntl", None)
     monkeypatch.setattr(locking, "msvcrt", FakeMSVCRT)
-    monkeypatch.setattr(locking.os, "lseek", deny_lseek)
     fd = os.open(tmp_path / "claim.lock", os.O_CREAT | os.O_RDWR)
     try:
         with pytest.raises(LockError, match="preparation failed"):
@@ -157,14 +172,14 @@ def test_windows_adapter_treats_native_eacces_as_contention(tmp_path, monkeypatc
     """The Windows locking call retains its native EACCES contention behavior."""
 
     class FakeMSVCRT:
-        LK_NBLCK = 1
+        get_osfhandle = staticmethod(lambda fd: fd)
 
-        @staticmethod
-        def locking(fd, operation, size):
-            raise OSError(errno.EACCES, "already locked")
+    def busy(*args, **kwargs):
+        raise OSError(errno.EACCES, "already locked")
 
     monkeypatch.setattr(locking, "fcntl", None)
     monkeypatch.setattr(locking, "msvcrt", FakeMSVCRT)
+    monkeypatch.setattr(locking, "_windows_range_lock", busy, raising=False)
     fd = os.open(tmp_path / "claim.lock", os.O_CREAT | os.O_RDWR)
     try:
         assert not try_lock_file(fd)
@@ -176,16 +191,16 @@ def test_windows_adapter_does_not_treat_other_winerrors_as_contention(tmp_path, 
     """Windows access-denied errors with a non-contention code remain failures."""
 
     class FakeMSVCRT:
-        LK_NBLCK = 1
+        get_osfhandle = staticmethod(lambda fd: fd)
 
-        @staticmethod
-        def locking(fd, operation, size):
-            error = OSError(errno.EACCES, "access denied")
-            error.winerror = 5
-            raise error
+    def denied(*args, **kwargs):
+        error = OSError(errno.EACCES, "access denied")
+        error.winerror = 5
+        raise error
 
     monkeypatch.setattr(locking, "fcntl", None)
     monkeypatch.setattr(locking, "msvcrt", FakeMSVCRT)
+    monkeypatch.setattr(locking, "_windows_range_lock", denied, raising=False)
     fd = os.open(tmp_path / "claim.lock", os.O_CREAT | os.O_RDWR)
     try:
         with pytest.raises(LockError, match="Windows advisory lock failed"):
@@ -273,18 +288,31 @@ def test_same_thread_exclusive_then_shared_fails_without_waiting(tmp_path):
         exclusive.release()
 
 
-def test_windows_adapter_locks_beyond_eof_without_writing(tmp_path, monkeypatch):
-    """Windows locking leaves an empty lock file unchanged while locking byte zero."""
+@pytest.mark.parametrize("shared", (False, True))
+@pytest.mark.parametrize("blocking", (False, True))
+def test_windows_adapter_locks_beyond_eof_without_writing(tmp_path, monkeypatch, shared, blocking):
+    """Windows native flags distinguish readers/writers without altering empty files."""
+    import ctypes
+    from types import SimpleNamespace
+
+    calls = []
+
+    def native_lock(handle, flags, reserved, low, high, overlapped):
+        calls.append(("lock", handle, flags, reserved, low, high))
+        assert overlapped._obj.Offset == overlapped._obj.OffsetHigh == 0
+        return True
+
+    def native_unlock(handle, reserved, low, high, overlapped):
+        calls.append(("unlock", handle, reserved, low, high))
+        assert overlapped._obj.Offset == overlapped._obj.OffsetHigh == 0
+        return True
+
+    api = SimpleNamespace(LockFileEx=native_lock, UnlockFileEx=native_unlock)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: api, raising=False)
+    locking._windows_lock_api.cache_clear()
 
     class FakeMSVCRT:
-        LK_LOCK = 1
-        LK_NBLCK = 2
-        LK_UNLCK = 3
-        calls = []
-
-        @classmethod
-        def locking(cls, fd, operation, size):
-            cls.calls.append((fd, operation, size))
+        get_osfhandle = staticmethod(lambda fd: fd)
 
     class WindowsOSProxy:
         SEEK_SET = os.SEEK_SET
@@ -301,14 +329,15 @@ def test_windows_adapter_locks_beyond_eof_without_writing(tmp_path, monkeypatch)
     path = tmp_path / "windows.lock"
     fd = os.open(path, os.O_CREAT | os.O_RDWR)
     try:
-        assert try_lock_file(fd)
+        assert locking._lock_file(fd, shared=shared, blocking=blocking)
         unlock_file(fd)
         assert os.fstat(fd).st_size == 0
     finally:
         os.close(fd)
+        locking._windows_lock_api.cache_clear()
 
-    assert [call[1] for call in FakeMSVCRT.calls] == [FakeMSVCRT.LK_NBLCK, FakeMSVCRT.LK_UNLCK]
-    assert [call[2] for call in FakeMSVCRT.calls] == [1, 1]
+    flags = (0 if shared else 2) | (0 if blocking else 1)
+    assert calls == [("lock", fd, flags, 0, 1, 0), ("unlock", fd, 0, 1, 0)]
 
 
 def test_suitability_check_is_limited_to_a_local_directory_shape(tmp_path):
