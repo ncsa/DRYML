@@ -166,6 +166,13 @@ the same concretization boundary. Build allocates missing ObjectIds only and
 initializes unspecified state. Selected LocalStates are restored once after all
 associations and current source payloads preflight.
 
+To establish stable identities before dispatching a recipe to workers, call
+`concrete_node.allocate_identities()` once in the coordinator and reuse the returned
+graph. This [metadata-only allocation](objects_and_defs.md#allocating-identities-before-dispatch)
+fills missing owned stateful IDs without a Repo, Store declaration, construction,
+or state capture. It preserves selected states and does not reserve exclusive
+execution; managed operation ownership remains a separate boundary.
+
 `repo.load(saved_node)` / `repo.load_state_ref(saved_node, reuse_live=...)` require
 saved completeness, then freshly validate full-key availability. They do not
 initialize omitted state or substitute another checkpoint. Stateless saved graphs
