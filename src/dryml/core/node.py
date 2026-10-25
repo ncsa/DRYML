@@ -233,7 +233,7 @@ class Node(Generic[T]):
         """Compose one exact root ObjectId; return a Node or raise on conflict/type."""
         return self.bind(identities={GraphPath(): identity})
 
-    def allocate_identities(self):
+    def allocate_identities(self, *, check_unique=False, repo=None):
         """Allocate missing identities in a concrete graph before materialization.
 
         Assign one fresh ObjectId per distinct owned stateful occurrence, using
@@ -242,24 +242,46 @@ class Node(Generic[T]):
         quoted recipes receive no IDs; non-quoted aliases to owned occurrences
         receive the same assignment. Stateless nodes receive no identity.
 
+        Args:
+            check_unique (bool): Default False keeps allocation metadata-only.
+                True retries candidates already known to the Repo, present in this
+                graph, or assigned earlier in this call. Existing IDs are preserved.
+            repo (Repo | None): Authority for checked allocation. If omitted,
+                use an explicitly active default Repo; never create one implicitly.
+                Ignored when ``check_unique`` is False.
         Returns:
             ConcreteNode: An immutable realization overlay, or this same handle
                 when no IDs are missing. Calling again on the result is a no-op;
                 separate calls on an unbound source allocate independent IDs.
         Raises:
             TypeError: If the owned graph is not concrete or contains legacy
-                ObjectRef/StateRef leaves. Call ``concretize()`` first.
+                ObjectRef/StateRef leaves, check_unique is not bool, or the
+                selected authority is not a Repo. Call ``concretize()`` first.
             ValueError: If independent owned nodes share an ObjectId or a stateless
-                node carries identity/state facets. Validation precedes allocation.
+                node carries identity/state facets, or checked allocation has no
+                Repo. Validation precedes allocation.
+            RuntimeError: If 32 candidates for one missing ID collide or the Repo
+                is closed/inherited. Store lookup failures propagate unchanged.
         Side Effects:
-            Allocates UUIDs only. Does not resolve classes, construct Objects,
-            capture or remove state, access Stores, or reserve execution ownership.
+            Allocates UUIDs; checked mode also reads connected Store declaration
+            metadata and Repo caches. Never resolves classes, constructs Objects,
+            captures/removes state, publishes, or reserves execution ownership.
+            Checks observe current evidence, not atomic cross-worker uniqueness.
         """
         from .definition import ConcreteNode
         from .reference_values import ObjectId
 
         if not isinstance(self, ConcreteNode):
             raise TypeError("Identity allocation requires a concrete Node; call concretize() first.")
+        if type(check_unique) is not bool:
+            raise TypeError("check_unique must be a bool.")
+        if check_unique:
+            from .repo import Repo, get_default_repo
+            repo = get_default_repo() if repo is None else repo
+            if repo is None:
+                raise ValueError("check_unique=True requires an explicit or active Repo.")
+            if not isinstance(repo, Repo):
+                raise TypeError("Checked identity allocation requires a Repo.")
         missing, identities = [], set()
         for _, node in _owned_nodes(self, strict=True):
             if not isinstance(node, ConcreteNode):
@@ -275,7 +297,12 @@ class Node(Generic[T]):
                 identities.add(node.object_id)
         if not missing:
             return self
-        facets = {node._occurrence: _Facets(ObjectId(), node.state) for node in missing}
+        if check_unique:
+            excluded = {node.object_id for node in _all_nodes(self, quoted=True) if node.object_id is not None}
+            assigned = repo._allocate_unique_object_ids(len(missing), excluded=excluded)
+        else:
+            assigned = (ObjectId() for _ in missing)
+        facets = {node._occurrence: _Facets(identity, node.state) for node, identity in zip(missing, assigned)}
         return _rewrite(self, facets=facets, realization=True, enter_quoted=False)
 
     def with_state(self, state):

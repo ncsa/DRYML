@@ -155,6 +155,25 @@ legacy owned reference leaves raise `TypeError`; independent owned nodes sharing
 an ObjectId or stateless nodes carrying identity/state facets raise `ValueError`,
 before any new IDs are allocated.
 
+By default, `check_unique=False`: UUIDs are allocated without consulting a Repo.
+To check new IDs against known Repo identities, use:
+
+```python
+identified = cdef.allocate_identities(check_unique=True, repo=repo)
+```
+
+Checked allocation uses a supplied Repo or an explicitly active default Repo;
+without either it raises `ValueError`, rather than creating an empty Repo. It
+checks full ObjectIds (namespace and nonce) against connected Store declaration
+anchors, live caches and cached graph metadata, IDs already present in the supplied
+graph, and IDs assigned earlier in this call. It preserves existing IDs, retrying
+only newly generated collisions, with at most 32 candidates per missing ID before
+`RuntimeError`. Store authority, capability and IO errors propagate. A fully
+identified graph still returns itself without UUIDs or Store reads. Checked mode
+does not publish or retain candidates. Its observations do not prevent another
+worker from assigning/publishing the same ID after the check; this is not an atomic
+reservation or a global uniqueness guarantee.
+
 Allocate once per logical job, before sending it to workers, and reuse the returned
 graph for retries. Separate calls on the original unbound recipe create independent
 job identities. The helper performs no class resolution, payload IO, Store
