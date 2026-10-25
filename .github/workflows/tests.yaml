@@ -35,19 +35,16 @@ jobs:
   lightweight:
     name: Good-enough (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
-    # Native durability/lifecycle representatives exceed the old whole-job budget;
-    # retain the full selection and its independent 180-second per-test timeout.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 180 || 120 }}
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.suite != 'good-enough' && 180 || 30 }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
-        include:
-          - os: windows-latest
-            python-version: "3.12"
-          - os: macos-latest
-            python-version: "3.12"
+        include: >-
+          ${{ fromJSON(
+            github.event_name == 'workflow_dispatch' && inputs.suite != 'good-enough'
+            && '[{"os":"ubuntu-latest","python-version":"3.10"},{"os":"ubuntu-latest","python-version":"3.11"},{"os":"ubuntu-latest","python-version":"3.12"},{"os":"ubuntu-latest","python-version":"3.13"},{"os":"ubuntu-latest","python-version":"3.14"},{"os":"windows-latest","python-version":"3.12"},{"os":"macos-latest","python-version":"3.12"}]'
+            || '[{"os":"ubuntu-latest","python-version":"3.12"}]'
+          ) }}
 
     steps:
       - uses: actions/checkout@v5
@@ -71,7 +68,7 @@ jobs:
           python -m pip install -r test_requirements.txt ".[test]"
 
       - name: Enable real-kernel notebook coverage on Linux Python 3.12
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        if: github.event_name == 'workflow_dispatch' && inputs.suite != 'good-enough' && matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         run: python -m pip install "ipykernel==7.2.0" "jupyter-client==8.8.0"
 
       - name: Show resolved versions
@@ -88,7 +85,7 @@ jobs:
         env:
           REQUESTED_SUITE: ${{ github.event_name == 'workflow_dispatch' && inputs.suite || 'good-enough' }}
         run: |
-          if [[ "$RUNNER_OS" == "Linux" && "$REQUESTED_SUITE" != "good-enough" ]]; then
+          if [[ "$REQUESTED_SUITE" != "good-enough" ]]; then
             bash ./tests.sh medium --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread
           else
             bash ./tests.sh good-enough --ignore tests/old --ignore tests/dev -x -vv --timeout=180 --timeout-method=thread
@@ -96,6 +93,7 @@ jobs:
 
   heavy:
     name: Heavy frameworks (Ubuntu, Python 3.12)
+    if: github.event_name == 'workflow_dispatch' && (inputs.suite == 'exhaustive' || inputs.suite == 'coverage')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:

@@ -22,13 +22,20 @@ same mode. It runs smoke and medium tests selected by the checked-in
 does not enable coverage. The ordinary verification sequence is a focused test,
 the affected subsystem, and then `good-enough`.
 
+The routine target is **10–20 minutes locally**, measured as complete runner wall
+time, including collection and both interpreter phases. It is not a time-based
+test cutoff. Policy changes must be timed locally before pushing. Pull requests
+run this representative gate once on Linux/Python 3.12 with a 30-minute job cap;
+the Python/platform matrix and heavy framework/native-estimator jobs run only
+after an explicit `exhaustive` or `coverage` workflow dispatch.
+
 **Exhaustive runs require an explicit user request.** Earlier instrumented full
 runs took roughly 2.5 hours. A generic request to implement, verify, review,
 commit, push, release, or fix CI is not permission to launch one. This policy
 supersedes full-closeout requirements in older plans and applies to delegated
 agents too. Do not bypass it with broad direct pytest runs, `medium`, `heavy`,
-`coverage`, or `profile`. Routine platform runners use `good-enough`; the Linux
-framework job runs the explicitly scoped selection described under Hosted Matrix.
+`coverage`, or `profile`. Routine PR CI uses `good-enough`; explicit exhaustive
+dispatches add platform and framework selections described under Hosted Matrix.
 There is no scheduled exhaustive job. A user selecting `exhaustive` or `coverage` in
 GitHub's manual workflow dispatch is an explicit request.
 
@@ -118,11 +125,15 @@ broaden its speed-tier selection.
 random sample. Add just enough routine tests to cover new code's meaningful
 behavior and important failure boundaries, rather than every permutation.
 Keep complete parameter and integration products in the explicit exhaustive
-selection. `tests/test_profiles.json` names integration functions whose
-other functions may be deferred, optionally enables marginal selection for
-specific multi-axis parameter products, and pins concurrency, fault-window,
-cancellation, locking, and other safety-sensitive paths to exhaustive
-selection. There is no random sampling or runtime cutoff.
+selection. `tests/test_profiles.json` names small integration representatives,
+optionally samples marginal rows of specific parameter products, and uses
+`deferred_paths` and `deferred_functions` to keep detailed process, native-platform,
+concurrency, fault-window, cancellation, locking, and repeated persistence products
+out of routine runs. These tests remain unchanged in explicit exhaustive selection.
+Deferred paths are removed before collection, avoiding their import/setup costs.
+A conflicting `must_run` pin is an error. There is no random sampling or runtime
+cutoff. The legacy `exhaustive_paths`/`exhaustive_functions` fields mean
+complete-in-routine pins; the current policy leaves both empty.
 
 For a separate exhaustive matrix, use `@pytest.mark.exhaustive_only` on the
 function or `pytestmark = pytest.mark.exhaustive_only` on a matrix-only module.
@@ -145,14 +156,13 @@ a file with a curated `representative_functions` entry is omitted until that
 file's function allowlist is deliberately updated. This intentional selection
 gap is why the exhaustive mode remains available on explicit user request.
 
-The Query/Method contract regressions from U1–U7 retain named routine coverage.
+The Query/Method contract regressions from U1–U7 retain small named routine coverage.
 Curated query allowlists include main-only and empty-index completeness, malformed
 authority, policy-preserving derived recovery, retained paging, and cumulative
-failure/fallback accounting. Deterministic bounded thread barriers cover build-claim
-waits outside fences, active same-process reader replacement, main writers, reversed
-Store ordering, and cancellation cleanup. Existing SQLite concurrency cases remain
-routine; the separate 18-case `test_u7_main_completeness_policy_matrix` is
-`exhaustive_only` and remains available to an explicitly requested exhaustive run.
+failure/fallback accounting. Detailed SQLite thread/process/platform lifetime,
+reader replacement, build-claim, fork, and cancellation matrices are exhaustive,
+along with the 18-case `test_u7_main_completeness_policy_matrix`. Routine tests
+retain direct query semantics, derived-only recovery, and small failure boundaries.
 
 Tiny U1/U4 model and value-handoff regressions have exact medium node pins so the
 heavy model categories cannot silently omit their named routine representatives.
@@ -177,17 +187,46 @@ symbolic Definition quotation and history v1 fixtures, TrainState observation
 persistence, Artifact/history association, closed qualification request
 construction, and credential-free tiny TensorFlow/Torch/JAX Dataset-owned training
 representatives.
-The JAX representatives include exact managed-local and Core subprocess graph
-restoration when the qualified JAX/Flax/Optax stack is installed. The routine
-profile does not run TFDS preparation, the real 36-cell CPU matrix, existing Ray,
+The JAX representatives include tiny managed-local behavior when the qualified
+JAX/Flax/Optax stack is installed; managed subprocess restoration is exhaustive.
+The routine profile does not run TFDS preparation, the real 36-cell CPU matrix, existing Ray,
 recovery interruption, or GPU execution. Those remain explicit opt-in gates.
 
 The real TFDS NumPy adapter test is `exhaustive_only`. It requires a caller-selected
 `DRYML_ML_QUALIFICATION_TFDS_DATA_DIR` and uses `download=False`; routine selection keeps
 the mocked offline adapter tests while excluding that real reader.
 
-The routine suite has an approximate five-minute feedback goal, not a runtime
-cutoff. Before the Dataset/JAX integration representatives were added, a
+### Local speed verification (2026-10-25)
+
+The revised selection completed in **1,087.72 seconds (18m08s) wall time** on
+Linux with Python 3.12.13 in `big_env`, using `CUDA_VISIBLE_DEVICES=""` and
+`JAX_PLATFORMS=cpu`. Both interpreter phases and runner startup are included:
+
+| Phase | Result | Pytest duration |
+|---|---|---:|
+| Process-sensitive representatives | 265 passed; 121 deselected | 95.01 s |
+| Ordinary representatives | 4,223 passed; 29 skipped; 1,130 deselected | 986.75 s |
+| Combined | **4,488 passed; 29 skipped; 1,251 deselected; no failures** | **18m08s wall** |
+
+The full local runner was measured before pushing with `/usr/bin/time -p`:
+
+```bash
+./tests.sh good-enough --ignore tests/old --ignore tests/dev -x tests \
+  -q --durations=30 --dryml-timing-summary
+```
+
+The timing run also wrote JUnit, per-test JSON, and the complete log under
+`/tmp/dryml/good-enough-speedo-2*`; temporary test data and the pytest cache were
+kept under `/tmp/dryml`. An initial successful trim took 20m47s. Its timing report
+identified remaining real-kernel/worker and repeated codec/work-census integrations;
+deferring those produced the final 18m08s run. Optional-dependency skips remain
+honest; this is local representative evidence, not exhaustive/platform qualification
+or a guarantee for every host. Test assertions and exhaustive availability were
+preserved. The selection/workflow guards passed all 68 focused checks before the
+first timing run; the complete final run includes those checks.
+
+The following is historical evidence for an older selection, not the current
+10–20 minute target or a runtime cutoff. Before Dataset/JAX integration grew, a
 reference selection measured **445.03 seconds (7m25s) wall time** on Linux with
 Python 3.12.13 in `big_env`, with **3,167 passed and 22 skipped**:
 
@@ -196,9 +235,8 @@ Python 3.12.13 in `big_env`, with **3,167 passed and 22 skipped**:
 ```
 
 The process-sensitive phase took 106.90 seconds and the ordinary phase took
-332.53 seconds; wall time also includes runner startup. The five-minute goal is
-not yet met. This measurement supersedes the older 38-minute representative
-run, which used a different selection and test setup. It is not a guarantee for
+332.53 seconds; wall time also includes runner startup. This measurement supersedes
+the older 38-minute representative run, which used a different selection and test setup. It is not a guarantee for
 other hosts: actual environment observation and worker tests remain sensitive
 to the installed environment. Re-measure after changing the policy or setup.
 
@@ -424,11 +462,13 @@ hosted or isolated-installation qualification.
 
 ### Current Linux qualification
 
-The single `heavy` job installs all frameworks together with pip on Linux/Python
-3.12. `heavy_test_requirements.txt` pins the shared stack, including XGBoost 3.4.1;
+On explicit exhaustive/coverage dispatch, the single `heavy` job installs all
+frameworks together with pip on Linux/Python 3.12. `heavy_test_requirements.txt`
+pins the shared stack, including XGBoost 3.4.1;
 the package extras and native reader/writer gates use the same native versions.
-This replaces the former isolated Conda/backend/platform matrix. XGBoost's pip
-wheel may include GPU support, but the adapters always request CPU execution.
+It is not part of routine PR CI. This replaces the former isolated
+Conda/backend/platform matrix. XGBoost's pip wheel may include GPU support, but
+the adapters always request CPU execution.
 The job preflights every framework, verifies native versions, builds and installs
 the DRYML wheel, and runs `pip check` before testing.
 
@@ -505,10 +545,11 @@ the native rollout does not automatically close issue #38.
 ### Dependency-light routine coverage
 
 `tests/models/test_estimator_contracts.py` is medium-tier and retains its complete
-fast acceptance/config/spec/admission/missing-extra/control-boundary set.
+fast acceptance/config/spec/admission/missing-extra/control-boundary set; the two
+persisted terminal Experiment/callback integrations are deferred to exhaustive.
 `tests/data/test_materialize_supervised_numpy.py` inherits Data's medium tier;
 all 47 strict collector cases remain routine without importing tensor/model
-frameworks. Neither file needs a representative allowlist. The fresh-process
+frameworks. The fresh-process
 `test_routine_estimator_selection_keeps_fast_contracts_without_native_imports`
 guard supplies only seven named owning files to the actual runner file-selection
 policy, then exercises pytest's tier/profile collection with native imports
@@ -528,7 +569,9 @@ fits run in the shared Linux heavy job.
 
 ## Hosted Matrix
 
-Pull requests and manual `good-enough` dispatches run eight jobs. Pushes do not
+Pull requests and manual `good-enough` dispatches run one Linux/Python 3.12 job.
+The expanded rows below run only on explicit `exhaustive`/`coverage` dispatches.
+Pushes do not
 trigger this test workflow. Workflow-level concurrency cancels running and
 pending CI for the same PR when a newer eligible run supersedes it. The group
 includes the workflow name, event name and PR number (or branch/tag ref for a
@@ -537,17 +580,18 @@ Repeated manual dispatches on the same ref also supersede earlier manual runs.
 
 | Target | Python versions | Selection | Jobs |
 |---|---|---|---:|
-| Ubuntu | 3.10, 3.11, 3.12, 3.13, 3.14 | `good-enough` | 5 |
-| Windows | 3.12 | `good-enough` | 1 |
-| macOS | 3.12 | `good-enough` | 1 |
-| Ubuntu, all frameworks installed together | 3.12 | Framework and native-estimator argument files | 1 |
+| Ubuntu, routine PR/manual gate | 3.12 | `good-enough` | 1 |
+| Ubuntu, explicit expanded gate | 3.10, 3.11, 3.12, 3.13, 3.14 | full smoke/medium | 5 |
+| Windows, explicit expanded gate | 3.12 | full smoke/medium | 1 |
+| macOS, explicit expanded gate | 3.12 | full smoke/medium | 1 |
+| Ubuntu, explicit heavy gate | 3.12 | Framework and native-estimator argument files | 1 |
 
-The seven platform jobs install `test_requirements.txt` and `dryml[test]`,
+The platform jobs install `test_requirements.txt` and `dryml[test]`,
 including optional filesystem-publication readers, without ML frameworks.
-Linux is the primary compatibility target. Only manually requested `exhaustive`
-or `coverage` suites run `medium` on Linux so every smoke/medium parameter
-combination is exercised there. Windows and macOS always use `good-enough` on
-Python 3.12. Python 3.14 is explicitly framework-reduced.
+Linux is the routine compatibility representative. Manually requested
+`exhaustive` or `coverage` suites run `medium` on every selected platform, so all
+smoke/medium combinations, including deferred platform/process tests, remain
+available. Python 3.14 is explicitly framework-reduced.
 
 The `tf` extra declares TensorFlow and tensorflow-datasets only for
 `python_version < '3.14'`, matching that framework-reduced boundary. TFDS has no
@@ -560,20 +604,21 @@ Lightweight CI jobs print individual test names and use `pytest-timeout`'s
 thread watchdog with a 180-second per-test limit (including fixture work).
 A stalled test dumps thread stacks and fails the process instead of hanging
 indefinitely; the watchdog does not turn unfinished tests into passes or define
-profile membership. Ubuntu jobs have a 20-minute job limit and Windows jobs a
-40-minute limit; macOS has a 20-minute limit. Local commands have no per-test
+profile membership. Routine jobs have a 30-minute whole-job cap; expanded manual
+platform jobs retain a 180-minute cap. Local commands have no per-test
 timeout unless the caller supplies one explicitly, and no selection-level performance cutoff has been
 introduced.
 
-The Ubuntu Python 3.12 platform job also installs ipykernel 7.2.0 and
-jupyter-client 8.8.0. Its existing `good-enough` selection then executes the
-real-kernel Dispatch regression; no separate notebook runner is needed.
+The explicitly expanded Ubuntu Python 3.12 job also installs ipykernel 7.2.0 and
+jupyter-client 8.8.0. Its full smoke/medium selection executes the real-kernel
+Dispatch regression; routine PR selection defers this process integration.
 Other platform/version jobs do not install those notebook dependencies.
 The test uses a job-owned kernel, temporary Store, and worker spool; it checks
 repeated publication/query, shell liveness, task ownership, and interrupt recovery.
 
-The single Linux `heavy` job uses pip to install `heavy_test_requirements.txt`
-and DRYML's framework extras in one Python 3.12 environment. The shared pins are
+The explicit-dispatch-only Linux `heavy` job uses pip to install
+`heavy_test_requirements.txt` and DRYML's framework extras in one Python 3.12
+environment. The shared pins are
 TensorFlow 2.21.0, tensorflow-datasets 4.9.10, CPU PyTorch 2.14.1+cpu,
 JAX/JAXlib 0.11.2, Flax 0.12.10, Optax 0.2.8, Ray 2.56.0,
 XGBoost 3.4.1, scikit-learn 1.9.0, statsmodels 0.15.0, NumPy 2.1.3,

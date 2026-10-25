@@ -284,7 +284,7 @@ def test_ci_workflow_keeps_comprehensive_and_coverage_suites_opt_in() -> None:
     assert jobs["ray-integration"]["if"] == explicit_extended
 
     heavy = jobs["heavy"]
-    assert "if" not in heavy and "strategy" not in heavy
+    assert heavy["if"] == explicit_extended and "strategy" not in heavy
     assert heavy["runs-on"] == "ubuntu-latest"
     assert heavy["timeout-minutes"] == 120
     for step in heavy["steps"]:
@@ -310,18 +310,28 @@ def test_ci_workflow_keeps_comprehensive_and_coverage_suites_opt_in() -> None:
 
     platform = jobs["lightweight"]
     matrix = platform["strategy"]["matrix"]
-    assert matrix["os"] == ["ubuntu-latest"]
-    assert matrix["python-version"] == ["3.10", "3.11", "3.12", "3.13", "3.14"]
-    assert matrix["include"] == [
+    import json
+    import re
+    selection = matrix["include"]
+    assert "github.event_name == 'workflow_dispatch' && inputs.suite != 'good-enough'" in selection
+    expanded, routine = (json.loads(value) for value in re.findall(r"'(\[.*?\])'", selection))
+    assert routine == [{"os": "ubuntu-latest", "python-version": "3.12"}]
+    assert expanded == [
+        *({"os": "ubuntu-latest", "python-version": version}
+          for version in ("3.10", "3.11", "3.12", "3.13", "3.14")),
         {"os": "windows-latest", "python-version": "3.12"},
         {"os": "macos-latest", "python-version": "3.12"},
     ]
-    assert '$RUNNER_OS" == "Linux"' in lightweight_step["run"]
+    assert "inputs.suite != 'good-enough' && 180 || 30" in platform["timeout-minutes"]
+    assert 'if [[ "$REQUESTED_SUITE" != "good-enough" ]]' in lightweight_step["run"]
     bash_setup = next(step for step in platform["steps"]
                       if "brew install bash" in step.get("run", ""))
     assert bash_setup["if"] == "runner.os == 'macOS'"
     notebook = next(step for step in platform["steps"]
                     if "ipykernel==" in step.get("run", ""))
-    assert notebook["if"] == "matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'"
+    assert notebook["if"] == (
+        "github.event_name == 'workflow_dispatch' && inputs.suite != 'good-enough' && "
+        "matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'"
+    )
     assert not {"notebook-dispatch", "local-filesystem-publication",
                 "jax-training-qualification", "native-estimator-qualification"} & jobs.keys()
