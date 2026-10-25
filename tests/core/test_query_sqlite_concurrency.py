@@ -997,7 +997,8 @@ def test_store_validation_contention_never_becomes_rebuild_or_incompatibility(
     assert index._connections._path_identity() == identity
 
 
-def test_explicit_cycle_destination_change_discards_validation_cut(tmp_path, monkeypatch):
+@pytest.mark.parametrize("replacement_policy", ("native", "refuse-active"))
+def test_explicit_cycle_destination_change_discards_validation_cut(tmp_path, monkeypatch, replacement_policy):
     """Replacing a destination during comparison cannot validate the old inode."""
     from dryml.core.query.model import QueryStats
 
@@ -1011,6 +1012,16 @@ def test_explicit_cycle_destination_change_discards_validation_cut(tmp_path, mon
     original_claim = index._build_claim
     replaced = []
     before = index.status().diagnostics["index_uuid"]
+    blocked = os.name == "nt" or replacement_policy == "refuse-active"
+    if replacement_policy == "refuse-active":
+        activate = other._activate_replacement
+
+        def refuse_active(*args, **kwargs):
+            if index._connections._leases:
+                raise QueryIndexBusy("replacement blocked by an active reader")
+            return activate(*args, **kwargs)
+
+        monkeypatch.setattr(other, "_activate_replacement", refuse_active)
 
     def validate(con, issues, **kwargs):
         original(con, issues, **kwargs)
@@ -1028,13 +1039,13 @@ def test_explicit_cycle_destination_change_discards_validation_cut(tmp_path, mon
     monkeypatch.setattr(index, "_store_certificate", validate)
     monkeypatch.setattr(index, "_build_claim", claim)
     stats = QueryStats()
-    if os.name == "nt":
+    if blocked:
         with pytest.raises(QueryIndexBusy, match="active reader"):
             index.refresh(True, stats=stats)
         assert stats.store_scan_count == 0
+        monkeypatch.setattr(index, "_store_certificate", original)
         assert index.status().diagnostics["index_uuid"] == before
         assert not replaced
-        monkeypatch.setattr(index, "_store_certificate", original)
         index.refresh(True, stats=stats)
         assert stats.store_scan_count == 0 and stats.refresh_action == "sqlite-validate"
         assert index.status().diagnostics["index_uuid"] == before
