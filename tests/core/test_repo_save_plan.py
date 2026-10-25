@@ -206,7 +206,7 @@ def test_partial_authority_repair_is_owner_fenced_and_does_not_capture(tmp_path,
     SavePlanLeaf.captures = 0
     original = store._atomic_write
     def fail_membership(path, payload):
-        if "/membership/saved/" in str(path):
+        if "/membership/saved/" in str(path).replace("\\", "/"):
             raise OSError("membership unavailable")
         return original(path, payload)
     monkeypatch.setattr(store, "_atomic_write", fail_membership)

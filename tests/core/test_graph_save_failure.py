@@ -59,7 +59,7 @@ def test_alias_replacement_failure_preserves_completed_state_ref(tmp_path, monke
 
     original = store._atomic_write
     def fail_alias(path, payload):
-        if str(path).endswith("/names/latest.record"):
+        if str(path).replace("\\", "/").endswith("/names/latest.record"):
             raise OSError("alias replacement failed")
         return original(path, payload)
 
@@ -85,7 +85,7 @@ def test_snapshot_install_failure_preserves_the_prior_receipt(tmp_path, monkeypa
 
     original = store._atomic_write
     def fail_snapshot(path, payload):
-        if "/graphs/" in str(path):
+        if "/graphs/" in str(path).replace("\\", "/"):
             raise OSError("snapshot install failed")
         return original(path, payload)
     monkeypatch.setattr(store, "_atomic_write", fail_snapshot)
@@ -170,7 +170,7 @@ def test_failed_local_state_publication_cleans_staging_before_state_ref(tmp_path
     if failure == "snapshot":
         original = store._atomic_write
         def fail_snapshot(path, payload):
-            if "/graphs/" in str(path):
+            if "/graphs/" in str(path).replace("\\", "/"):
                 raise OSError("snapshot install failed")
             return original(path, payload)
         monkeypatch.setattr(store, "_atomic_write", fail_snapshot)

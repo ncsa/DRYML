@@ -194,11 +194,11 @@ def test_save_publishes_state_ref_before_main_and_object_alias(tmp_path, monkeyp
     calls = []
     original = store._atomic_write
     def record_writes(path, payload):
-        if "/graphs/" in str(path):
+        if "/graphs/" in str(path).replace("\\", "/"):
             calls.append("state")
-        if str(path).endswith("/names/main.record"):
+        if str(path).replace("\\", "/").endswith("/names/main.record"):
             calls.append("main")
-        if str(path).endswith("/names/latest.record"):
+        if str(path).replace("\\", "/").endswith("/names/latest.record"):
             calls.append("alias")
         return original(path, payload)
     monkeypatch.setattr(store, "_atomic_write", record_writes)

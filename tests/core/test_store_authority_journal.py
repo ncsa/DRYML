@@ -414,7 +414,7 @@ def test_replay_refuses_to_overwrite_later_name_writer(tmp_path, monkeypatch):
     original = fs.publish_file
     def fail(source, target, *, replace=False):
         result = original(source, target, replace=replace)
-        if str(target).endswith("names/main.record"):
+        if str(target).replace("\\", "/").endswith("names/main.record"):
             raise OSError("name visible but incomplete call")
         return result
     with monkeypatch.context() as patch:

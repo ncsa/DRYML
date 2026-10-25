@@ -229,7 +229,7 @@ def test_later_alias_failure_keeps_earlier_name_and_completed_authority(tmp_path
     obj = ReportState(repo=repo)
     original = second._atomic_write
     def fail_name(path, data):
-        if str(path).endswith("/names/latest.record"):
+        if str(path).replace("\\", "/").endswith("/names/latest.record"):
             raise OSError("second alias failed")
         return original(path, data)
     monkeypatch.setattr(second, "_atomic_write", fail_name)
@@ -338,7 +338,7 @@ def test_membership_readback_failure_retains_dirty_authority_and_late_ledger(
 
     def write_then_damage(path, payload):
         result = original(path, payload)
-        if "/membership/saved/" in str(path):
+        if "/membership/saved/" in str(path).replace("\\", "/"):
             root_path = Path(path)
             if damage == "missing":
                 root_path.unlink()

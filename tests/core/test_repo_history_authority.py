@@ -132,7 +132,7 @@ def test_current_save_does_not_mask_interruption(tmp_path, monkeypatch, boundary
     original = store._atomic_write
 
     def interrupt(relative, content, *args, **kwargs):
-        selected = str(relative).endswith("/names/history.record")
+        selected = str(relative).replace("\\", "/").endswith("/names/history.record")
         if selected and boundary == "before":
             raise KeyboardInterrupt("history cancellation")
         result = original(relative, content, *args, **kwargs)

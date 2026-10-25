@@ -14,9 +14,9 @@ pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 from dryml.core import Object, Repo, SaveRouting, Selector, Serializable, save_object
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
-from dryml.core.repo import RepoLoadError, RepoSaveError
+from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord, StoredRootRecord
+from dryml.core.store.records import StoredRootRecord
 from dryml.core.node_prepare import NodePreparation
 from dryml.core.utils.graph.path import GraphPath, Parameter
 
@@ -729,9 +729,9 @@ def test_alternating_store_failure_qualifies_recovery_only_after_protection(
     original = second._atomic_write
 
     def fail_before_protection(path, payload):
-        path = str(path)
-        if ((failure_boundary == "creation" and path.endswith("/def.pkl"))
-                or (failure_boundary == "grant" and "/grants/" in path)):
+        normalized = str(path).replace("\\", "/")
+        if ((failure_boundary == "creation" and normalized.endswith("/def.pkl"))
+                or (failure_boundary == "grant" and "/grants/" in normalized)):
             raise OSError("middle publication unavailable")
         return original(path, payload)
 

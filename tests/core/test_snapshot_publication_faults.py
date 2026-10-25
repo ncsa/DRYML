@@ -68,7 +68,7 @@ def _interrupt_record(store, monkeypatch, fragment, error, *, after=True):
     original = store._atomic_write
     entered = []
     def operation(path, data):
-        if fragment not in str(path):
+        if fragment not in str(path).replace("\\", "/"):
             return original(path, data)
         entered.append(Path(path))
         if after:
@@ -124,7 +124,7 @@ def test_descendant_lineage_failure_preserves_exact_completed_path_statuses(tmp_
     store = DirStore(tmp_path / "store")
     original, entered = store._atomic_write, []
     def fail_second(path, data):
-        if "/metadata/lineage/" in str(path):
+        if "/metadata/lineage/" in str(path).replace("\\", "/"):
             entered.append(Path(path))
             if len(entered) == 2:
                 raise OSError("descendant lineage failed")
