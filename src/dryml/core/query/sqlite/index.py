@@ -318,6 +318,8 @@ class SQLiteStoreQueryIndex:
                         state = "ready"
                     finally:
                         con.execute("ROLLBACK")
+            except QueryIndexBusy:
+                raise
             except QueryIndexDirty as error:
                 state, diagnostics = "dirty", {"error": str(error)}
             except QueryIndexIncompatible as error:
@@ -424,6 +426,8 @@ class SQLiteStoreQueryIndex:
                         replace_index = True
                     epoch = max(epoch, data["epoch"])
                 replace_index |= epoch != cut.epoch
+            except QueryIndexBusy:
+                raise
             except Exception as error:
                 if is_sqlite_busy_error(error):
                     raise QueryIndexBusy("SQLite projection inspection is busy.") from error
@@ -632,6 +636,21 @@ class SQLiteStoreQueryIndex:
             return _read_generation(con)
 
     def status(self) -> QueryIndexStatus:
+        """Inspect current sidecar readiness without repair or graph inventory.
+
+        Returns:
+            QueryIndexStatus with current readiness and validation diagnostics.
+            Missing, dirty, incompatible, and corrupt evidence remains explicit.
+
+        Raises:
+            QueryIndexBusy: If an owned Store's status validation encounters typed
+                reader contention. Retry after the active reader closes; contention
+                does not establish incompatibility or authorize a rebuild.
+
+        Side Effects:
+            May open a short-lived leased SQLite read transaction, released before
+            returning or raising. Does not replace the index or mutate authority.
+        """
         if self._store_projection:
             return self._store_status()
         if self._is_dirty():

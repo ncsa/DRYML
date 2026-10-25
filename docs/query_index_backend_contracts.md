@@ -296,6 +296,9 @@ unleased connection users still coordinate teardown themselves.
 Windows cannot replace a main file while its protected handles remain open;
 replacement raises retryable `QueryIndexBusy` without closing those handles or
 changing the canonical index. Close the retained reader, then retry the rebuild.
+Store status validation and maintenance inspection preserve this typed contention
+error; they do not relabel it as incompatible/corrupt evidence or use it to start
+a metadata rebuild. Their read transaction and lease unwind before propagation.
 Discarded connection managers best-effort close their owned current-process
 handles. Unleased pools close in weak-reference finalization before SQLite's own
 connection finalizers, including cyclic owner graphs.

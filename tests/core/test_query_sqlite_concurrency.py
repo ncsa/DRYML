@@ -959,6 +959,44 @@ def test_format4_explicit_refresh_reuses_current_authority_certificate(tmp_path)
     assert not index._connections._leases
 
 
+@pytest.mark.parametrize("operation", ("status", "refresh", "inspection"))
+def test_store_validation_contention_never_becomes_rebuild_or_incompatibility(
+        tmp_path, monkeypatch, operation):
+    """An active reader's typed contention survives status and explicit maintenance."""
+    from dryml.core.query.model import QueryStats
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    _save_root_definition(store, _cdef("root"))
+    index = store.open_query_index()
+    before = index.status()
+    identity = index._connections._path_identity()
+    original = index._store_certificate
+    original_status = index.status
+    primary = QueryIndexBusy("replacement blocked by an active reader")
+
+    def busy(con, cut, **kwargs):
+        original(con, cut, **kwargs)
+        raise primary
+
+    monkeypatch.setattr(index, "_store_certificate", busy)
+    if operation == "inspection":
+        from dataclasses import replace
+        monkeypatch.setattr(index, "status", lambda: replace(before, state="dirty"))
+    stats = QueryStats()
+    with pytest.raises(QueryIndexBusy, match="active reader") as raised:
+        if operation == "status":
+            index.status()
+        else:
+            index.refresh(True, stats=stats)
+    assert raised.value is primary
+    assert stats.store_scan_count == 0
+    assert not index._connections._leases and not index._build_claim_path().exists()
+    monkeypatch.setattr(index, "_store_certificate", original)
+    monkeypatch.setattr(index, "status", original_status)
+    assert index.status().diagnostics["index_uuid"] == before.diagnostics["index_uuid"]
+    assert index._connections._path_identity() == identity
+
+
 def test_explicit_cycle_destination_change_discards_validation_cut(tmp_path, monkeypatch):
     """Replacing a destination during comparison cannot validate the old inode."""
     from dryml.core.query.model import QueryStats
