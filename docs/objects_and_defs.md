@@ -122,6 +122,47 @@ consumers retain their separate APIs. `copy_graph()` preserves facets and the
 alias partition while creating fresh private Node handles, without ObjectId
 allocation or encoding.
 
+### Allocating Identities Before Dispatch
+
+`concrete_node.allocate_identities()` fills in every missing ObjectId in the
+owned stateful graph without constructing Objects or registering anything in a
+Store. Concretize first so ownership and stateful roles are already known:
+
+```python
+from dryml.core import object_namespace
+
+cdef = recipe.concretize()
+with object_namespace("jobs", "data"):
+    identified = cdef.allocate_identities()
+
+assert identified.allocate_identities() is identified
+```
+
+The returned ConcreteNode has one new UUID-based ObjectId per distinct owned
+stateful occurrence. Shared children keep one identity; independent equal recipes
+receive different identities. Stateless nodes receive none. Reference-only targets
+are not allocated, while non-quoted references to occurrences also owned by this
+graph remain aliases of those identified occurrences. Quoted future recipes stay
+exact, including when they quote an owned occurrence.
+
+Existing IDs and LocalState selections remain unchanged. A fresh state-free recipe
+therefore becomes identity-complete without selecting or capturing any state; a
+recipe containing a saved dataset/model retains that selection. New IDs are
+realization metadata, not retroactive construction pins: retained construction
+views and creation digests stay unchanged. The source graph is immutable. A fully
+identified graph returns the same handle without allocating UUIDs. Soft inputs or
+legacy owned reference leaves raise `TypeError`; independent owned nodes sharing
+an ObjectId or stateless nodes carrying identity/state facets raise `ValueError`,
+before any new IDs are allocated.
+
+Allocate once per logical job, before sending it to workers, and reuse the returned
+graph for retries. Separate calls on the original unbound recipe create independent
+job identities. The helper performs no class resolution, payload IO, Store
+publication, or persistent reservation. It replaces manual graph-wide identity
+binding, not execution coordination: duplicate managed calls still require the
+same control authority and follow the [managed operation ownership
+contract](managed_operations.md#operation-ownership-and-shared-mutation).
+
 ## Creation, Compatibility And Operation Views
 
 The metadata APIs distinguish three named transformations over the same immutable

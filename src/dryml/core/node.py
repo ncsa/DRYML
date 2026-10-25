@@ -1,8 +1,10 @@
-"""Occurrence-aware immutable graph views and metadata-only constraint edits.
+"""Occurrence-aware immutable graph views, constraint edits and identity allocation.
 
 Definition and the normalized ConcreteNode use the existing constructor record
 representation. Facets live on their occurrence views; rooted maps are adapters.
 Retained construction views are immutable handles, never mutable facet tables.
+Explicit identity allocation fills concrete owned stateful occurrences without
+constructing Objects, selecting state, or publishing Store authority.
 """
 
 from __future__ import annotations
@@ -85,6 +87,8 @@ class Node(Generic[T]):
     and replacement never resolve targets, construct Objects, allocate ObjectIds,
     read payloads or publish data. Invalid paths raise GraphPathError; conflicting
     exact constraints raise ValueError and invalid facet types raise TypeError.
+    Explicit ``allocate_identities`` fills missing owned stateful identities on a
+    concrete graph, preserving existing facets and construction evidence.
     """
 
     __slots__ = ()
@@ -228,6 +232,51 @@ class Node(Generic[T]):
     def with_identity(self, identity):
         """Compose one exact root ObjectId; return a Node or raise on conflict/type."""
         return self.bind(identities={GraphPath(): identity})
+
+    def allocate_identities(self):
+        """Allocate missing identities in a concrete graph before materialization.
+
+        Assign one fresh ObjectId per distinct owned stateful occurrence, using
+        the current ``object_namespace``. Preserve existing IDs, state selections,
+        sharing and retained construction evidence. Reference-only targets and
+        quoted recipes receive no IDs; non-quoted aliases to owned occurrences
+        receive the same assignment. Stateless nodes receive no identity.
+
+        Returns:
+            ConcreteNode: An immutable realization overlay, or this same handle
+                when no IDs are missing. Calling again on the result is a no-op;
+                separate calls on an unbound source allocate independent IDs.
+        Raises:
+            TypeError: If the owned graph is not concrete or contains legacy
+                ObjectRef/StateRef leaves. Call ``concretize()`` first.
+            ValueError: If independent owned nodes share an ObjectId or a stateless
+                node carries identity/state facets. Validation precedes allocation.
+        Side Effects:
+            Allocates UUIDs only. Does not resolve classes, construct Objects,
+            capture or remove state, access Stores, or reserve execution ownership.
+        """
+        from .definition import ConcreteNode
+        from .reference_values import ObjectId
+
+        if not isinstance(self, ConcreteNode):
+            raise TypeError("Identity allocation requires a concrete Node; call concretize() first.")
+        missing, identities = [], set()
+        for _, node in _owned_nodes(self, strict=True):
+            if not isinstance(node, ConcreteNode):
+                raise TypeError("Identity allocation requires a concrete owned Node graph.")
+            if not node._stateful_role:
+                if node.object_id is not None or node.state is not None:
+                    raise ValueError("Stateless Nodes cannot select an ObjectId or private state.")
+            elif node.object_id is None:
+                missing.append(node)
+            else:
+                if node.object_id in identities:
+                    raise ValueError("Independent Nodes cannot share an ObjectId.")
+                identities.add(node.object_id)
+        if not missing:
+            return self
+        facets = {node._occurrence: _Facets(ObjectId(), node.state) for node in missing}
+        return _rewrite(self, facets=facets, realization=True, enter_quoted=False)
 
     def with_state(self, state):
         """Compose one exact root LocalState; return a Node or raise on conflict/type."""
