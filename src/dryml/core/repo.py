@@ -1638,6 +1638,47 @@ class Repo:
             ) if not getattr(obj, "_restore_failed", False) and available(obj)
         )
 
+    def _allocate_unique_object_ids(self, count, *, excluded):
+        """Allocate IDs absent from graph/cache metadata and connected anchors.
+
+        Retain current Store handles during reads, without reserving IDs or
+        recording candidates. Existing cached graph IDs and live runtime bindings
+        count even if their Objects are reserved or unrestorable. Each missing ID
+        gets at most 32 UUID candidates; exhaustion raises RuntimeError. Store
+        authority/capability/IO failures propagate instead of establishing absence.
+        This is observational checking, not a cross-process allocation transaction.
+        """
+        from .node import _all_nodes
+        from .reference_values import ObjectId
+
+        with self.retain_topology(allow_physical_duplicates=True):
+            known = set(excluded) | set(self._lineage_candidates)
+            roots = list(self.light_index) + list(self.cdef_cache.values())
+            for cache in (self.strong_obj_cache, self.weak_obj_cache):
+                for definition, obj in cache.items():
+                    roots.append(definition)
+                    for live in (obj, *getattr(obj, "_runtime_projection", {}).values()):
+                        identity = getattr(live, "object_id", None)
+                        if identity is not None:
+                            known.add(identity)
+            known.update(node.object_id for root in roots for node in _all_nodes(root, quoted=True)
+                         if node.object_id is not None)
+            assigned = []
+            for _ in range(count):
+                for _ in range(32):
+                    identity = ObjectId()
+                    if identity in known:
+                        continue
+                    if any(store.read_declaration_anchor(identity) is not None for store in self.stores):
+                        known.add(identity)
+                        continue
+                    known.add(identity)
+                    assigned.append(identity)
+                    break
+                else:
+                    raise RuntimeError("Cannot allocate a unique ObjectId after 32 candidates.")
+            return tuple(assigned)
+
     def _evict_live(self, obj: Object) -> None:
         """Remove one externally mutable failed exact-reuse candidate from caches."""
         self.strong_obj_cache.discard(obj.definition, obj)
