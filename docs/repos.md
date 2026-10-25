@@ -239,6 +239,13 @@ successful completion. Cancellation retains its original exception identity and
 partial report, including when an earlier independent target already failed;
 remaining targets are unattempted.
 
+An unrelated cooperating writer can invalidate a detached read-back cut after
+the save has published. Save confirmation retries that metadata observation at
+most eight times, without repeating capture, state hooks, or publication. Every
+attempt validates a fresh cut; invalid authority is not retried as contention.
+Exhausted read-back remains an unconfirmed save failure with its partial report,
+and does not advance the live root's receipt.
+
 Repair a failed index with `store.open_query_index().maintain_store()`. For an
 authority-partial save, reconnect the exact Store and call
 `store.repair_save_batch(publication.mutation_id, publication.retention_token)`.

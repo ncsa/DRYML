@@ -1316,13 +1316,25 @@ def _save_graph_records(saved, roots, origins, previous):
     return block, records, prepared
 
 
+def _retry_save_readback(read):
+    """Retry only detached read evidence after cut drift, at most eight times."""
+    from .store.authority import StoreCutChanged
+
+    for attempt in range(8):
+        try:
+            return read()
+        except StoreCutChanged:
+            if attempt == 7:
+                raise
+
+
 def _confirmed_batch_keys(target, batch):
-    """Return (available keys, protected subset) from one validated local cut."""
+    """Return available/protected keys, retrying only invalidated local read cuts."""
     from .store.retention import RetentionGrantRecord, _grant_path
 
-    result = []
-    protected = []
-    try:
+    def read():
+        result = []
+        protected = []
         with target._metadata_read():
             origins = {r.digest: n for r, n in batch.creations}
             for manifest, _ in batch.states:
@@ -1342,9 +1354,12 @@ def _confirmed_batch_keys(target, batch):
             for key in result:
                 if target._read_file(_grant_path(target, key, grant), RetentionGrantRecord) == grant:
                     protected.append(key)
+        return tuple(result), tuple(protected)
+
+    try:
+        return _retry_save_readback(read)
     except Exception:
         return (), ()
-    return tuple(result), tuple(protected)
 
 
 def _ready_save_batch(pending, confirmed_keys, required_keys):
@@ -1392,6 +1407,9 @@ def execute_routed_save_plan(
     A live root's existing saved receipt is checked for malformed destination
     capture metadata before hooks. Absent associations remain admissible; this
     validation neither proves current payload availability nor infers state reuse.
+    Unrelated cooperating mutations retry only detached read-back evidence, at
+    most eight times per observation; capture and publication are not repeated.
+    Exhaustion or invalid authority leaves the save unconfirmed with its report.
     """
     from contextlib import ExitStack
     import shutil
@@ -1618,7 +1636,8 @@ def execute_routed_save_plan(
                         if record.root_kind != "saved":
                             continue
                         try:
-                            confirmed = target.read_node(record.digest, kind="saved")
+                            confirmed = _retry_save_readback(
+                                lambda: target.read_node(record.digest, kind="saved"))
                         except Exception:
                             confirmed = None
                         if confirmed is not None:

@@ -49,6 +49,56 @@ def test_store_report_is_ephemeral_complete_and_not_state_identity(tmp_path):
     assert "StoreReport" not in repr(state)
 
 
+@pytest.mark.parametrize("boundary", ("keys", "snapshot"))
+@pytest.mark.parametrize("changes", (1, 8), ids=("settled", "exhausted"))
+def test_save_readback_retries_cut_drift_without_recapture_or_republication(
+        tmp_path, monkeypatch, boundary, changes):
+    """Unrelated writers invalidate read evidence, not the completed save itself."""
+    from dryml.core import Definition
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    peer = DirStore.open_existing(store.base_dir, query_index="none")
+    repo = Repo(store)
+    captures, publications, moves = [], [], []
+    capture = ReportState.save_state_to_dir_imp
+    publish = store.publish_save_batch
+    reader_name = "_read_variant" if boundary == "keys" else "_read_membership"
+    reader = getattr(store, reader_name)
+
+    def counted_capture(self, *args, **kwargs):
+        captures.append(self)
+        return capture(self, *args, **kwargs)
+
+    def counted_publish(batch):
+        result = publish(batch)
+        publications.append(result)
+        return result
+
+    def changed_read(*args, **kwargs):
+        result = reader(*args, **kwargs)
+        if publications and len(moves) < changes:
+            moves.append(len(moves))
+            peer.publish_node(Definition(ReportState, value=100 + len(moves)).concretize())
+        return result
+
+    monkeypatch.setattr(ReportState, "save_state_to_dir_imp", counted_capture)
+    monkeypatch.setattr(store, "publish_save_batch", counted_publish)
+    monkeypatch.setattr(store, reader_name, changed_read)
+    obj = ReportState(repo=repo)
+    if changes == 8:
+        with pytest.raises(RepoSaveError, match="read-back"):
+            repo.save_object(obj)
+        assert obj.last_state_ref is None
+    else:
+        saved, report = repo.save_object(obj, report_stores=True)
+        assert saved is obj.last_state_ref
+        assert report.required_stores == (store,)
+        assert report.publications[0].protected_state_keys == (saved.state.key,)
+        assert peer.read_node(_saved_digest(saved), kind="saved").graph_equal(saved)
+    assert captures == [obj]
+    assert len(publications) == 1 and len(moves) == changes
+
+
 def test_unconfigured_repo_save_commits_each_store_once_with_completed_report(tmp_path):
     """The unified save ledger owns one completed flush entry per connected Store."""
 

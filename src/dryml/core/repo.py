@@ -4213,6 +4213,9 @@ class Repo:
             advances only after its full closure has confirmed protected providers.
             Incomplete recovery preserves the prior receipt. Prepared local batches
             support alternating Store routes without splitting the per-Store commit.
+            If unrelated cooperating writes invalidate detached read-back evidence,
+            that observation retries at most eight times without recapturing or
+            republishing. Exhausted read-back remains an unconfirmed save failure.
             Durable user retention is established before association; uncertain
             grants are preserved. Buffered/custom backends lacking this seam
             fail before capture. Load the
