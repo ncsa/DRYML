@@ -381,6 +381,50 @@ def test_file_representatives_omit_only_named_file_repetitions():
     assert deselected == [repetition]
 
 
+def test_deferred_paths_and_functions_remain_available_without_profile():
+    """Routine deferral overrides complete-file pins but never removes exhaustive tests."""
+    ordinary = FakeItem("tests/example.py::test_boundary")
+    matrix = FakeItem("tests/example.py::test_platform_matrix")
+    process = FakeItem("tests/processes.py::test_process_overlap")
+    profile = {
+        "deferred_paths": {"tests/processes.py": "real process matrix"},
+        "deferred_functions": {matrix.nodeid: "platform matrix"},
+        "exhaustive_paths": {"tests/processes.py": "legacy complete pin"},
+    }
+    selected, deselected, summary = timing_plugin.select_representatives(
+        [ordinary, matrix, process], profile,
+    )
+    assert selected == [ordinary]
+    assert deselected == [matrix, process]
+    assert summary["reasons"]["deferred exhaustive coverage"] == 2
+    items = [ordinary, matrix, process]
+    timing_plugin.pytest_collection_modifyitems(FakeConfig({}), items)
+    assert items == [ordinary, matrix, process]
+
+
+@pytest.mark.parametrize("field,key", (
+    ("deferred_paths", "tests/example.py"),
+    ("deferred_functions", "tests/example.py::test_required"),
+))
+def test_deferred_coverage_cannot_silently_override_mandatory_pins(field, key):
+    item = FakeItem("tests/example.py::test_required")
+    with pytest.raises(pytest.UsageError, match="mandatory.*deferred"):
+        timing_plugin.select_representatives(
+            [item], {field: {key: "exhaustive"}, "must_run": {item.nodeid: "required"}},
+        )
+
+
+def test_deferred_files_are_not_collected_by_routine_runner(monkeypatch):
+    """Expensive modules are excluded before imports; exhaustive tier files remain."""
+    paths = ["./tests/core/test_unit.py", "./tests/core/test_process.py"]
+    monkeypatch.setattr(test_buckets, "select_files", lambda *_: paths)
+    selected = test_buckets.select_profile_files({}, {"medium"}, {
+        "deferred_paths": {"tests/core/test_process.py": "process matrix"},
+    })
+    assert selected == paths[:1]
+    assert test_buckets.select_files({}, {"medium"}) == paths
+
+
 def test_mandatory_node_survives_a_curated_function_allowlist():
     ordinary = FakeItem("tests/example.py::test_boundary")
     pinned = FakeItem("tests/example.py::test_matrix[required]")
@@ -503,6 +547,7 @@ def test_representative_stale_checks_reject_missing_function_in_collected_file()
 
 
 def test_good_enough_policy_retains_required_boundary_proofs():
+    """Pin current lifecycle owners, intact refusal and independent archive durability."""
     policy = timing_plugin._load_baseline(timing_plugin.DEFAULT_PROFILES)
     profile = policy["profiles"]["good-enough"]
     representatives = profile["representative_functions"]
@@ -516,25 +561,31 @@ def test_good_enough_policy_retains_required_boundary_proofs():
             "test_subprocess_setup_teardown_failure_preserves_result_and_cleanup_evidence",
             "test_subprocess_default_raw_traceback_reaches_the_caller",
         },
-        "tests/core/test_execute_integration.py": {
-            "test_real_subprocess_core_pre_and_post_go_cancellation_are_not_reported_as_results",
-            "test_real_subprocess_core_default_raw_workload_failure_is_visible",
-        },
         "tests/core/test_repo_forks.py": {
             "test_interruption_after_state_fork_boundary_leaves_complete_discoverable_authority",
         },
         "tests/core/test_state_ref_save.py": {
-            "test_zip_store_publishes_the_same_state_ref_authority",
+            "test_zip_retained_save_refuses_before_capture",
+        },
+        "tests/core/test_zipstore_identity.py": {
+            "test_failed_zip_commit_keeps_previous_complete_archive_bytes",
+            "test_zip_post_publish_failure_preserves_complete_reopenable_replacement",
+        },
+        "tests/core/test_execute_managed_integration.py": {
+            "test_direct_bound_operation_rejects_malformed_config_before_mutation",
+            "test_unrelated_nested_function_keeps_its_own_normalization_boundary",
         },
         "tests/managed/test_repo_routing.py": {
-            "test_resume_uses_retained_checkpoint_authority_after_routes_change",
-            "test_interrupted_completed_zip_commit_preserves_prior_checkpoint",
+            "test_checkpoint_and_final_preserve_first_match_closure_child_authority",
+            "test_buffered_retained_publication_refuses_before_capture_or_commit",
+            "test_replica_or_index_failure_never_associates_partial_state",
         },
         "tests/models/test_qualification_contract.py": {
             "test_qualification_case_round_trip_retains_exact_w3_reference_without_live_handles",
         },
         "tests/models/test_qualification_persistence_fixtures.py": {
-            "test_experiment_data_v1_fixture_round_trips_actual_reader_input_without_payloads",
+            "test_experiment_data_v1_fixture_is_rejected_without_partial_install",
+            "test_current_history_preserves_original_fixture_facts_and_missing_columns",
             "test_value_receipt_fixture_round_trips_actual_value_reader_input",
         },
         "tests/qualification/test_ml_workflow_cpu.py": {
@@ -546,6 +597,8 @@ def test_good_enough_policy_retains_required_boundary_proofs():
     }
     for path, functions in required.items():
         assert functions <= set(representatives[path]["functions"])
+        assert path not in profile["deferred_paths"]
+        assert not {f"{path}::{function}" for function in functions}.intersection(profile["deferred_functions"])
 
     selected = test_buckets.select_profile_files(
         test_buckets.load_baseline(test_buckets.DEFAULT_BASELINE), {"smoke", "medium"}, profile,
@@ -559,7 +612,26 @@ def test_good_enough_policy_retains_required_boundary_proofs():
         "tests/core/test_execute_managed_integration.py::"
         "test_managed_decorator_orders_materialize_once_and_publish_one_final_state"
         "[subprocess-operation_afm-written_order0]"
+    ) not in profile["must_run"]
+    assert (
+        "tests/managed/test_result_codec.py::"
+        "test_related_metadata_roots_share_occurrences_and_recompose_exactly"
     ) in profile["must_run"]
+
+    exhaustive_files = set(test_buckets.select_files(
+        test_buckets.load_baseline(test_buckets.DEFAULT_BASELINE), {"smoke", "medium", "heavy"},
+    ))
+    for path in profile["deferred_paths"]:
+        assert "./" + path in exhaustive_files
+        assert "./" + path not in selected
+    for path in (
+        "tests/core/test_query_sqlite_concurrency.py",
+        "tests/core/test_sqlite_connection_ownership.py",
+        "tests/managed/test_failure_windows.py",
+        "tests/runtime/test_fork_safety.py",
+        "tests/execute/test_subprocess_cancellation.py",
+    ):
+        assert path in profile["deferred_paths"]
 
     for complete_path in (
         "tests/environments/test_environment_selection.py",

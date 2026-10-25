@@ -76,9 +76,9 @@ def test_definition_substitution_preserves_definition_values_inside_binding_cont
         bound = template.sub(child=value, members={"nested": (value,)})
         assert bound.child is value
         assert bound.members["nested"][0] is value
-        assert bound.concretize() == Definition(
+        assert bound.concretize().graph_equal(Definition(
             SymbolicEnvelope, child=value, members={"nested": (value,)},
-        ).concretize()
+        ).concretize())
 
     assert SymbolicLeaf.calls == 0
 

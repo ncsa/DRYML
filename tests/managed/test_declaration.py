@@ -12,7 +12,6 @@ from dryml.annotations import Annotation, attach_annotation, own_annotations
 from dryml.managed import (
     ManagedConfig,
     ManagedConfigError,
-    ManagedControlError,
     ManagedDeclarationError,
     managed_operation,
 )
@@ -236,21 +235,32 @@ def test_descriptor_rejects_different_member_names_and_preserves_passive_annotat
     assert own_annotations(second) == (attached_first,)
 
 
-def test_invalid_snapshot_or_arguments_do_not_run_the_authored_method():
-    """U3 completes every supported validation before lifecycle delegation."""
+def test_invalid_snapshot_or_arguments_do_not_run_the_authored_method(tmp_path):
+    """Invalid callback snapshots and arguments refuse before body/control publication."""
 
-    calls = []
+    from dryml.core import Repo, Serializable
+    from dryml.core.store.dir import DirStore
 
-    class Subject:
+    class Subject(Serializable):
+        """Record body entry without a closure-held mutable global."""
+
+        def __init__(self):
+            """Initialize the body-entry evidence on this live receiver."""
+            self.calls = []
+
         @managed_operation()
         def operation(self, value, *, managed):
-            calls.append(value)
+            """Record a value only after successful managed admission."""
+            self.calls.append(value)
 
     callbacks = [lambda object_, context: None]
-    config = ManagedConfig(callbacks=callbacks)
+    repo = Repo(DirStore(tmp_path / "state"))
+    subject = Subject(repo=repo)
+    config = ManagedConfig(state_repo=repo, callbacks=callbacks)
     callbacks.append(object())
     with pytest.raises(ManagedConfigError):
-        Subject().operation("value", managed=config)
+        subject.operation("value", managed=config)
     with pytest.raises(ManagedConfigError):
-        Subject().operation({"unsupported": object()})
-    assert calls == []
+        subject.operation({"unsupported": object()}, managed=ManagedConfig(state_repo=repo))
+    assert subject.calls == []
+    assert subject.operation.status(state_repo=repo).state == "not_started"

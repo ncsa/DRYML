@@ -1,11 +1,18 @@
+"""Run-aware retained training accounting and unchanged early-stopping policy.
+
+TrainState uses a closed versioned field envelope and rejects incompatible
+records atomically. Accounting helpers never publish state or run training.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import dataclass, fields
 from math import isfinite
 from typing import ClassVar
 
-from dryml.core.reference_values import StateRef
+from dryml.core import Node
+from dryml.core.node import require_saved
 
 from .measurements import TrainingObservation
 
@@ -195,7 +202,7 @@ class TrainState:
     validation/progress/native-callback work remaining after a normalized final
     update. ``pending_epoch_metrics`` preserves completed validation facts for a
     retrying progress boundary. U9 owns publication of ``pending_observation``
-    to ExperimentData. Its accompanying time, predecessor, attempt, and terminal
+    to ExperimentData. Its accompanying time, predecessor, stable run, and terminal
     fields are captured before the managed checkpoint, so retry reuses one history
     occurrence rather than assigning fresh facts after publication.
     """
@@ -221,9 +228,9 @@ class TrainState:
     safe_point_sequence: int = 0
     pending_observation: TrainingObservation | None = None
     pending_observation_time: int | None = None
-    pending_observation_prev_state_ref: StateRef | None = None
+    pending_observation_prev_state_ref: Node | None = None
     pending_observation_prev_row_key: str | None = None
-    pending_observation_attempt_id: str | None = None
+    pending_observation_run_id: str | None = None
     pending_observation_terminal: bool = False
 
     @property
@@ -261,9 +268,14 @@ class TrainState:
                 and self.safe_point_sequence == other.safe_point_sequence
                 and self.pending_observation == other.pending_observation
                 and self.pending_observation_time == other.pending_observation_time
-                and self.pending_observation_prev_state_ref == other.pending_observation_prev_state_ref
+                and (
+                    self.pending_observation_prev_state_ref is other.pending_observation_prev_state_ref
+                    or self.pending_observation_prev_state_ref is not None
+                    and other.pending_observation_prev_state_ref is not None
+                    and self.pending_observation_prev_state_ref.graph_equal(other.pending_observation_prev_state_ref)
+                )
                 and self.pending_observation_prev_row_key == other.pending_observation_prev_row_key
-                and self.pending_observation_attempt_id == other.pending_observation_attempt_id
+                and self.pending_observation_run_id == other.pending_observation_run_id
                 and self.pending_observation_terminal == other.pending_observation_terminal
             )
         if isinstance(other, str) or other is None:
@@ -271,55 +283,39 @@ class TrainState:
         return NotImplemented
 
     def __getstate__(self) -> dict[str, object]:
-        """Encode all current fields by name for version-tolerant persistence.
+        """Encode the closed version-2 run-aware field mapping without IO.
 
         Returns:
             A field-name mapping accepted by :meth:`__setstate__`.
 
         Side Effects:
-            None. Named state lets a newer slotted schema restore older pickles
-            that did not contain postlude or observation fields.
+            None. Incompatible older records are not converted.
         """
 
-        return {item.name: getattr(self, item.name) for item in fields(self)}
+        return {"version": 2, "fields": {item.name: getattr(self, item.name) for item in fields(self)}}
 
     def __setstate__(self, state: object) -> None:
-        """Restore current or legacy slotted TrainState pickle state.
+        """Restore a complete version-2 TrainState atomically.
 
         Args:
-            state: Named current/legacy state or Python's legacy slotted-state
-                tuple.
+            state: Closed versioned mapping produced by ``__getstate__``.
 
         Raises:
-            TypeError: If the pickle payload is not a supported state shape.
+            TypeError: If a current field has an incompatible type.
+            ValueError: If the envelope/version/field set or progress is invalid.
 
         Side Effects:
-            Initializes every missing newer field from its declared default so
-            historical checkpoints remain recoverable.
+            Installs validated current fields only; old/malformed input raises
+            without changing this receiver or the persisted source.
         """
 
-        if isinstance(state, tuple) and len(state) == 2:
-            if state[0] is not None:
-                raise TypeError("Unsupported TrainState instance pickle state.")
-            state = state[1]
-        if isinstance(state, (tuple, list)):
-            if len(state) != 3:
-                raise TypeError("Unsupported TrainState legacy slot state.")
-            state = dict(zip(("epoch", "step", "phase"), state))
-        if not isinstance(state, Mapping):
-            raise TypeError("Unsupported TrainState pickle state.")
+        if type(state) is not dict or set(state) != {"version", "fields"} or type(state["version"]) is not int or state["version"] != 2:
+            raise ValueError("Unsupported TrainState version.")
+        state = state["fields"]
         field_map = {item.name: item for item in fields(self)}
-        unknown = set(state).difference(field_map)
-        if unknown:
-            raise ValueError(f"Unknown TrainState pickle fields: {sorted(unknown)!r}.")
-        values = {}
-        for name, item in field_map.items():
-            if name in state:
-                values[name] = state[name]
-            elif item.default is not MISSING:
-                values[name] = item.default
-            else:
-                values[name] = item.default_factory()
+        if type(state) is not dict or set(state) != set(field_map):
+            raise ValueError("TrainState requires exactly the current fields.")
+        values = dict(state)
         self._validate_restored_state(values)
         for item in fields(self):
             value = values[item.name]
@@ -330,7 +326,7 @@ class TrainState:
         """Validate a complete decoded state before installing any field.
 
         Args:
-            values: Complete current-schema field mapping with legacy defaults.
+            values: Complete current-schema field mapping.
 
         Raises:
             TypeError: If a field has an incompatible exact type.
@@ -399,18 +395,18 @@ class TrainState:
             raise TypeError("TrainState pending_observation must be a TrainingObservation or None.")
         observation_time = counter("pending_observation_time", nullable=True)
         predecessor = values["pending_observation_prev_state_ref"]
-        if predecessor is not None and type(predecessor) is not StateRef:
-            raise TypeError("TrainState pending_observation_prev_state_ref must be a StateRef or None.")
+        if predecessor is not None:
+            require_saved(predecessor)
         predecessor_key = values["pending_observation_prev_row_key"]
         if predecessor_key is not None and (type(predecessor_key) is not str or not predecessor_key):
             raise TypeError("TrainState pending_observation_prev_row_key must be a nonempty string or None.")
-        attempt_id = values["pending_observation_attempt_id"]
-        if attempt_id is not None and (type(attempt_id) is not str or not attempt_id):
-            raise TypeError("TrainState pending_observation_attempt_id must be a nonempty string or None.")
+        run_id = values["pending_observation_run_id"]
+        if run_id is not None and (type(run_id) is not str or not run_id):
+            raise TypeError("TrainState pending_observation_run_id must be a nonempty string or None.")
         if type(values["pending_observation_terminal"]) is not bool:
             raise TypeError("TrainState pending_observation_terminal must be an exact bool.")
         if observation is None:
-            if any(value is not None for value in (observation_time, predecessor, predecessor_key, attempt_id)):
+            if any(value is not None for value in (observation_time, predecessor, predecessor_key, run_id)):
                 raise ValueError("TrainState pending observation details require an observation.")
             if values["pending_observation_terminal"]:
                 raise ValueError("TrainState terminal observation marker requires an observation.")

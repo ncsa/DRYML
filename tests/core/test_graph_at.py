@@ -35,3 +35,29 @@ def test_graph_at_returns_completed_endpoint_forms_without_lookup(monkeypatch):
     assert parent.graph_at('$[@param("cls")]') is GraphAtLeaf
     with pytest.raises(GraphPathError):
         parent.graph_at('$[@param("missing")]')
+
+
+def test_node_at_boundaries_are_independent_and_endpoints_are_nodes():
+    leaf = Definition(value=1)
+    middle = Definition(child=leaf)
+    root = Definition(ref=middle.ref(), quoted=middle.quote(), scalar=3, container=[leaf])
+    assert root.at("$.ref") is middle
+    assert root.at("$.quoted") is middle
+    with pytest.raises(GraphPathError, match="reference"):
+        root.at("$.ref.child")
+    with pytest.raises(GraphPathError, match="quotation"):
+        root.at("$.quoted.child", traverse_refs=True)
+    assert root.at("$.ref.child", traverse_refs=True) is leaf
+    assert root.at("$.quoted.child", traverse_quoted=True) is leaf
+    for path in ("$.scalar", "$.container", "$.container[0].value"):
+        with pytest.raises(GraphPathError, match="Node endpoint"):
+            root.at(path)
+    with pytest.raises(TypeError, match="bool"):
+        root.at("$", traverse_refs=1)
+    both = Definition(both=DefLink.finalized(EdgeKind.REF, middle.quote()))
+    assert both.at("$.both") is middle
+    with pytest.raises(GraphPathError, match="reference"):
+        both.at("$.both.child", traverse_quoted=True)
+    with pytest.raises(GraphPathError, match="quotation"):
+        both.at("$.both.child", traverse_refs=True)
+    assert both.at("$.both.child", traverse_refs=True, traverse_quoted=True) is leaf

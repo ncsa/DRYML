@@ -10,35 +10,28 @@ from __future__ import annotations
 import copy
 import json
 import math
-import os
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 from uuid import uuid4
 
-from dryml.core import ObjectRef, ObjectSelector, Ref, StateRef
+from dryml.core import Node, ObjectSelector, Ref
+from dryml.core.node import require_saved
+from dryml.core.node_codec import decode_node_graph, encode_node_graph
+from dryml.core.node_prepare import NodePreparation
 from dryml.core.cardinality import Cardinality, CardinalityKind
 from dryml.core.object import Serializable
-from dryml.core.reference_json import (
-    ReferenceJSONCodecError,
-    _decode_legacy_reference_json,
-    _encode_legacy_reference_json,
-    decode_reference_json,
-    encode_reference_json,
-)
-from dryml.core.repo import RepoLoadError, RepoSaveError
-from dryml.core.store.records import StateAliasRecord
+from dryml.core.repo import RepoSaveError
+from dryml.core.store.records import NodeNameRecord
 from dryml.core.store.store import StoreAliasConflictError, StoreAuthorityError
 
 
 _FORMAT = "dryml-experiment-data"
-_VERSION = 3
-_READABLE_VERSIONS = frozenset((1, 2, 3))
+_VERSION = 4
+_READABLE_VERSIONS = frozenset((4,))
 _FILENAME = "experiment_data.json"
-# Retain the established alias so legacy histories migrate in place when their
-# next immutable current-version snapshot becomes current.
-_ALIAS = "experiment_data_current_v1"
+_ALIAS = "experiment_data_current_v4"
 _MAX_BYTES = 64 * 1024 * 1024
 _MAX_ROWS = 100_000
 _MAX_COLUMNS = 1_024
@@ -71,8 +64,21 @@ class ExperimentDataError(ValueError):
 
 def _copy(value):
     """Deep-copy history data without replacing the private missing sentinel."""
-
+    if isinstance(value, Node) or value is _MISSING:
+        return value
+    if isinstance(value, dict):
+        return type(value)((key, _copy(item)) for key, item in value.items())
+    if isinstance(value, (tuple, list)):
+        return type(value)(_copy(item) for item in value)
     return copy.deepcopy(value, {id(_MISSING): _MISSING})
+
+
+def _same(left, right):
+    if isinstance(left, Node):
+        return isinstance(right, Node) and left.graph_equal(right)
+    if isinstance(left, dict):
+        return isinstance(right, dict) and left.keys() == right.keys() and all(_same(left[key], right[key]) for key in left)
+    return left == right
 
 
 def _reject_duplicate_keys(pairs):
@@ -163,44 +169,34 @@ def _decode_cell(value: object) -> object:
     raise ExperimentDataError(f"Unsupported or malformed scalar tag {tag!r}.")
 
 
-def _encode_reference(value: StateRef, *, version: int) -> dict[str, object]:
-    if not isinstance(value, StateRef):
-        raise ExperimentDataError("History reference values must be exact StateRefs.")
+def _encode_reference(value: Node, *, version: int) -> dict[str, object]:
     try:
-        if version >= 3:
-            return encode_reference_json(value)
-        return _encode_legacy_reference_json(value, version=version)
-    except ReferenceJSONCodecError as error:
-        raise ExperimentDataError("History StateRef cannot be encoded as portable JSON.") from error
+        require_saved(value)
+        return encode_node_graph(NodePreparation((value,)))
+    except (TypeError, ValueError) as error:
+        raise ExperimentDataError("History requires a complete SavedNode.") from error
 
 
-def _encode_ref(value: StateRef, *, version: int = _VERSION) -> dict[str, object]:
+def _encode_ref(value: Node, *, version: int = _VERSION) -> dict[str, object]:
     return {"tag": "state_ref", "value": _encode_reference(value, version=version)}
 
 
 def _decode_ref(
         value: object, *, nullable: bool = False, version: int = _VERSION,
-) -> StateRef | None:
+) -> Node | None:
     if value is None and nullable:
         return None
     if not isinstance(value, Mapping) or set(value) != {"tag", "value"} or value["tag"] != "state_ref":
         raise ExperimentDataError("History references require an exact state_ref record.")
     try:
-        reference = (
-            decode_reference_json(value["value"])
-            if version >= 3
-            else _decode_legacy_reference_json(
-                value["value"], kind="state_ref", version=version,
-            )
-        )
-        if not isinstance(reference, StateRef):
-            raise ReferenceJSONCodecError("History reference is not a StateRef.")
+        reference = decode_node_graph(value["value"])
+        require_saved(reference)
         return reference
-    except ReferenceJSONCodecError as error:
+    except (TypeError, ValueError) as error:
         raise ExperimentDataError("History reference record is malformed.") from error
 
 
-def _mapping(value: object, expected: tuple[str, ...], what: str) -> tuple[tuple[str, StateRef], ...]:
+def _mapping(value: object, expected: tuple[str, ...], what: str) -> tuple[tuple[str, Node], ...]:
     if value is None:
         return ()
     if not isinstance(value, Mapping):
@@ -215,9 +211,11 @@ def _mapping(value: object, expected: tuple[str, ...], what: str) -> tuple[tuple
     return tuple((name, _require_state_ref(value[name], what)) for name in names)
 
 
-def _require_state_ref(value: object, what: str) -> StateRef:
-    if not isinstance(value, StateRef):
-        raise ExperimentDataError(f"{what} values must be exact StateRefs.")
+def _require_state_ref(value: object, what: str) -> Node:
+    try:
+        require_saved(value)
+    except (TypeError, ValueError) as error:
+        raise ExperimentDataError(f"{what} values must be complete SavedNodes.") from error
     return value
 
 
@@ -225,11 +223,11 @@ class ExperimentData(Serializable):
     """Persist a checkpoint history table for one projected Experiment subject.
 
     Args:
-        experiment: Default-policy :class:`~dryml.core.ObjectRef` projection of
+        experiment: State-weakened :class:`~dryml.core.Node` object projection of
             the Experiment graph. It is retained as a non-materializing ``Ref``.
 
     Raises:
-        TypeError: If ``experiment`` is not an ObjectRef projection.
+        TypeError: If ``experiment`` is not an object-view Node projection.
 
     Side Effects:
         Construction creates only an empty in-memory history. It does not import
@@ -241,9 +239,9 @@ class ExperimentData(Serializable):
     history snapshot through U2 compare-and-set authority.
     """
 
-    def __init__(self, experiment: Ref[ObjectRef]) -> None:
-        if not isinstance(experiment, ObjectRef):
-            raise TypeError("ExperimentData requires an Experiment ObjectRef projection.")
+    def __init__(self, experiment: Ref[Node]) -> None:
+        if not isinstance(experiment, Node) or not experiment.graph_equal(experiment.object_view()):
+            raise TypeError("ExperimentData requires an Experiment object-view Node.")
         self.experiment = experiment
         self._columns: tuple[str, ...] = ()
         self._rows: OrderedDict[str, dict[str, object]] = OrderedDict()
@@ -283,7 +281,7 @@ class ExperimentData(Serializable):
         Mutating returned nested mappings or containers cannot alter this Object.
 
         Returns:
-            A newly constructed pandas ``DataFrame`` with exact StateRef cells.
+            A newly constructed pandas ``DataFrame`` with exact SavedNode cells.
 
         Raises:
             ImportError: If the required pandas dependency is unavailable.
@@ -299,7 +297,7 @@ class ExperimentData(Serializable):
         for row in self._rows.values():
             facts = row["facts"]
             record = {
-                name: (pd.NA if facts[name] is _MISSING else copy.deepcopy(facts[name]))
+                name: (pd.NA if facts[name] is _MISSING else _copy(facts[name]))
                 for name in _FACT_NAMES
             }
             record.update({
@@ -325,48 +323,54 @@ class ExperimentData(Serializable):
         return pd.DataFrame.from_records(records, columns=columns)
 
     @classmethod
-    def _definition(cls, experiment: ObjectRef | ObjectSelector):
+    def _definition(cls, experiment: Node | ObjectSelector):
         experiment = cls._subject_reference(experiment)
         return cls.defn(Ref(experiment)).concretize()
 
     @staticmethod
-    def _subject_reference(experiment: ObjectRef | ObjectSelector) -> ObjectRef:
+    def _subject_reference(experiment: Node | ObjectSelector) -> Node:
         """Normalize a query selector to persistent Experiment association authority."""
 
         if isinstance(experiment, ObjectSelector):
             experiment = experiment.reference
-        if not isinstance(experiment, ObjectRef):
+        if not isinstance(experiment, Node):
             raise TypeError(
                 "ExperimentData requires an Experiment ObjectRef or ObjectSelector projection."
             )
-        return experiment
+        return experiment.object_view()
 
     @classmethod
-    def _load_current(cls, experiment: ObjectRef, *, repo, store):
-        cdef = cls._definition(experiment)
-        evidence = repo.reference_evidence(cdef)
-        references = {item.object_ref for item in evidence.declarations}
-        references.update(item.state_ref.object for item in evidence.states)
-        if not references:
-            return None, None, cdef
-        if len(references) != 1:
-            raise StoreAuthorityError("ExperimentData identity authority is ambiguous.")
-        reference = next(iter(references))
-        try:
-            current = repo.resolve_state_alias(reference, _ALIAS, store=store)
-        except KeyError as error:
-            raise StoreAuthorityError("ExperimentData identity exists without a current history alias.") from error
+    def _load_current(cls, experiment: Node, *, repo, store):
+        name = store.read_node_name(cls._current_name(experiment))
+        if name is None:
+            return None, None
+        current = store.read_node(name.root_digest, kind="saved")
         loaded = repo.load_state_ref(current, reuse_live="never", cache="none", source_store=store)
-        if not isinstance(loaded, cls) or loaded.experiment != experiment:
+        if not isinstance(loaded, cls) or not loaded.experiment.graph_equal(experiment):
             raise StoreAuthorityError("Current ExperimentData alias has incompatible history authority.")
-        return loaded, current, cdef
+        return loaded, current
+
+    @staticmethod
+    def _current_name(experiment):
+        return _ALIAS + "-" + experiment.object_projection_digest()
 
     @classmethod
-    def find(cls, experiment: Ref[ObjectRef] | ObjectSelector, *, repo, store=None):
+    def _save_current(cls, history, *, repo, store, expected):
+        saved = repo.save_object(history, store=store)
+        name = cls._current_name(history.experiment)
+        record = NodeNameRecord(name, "saved", NodePreparation((saved,)).digest(saved, domain="dryml-saved-root/v1"))
+        previous = None if expected is None else NodeNameRecord(name, "saved", NodePreparation((expected,)).digest(expected, domain="dryml-saved-root/v1"))
+        store.compare_and_set_node_name(record, expected=previous)
+        if store.read_node_name(name) != record:
+            raise StoreAliasConflictError("ExperimentData current name changed after publication.")
+        return saved
+
+    @classmethod
+    def find(cls, experiment: Ref[Node] | ObjectSelector, *, repo, store=None):
         """Load the Store-current history for one projected Experiment subject.
 
         Args:
-            experiment: Projected Experiment ObjectRef or ObjectSelector.
+            experiment: Projected Experiment object-view Node or ObjectSelector.
             repo: Connected Repo holding declaration and state authority.
             store: Optional selected Store. It is required for ambiguous Store
                 topology and restricts loading to that authority.
@@ -383,20 +387,20 @@ class ExperimentData(Serializable):
 
         experiment = cls._subject_reference(experiment)
         if store is None:
-            store = repo._selected_writable_physical_store(None, "find ExperimentData")
-        loaded, _, _ = cls._load_current(experiment, repo=repo, store=store)
+            store = repo._selected_writable_physical_store(None, "find ExperimentData", record_family="dryml-node-graph/v1")
+        loaded, _ = cls._load_current(experiment, repo=repo, store=store)
         return loaded
 
     @classmethod
-    def get_or_create(cls, experiment: Ref[ObjectRef] | ObjectSelector, *, repo, store=None):
+    def get_or_create(cls, experiment: Ref[Node] | ObjectSelector, *, repo, store=None):
         """Return the unique current history, creating or safely recovering it.
 
-        A new history uses the U2 declaration claim and absent-alias CAS. Recovery
+        A new history uses a format-4 absent-name CAS. Recovery
         can adopt only one validated empty initial snapshot; a populated or
         ambiguous alias-less history remains an authority error.
 
         Args:
-            experiment: Projected Experiment ObjectRef or ObjectSelector.
+            experiment: Projected Experiment object-view Node or ObjectSelector.
             repo: Connected Repo holding or receiving history authority.
             store: Optional selected writable Store. Omit it only for an
                 unambiguous writable physical Store topology.
@@ -405,7 +409,7 @@ class ExperimentData(Serializable):
             A fresh or newly initialized current ExperimentData object.
 
         Raises:
-            TypeError: If ``experiment`` is not a projected ObjectRef or
+            TypeError: If ``experiment`` is not a projected Node or
                 ObjectSelector.
             StoreAuthorityError: If initialization evidence is incomplete,
                 populated, malformed, or ambiguous.
@@ -413,65 +417,41 @@ class ExperimentData(Serializable):
                 cannot complete.
 
         Side Effects:
-            May declare/build an Object, publish its empty immutable snapshot, or
-            CAS-adopt a single recovered initial snapshot in the selected Store.
+            May construct/publish an empty history or CAS-adopt one recovered
+            empty snapshot through the selected Store's format-4 Node name.
         """
 
         experiment = cls._subject_reference(experiment)
-        selected = repo._selected_writable_physical_store(store, "create ExperimentData")
-        cdef = cls._definition(experiment)
-        try:
-            loaded, _, _ = cls._load_current(experiment, repo=repo, store=selected)
-        except StoreAuthorityError as error:
-            if "without a current history alias" not in str(error):
-                raise
-            loaded = None
+        selected = repo._selected_writable_physical_store(store, "create ExperimentData", record_family="dryml-node-graph/v1")
+        loaded, _ = cls._load_current(experiment, repo=repo, store=selected)
         if loaded is not None:
             return loaded
-
-        reference = repo.get_or_declare_object_ref(cdef, store=selected)
-        try:
-            current = repo.resolve_state_alias(reference, _ALIAS, store=selected)
-        except KeyError:
-            current = None
-        if current is not None:
-            return repo.load_state_ref(current, reuse_live="never", cache="none", source_store=selected)
-
-        evidence = repo.reference_evidence(cdef)
-        states = tuple(item.state_ref for item in evidence.states if item.state_ref.object == reference)
-        if states:
-            if len(states) != 1:
-                raise StoreAuthorityError("ExperimentData recovery found multiple alias-less snapshots.")
-            recovered = repo.load_state_ref(states[0], reuse_live="never", cache="none", source_store=selected)
-            if not isinstance(recovered, cls) or recovered.experiment != experiment or recovered._rows:
+        candidates = tuple(selected.query().saved().sel(cls._definition(experiment)).iter())
+        if candidates:
+            if len(candidates) != 1:
+                raise StoreAuthorityError("ExperimentData recovery requires one empty snapshot.")
+            recovered = repo.load_state_ref(candidates[0], reuse_live="never", cache="none", source_store=selected)
+            if not isinstance(recovered, cls) or recovered._rows or not recovered.experiment.graph_equal(experiment):
                 raise StoreAuthorityError("Only one valid empty ExperimentData snapshot may be adopted.")
+            saved = candidates[0]
+            record = NodeNameRecord(cls._current_name(experiment), "saved", NodePreparation((saved,)).digest(saved, domain="dryml-saved-root/v1"))
             try:
-                selected.compare_and_set_state_alias(
-                    StateAliasRecord(_ALIAS, reference, states[0].digest()),
-                    expected_state_ref_digest=None,
-                )
-                selected.commit()
+                selected.compare_and_set_node_name(record, expected=None)
             except StoreAliasConflictError:
-                winner = repo.resolve_state_alias(reference, _ALIAS, store=selected)
-                return repo.load_state_ref(winner, reuse_live="never", cache="none", source_store=selected)
-            winner = repo.resolve_state_alias(reference, _ALIAS, store=selected)
-            if winner != states[0]:
-                raise StoreAuthorityError("ExperimentData initialization alias changed unexpectedly.")
+                return cls.find(experiment, repo=repo, store=selected)
             return recovered
-
-        created = repo.build_object_ref(reference, store=selected)
+        created = cls(experiment)
         try:
-            repo.save_object_if_current(created, alias=_ALIAS, expected=None, store=selected)
+            cls._save_current(created, repo=repo, store=selected, expected=None)
         except StoreAliasConflictError:
-            winner = repo.resolve_state_alias(reference, _ALIAS, store=selected)
-            return repo.load_state_ref(winner, reuse_live="never", cache="none", source_store=selected)
+            return cls.find(experiment, repo=repo, store=selected)
         return created
 
     def add_row(
-            self, *, expected_artifacts: Sequence[str], state_ref: Ref[StateRef],
-            prev_state_ref: Ref[StateRef | None], time: int, examples_seen: int,
+            self, *, expected_artifacts: Sequence[str], state_ref: Ref[Node],
+            prev_state_ref: Ref[Node | None], time: int, examples_seen: int,
             parameters=None, dataset_size: Cardinality = Cardinality.UNKNOWN,
-            training_loss: float | None = None, eval_artifacts: Mapping[str, StateRef] | None = None,
+            training_loss: float | None = None, eval_artifacts: Mapping[str, Node] | None = None,
             scalar_values: Mapping[str, object] | None = None,
             evaluation_status: Literal["pending", "completed", "failed"] = "pending",
             row_key: str | None = None, prev_row_key: str | None = None) -> str:
@@ -483,8 +463,8 @@ class ExperimentData(Serializable):
 
         Args:
             expected_artifacts: Ordered, unique configured Artifact names.
-            state_ref: Exact checkpoint StateRef described by the row.
-            prev_state_ref: Optional exact predecessor StateRef.
+            state_ref: Complete checkpoint SavedNode described by the row.
+            prev_state_ref: Optional complete predecessor SavedNode.
             time: Non-negative observation timestamp in milliseconds.
             examples_seen: Non-negative retained training exposure.
             parameters: Optional object exposing non-negative ``total`` and
@@ -547,8 +527,8 @@ class ExperimentData(Serializable):
         return key
 
     def update_row(
-            self, row_key: str, *, artifact_inputs: Mapping[str, StateRef] | None = None,
-            eval_artifacts: Mapping[str, StateRef], scalar_values: Mapping[str, object],
+            self, row_key: str, *, artifact_inputs: Mapping[str, Node] | None = None,
+            eval_artifacts: Mapping[str, Node], scalar_values: Mapping[str, object],
             evaluation_status: Literal["pending", "completed", "failed"],
             failed_artifact: str | None = None) -> None:
         """Merge Artifact inputs/results into an existing checkpoint row.
@@ -558,8 +538,8 @@ class ExperimentData(Serializable):
 
         Args:
             row_key: Existing opaque checkpoint occurrence key.
-            artifact_inputs: Optional ordered initial Artifact StateRef mapping.
-            eval_artifacts: Ordered completed Artifact StateRef mapping.
+            artifact_inputs: Optional ordered initial Artifact SavedNode mapping.
+            eval_artifacts: Ordered completed Artifact SavedNode mapping.
             scalar_values: Supported scalar result mapping.
             evaluation_status: Requested pending, failed, or completed status.
             failed_artifact: Required expected incomplete name for failed status.
@@ -587,7 +567,7 @@ class ExperimentData(Serializable):
             incoming = _mapping(supplied, expected, field)
             values = dict(candidate[field])
             for name, reference in incoming:
-                if name in values and values[name] != reference:
+                if name in values and not values[name].graph_equal(reference):
                     raise ExperimentDataError(f"{field} cannot replace existing Artifact evidence for {name!r}.")
                 values[name] = reference
             candidate[field] = tuple((name, values[name]) for name in expected if name in values)
@@ -606,10 +586,10 @@ class ExperimentData(Serializable):
         self._pending_operations.append(("update", key, _copy(candidate)))
 
     def publish(self, *, repo, store=None):
-        """CAS-publish queued row changes and return the resulting StateRef.
+        """CAS-publish queued row changes and return the resulting SavedNode.
 
         Fresh history is loaded for each attempt, queued idempotent mutations are
-        reapplied, and U2's current-alias CAS publishes one immutable snapshot.
+        reapplied, and the format-4 current-name CAS publishes one immutable snapshot.
         At most eight stale-writer retries are attempted; failures retain local
         changes for caller inspection or retry.
 
@@ -618,7 +598,7 @@ class ExperimentData(Serializable):
             store: Optional explicit writable Store authority.
 
         Returns:
-            The exact newly current ExperimentData StateRef.
+            The exact newly current ExperimentData SavedNode.
 
         Raises:
             StoreAliasConflictError: If eight stale-writer attempts lose CAS.
@@ -631,7 +611,7 @@ class ExperimentData(Serializable):
             replace only the selected Store's current history alias.
         """
 
-        selected = repo._selected_writable_physical_store(store, "publish ExperimentData")
+        selected = repo._selected_writable_physical_store(store, "publish ExperimentData", record_family="dryml-node-graph/v1")
         operations = _copy(self._pending_operations)
         if not operations:
             if self.last_state_ref is None:
@@ -644,8 +624,8 @@ class ExperimentData(Serializable):
             try:
                 for operation in operations:
                     current._apply_operation(operation)
-                result = repo.save_object_if_current(
-                    current, alias=_ALIAS, expected=current.last_state_ref, store=selected,
+                result = self._save_current(
+                    current, repo=repo, expected=current.last_state_ref, store=selected,
                 )
             except StoreAliasConflictError:
                 continue
@@ -684,7 +664,7 @@ class ExperimentData(Serializable):
         for field in ("artifact_inputs", "eval_artifacts"):
             values = dict(current[field])
             for name, reference in target[field]:
-                if name in values and values[name] != reference:
+                if name in values and not values[name].graph_equal(reference):
                     raise ExperimentDataError(f"{field} cannot replace existing Artifact evidence for {name!r}.")
                 values[name] = reference
             current[field] = tuple((name, values[name]) for name in current["expected_artifacts"] if name in values)
@@ -700,8 +680,8 @@ class ExperimentData(Serializable):
         self._validate_row(current)
         self._install_row(key, current)
 
-    def _validate_association(self, reference: StateRef, what: str):
-        if reference.object_projection().reference != self.experiment:
+    def _validate_association(self, reference: Node, what: str):
+        if not reference.object_projection_equal(self.experiment):
             raise ExperimentDataError(f"{what} does not project to this ExperimentData subject.")
 
     @staticmethod
@@ -814,7 +794,7 @@ class ExperimentData(Serializable):
     @staticmethod
     def _same_facts(left, right):
         return (
-            left["facts"] == right["facts"]
+            _same(left["facts"], right["facts"])
             and left["expected_artifacts"] == right["expected_artifacts"]
         )
 
@@ -856,11 +836,11 @@ class ExperimentData(Serializable):
         return {"format": _FORMAT, "version": version, "columns": columns, "rows": rows}
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
-        """Write the closed, schema-controlled v3 JSON history payload.
+        """Write the closed, schema-controlled v4 Node JSON history payload.
 
         Args:
             dest_dir: Framework-provided empty payload directory.
-            codec: Accepted Object state-codec marker; v3 payload semantics are
+            codec: Accepted Object state-codec marker; v4 payload semantics are
                 fixed independently of this marker.
 
         Raises:
@@ -877,7 +857,7 @@ class ExperimentData(Serializable):
         Path(dest_dir, _FILENAME).write_bytes(raw)
 
     def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
-        """Decode and validate a v1, v2, or v3 history before replacing local rows.
+        """Validate v4 history before replacing rows; reject older versions intact.
 
         Args:
             src_dir: Framework payload directory containing ``experiment_data.json``.
@@ -990,16 +970,9 @@ class ExperimentData(Serializable):
                 raise ExperimentDataError(f"{what} entries require exactly name and state_ref.")
             name = _name(entry["name"], "Artifact name")
             try:
-                reference = (
-                    decode_reference_json(entry["state_ref"])
-                    if version >= 3
-                    else _decode_legacy_reference_json(
-                        entry["state_ref"], kind="state_ref", version=version,
-                    )
-                )
-                if not isinstance(reference, StateRef):
-                    raise ReferenceJSONCodecError("Artifact reference is not a StateRef.")
-            except ReferenceJSONCodecError as error:
+                reference = decode_node_graph(entry["state_ref"])
+                require_saved(reference)
+            except (TypeError, ValueError) as error:
                 raise ExperimentDataError(f"{what} contains a malformed StateRef.") from error
             result.append((name, reference))
         names = tuple(name for name, _ in result)

@@ -64,7 +64,7 @@ def test_current_process_save_updates_v3_cached_and_stored_membership(tmp_path):
 def _ready_store(path, *, destination=None):
     config = SQLiteQueryIndexConfig(path=destination, journal_mode="delete")
     store = DirStore(path, query_index=config)
-    store.write_definition_record(DefinitionRecord(Definition(RefreshLeaf, "root").concretize()))
+    store.publish_node(Definition(RefreshLeaf, "root").concretize())
     store.rebuild_query_index()
     return store
 
@@ -75,9 +75,9 @@ def _count_cycles(monkeypatch, *stores):
         index = store.open_query_index()
         original = index.refresh
 
-        def refresh(policy, *, stats=None, _original=original, _store=store):
+        def refresh(policy, *, stats=None, _original=original, _store=store, **kwargs):
             calls.append((_store, policy))
-            return _original(policy, stats=stats)
+            return _original(policy, stats=stats, **kwargs)
 
         monkeypatch.setattr(index, "refresh", refresh)
     return calls
@@ -95,9 +95,9 @@ def test_u2_shared_branches_fresh_request_and_direct_construction(tmp_path, monk
     assert calls == []
     first = base.cdefs().explain(analyze=True)
     second = copy(base).stored().explain(analyze=True)
-    assert first.refresh_action == "validate" and first.store_scan_count == 2
+    assert first.refresh_action == "validate" and first.store_scan_count == 0
     assert second.refresh is True and second.refresh_action == "reused"
-    assert second.store_scan_count == 1 and len(calls) == 1
+    assert second.store_scan_count == 0 and len(calls) == 1
     base.refresh(True).count()
     assert len(calls) == 2
     direct = IdentityQuery(base.source, refresh_policy=True)
@@ -220,8 +220,9 @@ def test_u2_same_producer_operands_preserve_external_scope_bindings(
     for query in (combined, combined.closure(), combined.nested(),
                   combined.nested().owners(), combined.nested().targets()):
         query.count()
-    assert calls == []
-    assert b.query_index_is_dirty() and c.query_index_is_dirty()
+    assert set(calls) == {(b, "auto"), (c, "auto")}
+    assert not b.query_index_is_dirty() and not c.query_index_is_dirty()
+    calls.clear()
     combined.refresh(True).count()
     assert len(calls) == 3 and {store for store, _ in calls} == {a, b, c}
     assert all(policy is True for _, policy in calls)
@@ -274,14 +275,14 @@ def test_u2_publication_failure_is_retryable_and_demand_recovery_outranks_reuse(
         raise primary
 
     with monkeypatch.context() as scoped:
-        scoped.setattr(index, "_clear_dirty", fail)
+        scoped.setattr(index, "_ack_store_projection", fail)
         with pytest.raises(QueryIndexError) as error:
             query.count()
         assert error.value is primary
     assert captures[-1].store_scan_count == 1 and captures[-1].refresh_action == "rebuild"
-    assert index.path.exists() and store.query_index_is_dirty()
+    assert index.path.exists() and index.status().state == "ready"
     assert not index._connections._leases and not index._build_claim_path().exists()
-    assert query.explain(analyze=True).refresh_action == "rebuild"
+    assert query.explain(analyze=True).refresh_action == "validate"
     assert query.explain(analyze=True).refresh_action == "reused"
     store.mark_query_index_dirty()
     bounded = replace(query.cdefs().stored(), take_limit=1)
@@ -303,16 +304,16 @@ def test_u3_equivalent_destinations_coalesce_in_both_store_repo_orders(tmp_path,
         index = store.open_query_index()
         original = index.refresh
 
-        def refresh(policy, *, stats=None, _original=original):
+        def refresh(policy, *, stats=None, _original=original, **kwargs):
             calls.append(policy)
-            return _original(policy, stats=stats)
+            return _original(policy, stats=stats, **kwargs)
 
         monkeypatch.setattr(index, "refresh", refresh)
     monkeypatch.setattr(repo._query_index, "refresh", lambda *a, **kw: pytest.fail("live Repo bulk refresh"))
     for left, right in ((first.query(), repo.query()), (repo.query(), first.query())):
         explanation = left.union(right).refresh(True).explain(analyze=True)
         assert explanation.refresh_action == "validate"
-        assert explanation.store_scan_count == 2  # maintenance, then one authority domain
+        assert explanation.store_scan_count == 0  # compact certificate validation only
     assert calls == [True, True]
 
 
@@ -334,8 +335,8 @@ def test_u3_conflicting_presentations_refuse_before_maintenance(tmp_path, monkey
         index.dirty_path = tmp_path / "other-dirty"
     else:
         index.store = DirStore(tmp_path / "foreign", query_index="sqlite")
-    for store in (first, second):
-        monkeypatch.setattr(store.open_query_index(), "refresh", lambda *a, **kw: pytest.fail("conflict performed maintenance"))
+    from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "refresh", lambda *a, **kw: pytest.fail("conflict performed maintenance"))
     query = Repo((first, second)).query() if within_repo else first.query().union(second.query())
     with pytest.raises(QueryIndexIncompatible):
         query.refresh(True).count()
@@ -362,7 +363,7 @@ def test_u3_backend_manager_path_mismatch_refuses_before_maintenance(tmp_path, m
 def test_u3_independent_domains_each_validate(tmp_path):
     stores = tuple(_ready_store(tmp_path / name) for name in ("a", "b"))
     explanation = Repo(stores).query().refresh(True).explain(analyze=True)
-    assert explanation.refresh_action == "validate" and explanation.store_scan_count == 4
+    assert explanation.refresh_action == "validate" and explanation.store_scan_count == 0
 
 
 def test_u3_demand_consumer_rejects_conflicting_repo_presentations(tmp_path, monkeypatch):
@@ -370,8 +371,8 @@ def test_u3_demand_consumer_rejects_conflicting_repo_presentations(tmp_path, mon
     first = _ready_store(tmp_path / "store")
     second = DirStore(first.base_dir, query_index=SQLiteQueryIndexConfig(path=tmp_path / "second.sqlite"))
     first.mark_query_index_dirty()
-    for store in (first, second):
-        monkeypatch.setattr(store.open_query_index(), "refresh", lambda *a, **kw: pytest.fail("conflict maintained"))
+    from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "refresh", lambda *a, **kw: pytest.fail("conflict maintained"))
     with pytest.raises(QueryIndexIncompatible):
         Repo((first, second)).query().cdefs().stored().take(1)
 
@@ -408,14 +409,18 @@ def test_u3_optional_absence_exact_positive_scan_controls(tmp_path, monkeypatch,
     import warnings
     import dryml.core.store.dir as dir_module
     from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+    from tests.core.test_local_state_discovery import DiscoveryValue
 
     store = DirStore(tmp_path / "optional", query_index="auto")
-    root = Definition(RefreshLeaf, "root").concretize()
-    store.write_definition_record(DefinitionRecord(root))
-    query = store.query().sel(root).cdefs().stored().refresh(policy).scan_policy(scan_policy)
+    repo = Repo(store)
+    saved = repo.save(DiscoveryValue("root", repo=repo))
+    query = store.query().local_states().state_key(saved.state.key).refresh(policy).scan_policy(scan_policy)
     request = query._refresh_bindings[0].request if policy is True else None
     with monkeypatch.context() as scoped:
-        scoped.setattr(dir_module, "sqlite_available", lambda: False)
+        from dryml.core.query.sqlite import index as index_module
+        def unavailable():
+            raise QueryIndexUnavailable("optional SQLite unavailable")
+        scoped.setattr(index_module, "require_sqlite", unavailable)
         scoped.setattr(store, "_validated_definition_root_inventory",
                        lambda: pytest.fail("optional exact positive acquired inventory"))
         scoped.setattr(store, "iter_definition_records",
@@ -428,28 +433,24 @@ def test_u3_optional_absence_exact_positive_scan_controls(tmp_path, monkeypatch,
             explanation = query.explain(analyze=True)
         assert observed == [], _warning_diagnostics(observed)
         assert explanation.store_scan_count == 0 and explanation.refresh_action == "none"
-        assert store._query_index_instance is None
+        assert store._query_index_unavailable
         if request is not None:
             assert request.completed == request.in_flight == {}
 
     store.rebuild_query_index()
     calls = _count_cycles(monkeypatch, store)
     index = store.open_query_index()
-    with pytest.raises(QueryWouldScanError):
-        query.scan_policy("forbid").exists()
-    assert calls == []
+    assert query.scan_policy("forbid").exists()
+    assert calls == [(store, policy)]
     if request is not None:
-        assert request.completed == request.in_flight == {}
-    with pytest.warns(RuntimeWarning, match="inventory scan") as observed:
-        assert query.scan_policy("warn").exists()
-    assert len(observed) == 1 and calls == [(store, policy)], _warning_diagnostics(observed)
+        assert request.completed and request.in_flight == {}
+    assert query.scan_policy("warn").exists()
     calls.clear()
     if policy is True:
         assert query.scan_policy("forbid").exists()
     else:
-        with pytest.raises(QueryWouldScanError):
-            query.scan_policy("forbid").exists()
-    assert calls == []
+        assert query.scan_policy("forbid").exists()
+    assert calls == ([] if policy is True else [(store, policy)])
     assert not index._connections._leases and not index._build_claim_path().exists()
 
 
@@ -457,19 +458,21 @@ def test_u3_warning_precedes_ready_validation_once(tmp_path, monkeypatch):
     import warnings
 
     store = _ready_store(tmp_path / "store")
-    original = store._validated_definition_root_inventory
+    import dryml.core.query.authority as authority
+    store.mark_query_index_dirty()
+    original = authority.capture_store_projection
     scans = []
     with warnings.catch_warnings(record=True) as observed:
         warnings.simplefilter("always")
 
-        def inventory():
+        def inventory(*args, **kwargs):
             assert len(observed) == 1
             scans.append(1)
-            return original()
+            return original(*args, **kwargs)
 
-        monkeypatch.setattr(store, "_validated_definition_root_inventory", inventory)
+        monkeypatch.setattr(authority, "capture_store_projection", inventory)
         explanation = store.query().refresh(True).scan_policy("warn").explain(analyze=True)
-    assert len(observed) == 1 and len(scans) == explanation.store_scan_count == 2
+    assert len(observed) == 1 and len(scans) == explanation.store_scan_count == 1
 
 
 def test_u3_always_repeats_ready_validation_and_inert_paths_do_nothing(tmp_path, monkeypatch):
@@ -479,7 +482,7 @@ def test_u3_always_repeats_ready_validation_and_inert_paths_do_nothing(tmp_path,
     query = store.query().refresh("always")
     for _ in range(2):
         explanation = query.explain(analyze=True)
-        assert explanation.refresh_action == "validate" and explanation.store_scan_count == 2
+        assert explanation.refresh_action == "validate" and explanation.store_scan_count == 0
     assert index.status().generation == generation
     monkeypatch.setattr(store, "open_query_index", lambda: pytest.fail("inert path opened index"))
     monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("inert path read authority"))
@@ -490,7 +493,9 @@ def test_u3_always_repeats_ready_validation_and_inert_paths_do_nothing(tmp_path,
 
 def test_u3_ready_explicit_scan_admission_precedes_backend_io(tmp_path, monkeypatch):
     store = _ready_store(tmp_path / "store")
-    monkeypatch.setattr(store, "open_query_index", lambda: pytest.fail("prohibited work opened backend"))
+    store.mark_query_index_dirty()
+    import dryml.core.query.authority as authority
+    monkeypatch.setattr(authority, "capture_store_projection", lambda *a, **k: pytest.fail("prohibited work inventoried authority"))
     root = Definition(RefreshLeaf, "root").concretize()
     for policy in (True, "always"):
         for query in (store.query().refresh(policy),
@@ -511,14 +516,17 @@ def test_u3_demand_recovery_reports_actual_rebuild_and_failed_scan(tmp_path, mon
     query = replace(store.query().cdefs().stored(), take_limit=1)
     original = index.refresh
 
-    def fail_after_scan(policy, *, stats=None):
+    started = []
+    def fail_after_scan(policy, *, stats=None, **kwargs):
         stats.store_scan_count += 1
         stats.refresh_action = "sqlite-rebuild"
+        started.append(stats)
         raise QueryIndexUnavailable("injected recovery failure")
 
     monkeypatch.setattr(index, "refresh", fail_after_scan)
-    explanation = query.explain(analyze=True)
-    assert explanation.refresh_action == "rebuild" and explanation.store_scan_count == 2
+    with pytest.raises(QueryIndexUnavailable):
+        query.explain(analyze=True)
+    assert started[0].store_scan_count == 1 and started[0].refresh_action == "sqlite-rebuild"
     assert store.query_index_is_dirty()
     monkeypatch.setattr(index, "refresh", original)
     explanation = query.explain(analyze=True)
@@ -555,7 +563,7 @@ def test_u3_explicit_failure_merges_started_work_in_finally(tmp_path, monkeypatc
 
     monkeypatch.setattr(SourceCapture, "__init__", retain)
 
-    def interrupt(policy, *, stats=None):
+    def interrupt(policy, *, stats=None, **kwargs):
         stats.store_scan_count += 1
         stats.refresh_action = "sqlite-validate"
         raise KeyboardInterrupt("maintenance interrupted")
@@ -576,10 +584,10 @@ def test_u3_topology_attachment_after_retention_waits_until_next_terminal(tmp_pa
     original = first.open_query_index().refresh
     retained, resume = threading.Event(), threading.Event()
 
-    def attach(policy, *, stats=None):
+    def attach(policy, *, stats=None, **kwargs):
         retained.set()
         assert resume.wait(15)
-        return original(policy, stats=stats)
+        return original(policy, stats=stats, **kwargs)
 
     monkeypatch.setattr(first.open_query_index(), "refresh", attach)
     outcomes, errors = [], []
@@ -601,9 +609,10 @@ def test_u3_topology_attachment_after_retention_waits_until_next_terminal(tmp_pa
     finally:
         resume.set()
         thread.join(15)
-    assert not thread.is_alive() and errors == []
-    assert outcomes[0].store_scan_count == 4
-    assert query.explain(analyze=True).store_scan_count == 4  # only C pending, then three fresh cuts
+    from dryml.core.query.model import QueryError
+    assert not thread.is_alive() and outcomes == []
+    assert len(errors) == 1 and isinstance(errors[0], QueryError)
+    assert query.explain(analyze=True).store_scan_count == 0
 
 
 def test_u3_explicit_recapture_keeps_cycle_and_cumulative_ledger(tmp_path, monkeypatch):
@@ -617,9 +626,9 @@ def test_u3_explicit_recapture_keeps_cycle_and_cumulative_ledger(tmp_path, monke
     original = index.refresh
     cycles = []
 
-    def refresh(policy, *, stats=None):
+    def refresh(policy, *, stats=None, **kwargs):
         cycles.append(policy)
-        return original(policy, stats=stats)
+        return original(policy, stats=stats, **kwargs)
 
     monkeypatch.setattr(index, "refresh", refresh)
 
@@ -630,10 +639,10 @@ def test_u3_explicit_recapture_keeps_cycle_and_cumulative_ledger(tmp_path, monke
     result, capture = query.max_verify(2)._run_terminal(evaluate, return_capture=True)
     assert result.count() == 0  # CDefs are not metadata holders
     assert cycles == [True]
-    assert capture.store_scan_count == 3 and capture.verified_count == 2
-    assert capture.demand_recaptures == 1 and capture.refresh_action == "validate"
+    assert capture.store_scan_count == 0 and capture.verified_count == 1
+    assert capture.demand_recaptures == 0 and capture.refresh_action == "validate"
     with pytest.raises(QueryVerifyBudgetExceeded):
-        query.max_verify(1)._run_terminal(evaluate)
+        query.max_verify(0)._run_terminal(evaluate)
     assert cycles == [True]  # later evaluation failure cannot reopen maintenance
 
 
@@ -707,3 +716,13 @@ def test_u3_inherited_repo_refuses_before_parent_configuration_lock(tmp_path):
         parent.close()
         child.close()
     assert repo.query().cdefs().count() == 1
+
+
+@pytest.mark.parametrize("refresh", [False, "auto", True, "always"])
+def test_format4_repo_query_refresh_uses_current_consumer(tmp_path, refresh):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    store.publish_node(Definition(RefreshLeaf, name="new").concretize())
+    before = store.authority_cut()
+    assert Repo(store).query().refresh(refresh).cdefs().stored().count() == 1
+    assert store.authority_cut() == before
+    assert len(store.open_query_index().projection_rows("recipe_root", refresh=False)) == 1

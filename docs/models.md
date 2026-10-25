@@ -155,11 +155,12 @@ batches. A restored unfinished invocation completes its retained target rather
 than adding the configured epoch count again; a later call after completion is a
 fresh invocation.
 
-Its named persistence state rejects unknown fields and validates finite loss
+Its closed version-2 persistence state rejects incompatible versions and missing
+or unknown fields, and validates finite loss
 facts, exact nonnegative counters, lifecycle enums, pending-postlude coherence,
 and pending-observation type before installing restored progress. Historical
-three-slot `(epoch, step, phase)` payloads remain supported with zero/`None`
-defaults for later lifecycle fields.
+three-slot `(epoch, step, phase)` and attempt-based payloads are rejected intact;
+there is no automatic conversion or default-filling reader.
 
 TensorFlow `fit`, explicit TensorFlow loops, and Torch loops validate all DRYML
 callbacks before training work and invoke them only after this retained state is
@@ -296,7 +297,8 @@ Model-owned mutable weights/buffers from the best completed epoch, exactly once.
 Optimizer slots and progression remain at the stopping epoch; JAX Model RNG also
 remains at the stopping epoch. This is intentionally a mixed-point graph, not a
 full training rewind. `Experiment.train` publishes a new terminal checkpoint
-after optional restoration and returns that exact StateRef; managed completion
+after optional restoration and exposes that exact SavedNode through
+`InvocationResult.final_state_ref`; managed completion
 and history associate the same reference. Publication, association, or history
 failure propagates and does not report a terminal receipt.
 
@@ -344,7 +346,7 @@ rejected by Execute capture before worker training. Factory configuration is
 transported for the invocation only and is never inserted into the Experiment or
 TrainFunction definition, checkpoint, early-stopping state, or managed ordinary-
 argument digest. Changing or omitting observers, or changing `observer_strict`, on
-a compatible unfinished invocation therefore retains the same managed attempt and
+a compatible unfinished invocation therefore retains the same managed run and
 accepted update position. Factory values should identify how the worker constructs
 the observer; credentials and live service clients belong in its selected runtime,
 not in the configuration.
@@ -402,8 +404,10 @@ A typical experiment graph might include:
 
 Because this graph is made of DRYML objects, it can be saved, queried, loaded, and reused.
 
-`Experiment.train(managed=...)` is a resumable managed operation whose successful
-result is the exact terminal `StateRef`, not the trainer's backend return. It adds
+`Experiment.train(managed=...)` is a resumable managed operation returning an
+`InvocationResult`. Its `.value` is `None`; `.final_state_ref` is the exact terminal
+SavedNode. The trainer's backend return remains available on direct TrainFunction
+calls. Experiment adds
 one invocation-local observer ahead of caller `ManagedConfig.callbacks` without
 changing the caller's configuration or callback list. The observer uses this fixed
 order for every training safe point and for the terminal state:
@@ -428,16 +432,29 @@ Before changing training phase, model, progress, or checkpoint state,
 `Experiment.train` preflights every inert Artifact recipe. Active roots may only
 be `this`; the framework validates the symbolic checkpoint binding, concrete
 Artifact definition, and a resumable managed `compute` operation with no required
-ordinary arguments and a final `StateRef` receipt. This validation neither builds
+ordinary arguments. Every normal managed completion supplies an InvocationResult
+and final SavedNode, independently of the authored return annotation. This validation neither builds
 an Artifact nor loads or computes model/Dataset payloads. Fully resolved recipes
 with no `this` root are retained unchanged.
 
 Pending observations retain their occurrence key, UTC-millisecond timestamp,
-trajectory predecessor, and terminal marker in `TrainState` before checkpoint
+trajectory predecessor, stable run ID, sequence, and terminal marker in `TrainState` before checkpoint
 publication. Retrying the same checkpoint updates that row instead of duplicating
 it; revisiting the same StateRef through a later trajectory creates a distinct row.
 History remains readable if a referenced checkpoint payload later becomes
 unavailable, but explicitly loading that checkpoint still fails.
+
+Occurrence keys are `v2:<run_id>:<sequence>`. Ordinary resume retains the run and
+sequence; each admitted call, including replay, receives a fresh invocation ID.
+The terminal checkpoint is selected with `managed.final_state(checkpoint)`, so
+finalization performs no second capture or checkpoint callback. Restored terminal
+observations repair their existing history directly without recapturing payloads.
+Completed replay performs no training, restore, capture, return normalization,
+Artifact evaluation, telemetry construction/delivery, or consumer completion hook.
+Rerun is explicit; a supplied starting SavedNode requires `rerun=True`, with
+precedence supplied start, recorded initial, then current live state. Unavailable
+selected state fails without fallback. Mixed-point best-weight, optimizer and
+progress selection remains TrainFunction policy.
 
 ### Opaque-fit recovery and worker evidence (U5)
 
@@ -448,8 +465,8 @@ For the maintained CPU XGBoost and statsmodels trainers, the boundary is:
 3. Associate that checkpoint in managed control authority.
 4. Evaluate/publish history and Artifacts, then run configured managed callbacks
    and request checks.
-5. Return logically, followed by managed final publication, completion and final
-   association.
+5. Select that same terminal checkpoint as final, then acknowledge durable result,
+   final association, and managed completion.
 
 An accepted fit or published snapshot **before step 3** is not a durable
 completed-fit resume guarantee. Failure propagates without a final receipt while
@@ -460,14 +477,12 @@ staging or association.
 
 After association, an unfinished terminal observation can be restored through
 ordinary managed resume. It reuses the same occurrence key, timestamp and exposure
-without another native fit. If its history row is unfinished, the actual codec
-re-emits retained native bytes and canonical metadata; the full replayed StateRef
-must equal the retained checkpoint **before continuing evaluation**. Prediction
-parity alone is insufficient. Completed Artifact receipts survive a later history
+without another native fit or checkpoint serialization. Its exact retained
+SavedNode remains the history/evaluation authority. Completed Artifact receipts survive a later history
 failure. Native statsmodels diagnostic caches may change without changing these
 retained bytes; replay never invokes native serialization again.
 
-The successful return must match the operation's actual `final_state_ref`.
+The successful result's `.final_state_ref` matches the operation's `status.final`.
 History rows bind to their own evaluated checkpoints; each Artifact binds to that
 row's exact model projection and its own completed compute receipt. Do not assume
 different publication moments necessarily produce equal StateRefs. Neither native
@@ -507,23 +522,24 @@ are omitted from scalar columns while their Artifact StateRef remains available.
 ## Experiment History
 
 `ExperimentData` is an ordinary persisted Object containing checkpoint history for
-one default-policy projected `Experiment` `ObjectRef`. Its constructor accepts only
-that non-materializing `Ref[ObjectRef]` subject; it does not own an Experiment,
-model, or Dataset payload. Exact checkpoint and Artifact `StateRef` values remain
+one projected `Experiment` object-view Node. Its constructor accepts only
+that non-materializing `Ref[Node]` subject; it does not own an Experiment,
+model, or Dataset payload. Exact checkpoint and Artifact SavedNode values remain
 in rows, so reading history never restores those referenced payloads.
-Embedded references use core's closed `dryml-reference-json` codec, which retains
+Embedded references use core's closed `dryml-node-graph/v1` codec, which retains
 supported canonical Definition values and frozen dense constructor arrays
 losslessly without opening the referenced checkpoint payload.
 
 `ExperimentData.find(experiment, repo=..., store=...)` returns a fresh current
-history object or `None` only when the subject has no history identity. Corrupt,
+history object or `None` when the subject has no current history name. Corrupt,
 ambiguous, incomplete, or alias-less published authority raises an authority/load
 error. `get_or_create(...)` selects one writable Store, creates the first empty
-snapshot through the Store-local `experiment_data_current_v1` CAS alias, and may
+snapshot through the Store-local `experiment_data_current_v4-<projection-digest>`
+Node-name CAS, and may
 recover only one valid empty alias-less initial snapshot. It never chooses an
 arbitrary matching query result. `find(...)`, `get_or_create(...)`, and the private
 definition lookup also accept an `ObjectSelector` and use its explicit `reference`
-association; direct construction remains an authoritative `Ref[ObjectRef]` call.
+association; direct construction uses `Ref[Node]`.
 
 `add_row(...)` validates an exact checkpoint and optional predecessor projection,
 then returns an opaque row key. Supplying a callback occurrence key makes identical
@@ -536,20 +552,26 @@ is present.
 
 Call `publish(repo=..., store=...)` after local row changes. It fresh-loads the
 current history, reapplies idempotent changes, saves an immutable snapshot, and
-CAS-advances the selected Store alias, retrying stale writers at most eight times.
+CAS-advances the selected Store name, retrying stale writers at most eight times.
 Failed publication preserves local queued changes and can leave a safe immutable
-orphan snapshot. `data` lazily imports pandas and returns a recursively detached
+orphan snapshot. An enabled-index failure after the current-name CAS still raises:
+the installed name remains authoritative, but does not prove acknowledged index
+coverage. Repair the exact pending Store mutation before retrying publication.
+`data` lazily imports pandas and returns a recursively detached
 DataFrame: missing cells are `pd.NA`, explicit nulls are `None`, and arbitrarily
 large integer facts remain integers. The authoritative payload is closed
-`experiment_data.json` format `dryml-experiment-data` version 1, not pandas pickle
-or pandas JSON inference.
+`experiment_data.json` format `dryml-experiment-data` version 4. Earlier histories
+and Experiment state records are rejected intact rather than converted. History
+references do not retain private data forever; explicit state cleanup preserves
+history and completed ordinary results while later materialization can report
+unavailable state without recomputing work.
 
 Use `ExperimentData.scalar_column(artifact, field=None)` when turning a configured
 Artifact name and optional top-level scalar field into a history column. It escapes
 backslashes and dots in components and rejects built-in history-field collisions.
 
 `ExperimentDataError` is raised before local mutation when an association,
-reference, row fact, scalar, status transition, or closed v1 codec payload violates
+reference, row fact, scalar, status transition, or closed v4 codec payload violates
 the history contract. It has no Store side effect. `TrainingObservation` is the
 immutable typed safe-point value retained inside `TrainState`; its
 `training_loss` property returns the window's weighted mean or `None` when no

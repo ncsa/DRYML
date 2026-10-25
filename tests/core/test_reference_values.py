@@ -69,3 +69,110 @@ def test_reference_values_import_without_optional_backends():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_local_state_exact_values_and_no_alternative_bindings():
+    from dryml.core import LocalState, StateKey
+
+    definition = Definition(ReferenceStateful).concretize()
+    key = StateKey("a" * 64, "pkl-" + "b" * 64)
+    state = LocalState(key, definition)
+    same = LocalState(key, Definition(ReferenceStateful).concretize())
+    assert definition.with_state(state).with_state(same).state is state
+    assert state.codec == "pkl"
+    with pytest.raises(ValueError):
+        StateKey("not-a-digest", key.codec_hash)
+    with pytest.raises(ValueError):
+        StateKey(key.cdef_digest, "bare-codec-hash")
+    with pytest.raises(TypeError):
+        LocalState(key, Definition(ReferenceStateful))
+    with pytest.raises(TypeError, match="LocalState"):
+        definition.with_state(key)
+    with pytest.raises(TypeError, match="LocalState"):
+        definition.with_state({state, same})
+
+
+def test_saved_subtree_maps_are_rebased_and_exclude_reference_ownership(monkeypatch):
+    from dryml.core import IdentitySpec, LocalState, StateKey, StateSpec, require_saved
+    from dryml.core.repo import Repo
+
+    child = Definition(ReferenceStateful).concretize()
+    state = LocalState(StateKey("a" * 64, "pkl-" + "b" * 64), child)
+    child = child.with_identity(ObjectId()).with_state(state)
+    root = Definition(children=[child, child], ref=child.ref(), quoted=child.quote())
+    # Pure metadata must not enter any existing materialization/publication seam.
+    def forbidden(*args, **kwargs):
+        pytest.fail("metadata performed runtime or payload IO")
+    monkeypatch.setattr(Repo, "load_or_build", forbidden)
+    monkeypatch.setattr(Repo, "load_state_ref", forbidden)
+    monkeypatch.setattr(Repo, "save", forbidden)
+    monkeypatch.setattr(ObjectId, "__init__", forbidden)
+    monkeypatch.setattr(ReferenceStateful, "__init__", forbidden)
+    monkeypatch.setattr("dryml.core.symbol.ImportRef.resolve", forbidden)
+    assert len(root.identity_spec()) == len(root.state_spec()) == 1
+    assert isinstance(root.identity_spec(), IdentitySpec)
+    assert isinstance(root.state_spec(), StateSpec)
+    selected = root.at("$.children[1]")
+    assert selected is child and require_saved(selected) is child
+    assert dict(selected.state_spec()) == {GraphPath(): state}
+    assert selected.object_id == child.object_id
+    assert root.at("$.ref") is child and root.at("$.quoted") is child
+    for operation in (root.identity_spec, root.state_spec):
+        assert all("ref" not in str(path) and "quoted" not in str(path) for path in operation())
+    with pytest.raises(AttributeError):
+        root.state_spec()._root = child
+
+
+@pytest.mark.parametrize("facet", ["identity", "state"])
+def test_facet_values_use_one_ownership_walk_and_preserve_metadata(facet, monkeypatch):
+    """Bulk values preserve ownership, order and immutable metadata in one walk."""
+    from collections.abc import Mapping, ValuesView
+    from dryml.core import LocalState, StateKey
+    from dryml.core import node
+    from dryml.core.repo import Repo
+
+    creation = Definition(ReferenceStateful).concretize()
+    children = [
+        Definition(ReferenceStateful).concretize().with_identity(ObjectId()).with_state(
+            LocalState(StateKey("a" * 64, "pkl-" + digit * 64), creation)
+        )
+        for digit in ("b", "c", "d")
+    ]
+    first, second, outside = children
+    root = Definition(children=[first, second, first], ref=outside.ref(), quoted=outside.quote())
+    spec = getattr(root, facet + "_spec")()
+    expected = [getattr(child, "object_id" if facet == "identity" else "state")
+                for child in (first, second)]
+    assert isinstance(spec, Mapping)
+    assert list(spec.items()) == list(zip(spec, expected))
+
+    walks = []
+    original = node._owned_nodes
+
+    def counted(scope):
+        walks.append(scope)
+        return original(scope)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("facet enumeration performed construction or target resolution")
+
+    monkeypatch.setattr(node, "_owned_nodes", counted)
+    monkeypatch.setattr(ObjectId, "__init__", forbidden)
+    monkeypatch.setattr(ReferenceStateful, "__init__", forbidden)
+    monkeypatch.setattr("dryml.core.symbol.ImportRef.resolve", forbidden)
+    monkeypatch.setattr(Repo, "load_or_build", forbidden)
+    monkeypatch.setattr(Repo, "load_state_ref", forbidden)
+    monkeypatch.setattr(Repo, "save", forbidden)
+    values = spec.values()
+    assert isinstance(values, ValuesView)
+    assert list(values) == expected
+    assert walks == [root]
+    assert len(values) == 2 and expected[0] in values
+    assert list(values) == expected
+    assert walks == [root]
+    assert list(spec.values()) == expected
+    assert walks == [root, root]
+    with pytest.raises(TypeError):
+        spec[next(iter(spec))] = expected[0]
+    with pytest.raises(AttributeError):
+        spec._root = first

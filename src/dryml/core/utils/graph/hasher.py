@@ -1,9 +1,34 @@
+"""Generic graph reduction and reachability helpers, without domain policy."""
+
 from __future__ import annotations
 
 from typing import Any, Hashable
 
 from ..types import is_namedtuple
 from .transformer import GraphCtx
+
+
+def fold_closure_masks(children, masks):
+    """Union distinct children's reachability masks and detect branch overlap.
+
+    Args:
+        children (Iterable[Hashable]): Distinct direct targets in typed edge order.
+        masks (Mapping[Hashable, int]): Already folded, inclusive child closures.
+    Returns:
+        tuple[int, bool]: Union mask and whether distinct closures intersect.
+    Raises:
+        KeyError: If a dependency's mask has not been folded.
+    Side Effects:
+        None. The predicate depends only on incidence, never on local values,
+        hashes, traversal demand or cache state. Domain role labels remain owned
+        by the caller's typed edge records.
+    """
+    closure, overlap = 0, False
+    for child in children:
+        mask = masks[child]
+        overlap |= bool(closure & mask)
+        closure |= mask
+    return closure, overlap
 
 
 class GraphHashError(Exception):

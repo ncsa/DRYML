@@ -331,6 +331,7 @@ def test_coordinator_scope_keeps_import_and_materialization_restrictions_after_s
     from dryml.artifacts import Value
     from dryml.data import Dataset
     from dryml.models import ExperimentData, Model
+    from tests.qualification.ml_workflow_workloads import _QualificationMetric
     from tests.qualification.ml_workflow_workers import _coordinator_result_scope, _coordinator_scope, _load_selected_coordinator_results
 
     requests, *_ = _requests(tmp_path)
@@ -353,13 +354,15 @@ def test_coordinator_scope_keeps_import_and_materialization_restrictions_after_s
                 return reference
 
         def reference(cls):
-            return SimpleNamespace(definition=SimpleNamespace(cls=cls))
+            return SimpleNamespace(cls=cls)
 
         history, artifact = reference(ExperimentData), reference(Value)
         assert _load_selected_coordinator_results(
             ResultRepo(), history_ref=history, artifact_ref=artifact,
         ) == (history, artifact)
         assert [reference for reference, _ in loaded] == [history, artifact]
+        metric = reference(_QualificationMetric)
+        assert _load_selected_coordinator_results(ResultRepo(), history_ref=history, artifact_ref=metric) == (history, metric)
         for rejected in (Model, Dataset):
             for slot in ("history_ref", "artifact_ref"):
                 loaded.clear()
@@ -425,7 +428,7 @@ def test_core_snapshot_without_allocation_reports_worker_process_truthfully(tmp_
     class Reference:
         value: str
 
-        def digest(self):
+        def exact_digest(self):
             return self.value
 
     @dataclass(frozen=True)

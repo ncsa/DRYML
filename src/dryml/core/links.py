@@ -21,7 +21,10 @@ class DefLink:
 
     Transient assertions are created only through the shared ``Ref(value)`` and
     ``Mat(value)`` vocabulary. They retain their live source until signature
-    normalization finalizes them and cannot be hashed, encoded, or pickled.
+    normalization finalizes them and cannot enter legacy stable hashes, CDef V2
+    encoding, or direct pickle. The separate Node graph v1 codec may record closed
+    immutable assertions as soft syntax without finalizing them; live runtime or
+    resource targets remain nonportable.
     """
 
     kind: Any

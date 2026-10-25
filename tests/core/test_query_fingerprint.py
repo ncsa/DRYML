@@ -1,7 +1,7 @@
 import pytest
 
 from tests.core import core_objects as objects
-from dryml.core import Definition, SKIP_ARGS, Satisfies, Selector
+from dryml.core import Choice, Definition, SKIP_ARGS, Satisfies, Selector
 from dryml.core.freeze import FrozenList
 from dryml.core.query.fingerprint import target_local_fingerprint
 from dryml.core.utils.graph.path import Arg, Kwarg
@@ -14,7 +14,7 @@ def assert_no_fingerprint_false_negative(selector, target, *, class_match="selec
 
 def test_fingerprint_never_rejects_container_compatible_target():
     target = objects.TestNest([1, 2]).definition
-    selector = Definition(objects.TestNest, (1, 2))
+    selector = Definition(objects.TestNest, Choice(([1, 2], (1, 2))))
 
     assert_no_fingerprint_false_negative(selector, target)
 
@@ -27,7 +27,7 @@ def test_frozen_list_selector_is_not_filtered_out():
 
 
 def test_frozen_list_selector_matches_list_and_tuple_compatible_targets():
-    selector = Definition(objects.TestNest, FrozenList([1, 2]))
+    selector = Definition(objects.TestNest, Choice((FrozenList([1, 2]), (1, 2))))
 
     assert_no_fingerprint_false_negative(selector, objects.TestNest([1, 2]).definition)
     assert_no_fingerprint_false_negative(selector, objects.TestNest((1, 2)).definition)

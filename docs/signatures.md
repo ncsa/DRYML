@@ -14,42 +14,73 @@ operation to activate them.
 
 `Ref[T]` selects and delivers reference or quotation data. `Mat[T]` selects the
 same authority but asks the caller-provided Repo to realize it. `Template` is a
-third fixed role, shorthand for `Template[Definition]`: it accepts symbolic or
-resolved Definitions as inert quotation data and delivers a plain Definition.
+third fixed role, shorthand for `Template[Node]`: it accepts symbolic or
+resolved Nodes as inert quotation data and delivers the same immutable handle.
+`Template[Definition]` remains an equivalent authoring spelling.
 `Ref(value)` and
 `Mat(value)` are assertions, not conversion requests: an opposing assertion fails
 before selection. An unannotated slot is `Mat` by default. Scalars and a directly
 supplied live `Object` continue to pass through naturally, while an unannotated
 `Definition`, `ConcreteDefinition`, `ObjectRef`, or `StateRef` is materialized.
 
-Supported exact targets are `Definition`, `ConcreteDefinition`, `ObjectRef`,
-`StateRef`, `Object`, `QuotedDef`, `Selector`, and `SelectorSpec` where applicable.
+Supported reference metadata targets include `Node`, `ConcreteNode`, and
+`SavedNode`. `Ref[Node]` requires symbolically resolved metadata, preserving
+constructor omissions and exact facets. `Ref[ConcreteNode]` additionally requires
+already normalized construction structure; it never normalizes a soft input.
+`SavedNode` is an `Annotated` completeness refinement, not another runtime wrapper:
+`Ref[SavedNode]` runs `require_saved` and returns the same handle. Completeness
+does not assert payload availability or current-use state compatibility.
+
+`Ref[IdentitySpec]` and `Ref[StateSpec]` deliver independent partial facet maps as
+metadata, extracting the materializing ownership closure from a supplied Node.
+They do not capture or allocate missing facets. Retained exact targets are
+`Definition`, `ConcreteDefinition`, `ObjectRef`, `StateRef`, `Object`, `QuotedDef`,
+`Selector`, and `SelectorSpec` where applicable. `Mat[T]` accepts an Object class
+(including a subclass), validates the target class, and leaves the one owning
+aggregate Repo boundary to concretize/materialize it. `Mat[Node]` and its
+refinements are invalid metadata targets; legacy `Mat[Definition]` and
+`Mat[ConcreteDefinition]` remain available for existing consumers.
 Exact requests deliver that exact authority: a `StateRef` supplied to
 `Ref[ObjectRef]` delivers its `ObjectRef`, for example. `Ref[AutoRef]` retains an
-incoming reference kind; for a live Object it selects CDef for an entirely
-stateless materializing graph, its known last `StateRef` for a stateful graph, or
-its `ObjectRef` otherwise. Automatic selection never saves or searches for a new
-receipt. A bare soft `Definition` is ambiguous and fails with guidance to wrap it
+incoming Node or explicitly supplied legacy reference kind. For a live Object it
+selects the construction definition for an entirely stateless materializing graph.
+For a stateful graph (including an ephemeral root with stateful descendants), it
+returns the known last complete saved Node when that receipt's object projection
+matches the receiver's retained construction and live identities; otherwise it
+returns the identity-bound construction Node. A mutated live payload does not
+invalidate that historical receipt. Automatic selection performs no Store IO,
+capture, restore, or search for a new receipt, and does not certify current payload
+availability. A Node receipt is not converted to the legacy `StateRef` type:
+requesting that unsupported delivery from a live Object raises `SignatureError`.
+A bare soft `Definition` is ambiguous and fails with guidance to wrap it
 in `Ref(...)`; that explicit assertion retains the Definition as reference data.
 `AutoRef` is an annotation-only marker class; use `Ref[AutoRef]`, not
 `Ref[AutoRef()]`, on every supported Python version.
 
-Artifact Folds use `Ref[AutoRef]` for their source/model-facing inputs. This keeps
-the selected CDef, ObjectRef, or StateRef as data in the declaration and prevents
+Artifact Folds and CachedDataset use `Ref[AutoRef]` for their source-facing inputs.
+This keeps the selected Node as data in the declaration and prevents
 automatic input saving or materialization during construction, readiness, value
 access, and result restoration. Fold's managed compute boundary deliberately
 materializes that reference through its selected state Repo.
+When passing a live source through recipe authoring, use the lossless assertion
+`CachedDataset(Ref(source))` to retain the live value until automatic selection;
+ordinary bare Object recipe values are snapshotted as construction definitions.
 
-Same-role unions such as `Ref[ConcreteDefinition | ObjectRef | StateRef]` select
-the strictest reachable authority independent of member order. Ambiguous
-strengthening fails instead of falling back. Nullable forms are flat:
+Same-role unions use a capability partial order, independent of member order.
+For example, `Ref[Node | ConcreteNode | SavedNode]` selects the uniquely available
+maximal refinement, preserving the selected handle and facets. Independent
+identity/state alternatives such as `Ref[IdentitySpec | StateSpec]` are ambiguous
+when both deliveries are available and raise `SignatureError`; neither dimension
+is silently preferred or discarded. Retained legacy compound-reference unions
+are comparable by their actual guarantees. Ambiguous strengthening fails instead
+of falling back. Nullable forms are flat:
 `Ref[ObjectRef | None]` and `Ref[ObjectRef] | None` accept a plain `None`;
 distributed forms such as `Ref[ConcreteDefinition] | Ref[ObjectRef] | None` are
 equivalent. Only plain `None` may appear outside role branches, and opposing value
 wrappers still conflict before the nullable branch is considered. `Ref[None]` does
 not compile. Ref/Mat forms are top-level only. Nested roles such as
 `list[Ref[ObjectRef]]`, container targets, mixed Ref/Mat unions, incomparable data
-unions, and Object-subclass annotations fail with `SignatureError`.
+unions, and Ref Object-subclass annotations fail with `SignatureError`.
 
 `QuotedDef` and `SelectorSpec` are expression data. Use `Ref[QuotedDef]`,
 `Ref[Selector]`, or `Ref[SelectorSpec]` to wrap, unwrap, or deliver them without
@@ -61,21 +92,25 @@ interpretation. Query indexing and matching treat these constructor markers as t
 quotation payloads rather than as graph boundaries.
 
 `Template` is annotation vocabulary, not a runtime recipe value: `Template(...)`,
-`Ref[Template]`, and subscriptions other than `Template[Definition]` are invalid.
-The three Definition boundaries are deliberately distinct: `Ref[Definition]`
-delivers only a symbolically resolved Definition without testing constructor
-completeness; `Mat[Definition]` admits role-normalized materializing structure
-before CDef, Repo, target, cache, or Store effects; and `Template` leaves symbolic
+`Ref[Template]`, and subscriptions other than `Template[Node]` and its retained
+Definition spelling are invalid. The three boundaries are deliberately distinct:
+Ref Node metadata is symbolically resolved without filling defaults; Mat admits
+role-normalized construction before materialization effects; and Template leaves symbolic
 content inert. A compatible `Ref(definition)` assertion records caller intent but
 cannot bypass the receiving role's expression rule.
 
-Fresh `Ref[Definition]` and `Template` constructor values persist as a Ref link
+Fresh `Ref[Node]`, retained `Ref[Definition]`, and Template constructor values persist as a Ref link
 to `QuotedDef`. This preserves expression data, including bounded parameter and
 arithmetic expressions, without making it a CDef graph edge. Direct `QuotedDef`
 and `Ref[QuotedDef]` remain the explicit wrapper-preserving local-data APIs.
+Node-only expression data uses the closed `dryml-node-template` v1 family with
+the existing authenticated Node graph codec; compatible legacy expression data
+retains its v1 family. Existing V2 Repo/Store boundaries reject unsupported Node
+identity/state facets rather than losing them. This signature cutover does not
+implement Node facet realization or a Store migration.
 
 The only nested Template grammar is `Mapping[str, Template]` (or the equivalent
-`Mapping[str, Template[Definition]]`), optionally unioned with `None`. Activated
+`Mapping[str, Template[Node]]`, including the retained Definition spelling), optionally unioned with `None`. Activated
 normalization validates string keys, orders entries by `canonical_key_bytes`, and
 admits every value independently. Lists, tuples, nested mappings, non-string
 keys, and nested Ref/Mat forms are rejected.
@@ -104,6 +139,20 @@ unbound variadic paths, malformed selection values, and unknown paths raise befo
 authority reads or realization.
 
 ## Authority And Effects
+
+Current Node references inspect only the supplied graph: `Ref[ConcreteNode]`
+does not search for identities, and `Ref[SavedNode]` does not search for a
+checkpoint or certify available bytes. Discover alternatives explicitly with a
+Repo query, choose one, then pass that Node to the signature boundary. `Mat[T]`
+for an Object class freshly preflights the supplied selected state before
+construction/restore. `ReferenceSelection(node, store)` pins that source; stale
+or disconnected source authority fails instead of falling back to another
+replica. Read-only source use admits multiple DirStore handles naming one
+physical domain; writable save destinations continue to reject that overlap.
+
+The following declaration/ClaimRecord discussion describes retained legacy
+reference adapters, whose Store-3 publication APIs are unsupported on built-in
+format-4 Stores. It does not add claims or automatic discovery to Node refinements.
 
 Definition-to-CDef reference strengthening requires an already fully bound
 expression; it cannot fill defaults or run a search. CDef-to-ObjectRef selection
@@ -203,16 +252,22 @@ runs. Prepared group closures retain detached structure and child invokers so
 global weak preparation state cannot retain their Method owner indirectly.
 
 Core Execute reconstructs a new worker-local plan rather than transporting a
-`SignaturePlan` or `BoundaryPlan`. Its function, Method, and managed integrations
-use their owners' narrow raw-result seam: the owner delivers arguments and invokes
-once, Execute may publish a live result, and that same owner then performs its one
-declared return normalization. These seams do not make contexts, prepared plans,
+`SignaturePlan` or `BoundaryPlan`. Ordinary function/Method integrations use their
+owners' narrow raw-result seam: the owner delivers arguments and invokes once,
+Execute may publish a live result, and that owner performs its one declared return
+normalization. Managed's supplied adapter instead calls its metadata-first
+admission seam; only execution delivers materializing arguments and normalizes a
+return, encodes the closed durable value before automatic final capture, and
+publishes completion. Compatible replay returns `InvocationResult` with no return
+normalization or consumer hook. Supported retained outer wrappers run only on the
+execution branch, under that same owner; the one-shot handoff does not suppress
+unrelated nested function boundaries. These seams do not make contexts, prepared plans,
 or caller-owned Repo/Store handles portable.
 See [Generic Execute](execute.md) for worker transport and [Managed Operations](managed_operations.md)
 for checkpoint/final-publication ordering.
 
-Core Execute's call description structurally lowers live Objects to their selected
-`StateRef` or CDef authority and uses a single receiving Repo boundary for Mat
+Core Execute's v3 call description structurally lowers saved live Objects to their selected
+Node authority and uses a single receiving Repo boundary for Mat
 delivery. It recursively walks closure globals, defaults, annotations, instance
 attributes, and `__slots__`; live Repo/Store resources are rejected rather than
 being carried by a pickle fallback. Selected declaration Stores are represented by
@@ -221,6 +276,14 @@ internal and bounded; it is not a general pickle or RPC format. Explicit
 `Ref(value)` and `Mat(value)` assertions remain transient while crossing an
 invocation and are consumed by the reconstructed worker-local plan. They cannot
 cross the result boundary or enter persistent identity data.
+
+Exact saved Node `ReferenceSelection` controls preserve all supplied facets and
+are checked against the pinned Store's saved-graph metadata at preparation and
+worker decoding. They do not infer a new identity, save state, or cache an
+availability proof. Node transport shares an authenticated table and compact
+root views across config starts, arguments and managed metadata. Config/declaration
+and detached-result schemas belong to `dryml.managed.execute_adapter`; Core has
+no managed import dependency.
 
 The callable graph includes globals, defaults, annotations, closure cells, bound
 receivers, instance attributes, and `__slots__` in one pass, preserving aliases

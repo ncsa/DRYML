@@ -110,6 +110,33 @@ def sync_file(path) -> None:
     _backend.sync_file(native)
 
 
+def sync_directory(path) -> None:
+    """Persist entries of an existing non-symlink directory without mutation.
+
+    Args:
+        path: Text, bytes, or PathLike directory path whose entries need a native
+            persistence barrier, including after an interrupted rename/unlink.
+
+    Returns:
+        None after the native directory barrier completes.
+
+    Raises:
+        FilesystemCapabilityError: If standalone directory barriers are unavailable
+            (including Windows, which requires write-through publication).
+        OSError: For missing paths, invalid shapes, permissions or barrier failures.
+        TypeError: If path is not path-like.
+
+    Side Effects:
+        Opens and flushes only this directory; never traverses payloads or renames
+        entries. Callers own entry validation and any required ancestor barriers.
+    """
+    native = _path(path)
+    _require_directory(native)
+    if _backend.USES_WRITE_THROUGH:
+        raise FilesystemCapabilityError("Standalone directory persistence requires a native directory barrier.")
+    _backend.sync_directory(native)
+
+
 def ensure_directory(path) -> None:
     """Create and persist every missing component of a directory path.
 
@@ -379,4 +406,5 @@ __all__ = [
     "publish_file",
     "remove_file",
     "sync_file",
+    "sync_directory",
 ]

@@ -1,4 +1,11 @@
-"""Lazy public facade for core definitions, persistence, and query APIs."""
+"""Lazy public facade for Node authoring, persistence, realization and queries.
+
+Definition authors the common Node carrier; ConcreteNode and SavedNode describe
+capabilities of that graph, not independent persistence models. require_saved
+validates completeness without opening payloads. Export access imports its owning
+module on demand and raises AttributeError for unknown names; it performs no
+Store publication or optional-backend activation.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +22,14 @@ _EXPORT_MODULES = {
     "selector_mode": "dryml.core.object",
     "ConcreteDefinition": "dryml.core.definition",
     "Definition": "dryml.core.definition",
+    "Node": "dryml.core.node",
+    "ConcreteNode": "dryml.core.definition",
+    "SavedNode": "dryml.core.node",
+    "require_saved": "dryml.core.node",
+    "StateKey": "dryml.core.state_values",
+    "LocalState": "dryml.core.state_values",
+    "IdentitySpec": "dryml.core.state_values",
+    "StateSpec": "dryml.core.state_values",
     "categorical_definition": "dryml.core.definition",
     "SKIP_ARGS": "dryml.core.definition",
     "freeze": "dryml.core.definition",
@@ -64,6 +79,7 @@ _EXPORT_MODULES = {
     "QuotedDef": "dryml.core.quoted",
     "SelectorSpec": "dryml.core.quoted",
     "Selector": "dryml.core.selector",
+    "QueryPredicate": "dryml.core.selector",
     "ObjectSelector": "dryml.core.selector",
     "selector": "dryml.core.selector",
     "Repo": "dryml.core.repo",
@@ -153,6 +169,8 @@ _EXPORT_MODULES = {
     "submit": "dryml.core.execute",
     "SaveAnnotations": "dryml.core.metadata",
     "LineageMetadata": "dryml.core.metadata",
+    "NodeLineageMetadata": "dryml.core.metadata",
+    "NodeSnapshotMetadata": "dryml.core.metadata",
     "SnapshotCapture": "dryml.core.metadata",
     "SnapshotMetadata": "dryml.core.metadata",
     "encode_metadata_mapping": "dryml.core.metadata",
@@ -218,6 +236,14 @@ __all__ = [
     "Serializable",
     "Compute",
     "Definition",
+    "Node",
+    "ConcreteNode",
+    "SavedNode",
+    "require_saved",
+    "StateKey",
+    "LocalState",
+    "IdentitySpec",
+    "StateSpec",
     "categorical_definition",
     "ConcreteDefinition",
     "DefLink",
@@ -244,6 +270,7 @@ __all__ = [
     "QuotedDef",
     "SelectorSpec",
     "Selector",
+    "QueryPredicate",
     "ObjectSelector",
     "selector",
     "Par",
@@ -348,6 +375,8 @@ __all__ = [
     "submit",
     "SaveAnnotations",
     "LineageMetadata",
+    "NodeLineageMetadata",
+    "NodeSnapshotMetadata",
     "SnapshotCapture",
     "SnapshotMetadata",
     "encode_metadata_mapping",

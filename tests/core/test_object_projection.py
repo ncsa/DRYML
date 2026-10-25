@@ -50,6 +50,28 @@ def _state_hash(char):
     return "pkl-" + char * 64
 
 
+def test_node_query_concrete_recipe_omits_facets_but_quoted_checkpoint_is_exact():
+    """Recipe anchors do not pin identities; quotation retains exact saved data."""
+    from dryml.core import LocalState, QueryPredicate, StateKey
+    creation = Definition(ProjectionLeaf, 2).concretize()
+    state = LocalState(StateKey(creation.creation_digest(), _state_hash("a")), creation)
+    candidate = creation.with_identity(ObjectId(("selected",))).with_state(state)
+    assert QueryPredicate(creation).matches(candidate)
+    assert QueryPredicate(Definition(value=2)).matches(candidate)
+    assert not QueryPredicate(Definition(recipe=creation.quote())).matches(
+        Definition(recipe=candidate.quote()))
+    assert not QueryPredicate(Definition(child=creation, recipe=creation.quote())).matches(
+        Definition(child=candidate, recipe=candidate.quote()))
+    assert not QueryPredicate(candidate).matches(creation)
+    changed = candidate.without_state()
+    assert candidate.object_projection_equal(changed)
+    assert not QueryPredicate(candidate.quote().value).matches(changed)
+    categorical = candidate.categorical(drop=("value",))
+    assert categorical.object_id == candidate.object_id and categorical.state == candidate.state
+    assert QueryPredicate(categorical).matches(candidate)
+    assert not QueryPredicate(categorical).matches(creation)
+
+
 def _state_ref(value, namespace, state_hash):
     definition = Definition(ProjectionLeaf, value).concretize()
     object_ref = ObjectRef(definition, {GraphPath(): ObjectId((namespace,))})
@@ -175,6 +197,68 @@ def test_object_selector_projection_deduplicates_states_and_preserves_exact_pins
     assert projected.count() == 2
     assert projected.sources(generated) == frozenset((first_source, second_source))
     assert identities.query().object_projection().count() == 2
+
+
+def test_object_selector_node_codec_preserves_recursive_meaning_bindings_and_aliases(monkeypatch):
+    """Shared Node transport retains query metadata and exact association pins."""
+
+    import json
+    from dryml.core.node_prepare import NodePreparation
+    from dryml.core.node_codec import encode_node_graph, decode_node_graph
+    from dryml.core.node import _as_node_view
+    import dryml.core.cdef_codec as legacy
+
+    child = _state_ref("child", "child", _state_hash("a"))
+    definition = Definition(
+        ProjectionRoot, child,
+        referenced=DefLink.finalized(EdgeKind.REF, child),
+        recipe=Definition(ProjectionLeaf, {"exact": child}),
+    ).concretize()
+    reference = ObjectRef(definition, {
+        GraphPath(): ObjectId(("root",)),
+        GraphPath((Parameter("materialized"),)): child.object_id,
+    })
+    generated = reference.object_projection(traverse_refs=True)
+    generated = ObjectSelector._projected(
+        _as_node_view(generated.definition), generated.objects, generated.reference)
+    pinned = ObjectSelector(reference)
+    root = Definition(ProjectionLeaf, [generated, generated.definition, pinned])
+    equivalent = Definition(ProjectionLeaf, [
+        generated, generated.definition, ObjectSelector(reference)])
+    split = Definition(ProjectionLeaf, [
+        generated, reference.object_projection(traverse_refs=True).definition, pinned])
+    changed = generated.definition.with_identity(ObjectId(("facet",)))
+
+    monkeypatch.setattr(legacy, "encode_cdef_graph", lambda *a, **k: pytest.fail("nested rooted export"))
+    monkeypatch.setattr(ImportRef, "resolve", lambda *a: pytest.fail("metadata symbol resolution"))
+    eager = NodePreparation((root, equivalent, split, changed), scheduler="eager")
+    deferred = NodePreparation(reversed(eager.roots))
+    assert eager.exact_equal(root, eager, equivalent)
+    assert eager.exact_key(root) == eager.exact_key(equivalent)
+    assert not eager.exact_equal(root, eager, split)
+    assert eager.exact_key(root) != eager.exact_key(split)
+    assert not generated.definition.graph_equal(changed)
+    for node in eager.nodes:
+        assert eager.exact_key(node) == deferred.exact_key(node)
+    packet = encode_node_graph(eager)
+    assert len(packet["tables"]) == 1
+    restored = decode_node_graph(json.loads(json.dumps(packet)))
+    projected, external, exact = restored.args[0]
+    assert projected.definition is external
+    assert eager.exact_equal(root, NodePreparation((restored,)), restored)
+    assert restored.exact_key() == eager.exact_key(root)
+    assert projected == generated
+    assert projected.objects == generated.objects
+    assert projected.reference == generated.reference
+    materialized = projected.definition.parameters["materialized"]
+    referenced = projected.definition.parameters["referenced"].target
+    assert materialized.definition is referenced.definition
+    assert materialized.reference.definition is referenced.reference.definition
+    recipe = projected.definition.parameters["recipe"].target.value
+    assert isinstance(recipe.args[0]["exact"], ObjectSelector)
+    assert isinstance(exact.definition.parameters["referenced"].target, StateRef)
+    assert exact.definition.parameters["referenced"].target.states == child.states
+    assert exact.reference.definition is exact.definition
 
 
 def test_reference_value_at_accepts_only_terminal_ref_data():

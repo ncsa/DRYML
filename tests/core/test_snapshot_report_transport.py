@@ -1,4 +1,4 @@
-"""V3 snapshot publication report transport contracts."""
+"""Format-4 saved-graph publication report transport contracts."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import pytest
 
 from dryml.core import Repo, SavePublication, Serializable, StoreReport
 from dryml.core.execute import decode_core_outcome
-from dryml.core.execute_codec import _outcome, _report_data
+from dryml.core.execute_codec import _outcome, _report_data, CoreCallCodecError
 from dryml.core.repo import RepoSaveError
 from dryml.core.repo_plan import PUBLICATION_PHASES
 from dryml.core.store.dir import DirStore
@@ -27,7 +27,7 @@ class ReportTransportValue(Serializable):
 
 
 @pytest.mark.usefixtures("fixed_snapshot_environment")
-def test_report_transport_accepts_every_closed_v3_phase(tmp_path):
+def test_report_transport_accepts_every_closed_v3_phase(tmp_path, monkeypatch):
     """Detached worker evidence preserves every StoreReport phase without handles."""
 
     store = DirStore(tmp_path / "store")
@@ -41,12 +41,23 @@ def test_report_transport_accepts_every_closed_v3_phase(tmp_path):
         ),
     )
 
-    outcome = decode_core_outcome(_outcome(
+    from dryml.core import execute_codec
+    checked = []
+    require_saved = execute_codec.require_saved
+    def count_saved(node):
+        checked.append(node)
+        return require_saved(node)
+    monkeypatch.setattr(execute_codec, "require_saved", count_saved)
+    payload = _outcome(
         False,
         publications=_report_data(report, repo, state),
         reason="result outcome exceeds configured bound after publication",
         limit_bytes=1_000_000,
-    ), repo=repo)
+    )
+    assert len(checked) == 1
+    checked.clear()
+    outcome = decode_core_outcome(payload, repo=repo)
+    assert len(checked) == 1
 
     assert tuple(item.phase for item in outcome.evidence.publications) == phases
     assert all(item.status == "unattempted" for item in outcome.evidence.publications)
@@ -61,7 +72,7 @@ def test_snapshot_failure_reports_unattempted_late_work_before_hooks(tmp_path, m
     repo = Repo(store)
     monkeypatch.setattr(
         store,
-        "publish_snapshot",
+        "publish_save_batch",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("snapshot failure")),
     )
 
@@ -76,3 +87,24 @@ def test_snapshot_failure_reports_unattempted_late_work_before_hooks(tmp_path, m
         for item in report.publications
         if item.phase in {"membership", "index"}
     )
+    assert tuple(store.iter_stored_root_records()) == ()
+
+
+@pytest.mark.parametrize("fault", ["missing_source", "wrong_uuid", "mixed_source_index"])
+def test_u19_external_publication_sources_are_closed_metadata(tmp_path, fault, monkeypatch):
+    """An external source descriptor cannot masquerade as a frozen Store index."""
+    from dryml.core.store.store import Store
+    store = DirStore(tmp_path / "store", query_index="none")
+    repo = Repo(store)
+    saved = repo.save(ReportTransportValue(1, repo=repo))
+    source = {"definition": store.to_definition(), "store_uuid": store.store_uuid}
+    row = {"state": saved, "store": None, "phase": "snapshot", "status": "completed", "path": "$", "source": source}
+    if fault == "missing_source":
+        row["source"] = None
+    elif fault == "wrong_uuid":
+        source["store_uuid"] = "wrong"
+    else:
+        row["store"] = 0
+    monkeypatch.setattr(Store, "from_definition", lambda *args: pytest.fail("resource opened"))
+    with pytest.raises(CoreCallCodecError, match="publication (source|Store index)"):
+        decode_core_outcome(_outcome(False, publications=[row], reason="failed", limit_bytes=1_000_000), repo=repo)

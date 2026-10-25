@@ -600,17 +600,17 @@ def test_adapter_complete_results_exact_repo_restore_and_diagnostic_reemission(n
         model.learn()
     before = None if model.results is None else set(model.results._results._cache)
     state = model.save(repo=repo)
-    path = Path(store.open_local_state(state, next(iter(state.states))).handle, "data")
-    inventory = {p.name: p.read_bytes() for p in path.iterdir()}
+    with store.read_state(state.state.key) as read:
+        inventory = {p.name: p.read_bytes() for p in Path(read.data_directory).iterdir()}
     assert set(inventory) == ({"metadata.json"} if family == "unfitted" else {"metadata.json", "results.pkl"})
-    assert all(v.startswith("statsmodels1-") for v in state.states.values())
+    assert all(v.key.codec_hash.startswith("statsmodels1-") for v in state.state_spec().values())
     if before is not None:
         assert set(model.results._results._cache) == before
     with monkeypatch.context() as guard:
         if model.results is not None:
             guard.setattr(type(model.results._results), "predict", lambda *a: pytest.fail("prediction during restore"))
         restored = Repo(store).load_state_ref(state, reuse_live="never")
-    assert restored is not model and restored.definition == model.definition
+    assert restored is not model and restored.definition.graph_equal(model.definition)
     assert restored.call_mode == "eager" and restored.default_batched is None
     if family != "unfitted":
         assert restored._accepted_fit.payload == model._accepted_fit.payload
@@ -629,9 +629,9 @@ def test_adapter_complete_results_exact_repo_restore_and_diagnostic_reemission(n
     else:
         assert restored.results is None
     resaved = restored.save(repo=repo)
-    assert resaved.states == state.states
-    second = Path(store.open_local_state(resaved, next(iter(resaved.states))).handle, "data")
-    assert {p.name: p.read_bytes() for p in second.iterdir()} == inventory
+    assert resaved.state_spec() == state.state_spec()
+    with store.read_state(resaved.state.key) as read:
+        assert {p.name: p.read_bytes() for p in Path(read.data_directory).iterdir()} == inventory
     if family != "unfitted":
         identity = model.object_id
         repo.restore_state_ref_into(model, unfitted)
@@ -696,7 +696,7 @@ def test_adapter_corrupt_incompatible_and_inconsistent_state_is_candidate_first(
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_adapter_local_managed_experiment_terminal_history_and_restore(native_stats, tmp_path):
     np, _, _, _, _ = native_stats
-    from dryml.core import Repo, StateRef
+    from dryml.core import Repo, require_saved
     from dryml.core.store.dir import DirStore
     from dryml.data import ArrayDataset, Batch, as_supervised
     from dryml.managed import ManagedConfig
@@ -709,11 +709,12 @@ def test_adapter_local_managed_experiment_terminal_history_and_restore(native_st
                      train_data=Batch(as_supervised(ArrayDataset((x, y)), 0, 1), 17))
     terminal = []
     final = exp.train(managed=ManagedConfig(state_repo=repo, callbacks=[
-        lambda obj, context: terminal.append(context.checkpoint_state_ref)]))
-    assert isinstance(final, StateRef) and terminal == [final]
-    assert exp.train.status(state_repo=repo).final_state_ref == final
-    history = ExperimentData.find(final.object_projection(), repo=repo).data
-    assert len(history) == 1 and history.iloc[0].state_ref == final
+        lambda obj, context: terminal.append(context.latest_checkpoint)])).final_state_ref
+    require_saved(final)
+    assert len(terminal) == 1 and terminal[0].graph_equal(final)
+    assert exp.train.status(state_repo=repo).final.graph_equal(final)
+    history = ExperimentData.find(final.object_view(), repo=repo).data
+    assert len(history) == 1 and history.iloc[0].state_ref.graph_equal(final)
     assert history.iloc[0].evaluation_status == "completed" and history.iloc[0].examples_seen == 96
     fresh = repo.load_state_ref(final, reuse_live="never")
     assert fresh.model is not exp.model and fresh.model._accepted_fit.payload == exp.model._accepted_fit.payload

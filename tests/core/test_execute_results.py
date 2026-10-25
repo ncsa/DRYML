@@ -8,7 +8,7 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import ConcreteDefinition, Object, ObjectRef, Repo, SaveRouting, Selector, Serializable, StateRef
+from dryml.core import ConcreteDefinition, Node, SavedNode, Object, ObjectRef, Repo, SaveRouting, Selector, Serializable, StateRef, require_saved
 from dryml.core.execute import (
     CoreExecutionError, ExecutionContext, SharedDirStoreStrategy, current_context, decode_core_outcome,
     worker_context,
@@ -45,13 +45,13 @@ def _structural_result():
     return StructuralResult()
 
 
-def _nested(reference: Ref[ObjectRef]):
+def _nested(reference: Ref[Node]):
     """Return repeated live and pre-existing reference leaves in nested values."""
     value = ResultValue(3)
     return {"items": (value, [value, reference])}
 
 
-def _reference_result(reference: Ref[ObjectRef]) -> Ref[ObjectRef]:
+def _reference_result(reference: Ref[Node]) -> Ref[Node]:
     """Return explicitly reference-valued authority without materializing it."""
     return reference
 
@@ -82,7 +82,7 @@ def _worker_store_count():
     return len(current_context().repo.stores)
 
 
-def _independent_same_identity_results(reference: Ref[StateRef]):
+def _independent_same_identity_results(reference: Ref[SavedNode]):
     """Return distinct live graphs that deliberately share one ObjectRef identity."""
     from dryml.core.execute import current_context
 
@@ -117,7 +117,7 @@ def test_live_results_publish_before_automatic_reference_selection(tmp_path):
     state = _invoke(strategy, _state_result, (7,), repo)
     structural = _invoke(strategy, _structural_result, (), repo)
 
-    assert isinstance(state, StateRef)
+    assert require_saved(state) is state
     assert Repo(DirStore.open_existing(tmp_path / "store")).load_state_ref(state, reuse_live="never").value == 7
     assert isinstance(structural, ConcreteDefinition)
 
@@ -128,13 +128,13 @@ def test_nested_results_preserve_reference_leaves_and_repeated_live_aliases(tmp_
     value = ResultValue(7, repo=repo)
     reference = repo.save(value, deep_capture=True)
 
-    result = _invoke(SharedDirStoreStrategy(), _nested, (reference.object,), repo)
+    result = _invoke(SharedDirStoreStrategy(), _nested, (reference,), repo)
 
     first, repeated = result["items"]
-    assert isinstance(first, StateRef)
+    assert require_saved(first) is first
     assert first is repeated[0]
-    assert repeated[1] == reference.object
-    assert _invoke(SharedDirStoreStrategy(), _reference_result, (reference.object,), repo) == reference.object
+    assert repeated[1].graph_equal(reference)
+    assert _invoke(SharedDirStoreStrategy(), _reference_result, (reference,), repo).graph_equal(reference)
 
 
 def test_return_objects_materializes_only_auto_results_once_and_never_refreshes_inputs(tmp_path):
@@ -143,16 +143,17 @@ def test_return_objects_materializes_only_auto_results_once_and_never_refreshes_
     original = ResultValue(2, repo=repo)
     state = repo.save(original, deep_capture=True)
     strategy = SharedDirStoreStrategy()
-    prepared = strategy.prepare(_nested, (state.object,), {}, repo=repo, control_store=None, update_args=False)
+    prepared = strategy.prepare(_nested, (state,), {}, repo=repo, control_store=None, update_args=False)
 
     result = strategy.recover(
         strategy.invoke(prepared.invocation, repo=repo, update_args=False), prepared,
-        repo=repo, args=(state.object,), kwargs={}, return_objects=True, update_args=False,
+        repo=repo, args=(state,), kwargs={}, return_objects=True, update_args=False,
     )
 
     first, repeated = result["items"]
     assert first is repeated[0]
-    assert isinstance(repeated[1], ObjectRef)
+    assert isinstance(repeated[1], Node)
+    assert repeated[1].graph_equal(state)
     assert original.value == 2
 
 
@@ -243,9 +244,10 @@ def test_same_identity_independent_result_graphs_do_not_share_a_snapshot(tmp_pat
         output = strategy.invoke(prepared.invocation, repo=repo, update_args=False)
     first, second = decode_core_outcome(output, repo=repo).value["result"]
 
-    assert isinstance(first, StateRef)
-    assert isinstance(second, StateRef)
-    assert first != second
+    assert require_saved(first) is first
+    assert require_saved(second) is second
+    assert not first.graph_equal(second)
+    assert first.object_projection_equal(second)
     assert Repo(DirStore.open_existing(tmp_path / "store")).load_state_ref(first, reuse_live="never").value == 11
     assert Repo(DirStore.open_existing(tmp_path / "store")).load_state_ref(second, reuse_live="never").value == 12
 
@@ -277,7 +279,7 @@ def test_post_publication_overflow_retains_exact_evidence_only(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     state = repo.save(ResultValue(4, repo=repo), deep_capture=True)
     publications = [{
-        "state": state.to_data(), "store": 0, "phase": "snapshot",
+        "state": state, "store": 0, "phase": "snapshot",
         "status": "completed", "path": "$",
     }]
     failure_size = len(_outcome(
@@ -291,7 +293,7 @@ def test_post_publication_overflow_retains_exact_evidence_only(tmp_path):
     ), repo=repo)
 
     assert not outcome.value["success"]
-    assert outcome.evidence.publications[0].state_ref == state
+    assert outcome.evidence.publications[0].state_ref.graph_equal(state)
     assert Repo(DirStore.open_existing(tmp_path / "store")).load_state_ref(
         outcome.evidence.publications[0].state_ref, reuse_live="never",
     ).value == 4
@@ -307,9 +309,9 @@ def test_outcome_evidence_uses_exact_refs_and_store_table_indexes_only(tmp_path)
         strategy.invoke(prepared.invocation, repo=repo, update_args=False), repo=repo,
     )
 
-    assert isinstance(outcome.value["result"], StateRef)
+    assert require_saved(outcome.value["result"]) is outcome.value["result"]
     assert outcome.evidence.publications
-    assert all(item.state_ref == outcome.value["result"] for item in outcome.evidence.publications)
+    assert all(item.state_ref.graph_equal(outcome.value["result"]) for item in outcome.evidence.publications)
     assert {item.store_index for item in outcome.evidence.publications} == {0}
 
 
@@ -325,7 +327,7 @@ def test_partial_replica_publication_is_a_failed_outcome_with_exact_evidence(tmp
     prepared = strategy.prepare(_state_result, (6,), {}, repo=repo, control_store=None, update_args=False)
     worker = Repo.from_definition(repo.to_definition())
     monkeypatch.setattr(
-        worker.stores[1], "publish_snapshot",
+        worker.stores[1], "publish_save_batch",
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("replica failure")),
     )
     try:
@@ -338,9 +340,51 @@ def test_partial_replica_publication_is_a_failed_outcome_with_exact_evidence(tmp
     assert {(item.store_index, item.status) for item in decoded.evidence.publications if item.phase == "snapshot"} == {
         (0, "completed"), (1, "failed"),
     }
+    assert len([item for item in decoded.evidence.publications if item.phase == "snapshot"]) == 2
     with pytest.raises(CoreExecutionError) as raised:
         strategy.recover(
             output, prepared, repo=repo, args=(6,), kwargs={},
             return_objects=False, update_args=False,
         )
-    assert raised.value.evidence == decoded.evidence
+    assert [(p.store_index, p.phase, p.status) for p in raised.value.evidence.publications] == [
+        (p.store_index, p.phase, p.status) for p in decoded.evidence.publications]
+    assert all(a.state_ref.graph_equal(b.state_ref) for a, b in zip(
+        raised.value.evidence.publications, decoded.evidence.publications))
+
+
+@pytest.mark.parametrize("foreign_repo", [False, True])
+def test_u19_managed_partial_publication_keeps_failed_identity_and_store_evidence(tmp_path, monkeypatch, foreign_repo):
+    """A managed final-save failure retains both published and failed replica facts."""
+    from tests.core.u19_execution_fixtures import WorkerValue
+    from dryml.managed import ManagedConfig
+    first, second = DirStore(tmp_path / "first", query_index="none"), DirStore(tmp_path / "second", query_index="none")
+    repo = Repo([first, second], save_routing=SaveRouting(
+        ((Selector(WorkerValue), first), (Selector(WorkerValue), second)), "all"))
+    caller = Repo(DirStore(tmp_path / "caller", query_index="none")) if foreign_repo else repo
+    subject = WorkerValue(str(tmp_path / "events"), repo=caller)
+    caller.save(subject)
+    strategy = SharedDirStoreStrategy()
+    prepared = strategy.prepare(subject.advance, (), {"managed": ManagedConfig(state_repo=repo)}, repo=caller, control_store=None, update_args=False)
+    worker = Repo.from_definition(caller.to_definition())
+    publish = DirStore.publish_save_batch
+    def fail_second(store, batch):
+        if store.base_dir == second.base_dir:
+            raise OSError("replica refused")
+        return publish(store, batch)
+    monkeypatch.setattr(DirStore, "publish_save_batch", fail_second)
+    try:
+        output = strategy.invoke(prepared.invocation, repo=worker, update_args=False)
+    finally:
+        worker.close(flush=False)
+    decoded = decode_core_outcome(output, repo=caller)
+    assert not decoded.value["success"]
+    snapshots = [row for row in decoded.evidence.publications if row.phase == "snapshot"]
+    assert len(snapshots) == 2
+    if foreign_repo:
+        assert {(row.store_uuid, row.status) for row in snapshots} == {(first.store_uuid, "completed"), (second.store_uuid, "failed")}
+        assert all(row.store_index is None and row.store_descriptor["kind"] == "dir" for row in snapshots)
+    else:
+        assert {(row.store_index, row.status) for row in snapshots} == {(0, "completed"), (1, "failed")}
+    assert decoded.evidence.failure.execution.operation_id == subject.advance.status(state_repo=repo).operation_id
+    assert decoded.evidence.failure.status.state != "completed"
+    assert all(row.state_ref.state.key.cdef_digest for row in decoded.evidence.publications)

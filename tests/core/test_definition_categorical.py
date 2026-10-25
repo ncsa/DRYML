@@ -25,7 +25,7 @@ def test_def_1():
 
     obj_def = obj.definition
 
-    assert obj_def == obj_def_manual.concretize()
+    assert obj_def.graph_equal(obj_def_manual.concretize())
     obj_class_def = obj_def.categorical(recursive=True)
     assert obj_class_def.match(obj_def)
 

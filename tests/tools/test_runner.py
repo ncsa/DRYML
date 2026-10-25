@@ -617,14 +617,12 @@ sys.exit(pytest.main([
     owner = "tests/models/test_dataset_training_integration.py"
     expected = {
         f"{owner}::{function}" for function in (
-            "test_generic_trainer_and_empty_artifacts_use_final_dataset_cardinality",
             "test_native_trainers_consume_authored_dataset_batches[torch]",
             "test_native_trainers_consume_authored_dataset_batches[tf]",
             "test_jax_trainer_consumes_authored_dataset_batches",
             "test_jax_qualification_model_runs_on_authored_dataset_batches[W1]",
             "test_jax_qualification_model_runs_on_authored_dataset_batches[W3]",
             "test_jax_managed_local_publishes_exact_history_and_independent_owner_state",
-            "test_jax_managed_subprocess_restores_exact_graph",
             "test_torch_update_failure_survives_source_cleanup_with_accepted_prefix",
             "test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
             "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",

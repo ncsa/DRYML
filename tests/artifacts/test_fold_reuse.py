@@ -11,8 +11,8 @@ from dryml.artifacts import ArtifactRecoveryError, Fold, Value
 from dryml.core import Repo
 from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
-from dryml.core.utils.graph.path import GraphPath
-from dryml.managed import ManagedConfig, ManagedRecoveryError, managed_operation
+from dryml.core.repo import RepoLoadError
+from dryml.managed import ManagedConfig, InvocationResult, managed_operation
 
 from .test_fold import CountingDataset, _fold
 
@@ -39,7 +39,7 @@ class NestedResultValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(return_state_ref=True)
+    @managed_operation()
     def compute(self, *, managed) -> None:
         """Install the child's current value as this Artifact result."""
 
@@ -57,10 +57,12 @@ def test_fold_compute_returns_its_exact_completed_state_ref(tmp_path):
     store = DirStore(tmp_path / "store")
     fold = _fold(CountingDataset([np.ones((1, 2), dtype=np.float32)]))
 
-    receipt = fold.compute(managed=ManagedConfig(state_repo=store))
+    result = fold.compute(managed=ManagedConfig(state_repo=store))
+    assert isinstance(result, InvocationResult) and result.value is None
+    receipt = result.final_state_ref
     restored = Repo(DirStore(store.base_dir)).load_state_ref(receipt, reuse_live="never")
 
-    assert receipt == fold.last_state_ref
+    assert receipt.graph_equal(fold.last_state_ref)
     assert restored.ready
     assert restored.value() == 2.0
 
@@ -73,17 +75,20 @@ def test_fold_completed_recipe_query_and_reopen_recovery_skip_source_iteration(t
     source = CountingDataset([np.ones((1, 2), dtype=np.float32)])
     fold = _fold(source)
     initial = repo.save_object(fold, deep_capture=True)
-    receipt = fold.compute(managed=ManagedConfig(state_repo=repo))
+    receipt = fold.compute(managed=ManagedConfig(state_repo=repo)).final_state_ref
 
-    assert Fold.find_completed_state_ref(fold, repo=repo) == receipt
-    assert Fold.load_completed(fold, repo=repo) is fold
+    assert Fold.find_completed_state_ref(fold, repo=repo).graph_equal(receipt)
+    loaded = Fold.load_completed(fold, repo=repo)
+    assert loaded.last_state_ref.graph_equal(receipt)
+    assert loaded is fold
+    assert Fold.load_completed(fold, repo=repo) is loaded
 
     CountingDataset.reset()
     reopened = Repo(DirStore.open_existing(store.base_dir))
     monkeypatch.setattr(Fold, "_load_source", lambda *_: pytest.fail("reuse loaded Fold input"))
     recovered = Fold.recover(initial, repo=reopened, reuse_live="never")
 
-    assert recovered.last_state_ref == receipt
+    assert recovered.last_state_ref.graph_equal(receipt)
     assert recovered.ready
     assert recovered.value() == 2.0
     assert CountingDataset.iterations == 0
@@ -120,17 +125,17 @@ def test_fold_compute_loads_a_saved_source_fresh_without_reusing_live_cache(tmp_
     source_state = repo.save_object(source, deep_capture=True)
     fold = _fold(source_state)
     calls = []
-    original = Repo.load_state_ref
+    original = Repo.build
 
     def tracked(self, state_ref, **kwargs):
-        if state_ref == source_state:
+        if state_ref.graph_equal(source_state):
             calls.append(kwargs)
         return original(self, state_ref, **kwargs)
 
-    monkeypatch.setattr(Repo, "load_state_ref", tracked)
+    monkeypatch.setattr(Repo, "build", tracked)
     fold.compute(managed=ManagedConfig(state_repo=repo))
 
-    assert calls == [{"reuse_live": "never", "cache": "none"}]
+    assert calls == [{"cache": "none"}]
     assert source.last_state_ref == source_state
 
 
@@ -156,12 +161,12 @@ def test_fold_recipe_query_rejects_corrupt_completed_authority(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     fold = _fold(CountingDataset([np.ones((1, 2), dtype=np.float32)]))
-    receipt = fold.compute(managed=ManagedConfig(state_repo=repo))
-    snapshot = Path(store.get_snapshot_directory(receipt))
-    payload, = snapshot.glob(f"local-state/*/{receipt.states[GraphPath()]}/data/value.pkl")
+    receipt = fold.compute(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    payload = Path(store.state_data_path(receipt.state.key), "value.pkl")
     payload.write_bytes(b"corrupt")
 
-    with pytest.raises(ManagedRecoveryError, match="exact StateRef closure"):
+    assert Fold.find_completed_state_ref(fold, repo=repo).graph_equal(receipt)
+    with pytest.raises(RepoLoadError):
         Fold.load_completed(fold, repo=repo)
 
 
@@ -190,7 +195,7 @@ def test_fold_completed_recovery_rejects_uncached_active_identity(tmp_path):
 
     store = DirStore(tmp_path / "store")
     fold = _fold(CountingDataset([np.ones((1, 2), dtype=np.float32)]))
-    receipt = fold.compute(managed=ManagedConfig(state_repo=store))
+    receipt = fold.compute(managed=ManagedConfig(state_repo=store)).final_state_ref
     reopened = Repo(DirStore.open_existing(store.base_dir))
     uncached = reopened.load_state_ref(receipt, reuse_live="never", cache="none")
 
@@ -205,13 +210,13 @@ def test_completed_reuse_validates_every_materialized_descendant_state(tmp_path)
 
     repo = Repo(DirStore(tmp_path / "store"))
     artifact = NestedResultValue(NestedResultState(1), repo=repo)
-    receipt = artifact.compute(managed=ManagedConfig(state_repo=repo))
+    receipt = artifact.compute(managed=ManagedConfig(state_repo=repo)).final_state_ref
     artifact.child.value = 2
     repo.save_object(artifact.child)
 
     recovered = NestedResultValue.load_completed(artifact, repo=repo)
 
     assert recovered is not artifact
-    assert recovered.last_state_ref == receipt
+    assert recovered.last_state_ref.graph_equal(receipt)
     assert recovered.child.value == 1
     assert recovered.value() == 1

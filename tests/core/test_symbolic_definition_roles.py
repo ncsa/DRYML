@@ -8,7 +8,10 @@ import json
 
 import pytest
 
-from dryml.core import Definition, Object, Par, Ref, Repo, Template
+from dryml.core import (
+    ConcreteNode, Definition, LocalState, Node, Object, ObjectId, Par, Ref,
+    Repo, SavedNode, Serializable, StateKey, Template, require_saved,
+)
 import dryml.core.cdef_codec as cdef_codec
 from dryml.core.cdef_codec import CDefGraphCodecError, decode_cdef_graph, encode_cdef_graph
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
@@ -383,3 +386,110 @@ def test_classless_resolved_definition_is_not_reported_as_symbolically_unresolve
     assert definition.is_resolved
     with pytest.raises(ValueError, match="no class authority"):
         Repo().materialize_boundary((definition,))
+
+
+def test_node_reference_capabilities_preserve_omissions_and_exact_facets():
+    """Node metadata is resolved, concrete is normalized, and saved is complete."""
+
+    incomplete = Definition(RoleLeaf)
+    concrete = Definition(RoleLeaf, 2).concretize()
+    assert _plan(Ref[Node]).prepare_args((incomplete,), {}).deliver_args()[0][0] is incomplete
+    assert incomplete.parameters == {}
+    assert _plan(Ref[ConcreteNode]).prepare_args((concrete,), {}).deliver_args()[0][0] is concrete
+    assert _plan(Ref[SavedNode]).prepare_args((concrete,), {}).deliver_args()[0][0] is concrete
+    assert require_saved(concrete) is concrete
+    with pytest.raises(SignatureError):
+        _plan(Ref[ConcreteNode]).prepare_args((incomplete,), {})
+    symbolic = Definition(RoleLeaf, Par("width"))
+    with pytest.raises(SignatureError, match="symbolically resolved"):
+        _plan(Ref[Node]).prepare_args((symbolic,), {})
+    assert _plan(Template[Node]).prepare_args((symbolic,), {}).deliver_args()[0][0] is symbolic
+    mapping = _plan(Mapping[str, Template[Node]]).prepare_args(({"future": symbolic},), {})
+    assert mapping.deliver_args()[0][0]["future"] is symbolic
+
+
+def test_saved_node_annotation_validates_completeness_without_capture(monkeypatch):
+    """The Annotated refinement checks the same handle and never saves a state."""
+
+    concrete = Definition(Serializable).concretize()
+    creation = concrete.creation_view()
+    state = LocalState(StateKey(creation.creation_digest(), "pickle-" + "a" * 64), creation)
+    saved = concrete.with_identity(ObjectId(("savedrole",))).with_state(state)
+    monkeypatch.setattr(Repo, "save_object", lambda *a, **k: pytest.fail("automatic save"))
+    with pytest.raises(SignatureError):
+        _plan(Ref[SavedNode]).prepare_args((concrete,), {})
+    assert _plan(Ref[SavedNode]).prepare_args((saved,), {}).deliver_args()[0][0] is saved
+    assert _plan(Ref[Node | ConcreteNode | SavedNode]).prepare_args((saved,), {}).deliver_args()[0][0] is saved
+
+
+def test_node_expression_codec_retains_facets_aliases_and_construction_evidence():
+    """Node-family expression data is lossless and rejected by the old reader."""
+
+    from dryml.core.template_codec import _decode
+
+    concrete = Definition(Serializable).concretize()
+    state = LocalState(StateKey(concrete.creation_digest(), "pickle-" + "b" * 64), concrete)
+    shared = Definition(RoleLeaf, Par("width")).with_identity(ObjectId(("expression",))).with_state(state)
+    source = Definition(PlainHolder, [shared, shared, Definition(RoleLeaf, Par("width"))])
+    data = expression_to_data(source)
+    assert data["schema"] == "dryml-node-template" and data["version"] == 1
+    assert data["graph"]["format"] == "dryml-node-graph/v1"
+    restored = expression_from_data(data)
+    assert restored.graph_equal(source)
+    assert restored.args[0][0] is restored.args[0][1]
+    assert restored.args[0][0] is not restored.args[0][2]
+    with pytest.raises(ParameterizationError):
+        _decode(data)
+
+
+def test_auto_ref_rejects_unresolved_node_assertions_without_sampling():
+    """Explicit Ref intent does not bypass resolved-metadata admission."""
+
+    from dryml.core import AutoRef
+
+    with pytest.raises(SignatureError, match="symbolically resolved"):
+        _plan(Ref[AutoRef]).prepare_args((Ref(Definition(RoleLeaf, Par("width"))),), {})
+
+
+def test_template_node_codec_handles_semantic_values_and_overlay_evidence():
+    """New-family quotation preserves arrays and retained normalized construction."""
+
+    import numpy as np
+
+    concrete = Definition(RoleLeaf, 2).concretize()
+    realized = concrete.with_realization(identities={"$": ObjectId(("overlay",))})
+    source = Definition(PlainHolder, [realized, realized, np.array([1, 2], dtype="<i4")])
+    restored = expression_from_data(expression_to_data(source))
+    assert restored.graph_equal(source)
+    overlay = restored.args[0][0]
+    assert overlay is restored.args[0][1]
+    assert overlay.construction_view.object_id is None
+    assert overlay.construction_view._occurrence is overlay._occurrence
+    array_only = Definition(RoleLeaf, np.array([1, 2], dtype="<i4"))
+    assert expression_from_data(expression_to_data(array_only)).graph_equal(array_only)
+
+
+def test_node_expression_codec_keeps_bounds_and_rejects_incompatible_family_intact(monkeypatch):
+    """Node-family selection cannot bypass expression limits or accept V2 metadata."""
+
+    source = Definition(RoleLeaf, [1, 2]).with_identity(ObjectId(("bounded",)))
+    data = expression_to_data(source)
+    for mutation in (
+        lambda value: value.update(version=2),
+        lambda value: value["graph"].update(identity_version=2),
+        lambda value: value["graph"].update(format="dryml-node-graph/v2"),
+        lambda value: value["graph"]["views"][0].update(expected_key="wrong"),
+    ):
+        malformed = deepcopy(data)
+        mutation(malformed)
+        snapshot = deepcopy(malformed)
+        with pytest.raises(ParameterizationError):
+            expression_from_data(malformed)
+        assert malformed == snapshot
+    with pytest.raises(ParameterizationLimitError, match="integer"):
+        expression_to_data(Definition(RoleLeaf, 1 << 1025).with_identity(source.object_id))
+    monkeypatch.setattr("dryml.core.template_codec._MAX_ENTRIES", 1)
+    with pytest.raises(ParameterizationLimitError, match="entry limit"):
+        expression_to_data(source)
+    with pytest.raises(ParameterizationLimitError, match="entry limit"):
+        expression_from_data(data)

@@ -52,10 +52,10 @@ def test_equivalent_broad_v3_workload_captures_each_query_cut_once(tmp_path):
     counting = CountingStore(DirStore(store.base_dir, query_index="memory"))
     repo2 = Repo(stores=counting)
 
-    assert repo2.query().cdefs().stored().count() == 1
-    assert counting.hydrate_count == 1
-    assert repo2.query().cdefs().stored().count() == 1
-    assert counting.hydrate_count == 2
+    for _ in range(2):
+        stats = repo2.query().cdefs().stored().explain(analyze=True)
+        assert stats.result_count == stats.store_scan_count == 1
+    assert counting.hydrate_count == 0  # no legacy DefinitionRecord inventory
 
 
 def test_u2_completed_exact_positive_has_no_maintenance_inventory(tmp_path, monkeypatch):
@@ -63,15 +63,16 @@ def test_u2_completed_exact_positive_has_no_maintenance_inventory(tmp_path, monk
 
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     root = Definition(PerfLeaf, "root").concretize()
-    store.write_definition_record(DefinitionRecord(root))
+    store.publish_node(root)
     store.rebuild_query_index()
     counting = CountingStore(store)
     query = counting.query().refresh(True)
     query.count()
     counting.hydrate_count = counting.definition_read_count = 0
     monkeypatch.setattr(counting.open_query_index(), "refresh", lambda *a, **kw: pytest.fail("completed request refreshed"))
-    assert query.sel(root).cdefs().stored().exists()
-    assert counting.hydrate_count == 0 and counting.definition_read_count == 2
+    stats = query.sel(root).cdefs().stored().explain(analyze=True)
+    assert stats.result_count == 1 and stats.store_scan_count == 0
+    assert stats.cdef_blobs_decoded == 1 and counting.hydrate_count == counting.definition_read_count == 0
 
 
 def test_v3_broad_query_does_not_restore_payloads(tmp_path):
@@ -101,17 +102,21 @@ def test_definition_count_and_explain_do_not_materialize(tmp_path):
     assert counting.restore_count == 0
 
 
-def test_exact_root_lookup_avoids_broad_hydration(tmp_path):
-    store = DirStore(tmp_path / "store", query_index="memory")
+def test_indexed_concrete_recipe_lookup_avoids_broad_hydration(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
     repo = Repo(stores=store)
     obj = PerfLeaf("x", repo=repo)
     repo.save_object(obj)
+    for i in range(4):
+        store.publish_node(Definition(PerfLeaf, "unrelated-" + str(i)).concretize())
 
-    counting = CountingStore(DirStore(store.base_dir, query_index="memory"))
+    counting = CountingStore(DirStore(store.base_dir, query_index="sqlite"))
     repo2 = Repo(stores=counting)
 
-    assert repo2.query().sel(obj.definition).cdefs().stored().count() == 1
-    assert counting.definition_read_count >= 1
+    stats = repo2.query().sel(obj.definition).cdefs().stored().refresh(False).require_indexed().explain(analyze=True)
+    assert stats.result_count == 1 and stats.cdef_blobs_decoded == 1 and stats.store_scan_count == 0
+    assert stats.candidate_rows_read == 1
+    assert counting.definition_read_count == 0
     assert counting.hydrate_count == 0
 
 
@@ -124,8 +129,9 @@ def test_exact_v3_query_reads_only_direct_definition_authority(tmp_path):
     counting = CountingStore(DirStore(store.base_dir))
     repo2 = Repo(stores=counting)
 
-    assert repo2.query().sel(obj.definition).cdefs().stored().count() == 1
-    assert counting.definition_read_count >= 1
+    stats = repo2.query().sel(obj.definition).cdefs().stored().explain(analyze=True)
+    assert stats.result_count == 1 and stats.cdef_blobs_decoded == 1 and stats.store_scan_count == 0
+    assert counting.definition_read_count == 0
     assert counting.hydrate_count == 0
     assert counting.restore_count == 0
 
@@ -157,8 +163,9 @@ def test_v3_broad_save_query_records_its_expanded_inventory_cost(tmp_path):
     obj = PerfLeaf("x", repo=repo)
     repo.save_object(obj)
 
-    assert repo.query().cdefs().stored().count() == 1
-    assert counting.hydrate_count == 1
+    stats = repo.query().cdefs().stored().explain(analyze=True)
+    assert stats.result_count == 1 and stats.store_scan_count == 0
+    assert counting.hydrate_count == 0
 
 
 def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
@@ -169,16 +176,14 @@ def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
     second = DirStore(tmp_path / "second", query_index="sqlite")
     values = sorted(
         (Definition(PerfLeaf, f"value-{index}").concretize() for index in range(6)),
-        key=lambda value: value.graph_hash(),
+        key=lambda value: value.exact_digest(),
     )
     for value in values[:4]:
-        first.write_definition_record(DefinitionRecord(value))
+        first.publish_node(value)
     for value in (*values[:3], values[-1]):
-        second.write_definition_record(DefinitionRecord(value))
+        second.publish_node(value)
     first.rebuild_query_index()
     second.rebuild_query_index()
-    for store in (first, second):
-        store.write_main_ref(MainRefRecord(DefinitionRecord(values[0]).digest))
     monkeypatch.setattr(
         first,
         "iter_definition_records",
@@ -189,32 +194,13 @@ def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
         "iter_definition_records",
         lambda: pytest.fail("bounded query scanned second Store authority"),
     )
-    pages = 0
-    rows = 0
-    original = SQLiteQueryIndexReadView.iter_stored_identity_cdef_batches
-
-    def counted(self, **kwargs):
-        nonlocal pages, rows
-        for batch in original(self, **kwargs):
-            pages += 1
-            rows += len(batch.cdefs)
-            yield batch
-
-    monkeypatch.setattr(
-        SQLiteQueryIndexReadView,
-        "iter_stored_identity_cdef_batches",
-        counted,
-    )
-
     result = Repo((first, second)).query().cdefs().stored().require_indexed().max_verify(3).take(3)
 
-    assert tuple(result) == tuple(values[:3])
+    assert all(a.graph_equal(b) for a, b in zip(result, values[:3]))
     assert result.bounded and result.requested_limit == 3
     assert result.diagnostic().pages_fetched == 2
     assert result.diagnostic().candidate_rows_read == 8
     assert result.diagnostic().cdef_blobs_decoded == 8
-    assert pages == 2
-    assert rows == 8
     assert all(len(result.sources(value)) == 2 for value in values[:3])
 
     refined = result.query().sel(values[0]).collect()
@@ -237,46 +223,20 @@ def test_reference_validation_visits_roots_linearly_per_selected_cut(
     from dryml.core.store.records import DeclarationRecord
     from dryml.core.utils.graph.path import GraphPath
 
-    store = DirStore(tmp_path / "store", query_index="memory")
+    store = DirStore(tmp_path / "store", query_index="sqlite")
     for index in range(root_count):
-        store.write_declaration_record(DeclarationRecord(ObjectRef(
-            Definition(PerfParent, index).concretize(),
-            {GraphPath(): ObjectId(("linear",))},
-        )))
-    passes = 0
+        store.publish_node(Definition(PerfParent, index).concretize().with_identity(ObjectId(("linear",))))
     visits = 0
-    materializations = 0
-    original_combination = source.validate_captured_reference_authority
-    original_roots = authority._validate_object_reference_roots
-    original_repo = source.SourceCapture.capture_repo
-
-    def capture_repo(capture, *args, **kwargs):
-        nonlocal materializations
-        materializations += 1
-        return original_repo(capture, *args, **kwargs)
-
-    def combination(facts):
-        nonlocal passes
-        passes += 1
-        return original_combination(facts)
-
-    def roots(values):
-        def counted():
-            nonlocal visits
-            for value in values:
-                visits += 1
-                yield value
-        return original_roots(counted())
-
-    monkeypatch.setattr(source, "validate_captured_reference_authority", combination)
-    monkeypatch.setattr(authority, "_validate_object_reference_roots", roots)
-    monkeypatch.setattr(source.SourceCapture, "capture_repo", capture_repo)
+    from dryml.core.store.records import DeclarationAnchorRecord
+    original_read = source._NodePage.read
+    def read(page, selected, path, reader, *args, **kwargs):
+        nonlocal visits
+        if reader is DeclarationAnchorRecord:
+            visits += 1
+        return original_read(page, selected, path, reader, *args, **kwargs)
+    monkeypatch.setattr(source._NodePage, "read", read)
     query = Repo(store).query().object_refs().stored()
     assert query.count() == root_count
-    assert passes == 1
     assert visits == root_count
-    assert materializations == 1
     assert query.count() == root_count
-    assert passes == 2
     assert visits == 2 * root_count
-    assert materializations == 2

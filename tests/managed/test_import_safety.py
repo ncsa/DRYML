@@ -8,7 +8,7 @@ import sys
 
 
 def test_managed_exports_are_closed_and_import_avoids_lifecycle_consumers():
-    """U3 imports declaration helpers but not execute, dispatch, records, or plugins."""
+    """The integrated facade exposes detached results without execution/plugins."""
 
     script = """
 import json
@@ -16,6 +16,8 @@ import sys
 import dryml.managed
 
 assert set(dryml.managed.__all__) == {
+        'InvocationResult', 'FailedInvocationResult', 'ExecutionIdentity',
+        'ResultReference', 'ResultSource', 'ManagedResultError',
         'InterruptRequestResult', 'ManagedConfig', 'ManagedContext', 'ManagedConfigError',
         'ManagedConflictError', 'ManagedContextError', 'ManagedControlError',
         'ManagedDeclarationError', 'ManagedError', 'ManagedInterrupted',

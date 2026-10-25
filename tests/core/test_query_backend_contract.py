@@ -26,7 +26,6 @@ from dryml.core.query.selector_graph import compile_selector_graph
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
 
 
 class ContractLeaf(Object):
@@ -405,7 +404,9 @@ def test_contract_register_exact_lookup_and_generation(backend_case):
         did = next(iter(dids))
         assert view.generation == result.generation
         assert view.is_stored_id(did)
-        assert view.cdefs_by_id(dids) == {did: obj.definition}
+        decoded = view.cdefs_by_id(dids)
+        assert set(decoded) == {did}
+        assert decoded[did].graph_equal(obj.definition)
 
 
 def test_contract_phase0_record_types_are_available():
@@ -446,7 +447,7 @@ def test_direct_memory_explicit_calls_repeat_hydration_and_retain_failures(tmp_p
     from dryml.core.query.model import QueryIndexError, QueryStats
 
     store = DirStore(tmp_path / "memory", query_index="memory")
-    store.write_definition_record(DefinitionRecord(ContractLeaf("first").definition))
+    store.publish_node(ContractLeaf("first").definition)
     index = MemoryContractIndex(store)
     scans = []
     original = store.hydrate_index
@@ -526,7 +527,7 @@ def test_query_index_status_reflects_each_current_policy(tmp_path):
         "sqlite", "memory", "none", "sqlite",
     ]
     assert [status.state for status in statuses] == [
-        "missing", "ready", "disabled", "missing",
+        "missing", "disabled", "disabled", "missing",
     ]
     assert all(status.generation is None for status in statuses)
 
@@ -534,15 +535,15 @@ def test_query_index_status_reflects_each_current_policy(tmp_path):
 def test_memory_and_none_policies_never_create_sqlite_sidecars(tmp_path):
     """Non-SQLite policies leave persistent derived paths absent."""
 
-    for policy, state in (("memory", "ready"), ("none", "disabled")):
+    for policy, state in (("memory", "disabled"), ("none", "disabled")):
         store = DirStore(tmp_path / policy, query_index=policy)
         root = Definition(ContractLeaf, policy).concretize()
-        store.write_definition_record(DefinitionRecord(root))
+        record = store.publish_node(root)
 
         assert store.open_query_index() is None
         assert store.query_index_status().state == state
         assert not Path(store.query_index_path).exists()
-        assert tuple(store.iter_definition_records())
+        assert store.read_node(record.digest).graph_equal(root)
 
 
 def test_contract_local_candidates_and_planner(backend_case):
@@ -560,7 +561,7 @@ def test_contract_local_candidates_and_planner(backend_case):
         candidate_ids = graph_candidate_ids(view, selector_graph, domain)
         cdefs = tuple(view.cdefs_by_id(candidate_ids).values())
 
-    assert cdefs == (wanted.definition,)
+    assert len(cdefs) == 1 and cdefs[0].graph_equal(wanted.definition)
 
 
 def test_memory_variadic_selector_uses_semantic_requirements_without_scanning(tmp_path):
@@ -645,9 +646,13 @@ def test_contract_owner_projection_and_occurrence_capture(backend_case):
         projection = view.project_owners({leaf_id})
         occurrences = tuple(view.occurrence_snapshot_for_nested_ids({leaf_id}).iter_occurrences())
 
-    assert set(projection.cdefs) == {owner1.definition, owner2.definition}
-    assert {occ.owner for occ in occurrences} == {owner1.definition, owner2.definition}
-    assert {occ.definition for occ in occurrences} == {leaf.definition}
+    assert len(projection.cdefs) == 2
+    assert all(sum(cdef.graph_equal(expected) for cdef in projection.cdefs) == 1
+               for expected in (owner1.definition, owner2.definition))
+    assert len(occurrences) == 2
+    assert all(sum(occ.owner.graph_equal(expected) for occ in occurrences) == 1
+               for expected in (owner1.definition, owner2.definition))
+    assert all(occ.definition.graph_equal(leaf.definition) for occ in occurrences)
     assert all(str(occ.path) == '$[@param("child")]' for occ in occurrences)
 
 

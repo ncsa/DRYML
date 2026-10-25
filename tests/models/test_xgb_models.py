@@ -507,7 +507,7 @@ def test_adapter_cleanup_precedes_single_native_encoding(native_xgb, monkeypatch
 def test_adapter_local_experiment_publishes_native_model_and_terminal_history(native_xgb, tmp_path):
     """One local happy path connects the real codec to the unchanged managed owner."""
     np, _, _ = native_xgb
-    from dryml.core import Repo, StateRef
+    from dryml.core import Repo, require_saved
     from dryml.core.store.dir import DirStore
     from dryml.data import ArrayDataset, Batch, as_supervised
     from dryml.managed import ManagedConfig
@@ -522,13 +522,15 @@ def test_adapter_local_experiment_publishes_native_model_and_terminal_history(na
                      repo=repo, checkpoint_every_steps=1)
     terminal = []
     final = exp.train(managed=ManagedConfig(
-        state_repo=repo, callbacks=[lambda obj, context: terminal.append(context.checkpoint_state_ref)]))
-    assert isinstance(final, StateRef) and terminal == [final]
-    assert exp.train.status(state_repo=repo).final_state_ref == final
-    history = ExperimentData.find(final.object_projection(), repo=repo).data
+        state_repo=repo, callbacks=[lambda obj, context: terminal.append(context.latest_checkpoint)]
+    )).final_state_ref
+    require_saved(final)
+    assert len(terminal) == 1 and terminal[0].graph_equal(final)
+    assert exp.train.status(state_repo=repo).final.graph_equal(final)
+    history = ExperimentData.find(final.object_view(), repo=repo).data
     assert len(history) == 1
     assert history.iloc[0].evaluation_status == "completed"
-    assert history.iloc[0].state_ref == final and history.iloc[0].examples_seen == 10
+    assert history.iloc[0].state_ref.graph_equal(final) and history.iloc[0].examples_seen == 10
     fresh = repo.load_state_ref(final, reuse_live="never")
     assert fresh.model is not exp.model
     assert (fresh.state.step, fresh.state.epoch, fresh.state.examples_seen) == (1, 1, 10)
@@ -554,10 +556,10 @@ def test_adapter_exact_repo_restore_and_retained_payload_identity(native_xgb, tm
     if task != "unfitted":
         model.fit(x, y)
     state = model.save(repo=repo)
-    payload_dir = Path(store.open_local_state(state, next(iter(state.states))).handle, "data")
-    inventory = {path.name: path.read_bytes() for path in payload_dir.iterdir()}
+    with store.read_state(state.state.key) as read:
+        inventory = {path.name: path.read_bytes() for path in Path(read.data_directory).iterdir()}
     assert set(inventory) == ({"metadata.json"} if task == "unfitted" else {"metadata.json", "model.ubj"})
-    assert all(value.startswith("xgboost1-") for value in state.states.values())
+    assert all(value.key.codec_hash.startswith("xgboost1-") for value in state.state_spec().values())
     with monkeypatch.context() as guard:
         if task != "unfitted":
             def no_probe(*args, **kwargs):
@@ -567,7 +569,7 @@ def test_adapter_exact_repo_restore_and_retained_payload_identity(native_xgb, tm
             guard.setattr(type(model.mdl), "predict_proba", no_probe, raising=False)
         reopened = Repo(store).load_state_ref(state, reuse_live="never")
     assert reopened is not model
-    assert reopened.definition == model.definition
+    assert reopened.definition.graph_equal(model.definition)
     assert reopened.call_mode == "eager" and reopened.default_batched is None
     if task != "unfitted":
         np.testing.assert_array_equal(reopened(x), model(x))
@@ -579,9 +581,9 @@ def test_adapter_exact_repo_restore_and_retained_payload_identity(native_xgb, tm
         with pytest.raises(ValueError, match="unfitted"):
             reopened(x)
     resaved = reopened.save(repo=repo)
-    assert resaved.states == state.states
-    second_dir = Path(store.open_local_state(resaved, next(iter(resaved.states))).handle, "data")
-    assert {path.name: path.read_bytes() for path in second_dir.iterdir()} == inventory
+    assert resaved.state_spec() == state.state_spec()
+    with store.read_state(resaved.state.key) as read:
+        assert {path.name: path.read_bytes() for path in Path(read.data_directory).iterdir()} == inventory
     if task != "unfitted":
         repo.restore_state_ref_into(model, unfitted)
         assert model._accepted_fit is None and model.mdl is None

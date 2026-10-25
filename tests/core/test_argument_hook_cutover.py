@@ -2,7 +2,7 @@
 
 import pytest
 
-from dryml.core import Definition, Object, Repo
+from dryml.core import Definition, Object
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core.definition import ConcreteDefinition
@@ -37,8 +37,8 @@ def test_public_categorical_controls_are_named_and_do_not_construct():
     assert source.categorical().parameters["uid"] == "kept"
     assert source.categorical().parameters["metadata"] == {"note": "kept"}
     assert queried.parameters["metadata"] == {"note": "kept"}
-    assert helper == projected
-    assert queried == projected
+    assert helper.graph_equal(projected)
+    assert queried.graph_equal(projected)
 
 
 def test_constructor_binding_preserves_ordinary_controls_without_hooks():

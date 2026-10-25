@@ -17,6 +17,7 @@ from .identity import IdentitySet, ObjectSelectorSet, Occurrence, OccurrenceSet,
 from .query import IdentityQuery, OccurrenceQuery, intersection, union
 from .relationships import EdgePolicy, RelationshipKind, RelationshipPath
 from .result import ObjectResultSet
+from ..selector import QueryPredicate
 
 __all__ = [
     "Arg",
@@ -42,6 +43,7 @@ __all__ = [
     "ObjectResultSet",
     "QueryCardinalityError",
     "QueryDomainError",
+    "QueryPredicate",
     "QueryDiagnostic",
     "QueryError",
     "QueryExplanation",

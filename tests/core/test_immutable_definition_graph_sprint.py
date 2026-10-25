@@ -17,7 +17,6 @@ from dryml.core import (
     Selector,
     SelectorSpec,
     Satisfies,
-    Template,
     Generator,
     UniformFromSet,
     UniformIntRange,
@@ -30,7 +29,7 @@ from dryml.core.links import DefLink
 from dryml.core.errors import CannotConcretizeParameterizedDefinition, CannotConcretizeSelectorReference, CycleError
 from dryml.core.freeze import FrozenDict, FrozenList, FrozenTuple
 from dryml.core.query.path import Arg, Index
-from dryml.core.utils.graph.path import GraphPath
+from dryml.core.utils.graph.path import GraphPath, Kwarg
 
 from tests.core import core_objects as objects
 
@@ -55,15 +54,16 @@ class AuditChainNode(Object):
         self.width = width
 
 
-def test_definition_is_immutable_hashable_and_structural():
+def test_definition_is_immutable_hashable_occurrence_with_named_comparison():
     d1 = Definition(Cls1, 1, test={"x": [1, 2]})
     d2 = Definition(Cls1, 1, test={"x": [1, 2]})
     d3 = Definition(Cls1, 2, test={"x": [1, 2]})
 
-    assert d1 == d2
+    assert d1 != d2
+    assert d1.recipe_equal(d2)
     assert d1 != d3
-    assert hash(d1) == hash(d2)
-    assert {d1: "value"}[d2] == "value"
+    assert not d1.recipe_equal(d3)
+    assert len({d1, d2, d1}) == 2
     with pytest.raises(Exception):
         d1._kwargs = {}
 
@@ -214,7 +214,7 @@ def test_indexed_query_can_inspect_ref_target_subgraph():
     selector = Definition(
         AuditChainNode,
         "A",
-        ref=_ref(Selector(Definition(
+        ref=_ref(Definition(
             AuditChainNode,
             "B",
             child=Definition(
@@ -222,7 +222,7 @@ def test_indexed_query_can_inspect_ref_target_subgraph():
                 "C",
                 ref=_ref(Definition(AuditChainNode, "D", width=512)),
             ),
-        ))),
+        )),
     )
 
     assert list(IdentitySet((a,)).query().sel(selector).collect()) == [a]
@@ -244,7 +244,7 @@ def test_repo_query_selector_preserves_policy():
 def test_lens_set_deep_freezes_replacement_inside_frozen_container():
     d1 = Definition(Nest3, [[1]])
     replacement = [2, 3]
-    d2 = d1.at(GraphPath((Arg(0), Index(0)))).set(replacement)
+    d2 = d1.lens(GraphPath((Arg(0), Index(0)))).set(replacement)
 
     replacement.append(4)
 
@@ -308,7 +308,7 @@ def test_indexed_query_missing_does_not_require_presence():
 
     ref_selector = Definition(
         Nest3,
-        ref=_ref(Selector(Definition(Cls1, x={"missing": Missing()}))),
+        ref=_ref(Definition(Cls1, x={"missing": Missing()})),
     )
     assert list(universe.sel(ref_selector).collect()) == [ref_parent]
 
@@ -385,8 +385,185 @@ def test_satisfies_lambda_requires_stable_name_for_hash():
     named2 = Definition(Cls1, test=Satisfies(lambda value: False, name="always"))
 
     with pytest.raises(TypeError, match="stable-hashable"):
-        hash(anon)
-    assert hash(named1) == hash(named2)
+        anon.stable_hash()
+    assert named1.stable_hash() == named2.stable_hash()
+
+
+def test_node_bind_alias_constraints_replacement_and_extraction(monkeypatch):
+    from dryml.core import LocalState, Node, ObjectId, StateKey
+
+    child = Definition(Cls1, 7)
+    independent = Definition(Cls1, 7)
+    root = Definition(left=child, right=child, independent=independent)
+    identity = ObjectId()
+    state = LocalState(StateKey("a" * 64, "pkl-" + "b" * 64), child.concretize())
+    monkeypatch.setattr(ObjectId, "__init__", lambda *a, **k: pytest.fail("identity allocation"))
+    monkeypatch.setattr(Cls1, "__init__", lambda *a, **k: pytest.fail("constructor"))
+
+    bound = root.bind(identities={"$.left": identity, "$.right": identity},
+                      states={"$.right": state})
+    assert isinstance(bound, Node)
+    assert bound.at("$.left") is bound.at("$.right")
+    assert bound.at("$.left").object_id == identity
+    assert bound.at("$.right").state == state
+    assert bound.at("$.independent") is independent
+    assert child.object_id is None and child.state is None
+    assert bound.bind(identities={"$.right": identity}) is bound
+    assert dict(bound.identity_spec()) == {GraphPath((Kwarg("left"),)): identity}
+    assert dict(bound.at("$.right").state_spec()) == {GraphPath(): state}
+    assert bound.at("$.right").identity_spec().root is bound.at("$.left")
+    with pytest.raises(ValueError, match="conflict"):
+        bound.bind(states={"$.left": LocalState(StateKey("a" * 64, "pkl-" + "c" * 64), state.creation_cdef)})
+    with pytest.raises(TypeError, match="LocalState"):
+        root.bind(states={"$.left": [state, state]})
+    removed = bound.replace_bindings(identities={"$.right": None})
+    assert removed.at("$.left").object_id is None
+    assert removed.at("$.right").state == state
+    assert bound.at("$.left").object_id == identity
+    replacement = Definition(Cls1, 99)
+    edited = bound.replace("$.right", replacement)
+    assert edited.at("$.left") is replacement
+    assert edited.at("$.right") is replacement
+    assert edited.at("$.independent") is independent
+
+
+def test_node_embedded_views_compose_facets_and_reject_conflicts():
+    from dryml.core import LocalState, ObjectId, StateKey
+
+    child = Definition(Cls1, 4)
+    identity = ObjectId()
+    state = LocalState(StateKey("a" * 64, "pkl-" + "b" * 64), child.concretize())
+    composed = Definition(left=child.with_identity(identity), right=child.with_state(state))
+    assert composed.at("$.left") is composed.at("$.right")
+    assert composed.at("$.left").object_id == identity
+    assert composed.at("$.left").state == state
+    with pytest.raises(ValueError, match="conflict"):
+        Definition(left=child.with_identity(identity), right=child.with_identity(ObjectId()))
+
+
+def test_node_pickle_sets_and_semantic_topology_preserve_occurrences():
+    import pickle
+
+    first, second = Definition(Cls1, 1), Definition(Cls1, 1)
+    root = Definition(members={first, second}, alias=first)
+    restored = pickle.loads(pickle.dumps(root))
+    assert len(root.kwargs["members"]) == len(restored.kwargs["members"]) == 2
+    assert restored.at("$.alias") in restored.kwargs["members"]
+    assert restored != root
+    assert restored.graph_equal(root)
+    assert root.recipe_equal(Definition(members={first, second}, alias=second))
+    assert not Definition(a=first, b=first).graph_equal(Definition(a=first, b=second))
+
+
+def test_concrete_node_facets_saved_refinement_and_retained_construction_view():
+    from dryml.core import ConcreteNode, LocalState, ObjectId, StateKey, require_saved
+    from dryml.core.object import Serializable
+
+    concrete = Definition(Serializable).concretize()
+    assert isinstance(concrete, ConcreteNode)
+    with pytest.raises(ValueError, match="identity|state"):
+        require_saved(concrete)
+    state0 = LocalState(StateKey("a" * 64, "pkl-" + "b" * 64), concrete)
+    state1 = LocalState(StateKey("a" * 64, "pkl-" + "c" * 64), concrete)
+    pinned = concrete.with_state(state0)
+    captured = pinned.with_realization(identities={"$": ObjectId()}, states={"$": state1})
+    assert require_saved(captured) is captured
+    assert captured.construction_view is pinned
+    assert captured.state == state1 and pinned.state == state0
+    assert captured.without_state().construction_view.state == state0
+    assert len({concrete, Definition(Serializable).concretize()}) == 2
+    with pytest.raises(AttributeError):
+        captured._facets = concrete._facets
+    with pytest.raises(TypeError):
+        require_saved(Definition(Serializable))
+    from dryml.core import ObjectRef
+    legacy = ObjectRef(Definition(Serializable).concretize(), {GraphPath(): ObjectId()})
+    with pytest.raises(TypeError, match="Node-local facets"):
+        require_saved(Definition(Nest3, legacy).concretize())
+
+
+def test_nested_concretization_keeps_facets_aliases_and_named_paths():
+    from dryml.core import ConcreteNode, ObjectId, Parameter, Key
+
+    identity = ObjectId()
+    child = Definition(Cls1, 3).with_identity(identity)
+    authored = Definition(Nest3, child, other=child)
+    concrete = authored.concretize()
+    first = concrete.at(GraphPath((Parameter("args"), Index(0))))
+    assert isinstance(concrete, ConcreteNode) and isinstance(first, ConcreteNode)
+    assert first is concrete.at(GraphPath((Parameter("kwargs"), Key("other"))))
+    assert first.object_id == identity
+    assert authored.at(GraphPath((Arg(0),))).object_id == identity
+    with pytest.raises(ValueError, match="Stateless Nodes"):
+        authored.build()
+
+
+def test_node_projection_and_pickle_preserve_aliases_and_quoted_configuration():
+    import pickle
+    from dryml.core import LocalState, StateKey, ObjectId
+
+    concrete = Definition(Cls1, 1).concretize()
+    state = LocalState(StateKey("a" * 64, "pkl-" + "b" * 64), concrete)
+    concrete = concrete.with_identity(ObjectId()).with_state(state)
+    root = Definition(members={concrete, Definition(Cls1, 1).concretize()},
+                      alias=concrete, quoted=concrete.quote())
+    restored = pickle.loads(pickle.dumps(root))
+    assert restored.graph_equal(root)
+    assert len(restored.kwargs["members"]) == 2
+    assert restored.at("$.alias") in restored.kwargs["members"]
+    projected = restored.object_view()
+    assert projected.at("$.alias").state is None
+    assert projected.at("$.alias").object_id == concrete.object_id
+    assert projected.at("$.alias") in projected.kwargs["members"]
+    assert projected.at("$.quoted").state.key == state.key
+    embedded = Definition(projected=projected)
+    assert embedded.at("$.projected.alias").state is None
+    assert embedded.at("$.projected.quoted").state.key == state.key
+    assert root.at("$.alias").state is state
+    copied = concrete.copy_graph()
+    assert copied.state == state and copied.object_id == concrete.object_id
+    assert copied != concrete and copied.graph_equal(concrete)
+
+
+def test_conflicting_bulk_alias_edit_fails_atomically_and_independent_nodes_survive():
+    from dryml.core import ObjectId
+
+    first, independent = Definition(Cls1, 1), Definition(Cls1, 1)
+    root = Definition(left=first, right=first, independent=independent)
+    one, two = ObjectId(), ObjectId()
+    with pytest.raises(ValueError, match="conflict"):
+        root.bind(identities={"$.left": one, "$.right": two})
+    with pytest.raises(ValueError, match="conflict"):
+        root.replace_bindings(identities={"$.left": None, "$.right": one})
+    assert first.object_id is None and root.at("$.left") is root.at("$.right")
+    bound = root.bind(identities={"$.left": one, "$.independent": two})
+    assert bound.at("$.left") is bound.at("$.right")
+    assert bound.at("$.independent") is not bound.at("$.left")
+
+
+def test_node_value_tags_and_array_snapshots_are_immutable():
+    import pickle
+    import numpy as np
+
+    values = np.arange(4, dtype=">i4").reshape(2, 2)
+    first, second = Definition(Cls1, 1), Definition(Cls1, 1)
+    node = Definition(Nest3, values=values, mutable={first, second},
+                      frozen=frozenset({first, second}), ordered=[first, second])
+    values[0, 0] = 999
+    assert node.kwargs["values"][0, 0] == 0
+    assert node.kwargs["values"].dtype == np.dtype(">i4")
+    assert not node.kwargs["values"].flags.writeable
+    assert type(node.kwargs["frozen"]) is frozenset
+    assert type(node.kwargs["mutable"]) is not frozenset
+    restored = pickle.loads(pickle.dumps(node))
+    assert restored.graph_equal(node)
+    concrete = node.concretize()
+    assert type(concrete.parameters["kwargs"]["frozen"]) is frozenset
+    assert len(concrete.parameters["kwargs"]["frozen"]) == 2
+    with pytest.raises(TypeError, match="(?i)object.dtype|object-dtype"):
+        Definition(Nest3, values={"nested": np.array([object()], dtype=object)})
+    with pytest.raises(TypeError, match="str and int"):
+        Definition(Nest3, values={True: "not-an-integer-key"})
 
 
 def test_raw_function_value_in_definition_is_rejected():

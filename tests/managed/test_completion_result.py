@@ -1,214 +1,198 @@
-"""Managed invocation completion-result contract tests."""
-
-from __future__ import annotations
+"""Public durable completion and fresh lazy-source qualification."""
 
 import inspect
-from typing import Any
-import warnings
+import shutil
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-
-from dryml.core import Repo, StateRef
+from dryml.core import Repo
 from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
-from dryml.managed import ManagedConfig, ManagedDeclarationError, managed_operation
-
-
-_completion_handoffs = []
+from dryml.managed import ManagedConfig, managed_operation
 
 
 class CompletionValue(Pickleable):
-    """Small managed receiver whose body can deliberately return an unwanted value."""
+    """Count real body/capture/restore and consumer boundaries."""
 
-    def __init__(self, value=0, unexpected=False):
+    bodies = captures = restores = handoffs = 0
+
+    def __init__(self, value=0):
         self.value = value
-        self.unexpected = unexpected
 
-    @managed_operation(return_state_ref=True)
-    def advance(self, amount, *, managed) -> None:
-        """Change state and optionally exercise the discarded-body-result boundary."""
+    def save_state_to_dir_imp(self, directory, *, codec):
+        type(self).captures += 1
+        return super().save_state_to_dir_imp(directory, codec=codec)
 
+    def restore_state_from_dir_imp(self, directory, *, codec):
+        type(self).restores += 1
+        return super().restore_state_from_dir_imp(directory, codec=codec)
+
+    @managed_operation(resumable=True)
+    def advance(self, amount=3, *, managed):
+        type(self).bodies += 1
         self.value += amount
-        if self.unexpected:
-            return _UnexpectedResult()
+        return {"value": self.value}
+
+    def _managed_post_publication(self, final_state, state_repo, report):
+        type(self).handoffs += 1
 
 
-class CompletionHookValue(Pickleable):
-    """Managed receiver that records the private completed-publication handoff."""
+class MetadataCompletionValue(CompletionValue):
+    """Publish related metadata roots through the real managed completion chain."""
 
-    def __init__(self, *, fail_hook=False):
-        """Initialize mutation state and optional handoff delivery failure."""
-
-        self.value = 0
-        self.fail_hook = fail_hook
-
-    @managed_operation(return_state_ref=True)
-    def advance(self, *, managed) -> None:
-        """Complete one normal invocation for lifecycle-hook assertions."""
-
-        self.value += 1
-
-    @managed_operation(return_state_ref=True)
-    def fail(self, *, managed) -> None:
-        """Raise from the body before a final state can be published."""
-
-        raise ValueError("body failed")
-
-    @managed_operation(return_state_ref=True)
-    def interrupt(self, *, managed) -> None:
-        """Request interruption before final publication and completion."""
-
-        managed.interrupt()
-
-    def _managed_post_publication(self, final_state, state_repo, report) -> None:
-        """Record the invocation-local completed state and selected publication authority.
-
-        Args:
-            final_state: The exact validated final StateRef for this invocation.
-            state_repo: The borrowed selected Repo that published ``final_state``.
-            report: The immutable selected save report proving snapshot placement.
-
-        Raises:
-            RuntimeError: When this fixture is configured to model delivery failure.
-        """
-
-        status = self.advance.status(state_repo=state_repo)
-        _completion_handoffs.append((final_state, state_repo, report, status))
-        if self.fail_hook:
-            raise RuntimeError("post-completion handoff failed")
+    @managed_operation(resumable=True)
+    def describe(self, *, managed):
+        """Return inert related graph values after one counted body execution."""
+        from tests.managed.test_result_codec import related_metadata_result
+        type(self).bodies += 1
+        return related_metadata_result()
 
 
-class _UnexpectedResult:
-    """A body result whose representation must never be requested."""
-
-    def __repr__(self) -> str:
-        raise AssertionError("discarded managed results must not be represented")
-
-
-def test_return_state_ref_requires_explicit_none_annotation_and_projects_signature():
-    """Only an authored None result contract can select managed completion results."""
-
-    def absent(self, *, managed):
-        return None
-
-    def incompatible(self, *, managed) -> int:
-        return None
-
-    def ambiguous(self, *, managed) -> Any:
-        return None
-
-    def postponed(self, *, managed) -> "None":
-        return None
-
-    with pytest.raises(ManagedDeclarationError, match="explicit None"):
-        managed_operation(return_state_ref=True)(absent)
-    with pytest.raises(ManagedDeclarationError, match="explicit None"):
-        managed_operation(return_state_ref=True)(incompatible)
-    with pytest.raises(ManagedDeclarationError, match="explicit None"):
-        managed_operation(return_state_ref=True)(ambiguous)
-    declaration = managed_operation(return_state_ref=True)(postponed)
-
-    class Subject:
-        operation = declaration
-
-    assert declaration.author_signature.return_annotation == postponed.__annotations__["return"]
-    assert inspect.signature(Subject().operation).return_annotation is StateRef
-
-
-def test_return_state_ref_captures_the_completed_publication(tmp_path):
-    """A flagged call returns its own final StateRef after completion association."""
-
-    store = DirStore(tmp_path / "state")
-    repo = Repo((store,))
-    value = CompletionValue(repo=repo)
-
-    result = value.advance(3, managed=ManagedConfig(state_repo=repo))
-
-    assert type(result) is StateRef
-    assert result == value.advance.status(state_repo=repo).final_state_ref
-    assert repo.load_state_ref(result, reuse_live="never").value == 3
+def test_related_metadata_completion_reopens_in_fresh_kernel_and_never_caches_source(tmp_path):
+    import json
+    from pathlib import Path
+    import subprocess
+    import sys
+    from dryml.core import Definition
+    from dryml.managed import ManagedResultError
+    from dryml.managed.results import result_path
+    from tests.managed.test_result_codec import assert_related_metadata_result
+    from tests.managed.test_u14_authority import Experiment
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    live = MetadataCompletionValue(repo=repo)
+    MetadataCompletionValue.bodies = MetadataCompletionValue.captures = MetadataCompletionValue.restores = 0
+    result = live.describe(managed=ManagedConfig(state_repo=repo))
+    first, second = result.value, result.value
+    assert_related_metadata_result(first)
+    assert_related_metadata_result(second)
+    assert first["roots"][0] is not second["roots"][0]
+    expected = Definition(Experiment, first["roots"][:5])
+    assert expected.graph_equal(Definition(Experiment, second["roots"][:5]))
+    replay = live.describe(managed=ManagedConfig(state_repo=repo))
+    assert_related_metadata_result(replay.value)
+    counts = MetadataCompletionValue.bodies, MetadataCompletionValue.captures, MetadataCompletionValue.restores
+    assert counts == (1, 1, 0)
+    descriptor = {"reference": result.result_reference.to_data(), "path": result.source.path,
+                  "store_uuid": result.source.store_uuid, "key": expected.exact_key().decode("ascii")}
+    path = Path(result_path(repo.stores[0], result.result_reference.key))
+    repo.close(flush=False)
+    reader = subprocess.run([sys.executable, "-c", """
+import json, sys
+from dryml.core import Definition
+from dryml.managed.results import ResultReference, ResultSource
+from tests.managed.test_result_codec import assert_related_metadata_result
+from tests.managed.test_u14_authority import Experiment
+data = json.loads(sys.argv[1])
+value = ResultSource(data['path'], data['store_uuid']).read(ResultReference.from_data(data['reference']))
+assert_related_metadata_result(value)
+assert Definition(Experiment, value['roots'][:5]).exact_key().decode('ascii') == data['key']
+""", json.dumps(descriptor)], capture_output=True, text=True, timeout=30)
+    assert reader.returncode == 0, reader.stdout + reader.stderr
+    path.unlink()
+    with pytest.raises(ManagedResultError, match="result_unavailable"): result.value
+    assert (MetadataCompletionValue.bodies, MetadataCompletionValue.captures, MetadataCompletionValue.restores) == counts
 
 
-def test_receiver_without_private_post_publication_hook_retains_completion_behavior(tmp_path):
-    """Ordinary managed receivers need no lifecycle-hook declaration to complete."""
-
-    store = DirStore(tmp_path / "state")
-    repo = Repo((store,))
-    value = CompletionValue(repo=repo)
-
-    result = value.advance(3, managed=ManagedConfig(state_repo=repo))
-
-    assert type(result) is StateRef
-    assert (value.value, value.advance.status(state_repo=repo).final_state_ref) == (3, result)
-
-
-def test_return_state_ref_discards_unexpected_result_before_publication_when_warning_errors(tmp_path):
-    """Warnings-as-errors stop a flagged result before a final success is published."""
-
-    store = DirStore(tmp_path / "state")
-    repo = Repo((store,))
-    value = CompletionValue(unexpected=True, repo=repo)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        with pytest.raises(RuntimeWarning, match="discarded"):
-            value.advance(3, managed=ManagedConfig(state_repo=repo))
-
-    assert value.advance.status(state_repo=repo).state == "failed"
+def test_execute_related_metadata_result_keeps_detached_aliases(tmp_path):
+    from dryml.core import Executor
+    from dryml.core.execute import CoreOptions
+    from dryml.execute.subprocess import SubProcessConfig
+    from tests.managed.test_result_codec import assert_related_metadata_result
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    live = MetadataCompletionValue(repo=repo)
+    first = live.describe(managed=ManagedConfig(state_repo=repo))
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = Executor(SubProcessConfig(spool_directory=spool), core=CoreOptions(repo=repo, return_objects=False))
+    try:
+        future = executor.submit(live.describe)
+        detached = future.result(timeout=30)
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=10)
+    repo.close(flush=False)
+    assert detached.execution.run_id == first.execution.run_id
+    assert detached.result_reference.version == 2
+    assert_related_metadata_result(detached.value)
 
 
-def test_return_state_ref_warns_once_and_never_materializes_the_body_result(tmp_path):
-    """A normal warning policy discards a non-None body value and still completes."""
-
-    store = DirStore(tmp_path / "state")
-    repo = Repo((store,))
-    value = CompletionValue(unexpected=True, repo=repo)
-
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always", RuntimeWarning)
-        result = value.advance(3, managed=ManagedConfig(state_repo=repo))
-
-    assert type(result) is StateRef
-    assert [warning.category for warning in captured] == [RuntimeWarning]
-
-
-def test_private_post_publication_hook_receives_completed_invocation_authority(tmp_path):
-    """Each private handoff retains its exact ref after a later receipt replaces it."""
-
-    store = DirStore(tmp_path / "state")
-    repo = Repo((store,))
-    value = CompletionHookValue(repo=repo)
-    _completion_handoffs.clear()
-
-    first = value.advance(managed=ManagedConfig(state_repo=repo))
-    second = value.advance(managed=ManagedConfig(state_repo=repo, rerun=True))
-
-    assert len(_completion_handoffs) == 2
-    final_state, selected_repo, report, status = _completion_handoffs[0]
-    assert (final_state, _completion_handoffs[1][0]) == (first, second)
-    assert first != second
-    assert selected_repo is repo
-    assert (status.state, status.final_state_ref) == ("completed", first)
-    assert value.last_state_ref == second
-    assert any(snapshot.state_ref == first for snapshot in report.snapshots)
-    assert repo.load_state_ref(first, reuse_live="never").value == 1
-    assert repo.load_state_ref(second, reuse_live="never").value == 2
+def test_public_result_detaches_and_replays_old_live_receiver_without_work(tmp_path):
+    from dryml.managed import InvocationResult
+    store = DirStore(tmp_path / "state", query_index="none")
+    repo = Repo(store)
+    live = CompletionValue(repo=repo)
+    seed = repo.save(live)
+    CompletionValue.bodies = CompletionValue.captures = CompletionValue.restores = CompletionValue.handoffs = 0
+    first = live.advance(managed=ManagedConfig(state_repo=repo))
+    assert type(first) is InvocationResult
+    assert inspect.signature(live.advance).return_annotation is InvocationResult
+    assert first.status.state == "completed" and first.final_state_ref.state is not None
+    assert first.value == {"value": 3}
+    assert (CompletionValue.bodies, CompletionValue.captures, CompletionValue.restores, CompletionValue.handoffs) == (1, 1, 0, 1)
+    old = repo.load(seed, cache="none")
+    counts = CompletionValue.bodies, CompletionValue.captures, CompletionValue.restores, CompletionValue.handoffs
+    replay = old.advance(3, managed=ManagedConfig(state_repo=repo))
+    assert old.value == 0 and replay.value == first.value
+    assert replay.execution.run_id == first.execution.run_id
+    assert replay.execution.producer_invocation_id == first.execution.invocation_id
+    assert replay.execution.invocation_id != first.execution.invocation_id
+    assert (CompletionValue.bodies, CompletionValue.captures, CompletionValue.restores, CompletionValue.handoffs) == counts
+    shutil.rmtree(store.state_data_path(first.final_state_ref.state.key))
+    shutil.rmtree(store.state_data_path(seed.state.key))
+    repo.close(flush=False)
+    assert first.status.state == "completed" and first.final_state_ref.graph_equal(replay.final_state_ref)
+    assert first.value == {"value": 3}
+    fresh = Repo(DirStore(tmp_path / "state", query_index="none"))
+    again = old.advance(managed=ManagedConfig(state_repo=fresh))
+    assert again.value == {"value": 3} and old.value == 0
+    assert (CompletionValue.bodies, CompletionValue.captures, CompletionValue.restores, CompletionValue.handoffs) == counts
 
 
-def test_private_post_publication_hook_failure_preserves_completed_authority(tmp_path):
-    """A failed post-completion delivery raises without recasting the operation."""
+@pytest.mark.parametrize("fault", ["missing", "corrupt", "replacement"])
+def test_each_lazy_access_revalidates_source_even_after_decode(tmp_path, fault):
+    from dryml.managed import ManagedResultError
+    from dryml.managed.results import result_path
+    root = tmp_path / "state"
+    store = DirStore(root, query_index="none")
+    repo = Repo(store)
+    live = CompletionValue(repo=repo)
+    result = live.advance(managed=ManagedConfig(state_repo=repo))
+    assert result.value == {"value": 3}
+    counts = CompletionValue.bodies, CompletionValue.captures, CompletionValue.restores
+    path = result_path(store, result.result_reference.key)
+    if fault == "missing":
+        from pathlib import Path
+        Path(path).unlink()
+    elif fault == "corrupt":
+        from pathlib import Path
+        Path(path).write_bytes(b"{}")
+    else:
+        from pathlib import Path
+        payload = Path(path).read_bytes()
+        repo.close(flush=False)
+        root.rename(tmp_path / "old-state")
+        replacement = DirStore(root, query_index="none")
+        replacement_path = Path(result_path(replacement, result.result_reference.key))
+        replacement_path.parent.mkdir(parents=True)
+        replacement_path.write_bytes(payload)
+    assert result.status.state == "completed"
+    with pytest.raises(ManagedResultError) as error:
+        result.value
+    assert error.value.reason == {"missing": "result_unavailable", "corrupt": "result_corrupt", "replacement": "result_source_changed"}[fault]
+    assert (CompletionValue.bodies, CompletionValue.captures, CompletionValue.restores) == counts
 
-    store = DirStore(tmp_path / "state")
-    repo = Repo((store,))
-    value = CompletionHookValue(fail_hook=True, repo=repo)
-    _completion_handoffs.clear()
 
-    with pytest.raises(RuntimeError, match="post-completion handoff failed"):
-        value.advance(managed=ManagedConfig(state_repo=repo))
-
-    final_state, _, _, status_at_handoff = _completion_handoffs[0]
-    status = value.advance.status(state_repo=repo)
-    assert (status_at_handoff.state, status_at_handoff.final_state_ref) == ("completed", final_state)
-    assert (status.state, status.final_state_ref, status.failure_code) == ("completed", final_state, None)
+def test_unsupported_return_fails_before_automatic_capture(tmp_path):
+    from dataclasses import dataclass
+    from dryml.managed import ManagedResultError
+    from tests.managed.u16_fixtures import Value, setup
+    @dataclass(frozen=True)
+    class Summary:
+        value: int
+    control, live = setup(tmp_path)
+    Value.action = lambda obj, ctx: Summary(1)
+    with pytest.raises(ManagedResultError) as error:
+        live.run(managed=ManagedConfig(state_repo=control.state_repo))
+    assert Value.captures == 0 and Value.bodies == 1
+    assert error.value.execution and error.value.failed_result.status.state == "failed"
+    assert live.run.status(state_repo=control.state_repo).failure_code == "result_error"

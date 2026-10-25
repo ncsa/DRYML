@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core import Definition, Generator, Mat, Object
+from dryml.core import Definition, Generator, Mat, Object, Serializable
 from dryml.core.domains import UniformFromSet, UniformIntRange
 from dryml.core.errors import ParameterizationError, ParameterizationLimitError, UnsupportedGeneratorVerificationError
 from dryml.core.template import Par, Shared, repeat
@@ -31,6 +31,13 @@ class SupportParent(Object):
 
     def __init__(self, children):
         self.children = children
+
+
+class SelectedStateLeaf(Serializable):
+    """Stateful declaration for recipe-compatible and incompatible selections."""
+
+    def __init__(self, value):
+        self.value = value
 
 
 class MatSupportParent(Object):
@@ -91,6 +98,12 @@ def test_support_selector_enforces_correlated_and_hidden_finite_products():
 
     assert selector.matches(Definition(SupportModel, 64, scale=2, product=128))
     assert not selector.matches(Definition(SupportModel, 32, scale=2, product=128))
+    from dryml.core import QueryPredicate
+    predicate = QueryPredicate.support(selector._generator)
+    false_positive = Definition(SupportModel, 32, scale=2, product=128)
+    assert selector.prefilter.matches(false_positive)
+    assert not predicate.matches(false_positive)
+    assert predicate.matches(Definition(SupportModel, 64, scale=2, product=128))
 
     hidden = Definition(SupportModel, product=Par("width") * Par("scale"))
     hidden_selector = Generator(
@@ -164,6 +177,9 @@ def test_hidden_wide_support_exceeding_budget_is_not_approximated():
 
     with pytest.raises(ParameterizationLimitError):
         selector.matches(Definition(SupportModel, product=8))
+    from dryml.core import QueryPredicate
+    with pytest.raises(ParameterizationLimitError):
+        QueryPredicate.support(selector._generator, max_assignments=8).matches(Definition(SupportModel, product=8))
 
 
 def test_support_never_hides_invalid_branches_or_unavailable_exact_proofs():
@@ -178,3 +194,76 @@ def test_support_never_hides_invalid_branches_or_unavailable_exact_proofs():
     unsupported = Generator(unindexed, {"width": UnindexedDomain()}).support_selector()
     with pytest.raises(UnsupportedGeneratorVerificationError):
         unsupported.matches(Definition(SupportModel, product=2))
+    from dryml.core import QueryPredicate
+    with pytest.raises(UnsupportedGeneratorVerificationError):
+        (QueryPredicate(Definition()) | QueryPredicate(unsupported)).matches(Definition(SupportModel, product=2))
+
+
+def test_generation_preserves_facets_aliases_and_rejects_incompatible_selected_state():
+    """Generation varies recipes without losing fixed selections or implying concrete."""
+
+    from dryml.core import ConcreteNode, LocalState, ObjectId, StateKey
+
+    creation = Definition(SelectedStateLeaf, 2).concretize()
+    state = LocalState(StateKey(creation.creation_digest(), "pickle-" + "a" * 64), creation)
+    identity = ObjectId(("generation",))
+    shared = Definition(SelectedStateLeaf, Par("width")).with_identity(identity).with_state(state)
+    source = Definition(SupportParent, [shared, shared, Definition(SelectedStateLeaf, Par("width"))])
+    remapped = source.remap({"width": "size"})
+    generator = Generator(remapped, {"size": UniformFromSet((2, 3))})
+    first, second = generator.grid()
+    left, alias, independent = first.args[0]
+    assert left is alias and left is not independent
+    assert left.object_id == identity and left.state is state
+    assert remapped.args[0][0].state is state
+    assert first.is_resolved and not isinstance(first, ConcreteNode)
+    assert first.object_id is None and independent.object_id is None
+    normalized = left.concretize()
+    assert normalized.state is state and normalized.object_id == identity
+    assert state.validate_for(normalized, codec="pickle") is state
+    changed = second.args[0][0].concretize()
+    assert changed.state is state and changed.object_id == identity
+    with pytest.raises(ValueError, match="incompatible"):
+        state.validate_for(changed, codec="pickle")
+    from dryml.core.repo import RepoLoadError
+    with pytest.raises(RepoLoadError, match="codec"):
+        left.build()
+    selector = generator.support_selector()
+    assert selector.matches(first) and selector.matches(second)
+    from dryml.core.utils.graph.path import Arg, GraphPath, Index
+
+    assert not selector.matches(first.replace(GraphPath((Arg(0), Index(0))), left.without_state()))
+    assert source.args[0][0].names == ("width",)
+
+
+def test_generator_admits_an_already_concrete_node_without_strengthening_it():
+    """A fixed normalized Node is a zero-root generator, retaining its exact handle."""
+
+    from dryml.core import ObjectId
+
+    concrete = Definition(SupportLeaf, 2).concretize().with_identity(ObjectId(("fixed",)))
+    generator = Generator(concrete, {})
+    assert generator.grid() == (concrete,)
+    assert generator.sample() is concrete
+    assert generator.support_selector().matches(concrete)
+    assert not generator.support_selector().matches(concrete.without_identity())
+
+
+def test_nested_node_choices_use_exact_facets_without_process_handle_membership():
+    """Node-valued providers prove portable support with named graph equality."""
+
+    from dryml.core import ObjectId
+
+    first = Definition(SupportLeaf, 2).with_identity(ObjectId(("choiceone",)))
+    second = Definition(SupportLeaf, 2).with_identity(ObjectId(("choicetwo",)))
+    generator = Generator(Definition(SupportParent, Par("child")), {"child": UniformFromSet((first, second))})
+    selector = generator.support_selector()
+    assert selector.matches(Definition(SupportParent, first.copy_graph()))
+    assert selector.matches(Definition(SupportParent, second.copy_graph()))
+    assert not selector.matches(Definition(SupportParent, first.without_identity()))
+    persisted = type(selector).from_data(selector.to_data())
+    assert persisted.matches(Definition(SupportParent, first.copy_graph()))
+    from dryml.core import QueryPredicate
+    predicate = QueryPredicate.from_data(QueryPredicate.support(generator).to_data())
+    assert predicate.matches(Definition(SupportParent, first.copy_graph()))
+    assert not predicate.matches(Definition(SupportParent, first.without_identity()))

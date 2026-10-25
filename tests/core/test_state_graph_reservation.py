@@ -61,7 +61,8 @@ def test_graph_reservation_allows_its_exact_save_reuse(tmp_path):
     with repo.reserve_state_graph(obj) as reservation:
         state = repo.save_object(obj, reservation=reservation)
 
-    assert state.object == obj.object_ref
+    assert state.object_id == obj.object_id
+    assert state.creation_view().graph_equal(obj.definition)
 
 
 def test_failed_save_on_closed_repo_releases_owned_graph_reservation(tmp_path):
@@ -132,7 +133,8 @@ def test_disjoint_graph_save_can_proceed_while_another_graph_is_reserved(tmp_pat
     with repo.reserve_state_graph(first):
         state = repo.save_object(second)
 
-    assert state.object == second.object_ref
+    assert state.object_id == second.object_id
+    assert state.creation_view().graph_equal(second.definition)
 
 
 def test_graph_reservation_rejects_a_sibling_thread_before_hooks(tmp_path):
@@ -188,12 +190,16 @@ def test_reserved_logical_object_is_not_reused_by_a_sibling_thread(tmp_path, reu
     thread.start()
     assert acquired.wait(timeout=5)
     try:
-        loaded = repo.load_state_ref(state, reuse_live=reuse_live)
+        from dryml.core.repo import RepoLoadError
+        with pytest.raises(RepoLoadError, match="reserved"):
+            repo.load_state_ref(state, reuse_live=reuse_live)
     finally:
         release.set()
         thread.join(timeout=5)
 
-    assert loaded is not obj
+    assert not thread.is_alive()
+    loaded = repo.load_state_ref(state, reuse_live=reuse_live)
+    assert loaded is obj
     assert loaded.object_id == obj.object_id
 
 

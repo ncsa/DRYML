@@ -2,30 +2,65 @@
 
 DRYML provides immutable construction definitions, exact graph references, and local checkpoint publication for Python machine-learning objects.
 
-## CDef V2
+## Composable Object State
 
-`Definition` is a soft declaration. Concretizing it produces a `ConcreteDefinition` (CDef): a fully bound structural recipe. CDef equality and `stable_hash()` compare class and semantic parameters; they intentionally do not include graph sharing or object identity. `CDef.graph_equal()` and `graph_hash()` additionally preserve shared versus independent equal nodes.
+`Definition` authors an immutable Node graph. Concretizing it produces a
+`ConcreteNode`: normalized construction structure, independently of saved-state
+completeness. Each node can select an ObjectId and a compatible local StateKey
+independently. `recipe.bind(identities=..., states=...)` composes constraints;
+contradictory assignments through aliases fail rather than silently overriding.
 
-`ObjectRef` adds durable `ObjectId` lineage for every owned `Serializable` node. `StateRef` adds one immutable local-state hash for each of those paths. Inspecting CDefs, ObjectRefs, StateRefs, and structural queries is import-free. CDef `.args` and `.kwargs` are call projections and may import the current class; use `.cls` and `.parameters` for inspection.
+Node handle equality identifies an occurrence/view; use `graph_equal` for exact
+graph semantics and `object_projection_equal` for state-independent realized
+identity. SavedNode is the complete-saved typing refinement of the same graph,
+validated by `require_saved`, not another graph model. Metadata inspection does
+not construct Objects or read private state. Concrete `.args`/`.kwargs` call
+projections may resolve the current class; use `.cls`/`.parameters` for inspection.
 
 ```python
-from dryml import Definition, Object, Repo, Serializable
+from pathlib import Path
+from dryml import Repo, Serializable
 from dryml.core.store.dir import DirStore
 
 
 class Counter(Serializable):
+    """Persist one mutable integer independently of its construction recipe."""
+
     def __init__(self, value=0):
         super().__init__()
         self.value = value
 
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        """Write the current value to the framework-owned private data directory."""
+        Path(dest_dir, "value").write_text(str(self.value), encoding="ascii")
+
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
+        """Restore a previously authenticated value; invalid integer data raises."""
+        self.value = int(Path(src_dir, "value").read_text(encoding="ascii"))
+
 
 repo = Repo(DirStore("./checkpoint-store"))
 counter = Counter(3, repo=repo)
+counter.value = 5
 state = counter.save(repo=repo)
-restored = repo.load_state_ref(state)
-assert restored.object_ref == state.object
+restored = repo.load_state_ref(state, reuse_live="never")
+assert restored.value == 5
+assert restored.object_id == counter.object_id
+assert repo.describe(restored).object_projection_equal(state)
 ```
 
-`Object.save()` publishes immutable directory state and returns a `StateRef`. `federated=False` is self-contained by default; `federated=True` may retain immutable dependencies in connected Stores. `deep_capture=True` captures each owned serializable node once. There is no automatic mutation detection: call `save()` after relevant mutation.
+`Object.save()` publishes a retained SavedNode through connected durable Stores.
+Each distinct live stateful node needing fresh state is captured once; explicit
+`states=` reuse avoids recapturing selected bytes. A last-save receipt does not
+prove unchanged mutable state. Store 4 uses CDef-owned state buckets and full
+StateKeys; old Stores are rejected intact, without automatic migration.
+
+Managed methods return `InvocationResult`, with lazy `.value`, detached
+`.status`/`.execution`, and `.final_state_ref`. Compatible completed calls replay
+without running, restoring or saving the receiver. Explicit rerun controls start
+selection; missing selected state never silently initializes or falls back.
 
 See [Objects and Definitions](docs/objects_and_defs.md), [Repos and Stores](docs/repos.md), [Formats](docs/formats.md), and [Graph Querying](docs/graph_querying.md).
+See [Managed Operations](docs/managed_operations.md) and the
+[verification record](docs/object_state_lifecycle_verification.md) for retention,
+recovery, measured work and integrated verification results.

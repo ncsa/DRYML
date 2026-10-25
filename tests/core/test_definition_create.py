@@ -3,8 +3,10 @@ import pytest
 from tests.core import core_objects as objects
 import dryml
 from dryml.core.definition import Definition, ConcreteDefinition, SKIP_ARGS
-from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.freeze import FrozenDict, FrozenList, FrozenTuple
+from dryml.core import LocalState, ObjectId, QuotedDef, Ref, Repo, Serializable, StateKey
 from dryml.core.object import Object
+from dryml.core.repo import RepoLoadError
 from dryml.core.symbol import ImportRef
 
 ### Tests for methods of creating definitions. We verify they have the intended properties.
@@ -167,7 +169,7 @@ def test_build_definition_2():
     assert definition.args == ()
     assert definition.kwargs["test"] == "a"
     sub_def = definition.parameters["x"]
-    assert type(sub_def) == ConcreteDefinition
+    assert isinstance(sub_def, ConcreteDefinition)
     assert isinstance(sub_def.cls, ImportRef)
     assert sub_def.cls.resolve() is objects.TestClass1
     assert sub_def.args == ()
@@ -322,3 +324,174 @@ def test_partial_definition_parameters_bind_only_supplied_fields(monkeypatch):
 def test_private_persisted_constructor_rejects_retired_raw_call_arguments():
     with pytest.raises(TypeError):
         ConcreteDefinition._from_persisted_record(SemanticFixture, (1,), {"keyword": 4})
+
+
+class RecipeEditorModel(Serializable):
+    """Stateful recipe whose lifecycle effects must follow selection preflight."""
+
+    effects = []
+
+    def __init__(self, width=1, *, children=(), quoted: Ref[QuotedDef] | None = None, extra=0):
+        RecipeEditorModel.effects.append("construct")
+        self.width = width
+        self.children = children
+        self.quoted = quoted
+        self.extra = extra
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        RecipeEditorModel.effects.append("save")
+
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
+        RecipeEditorModel.effects.append("restore")
+
+
+class OtherRecipeEditorModel(RecipeEditorModel):
+    """Distinct target with the same call shape for class-edit incompatibility."""
+
+
+_RECIPE_EDITORS = ("with_cls", "with_args", "with_arg", "with_kwargs", "with_kwarg", "without_kwarg")
+
+
+def _edited_recipe(source, editor):
+    if editor == "with_cls":
+        return source.with_cls(OtherRecipeEditorModel)
+    if editor == "with_args":
+        return source.with_args(3)
+    if editor == "with_arg":
+        return source.with_arg(0, 3)
+    if editor == "with_kwargs":
+        return source.with_kwargs(extra=2)
+    if editor == "with_kwarg":
+        return source.with_kwarg("extra", 2)
+    return source.without_kwarg("extra")
+
+
+def _editor_state(source):
+    creation = source.concretize().creation_view()
+    return LocalState(StateKey(creation.creation_digest(), "pkl-" + "a" * 64), creation)
+
+
+@pytest.mark.parametrize("editor", _RECIPE_EDITORS)
+def test_retained_recipe_editors_preserve_root_and_nested_facets(editor):
+    """Recipe edits keep exact constraints, occurrence sharing, and inert quotes."""
+    child = Definition(RecipeEditorModel, 1)
+    child_id, root_id = ObjectId(), ObjectId()
+    child_state = _editor_state(child)
+    shared = child.with_identity(child_id).with_state(child_state)
+    independent = Definition(RecipeEditorModel, 1)
+    quoted = child.with_identity(ObjectId()).quote()
+    recipe = Definition(
+        RecipeEditorModel, 2, children=[shared, shared, independent], quoted=quoted, extra=1,
+    )
+    root_state = _editor_state(recipe)
+    source = recipe.with_realization(identities={"$": root_id}, states={"$": root_state})
+
+    changed = _edited_recipe(source, editor)
+
+    assert changed._occurrence is source._occurrence
+    assert changed.object_id == root_id and changed.state is root_state
+    left, alias, other = changed.kwargs["children"]
+    assert left is alias is shared and other is independent
+    assert left.object_id == child_id and left.state is child_state
+    assert other.object_id is None and other.state is None
+    assert changed.kwargs["quoted"] is source.kwargs["quoted"]
+    assert changed.kwargs["quoted"].value.object_id != child_id
+    assert changed.construction_view is changed
+    assert source.construction_view is recipe
+    assert source.args == (2,) and source.kwargs["extra"] == 1
+
+
+@pytest.mark.parametrize("editor", _RECIPE_EDITORS)
+@pytest.mark.parametrize("nested", [False, True], ids=["root", "nested-shared"])
+def test_retained_recipe_editors_reject_incompatible_selected_state_before_hooks(editor, nested):
+    """Actual build rejects edited selected state before any constructor or IO hook."""
+    recipe = Definition(RecipeEditorModel, 2, extra=1)
+    state, identity = _editor_state(recipe), ObjectId()
+    source = recipe.bind(identities={"$": identity}, states={"$": state})
+    changed = _edited_recipe(source, editor)
+    target = Definition(RecipeEditorModel, children=[changed, changed]) if nested else changed
+    RecipeEditorModel.effects.clear()
+
+    with pytest.raises(RepoLoadError, match="Selected state is incompatible.*incompatible"):
+        target.build(repo=Repo(), cache="none")
+
+    assert RecipeEditorModel.effects == []
+    assert changed.object_id == identity and changed.state is state
+    assert source.state is state and source.args == (2,)
+
+
+@pytest.mark.parametrize("editor", _RECIPE_EDITORS[:-1])
+def test_retained_recipe_editor_noops_preserve_construction_evidence(editor):
+    """An unchanged call does not promote realization pins into creation evidence."""
+    recipe = Definition(RecipeEditorModel, 2, extra=1)
+    source = recipe.with_realization(identities={"$": ObjectId()}, states={"$": _editor_state(recipe)})
+    if editor == "with_cls":
+        changed = source.with_cls(source.cls)
+    elif editor == "with_args":
+        changed = source.with_args(*source.args)
+    elif editor == "with_arg":
+        changed = source.with_arg(0, source.args[0])
+    elif editor == "with_kwargs":
+        changed = source.with_kwargs(**source.kwargs)
+    else:
+        changed = source.with_kwarg("extra", source.kwargs["extra"])
+    assert changed.construction_view is recipe
+    assert changed._occurrence is source._occurrence
+    assert changed.graph_equal(source)
+
+
+def test_retained_recipe_editor_snapshots_values_and_only_invalidates_changed_evidence():
+    """Equal frozen container/array values preserve evidence; changed bytes do not."""
+    recipe = Definition(RecipeEditorModel, 2, extra=[np.array([1, 2])])
+    source = recipe.with_realization(identities={"$": ObjectId()})
+    same = source.with_kwarg("extra", [np.array([1, 2])])
+    replacement = np.array([3, 4])
+    changed = source.with_kwarg("extra", [replacement])
+    replacement[0] = 99
+
+    assert same.construction_view is recipe
+    assert same.graph_equal(source)
+    assert changed.construction_view is changed
+    assert changed.object_id == source.object_id
+    assert np.array_equal(changed.kwargs["extra"][0], [3, 4])
+    assert np.array_equal(source.kwargs["extra"][0], [1, 2])
+
+
+@pytest.mark.parametrize("target", [None, RecipeEditorModel], ids=["classless", "targeted"])
+def test_retained_keyword_editors_preserve_skipped_positional_constraints(target):
+    """Keyword editing keeps partial spelling and facets without target resolution."""
+    recipe = Definition(SKIP_ARGS, extra=1) if target is None else Definition(target, SKIP_ARGS, extra=1)
+    source = recipe.with_identity(ObjectId())
+    changed = source.with_kwargs(extra=2).with_kwarg("children", []).without_kwarg("extra")
+    assert changed.cls is target and changed.args is None
+    assert changed.object_id == source.object_id
+    assert changed._occurrence is source._occurrence
+    assert changed.kwargs == {"children": FrozenList()}
+
+
+@pytest.mark.parametrize("editor", ["with_args", "with_arg", "with_kwargs", "with_kwarg"])
+def test_retained_recipe_editors_coalesce_new_alias_views(editor):
+    """New complementary aliases compose; a contradictory alias is rejected."""
+    child = Definition(RecipeEditorModel, 1)
+    identity, state = ObjectId(), _editor_state(child)
+    identified, selected = child.with_identity(identity), child.with_state(state)
+    if editor in ("with_args", "with_arg"):
+        source = Definition(RecipeEditorModel, 0, children=identified)
+    else:
+        source = Definition(RecipeEditorModel, identified)
+
+    def edit(value):
+        if editor == "with_args":
+            return source.with_args(value)
+        if editor == "with_arg":
+            return source.with_arg(0, value)
+        if editor == "with_kwargs":
+            return source.with_kwargs(children=value)
+        return source.with_kwarg("children", value)
+
+    changed = edit(selected)
+    assert changed.args[0] is changed.kwargs["children"]
+    assert changed.args[0].object_id == identity and changed.args[0].state is state
+    assert changed._occurrence is source._occurrence
+    with pytest.raises(ValueError, match="binding conflict"):
+        edit(child.with_identity(ObjectId()))

@@ -8,7 +8,7 @@ from typing import Any
 from ..cdef_graph import EdgeKind
 from ..definition import ConcreteDefinition, Definition
 from ..object import Object
-from ..selector import Selector
+from ..selector import QueryPredicate, Selector
 from .local_structure import LocalStructureCycleError, walk_local_structure
 from .model import ClassMatchPolicy, FeatureRequirement, FeatureToken
 from .path import Arg, DefinitionPath, Index, Key, Kwarg, Parameter
@@ -29,7 +29,7 @@ class SelectorGraphCycleError(SelectorGraphError):
 class SelectorGraphNode:
     node_id: SelectorNodeId
     source_path: DefinitionPath
-    selector: Definition | ConcreteDefinition
+    selector: Definition | ConcreteDefinition | QueryPredicate
     local_requirements: tuple[FeatureRequirement, ...]
     exact_definition: ConcreteDefinition | None = None
     alternate_local_requirements: tuple[tuple[FeatureRequirement, ...], ...] = ()
@@ -53,10 +53,18 @@ class SelectorGraphEdge:
 
 @dataclass(frozen=True, slots=True)
 class SelectorGraph:
+    """Legacy posting graph plus a visible exact Node semantic residual.
+
+    ``exact_residual`` owns shared NodePreparation facts when the legacy posting
+    families cannot certify the pattern. ``residual_reasons`` explains why scan
+    fallback/refusal is required; empty postings never prove a Node negative.
+    """
     root: SelectorNodeId
     nodes: tuple[SelectorGraphNode, ...]
     edges: tuple[SelectorGraphEdge, ...]
     requires_scan: bool = False
+    exact_residual: Any = field(default=None, repr=False, compare=False)
+    residual_reasons: tuple[str, ...] = ()
     _outgoing: dict[SelectorNodeId, tuple[SelectorGraphEdge, ...]] = field(init=False, repr=False, compare=False)
     _incoming: dict[SelectorNodeId, tuple[SelectorGraphEdge, ...]] = field(init=False, repr=False, compare=False)
 
@@ -95,17 +103,44 @@ class SelectorGraph:
 
 
 def compile_selector_graph(
-        selector: Definition | ConcreteDefinition | Selector | None,
+        selector: Definition | ConcreteDefinition | Selector | QueryPredicate | None,
         *,
         class_match: ClassMatchPolicy | None = None) -> SelectorGraph | None:
+    """Prepare supplied query constraints without construction/default binding.
+
+    Args:
+        selector: Direct Node, explicit predicate, or legacy selector adapter.
+        class_match: Optional exact/inheritance matching policy.
+    Returns:
+        A posting graph, or None for unsupported legacy inputs. Direct Nodes and
+        predicates retain an exact prepared residual. Facets/predicates without
+        certified legacy posting coverage also retain a visible scan requirement.
+    Raises:
+        TypeError, ValueError: For malformed or unsupported pattern metadata.
+    Side Effects:
+        Pure preparation only; no constructors, state IO or identity allocation.
+    """
     if selector is None:
         return None
     if isinstance(selector, Object):
         selector = selector.definition
+    strict = False
     if isinstance(selector, Selector):
+        strict = selector.strict
         if class_match is None:
             class_match = selector.cls_policy
         selector = selector.root
+    from ..node import Node
+    residual = None
+    if isinstance(selector, (Node, QueryPredicate)):
+        from .node_pattern import _PreparedPredicate
+        residual = _PreparedPredicate(QueryPredicate(selector), strict=strict, class_match=class_match or "selector")
+    if isinstance(selector, QueryPredicate) or (residual is not None and _node_has_new_facets(residual.prepared)):
+        return SelectorGraph(
+            root=0, nodes=(SelectorGraphNode(0, DefinitionPath(), selector, ()),), edges=(),
+            requires_scan=True, exact_residual=residual,
+            residual_reasons=("Node occurrence/facet predicate requires exact metadata verification; legacy postings lack certified coverage",),
+        )
     if not isinstance(selector, (Definition, ConcreteDefinition)):
         return None
     if class_match is None:
@@ -119,7 +154,16 @@ def compile_selector_graph(
         # CDef authority uses semantic Parameter paths; soft Definitions retain
         # call spelling, so direct verification remains the sound candidate plan.
         requires_scan=compiler.requires_scan,
+        exact_residual=residual,
+        residual_reasons=(() if residual is None else
+                          ("Node alias/role/facet semantics require exact assignment verification",)),
     )
+
+
+def _node_has_new_facets(prepared):
+    from ..node import Node
+    return any(node.object_id is not None or node.state is not None or node._construction is not None
+               for node in prepared.nodes if isinstance(node, Node))
 
 
 class _SelectorGraphCompiler:
@@ -128,9 +172,14 @@ class _SelectorGraphCompiler:
         self.nodes: list[SelectorGraphNode] = []
         self.edges: list[SelectorGraphEdge] = []
         self.active: dict[int, DefinitionPath] = {}
+        self.handles = {}
         self.requires_scan = False
 
     def add_node(self, selector: Definition | ConcreteDefinition, source_path: DefinitionPath) -> SelectorNodeId:
+        from ..node import Node
+        handle = selector._view if isinstance(selector, Node) else None
+        if handle is not None and handle in self.handles:
+            return self.handles[handle]
         active_id = id(selector) if isinstance(selector, Definition) else None
         if active_id is not None:
             first_path = self.active.get(active_id)
@@ -141,6 +190,8 @@ class _SelectorGraphCompiler:
             self.active[active_id] = source_path
 
         node_id = len(self.nodes)
+        if handle is not None:
+            self.handles[handle] = node_id
         self.nodes.append(SelectorGraphNode(node_id, source_path, selector, (), None))
         if _selector_requires_scan(selector) or _selector_has_partial_factory(selector):
             self.requires_scan = True

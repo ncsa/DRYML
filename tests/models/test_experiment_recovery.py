@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from dryml.artifacts import Value
-from dryml.core import Definition, Par, Ref, Repo, StateRef
+from dryml.core import Definition, Node, Par, Ref, Repo
 from dryml.core.object import Pickleable
 from dryml.core.store.dir import DirStore
 from dryml.managed import ManagedConfig, ManagedRerunRequiredError, managed_operation
@@ -45,7 +45,7 @@ class OrderedValue(Value):
     events = []
     failures = set()
 
-    def __init__(self, name, model: Ref[StateRef]):
+    def __init__(self, name, model: Ref[Node]):
         self.name = name
         self.model = model
 
@@ -55,7 +55,7 @@ class OrderedValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Record this receiver and fail only the configured initial invocation."""
 
@@ -124,7 +124,7 @@ class FailOnceValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Fail once, then install a complete terminal result on retry."""
 
@@ -137,24 +137,24 @@ class FailOnceValue(Value):
         })
 
 
-class _RetainedCheckpointAttempt:
+class _RetainedCheckpointRun:
     """Narrow managed-checkpoint seam for revisiting one retained state."""
 
-    def __init__(self, checkpoint, attempt_id):
-        self.checkpoint_state_ref = checkpoint
-        self.attempt_id = attempt_id
+    def __init__(self, checkpoint, run_id):
+        self.latest_checkpoint = checkpoint
+        self.run_id = run_id
 
     def checkpoint(self):
         """Return the already retained checkpoint observed by this trajectory arm."""
 
-        return self.checkpoint_state_ref
+        return self.latest_checkpoint
 
 
-def _observation_context(repo, checkpoint):
+def _observation_context(repo, checkpoint, run_id):
     """Build the callback fields consumed after a managed checkpoint association."""
 
     return SimpleNamespace(
-        checkpoint_state_ref=checkpoint, state_repo=repo, control_store=repo.default_store,
+        latest_checkpoint=checkpoint, run_id=run_id, state_repo=repo, control_store=repo.default_store,
     )
 
 
@@ -164,36 +164,37 @@ def test_revisited_checkpoint_occurrences_keep_trajectory_predecessors(tmp_path)
     repo = Repo(DirStore(tmp_path / "store"))
     exp = Experiment(RecoveryModel(), TerminalTrainer(), repo=repo)
     checkpoint = repo.save_object(exp, deep_capture=True)
-    ExperimentData.get_or_create(checkpoint.object_projection(), repo=repo)
-    context = _observation_context(repo, checkpoint)
+    ExperimentData.get_or_create(checkpoint.object_view(), repo=repo)
+    context = _observation_context(repo, checkpoint, "trajectory-a")
 
-    exp._stage_checkpoint(_RetainedCheckpointAttempt(checkpoint, "trajectory-a"))
+    exp._stage_checkpoint(_RetainedCheckpointRun(checkpoint, "trajectory-a"))
     exp._evaluate_checkpoint(context)
-    first = ExperimentData.find(checkpoint.object_projection(), repo=repo).data.iloc[0]
+    first = ExperimentData.find(checkpoint.object_view(), repo=repo).data.iloc[0]
 
     # This globally appended row is not the second branch's trajectory predecessor.
-    foreign = ExperimentData.find(checkpoint.object_projection(), repo=repo)
+    foreign = ExperimentData.find(checkpoint.object_view(), repo=repo)
     foreign.add_row(
         expected_artifacts=(), state_ref=checkpoint, prev_state_ref=None,
         time=0, examples_seen=0, row_key="other-trajectory",
     )
     foreign.publish(repo=repo)
 
-    exp._stage_checkpoint(_RetainedCheckpointAttempt(checkpoint, "trajectory-b"))
+    exp._stage_checkpoint(_RetainedCheckpointRun(checkpoint, "trajectory-b"))
+    context.run_id = "trajectory-b"
     exp._evaluate_checkpoint(context)
-    history = ExperimentData.find(checkpoint.object_projection(), repo=repo)
-    second = history.data.loc[history.data.row_key == "v1:trajectory-b:2"].iloc[0]
+    history = ExperimentData.find(checkpoint.object_view(), repo=repo)
+    second = history.data.loc[history.data.row_key == "v2:trajectory-b:2"].iloc[0]
     exp._evaluate_checkpoint(context)
-    history = ExperimentData.find(checkpoint.object_projection(), repo=repo)
+    history = ExperimentData.find(checkpoint.object_view(), repo=repo)
     retried = history.data.loc[history.data.row_key == second.row_key].iloc[0]
 
-    assert first.row_key == "v1:trajectory-a:1"
-    assert first.state_ref == second.state_ref == checkpoint
+    assert first.row_key == "v2:trajectory-a:1"
+    assert first.state_ref.graph_equal(checkpoint) and second.state_ref.graph_equal(checkpoint)
     assert second.row_key != first.row_key
-    assert (second.prev_row_key, second.prev_state_ref) == (first.row_key, checkpoint)
-    assert (retried.row_key, retried.time, retried.state_ref, retried.examples_seen) == (
-        second.row_key, second.time, second.state_ref, second.examples_seen,
-    )
+    assert second.prev_row_key == first.row_key
+    assert second.prev_state_ref.graph_equal(checkpoint)
+    assert (retried.row_key, retried.time, retried.examples_seen) == (second.row_key, second.time, second.examples_seen)
+    assert retried.state_ref.graph_equal(second.state_ref)
 
 
 def test_changed_telemetry_resumes_same_attempt_without_replaying_update(tmp_path):
@@ -224,11 +225,45 @@ def test_changed_telemetry_resumes_same_attempt_without_replaying_update(tmp_pat
     )
     completed = exp.train.status(state_repo=repo)
 
-    assert interrupted.attempt_id == completed.attempt_id
+    assert interrupted.run_id == completed.run_id
+    assert interrupted.invocation_id != completed.invocation_id
     assert first_steps == [1]
     assert resumed_steps == [2]
     assert (exp.model.value, exp.state.step) == (2, 2)
-    assert completed.final_state_ref == final
+    assert completed.final.graph_equal(final.final_state_ref)
+    assert final.value is None
+    assert repo.load_state_ref(final.final_state_ref, reuse_live="never").state == exp.state
+    history = ExperimentData.find(final.final_state_ref.object_view(), repo=repo).data
+    assert all(key.startswith(f"v2:{completed.run_id}:") for key in history.row_key)
+
+
+def test_resume_rejects_other_run_observation_before_completed_history_reuse(tmp_path, monkeypatch):
+    """A stale retained observation cannot borrow another run's completed row."""
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    exp = Experiment(RecoveryModel(), TerminalTrainer(), repo=repo)
+    TerminalTrainer.calls = 0
+
+    def stop(*_):
+        raise RuntimeError("after terminal evaluation")
+
+    with pytest.raises(RuntimeError, match="after terminal evaluation"):
+        exp.train(managed=ManagedConfig(state_repo=repo, callbacks=[stop]))
+    failed = exp.train.status(state_repo=repo)
+    original = Experiment.restore_state_from_dir_imp
+
+    def stale(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self.state.pending_observation_run_id = "another-run"
+
+    monkeypatch.setattr(Experiment, "restore_state_from_dir_imp", stale)
+    with pytest.raises(ValueError, match="another run"):
+        exp.train(managed=ManagedConfig(state_repo=repo))
+    status = exp.train.status(state_repo=repo)
+    assert status.run_id == failed.run_id
+    assert status.checkpoint.graph_equal(failed.checkpoint)
+    assert TerminalTrainer.calls == 1
+    history = ExperimentData.find(failed.checkpoint.object_view(), repo=repo).data
+    assert list(history.row_key) == [f"v2:{failed.run_id}:1"]
 
 
 def test_failed_second_artifact_reuses_the_same_pending_history_occurrence(tmp_path):
@@ -249,19 +284,19 @@ def test_failed_second_artifact_reuses_the_same_pending_history_occurrence(tmp_p
 
     with pytest.raises(RuntimeError, match="second failed"):
         exp.train(managed=ManagedConfig(state_repo=repo))
-    checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
-    history = ExperimentData.find(checkpoint.object_projection(), repo=repo)
+    checkpoint = exp.train.status(state_repo=repo).checkpoint
+    history = ExperimentData.find(checkpoint.object_view(), repo=repo)
     failed = history.data.iloc[0]
 
     assert OrderedValue.events == ["first", "third", "second"]
     assert failed.evaluation_status == "failed"
     assert tuple(failed.eval_artifacts) == ("first", "third")
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    repaired = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    repaired = ExperimentData.find(final.object_view(), repo=repo).data.iloc[0]
 
     assert repaired.row_key == failed.row_key
-    assert repaired.state_ref == checkpoint
+    assert repaired.state_ref.graph_equal(checkpoint)
     assert repaired.evaluation_status == "completed"
     assert tuple(repaired.eval_artifacts) == ("first", "third", "second")
     # The default cadence is terminal-only; retry repairs its retained row without
@@ -299,12 +334,12 @@ def test_completed_admission_race_adopts_receipt_without_rerunning_artifact(
 
     monkeypatch.setattr(managed_runtime, "invoke", race)
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    row = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    row = ExperimentData.find(final.object_view(), repo=repo).data.iloc[0]
 
     assert OrderedValue.events == ["race"]
     assert row.evaluation_status == "completed"
-    assert row.eval_artifacts["race"] == completed[0]
+    assert row.eval_artifacts["race"].graph_equal(completed[0].final_state_ref)
 
 
 def test_terminal_artifact_retry_replays_one_occurrence_without_retraining(tmp_path):
@@ -319,18 +354,17 @@ def test_terminal_artifact_retry_replays_one_occurrence_without_retraining(tmp_p
 
     with pytest.raises(RuntimeError, match="terminal artifact failed"):
         exp.train(managed=ManagedConfig(state_repo=repo))
-    checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
-    failed = ExperimentData.find(checkpoint.object_projection(), repo=repo).data.iloc[0]
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    repaired = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
+    checkpoint = exp.train.status(state_repo=repo).checkpoint
+    failed = ExperimentData.find(checkpoint.object_view(), repo=repo).data.iloc[0]
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    repaired = ExperimentData.find(final.object_view(), repo=repo).data.iloc[0]
 
     assert TerminalTrainer.calls == 1
     assert FailOnceValue.calls == 2
-    assert (repaired.row_key, repaired.time, repaired.state_ref) == (
-        failed.row_key, failed.time, checkpoint,
-    )
+    assert (repaired.row_key, repaired.time) == (failed.row_key, failed.time)
+    assert repaired.state_ref.graph_equal(checkpoint)
     assert repaired.evaluation_status == "completed"
-    assert final == checkpoint
+    assert final.graph_equal(checkpoint)
 
 
 def test_cadenced_checkpoint_retry_restores_step_and_finishes_without_duplicate_update(tmp_path):
@@ -345,11 +379,11 @@ def test_cadenced_checkpoint_retry_restores_step_and_finishes_without_duplicate_
 
     with pytest.raises(RuntimeError, match="terminal artifact failed"):
         exp.train(managed=ManagedConfig(state_repo=repo))
-    checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
+    checkpoint = exp.train.status(state_repo=repo).checkpoint
     assert checkpoint is not None
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    history = ExperimentData.find(final.object_projection(), repo=repo).data
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    history = ExperimentData.find(final.object_view(), repo=repo).data
 
     assert exp.model.value == exp.state.step == 3
     assert list(history.examples_seen) == [2, 3]
@@ -385,17 +419,17 @@ def test_terminal_recovery_reuses_one_occurrence_after_each_experiment_boundary(
     monkeypatch.setattr(experiment_module, "_experiment_boundary", interrupt)
     with pytest.raises(RuntimeError, match=stage):
         exp.train(managed=ManagedConfig(state_repo=repo))
-    checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
-    failed = ExperimentData.find(checkpoint.object_projection(), repo=repo).data.iloc[0]
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    repaired = ExperimentData.find(final.object_projection(), repo=repo).data
+    checkpoint = exp.train.status(state_repo=repo).checkpoint
+    failed = ExperimentData.find(checkpoint.object_view(), repo=repo).data.iloc[0]
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    repaired = ExperimentData.find(final.object_view(), repo=repo).data
 
     assert triggered == [stage]
     assert TerminalTrainer.calls == 1
     assert len(repaired) == 1
     assert repaired.iloc[0].row_key == failed.row_key
     assert repaired.iloc[0].time == failed.time
-    assert repaired.iloc[0].state_ref == checkpoint == final
+    assert repaired.iloc[0].state_ref.graph_equal(checkpoint) and final.graph_equal(checkpoint)
     assert repaired.iloc[0].evaluation_status == "completed"
 
 
@@ -419,13 +453,13 @@ def test_association_failure_replays_the_staged_terminal_occurrence(tmp_path, mo
     monkeypatch.setattr(managed_context, "_checkpoint_boundary", interrupt)
     with pytest.raises(RuntimeError, match="injected association"):
         exp.train(managed=ManagedConfig(state_repo=repo))
-    checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    row = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
+    checkpoint = exp.train.status(state_repo=repo).checkpoint
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    row = ExperimentData.find(final.object_view(), repo=repo).data.iloc[0]
 
     assert triggered == ["checkpoint_associated"]
     assert TerminalTrainer.calls == 1
-    assert (row.state_ref, final) == (checkpoint, checkpoint)
+    assert row.state_ref.graph_equal(checkpoint) and final.graph_equal(checkpoint)
     assert row.evaluation_status == "completed"
 
 
@@ -453,16 +487,15 @@ def test_failed_status_publication_boundary_recovers_without_retraining(tmp_path
     monkeypatch.setattr(experiment_module, "_experiment_boundary", interrupt)
     with pytest.raises(RuntimeError, match="injected failed status"):
         exp.train(managed=ManagedConfig(state_repo=repo))
-    checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
-    failed = ExperimentData.find(checkpoint.object_projection(), repo=repo).data.iloc[0]
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    repaired = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
+    checkpoint = exp.train.status(state_repo=repo).checkpoint
+    failed = ExperimentData.find(checkpoint.object_view(), repo=repo).data.iloc[0]
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    repaired = ExperimentData.find(final.object_view(), repo=repo).data.iloc[0]
 
     assert triggered == ["failed_status_published"]
     assert TerminalTrainer.calls == 1
-    assert (repaired.row_key, repaired.time, repaired.state_ref) == (
-        failed.row_key, failed.time, checkpoint,
-    )
+    assert (repaired.row_key, repaired.time) == (failed.row_key, failed.time)
+    assert repaired.state_ref.graph_equal(checkpoint)
     assert repaired.evaluation_status == "completed"
 
 
@@ -495,8 +528,8 @@ def test_failed_status_publish_error_preserves_completed_results_for_retry(tmp_p
     monkeypatch.setattr(ExperimentData, "publish", fail_failed_status_publish)
     with pytest.raises(OSError, match="injected failed history publish"):
         exp.train(managed=ManagedConfig(state_repo=repo))
-    checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
-    history = ExperimentData.find(checkpoint.object_projection(), repo=repo)
+    checkpoint = exp.train.status(state_repo=repo).checkpoint
+    history = ExperimentData.find(checkpoint.object_view(), repo=repo)
     pending = history.data.iloc[0]
     first_result = pending.eval_artifacts["first"]
 
@@ -505,13 +538,13 @@ def test_failed_status_publish_error_preserves_completed_results_for_retry(tmp_p
     assert pending.evaluation_status == "pending"
     assert OrderedValue.events == ["first", "second"]
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    repaired = ExperimentData.find(final.object_projection(), repo=repo).data
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    repaired = ExperimentData.find(final.object_view(), repo=repo).data
     row = repaired.loc[repaired.row_key == pending.row_key].iloc[0]
 
     assert TerminalTrainer.calls == 1
     assert row.row_key == pending.row_key
-    assert row.eval_artifacts["first"] == first_result
+    assert row.eval_artifacts["first"].graph_equal(first_result)
     assert row.evaluation_status == "completed"
     assert OrderedValue.events[:3] == ["first", "second", "second"]
 
@@ -542,8 +575,8 @@ def test_completed_status_publish_error_reuses_completed_artifact_without_retrai
     monkeypatch.setattr(ExperimentData, "publish", fail_completed_status_publish)
     with pytest.raises(OSError, match="injected completed history publish"):
         exp.train(managed=ManagedConfig(state_repo=repo))
-    checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
-    pending = ExperimentData.find(checkpoint.object_projection(), repo=repo).data.iloc[0]
+    checkpoint = exp.train.status(state_repo=repo).checkpoint
+    pending = ExperimentData.find(checkpoint.object_view(), repo=repo).data.iloc[0]
     result = pending.eval_artifacts["only"]
 
     assert triggered == ["completed"]
@@ -551,13 +584,12 @@ def test_completed_status_publish_error_reuses_completed_artifact_without_retrai
     assert pending.evaluation_status == "pending"
     assert OrderedValue.events == ["only"]
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    repaired = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    repaired = ExperimentData.find(final.object_view(), repo=repo).data.iloc[0]
 
     assert TerminalTrainer.calls == 1
-    assert (repaired.row_key, repaired.time, repaired.eval_artifacts["only"]) == (
-        pending.row_key, pending.time, result,
-    )
+    assert (repaired.row_key, repaired.time) == (pending.row_key, pending.time)
+    assert repaired.eval_artifacts["only"].graph_equal(result)
     assert repaired.evaluation_status == "completed"
     assert OrderedValue.events == ["only"]
 
@@ -614,11 +646,11 @@ def test_native_terminal_replay_reemits_exact_associated_checkpoint(
         with pytest.raises(RuntimeError, match=f"injected native {stage}"):
             exp.train(managed=ManagedConfig(state_repo=repo))
         failed_status = exp.train.status(state_repo=repo)
-        checkpoint = failed_status.checkpoint_state_ref
-        assert checkpoint is not None and failed_status.final_state_ref is None
+        checkpoint = failed_status.checkpoint
+        assert checkpoint is not None and failed_status.final is None
         retained = repo.load_state_ref(checkpoint, reuse_live="never", cache="none")
         observation = retained.state.pending_observation
-        occurrence = retained._occurrence_key(retained.state.pending_observation_attempt_id, observation.sequence)
+        occurrence = retained._occurrence_key(retained.state.pending_observation_run_id, observation.sequence)
         timestamp = retained.state.pending_observation_time
         payload, metadata = retained.model._accepted_fit.payload, retained.model._accepted_fit.metadata
         expected = retained.model(_arrays(kind)[0])
@@ -641,43 +673,43 @@ def test_native_terminal_replay_reemits_exact_associated_checkpoint(
         try:
             resumed = resumed_repo.load_state_ref(checkpoint, reuse_live="never", cache="none")
             publication_refs = []
-            publisher_factory = managed_context._publish_managed_state
+            import dryml.managed.storage as managed_storage
+            publisher = managed_storage._publish_checkpoint
 
-            def checked_publisher():
-                publisher = publisher_factory()
+            def checked_publisher(repo, obj, **kwargs):
+                if isinstance(obj, Experiment):
+                    pytest.fail("terminal resume recaptured its Experiment")
+                return publisher(repo, obj, **kwargs)
 
-                def publish(*args, **kwargs):
-                    result = publisher(*args, **kwargs)
-                    assert result.state_ref == checkpoint
-                    publication_refs.append(result.state_ref)
-                    return result
-
-                return publish
-
-            monkeypatch.setattr(managed_context, "_publish_managed_state", checked_publisher)
-            final = resumed.train(managed=ManagedConfig(state_repo=resumed_repo))
+            monkeypatch.setattr(managed_storage, "_publish_checkpoint", checked_publisher)
+            result = resumed.train(managed=ManagedConfig(state_repo=resumed_repo))
+            final = result.final_state_ref
             completed = resumed.train.status(state_repo=resumed_repo)
-            rows = ExperimentData.find(final.object_projection(), repo=resumed_repo).data
-            assert calls == [48] and replayed and publication_refs == [checkpoint]
+            rows = ExperimentData.find(final.object_view(), repo=resumed_repo).data
+            assert calls == [48] and replayed == [] and publication_refs == []
             assert triggered == [stage]
-            assert completed.attempt_id == failed_status.attempt_id
-            assert completed.final_state_ref == final
+            assert completed.run_id == failed_status.run_id
+            assert completed.invocation_id != failed_status.invocation_id
+            assert completed.final.graph_equal(final)
             assert len(rows) == 1
             row = rows.iloc[0]
             assert len(SavedModelValue.calls) == (2 if stage == "artifact_compute" else 1)
-            assert (row.row_key, row.time, row.state_ref, row.examples_seen) == (occurrence, timestamp, checkpoint, 48)
+            assert (row.row_key, row.time, row.examples_seen) == (occurrence, timestamp, 48)
+            assert row.state_ref.graph_equal(checkpoint)
+            assert final.graph_equal(checkpoint)
             _assert_row(resumed_repo, row)
             assert (resumed.state.step, resumed.state.epoch, resumed.state.examples_seen) == (1, 1, 48)
             np.testing.assert_array_equal(resumed.model(_arrays(kind)[0]), expected)
             # The Experiment replay guard checks this same full StateRef before
             # continuing the row; independently republishing proves codec identity.
-            assert resumed_repo.save_object(retained, deep_capture=True) == checkpoint
+            assert resumed_repo.save_object(retained, deep_capture=True).graph_equal(checkpoint)
+            from dryml.artifacts.dataset import _saved_digest
             record_property("native_replay", json.dumps({
-                "kind": kind, "stage": stage, "checkpoint": checkpoint.digest(),
-                "final": final.digest(), "row_key": occurrence, "time": timestamp,
+                "kind": kind, "stage": stage, "checkpoint": _saved_digest(checkpoint),
+                "final": _saved_digest(final), "row_key": occurrence, "time": timestamp,
                 "native_fit_rows": calls, "examples_seen": int(row.examples_seen),
                 "payload_sha256": hashlib.sha256(payload).hexdigest(),
-                "replayed_checkpoint": publication_refs[0].digest(),
+                "replayed_checkpoint": _saved_digest(final),
             }, sort_keys=True))
         finally:
             resumed_repo.close(flush=False)
@@ -710,24 +742,25 @@ def test_native_preassociation_failure_retains_live_fit_but_prior_authority_refi
             exp.train(managed=ManagedConfig(state_repo=repo))
         status = exp.train.status(state_repo=repo)
         assert status.state == "failed"
-        assert status.checkpoint_state_ref is status.final_state_ref is None
+        assert status.checkpoint is status.final is None
         assert exp.model._accepted_fit is not None
         assert (exp.state.step, exp.state.epoch, exp.state.examples_seen) == (1, 1, 48)
         assert exp.state.pending_observation_terminal
         assert exp.model(_arrays(kind)[0]).shape[0] == 48
-        assert ExperimentData.find(prior.object_projection(), repo=repo) is None
+        assert ExperimentData.find(prior.object_view(), repo=repo) is None
         fresh_repo = Repo(DirStore(tmp_path / "store"))
         try:
             restarted = fresh_repo.load_state_ref(prior, reuse_live="never", cache="none")
             assert restarted.model._accepted_fit is None and restarted.state.step == 0
-            final = restarted.train(managed=ManagedConfig(state_repo=fresh_repo, rerun=True))
+            final = restarted.train(managed=ManagedConfig(state_repo=fresh_repo, rerun=True)).final_state_ref
             assert calls == [48, 48]
             assert (restarted.state.step, restarted.state.epoch, restarted.state.examples_seen) == (1, 1, 48)
-            assert restarted.train.status(state_repo=fresh_repo).final_state_ref == final
+            assert restarted.train.status(state_repo=fresh_repo).final.graph_equal(final)
+            from dryml.artifacts.dataset import _saved_digest
             record_property("preassociation_restart", json.dumps({
-                "kind": kind, "prior": prior.digest(), "final": final.digest(),
+                "kind": kind, "prior": _saved_digest(prior), "final": _saved_digest(final),
                 "native_fit_rows": calls, "restarted_exposure": restarted.state.examples_seen,
-                "failed_checkpoint_associated": status.checkpoint_state_ref is not None,
+                "failed_checkpoint_associated": status.checkpoint is not None,
             }, sort_keys=True))
         finally:
             fresh_repo.close(flush=False)

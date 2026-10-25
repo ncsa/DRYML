@@ -128,7 +128,8 @@ def test_generator_captures_complete_distributions_and_samples_once_per_root():
     second = generator.sample(random.Random(7))
 
     assert isinstance(first, Definition)
-    assert first == second
+    assert first is not second
+    assert first.graph_equal(second)
     assert first.parameters["product"] == first.parameters["width"] * 2
     assert generator.definition.names == ("encoder/width",)
     assert generator.distributions["encoder/width"] is widths

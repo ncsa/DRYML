@@ -212,9 +212,9 @@ def select_representatives(
 ) -> tuple[list[Any], list[Any], dict[str, Any]]:
     """Select deterministic representatives from collected pytest items.
 
-    Files are complete unless policy names representative functions for that
-    file or tests carry the ``exhaustive_only`` marker. A marked mandatory node
-    raises UsageError rather than silently dropping a required proof.
+    Files are complete unless policy names representative functions, defers paths
+    or functions to exhaustive runs, or tests carry ``exhaustive_only``. Conflicting
+    mandatory pins raise UsageError rather than silently dropping a required proof.
     Matrix sampling is separately opt-in and uses callspec values rather
     than pytest row indices, retaining every value on every axis. Stale
     references are rejected only when their owning file was collected, so the
@@ -229,6 +229,13 @@ def select_representatives(
     representative_functions = profile.get("representative_functions", {})
     sampled_functions = set(profile.get("sampled_functions", {}))
     must_run = set(profile.get("must_run", {}))
+    deferred_paths = set(profile.get("deferred_paths", {}))
+    deferred_functions = set(profile.get("deferred_functions", {}))
+    conflicts = sorted(nodeid for nodeid in must_run
+                       if path_for_nodeid(nodeid) in deferred_paths
+                       or nodeid.split("[", 1)[0] in deferred_functions)
+    if conflicts:
+        raise pytest.UsageError("mandatory DRYML profile nodes are deferred: " + ", ".join(conflicts))
     representative_names: dict[str, set[str]] = {}
     for path, selection in representative_functions.items():
         functions = selection.get("functions", ())
@@ -260,7 +267,7 @@ def select_representatives(
         path_for_nodeid(function) for function in collected_functions
     }
     collected_nodeids = {item.nodeid for item in collection}
-    referenced_functions = exhaustive_functions | sampled_functions
+    referenced_functions = exhaustive_functions | sampled_functions | deferred_functions
     stale_functions = sorted(
         function
         for function in referenced_functions
@@ -294,6 +301,9 @@ def select_representatives(
         group = groups[function]
         path = path_for_nodeid(function)
         selected_names = representative_names.get(path)
+        if path in deferred_paths or function in deferred_functions:
+            reasons["deferred exhaustive coverage"] += len(group)
+            continue
         if path in exhaustive_paths or function in exhaustive_functions:
             _keep_items(group, keep)
             reasons["safety/exhaustive pin"] += len(group)

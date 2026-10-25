@@ -43,6 +43,28 @@ def test_publish_file_no_clobber_consumes_staging_and_preserves_bytes(
     assert not staged.exists()
 
 
+def test_standalone_directory_barrier_propagates_native_failure_and_refuses_write_through(
+        tmp_path, monkeypatch):
+    calls = []
+    def unavailable(path):
+        calls.append(path)
+        raise OSError("native directory barrier unavailable")
+    monkeypatch.setattr(filesystem, "_backend", SimpleNamespace(
+        USES_WRITE_THROUGH=False, sync_directory=unavailable))
+    with pytest.raises(OSError, match="native directory barrier"):
+        filesystem.sync_directory(BytesPath(os.fsencode(tmp_path)))
+    assert calls == [str(tmp_path)]
+    file = _staged_file(tmp_path, "file")
+    with pytest.raises(NotADirectoryError):
+        filesystem.sync_directory(file)
+    with pytest.raises(FileNotFoundError):
+        filesystem.sync_directory(tmp_path / "absent")
+    assert calls == [str(tmp_path)]
+    monkeypatch.setattr(filesystem, "_backend", windows_backend)
+    with pytest.raises(filesystem.FilesystemCapabilityError, match="native directory barrier"):
+        filesystem.sync_directory(tmp_path)
+
+
 def test_bytes_paths_and_unicode_names_preserve_native_path_fidelity(tmp_path):
     staged = tmp_path / "staged-é"
     staged.write_bytes(b"\x00\xff native")

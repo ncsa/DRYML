@@ -1,6 +1,31 @@
 # SQLite Query Lowering
 
-SQLite lowers safe CDef and reference predicates to candidate relations, then DRYML verifies results against authoritative V2 values. Graph paths use the current typed `Parameter` codec and query rows include current CDef/reference semantics. A mismatched query schema or semantic-version bundle is rejected before row decode, not interpreted as an empty index.
+## Current Store Projection Boundary
+
+Format-4 Stores maintain SQLite schema **10**, coverage contract **1** synchronously
+through their journaled public mutation boundary. `store_projection_rows` retains
+source contributions and block/table/overlay correlation for typed node, edge and
+facet postings. Recipe/saved membership is separate from known creation metadata,
+full-StateKey manifests, data availability, declarations and names. The covering
+source index makes incremental replacement proportional to changed sources rather
+than total Store size. Coverage, mutation receipts and changed rows commit in the
+same transaction; old schema 9 or incomplete coverage never becomes a ready empty
+index.
+
+The current read seam is `index.projection_rows(family, refresh=False)`, with
+fresh Store UUID/epoch/pending and index UUID/schema/coverage checks. Disabled
+refresh does no maintenance and refuses stale or missing coverage. Unknown or
+not-yet-integrated metadata, retention and lifecycle families are refused rather
+than treated as empty. See [Query Index Backend Contracts](query_index_backend_contracts.md)
+for the closed family list, recovery and exact-acknowledgement protocol.
+
+Repo query lowering, bounded pages, continuations and local-state discovery await
+their owning consumer cutover. Format-4 Stores do not admit legacy Query V3 views
+or advertise that those plans can consume the new projection already.
+
+## Retained Legacy Lowering And Future Qualification
+
+The retained legacy SQLite compiler lowers safe CDef and reference predicates to candidate relations, then verifies results against authoritative V2 values. Graph paths use the typed `Parameter` codec. A mismatched query schema or semantic-version bundle is rejected before row decode, not interpreted as an empty index. These legacy terminals are not enabled against format-4 authority.
 
 The sidecar is derived. Dirty, missing, corrupt, or incompatible SQLite files are rebuilt visibly from current Store records; no rebuild mutates definitions, StateRefs, aliases, or local-state directories. Read transactions are short and connections are process-local. WAL behavior depends on the selected local filesystem and SQLite runtime.
 

@@ -2,12 +2,16 @@
 
 The reservation registry is intentionally independent of Store identity. Store
 locks protect durable authority, while this module prevents two cooperating
-threads in one process from mutating the same retained live graph at once.
+threads in one process from performing overlapping state IO on the same retained
+live graph at once. These reservations protect actual capture/restore/reuse work;
+they are not an execution-lifetime exclusion rule for managed logical operations.
 """
 
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
+from contextlib import contextmanager
+from contextvars import ContextVar
 import os
 from threading import RLock, get_ident
 from typing import Iterable
@@ -17,6 +21,22 @@ _REGISTRY_LOCK = RLock()
 _OBJECT_OWNERS: dict[object, "StateGraphReservation"] = {}
 _LIVE_OWNERS: dict[int, "StateGraphReservation"] = {}
 _AUTHORITY = object()
+_CONSTRUCTION_IDENTITY = ContextVar("dryml_construction_identity", default=None)
+
+
+@contextmanager
+def construction_identity(identity):
+    """Supply an exact ObjectId to one constructor without a user keyword.
+
+    identity is an ObjectId or None. Yields None and restores the previous
+    task-local selection on every exit. This allocates no identity and grants no
+    state ownership; the materializing caller owns validation and reservation.
+    """
+    token = _CONSTRUCTION_IDENTITY.set(identity)
+    try:
+        yield
+    finally:
+        _CONSTRUCTION_IDENTITY.reset(token)
 
 
 def _clear_inherited_reservations() -> None:
@@ -37,7 +57,8 @@ if hasattr(os, "register_at_fork"):
 class StateGraphReservation(AbstractContextManager):
     """One active process/thread lease over an exact live state graph.
 
-    Instances are created only by :meth:`Repo.reserve_state_graph`. The lease
+    Instances are created only by :meth:`Repo.reserve_state_graph` for state IO,
+    not to claim an entire managed execution lifetime. The lease
     covers the root's immutable ObjectRef, every stateful ObjectId, and the
     exact live nodes observed during preflight. ``release()`` is idempotent for
     the owning process and thread; inherited or foreign callers cannot release

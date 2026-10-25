@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from dryml.core import ConcreteDefinition, Executor as CoreExecutor
-from dryml.core import Object, ObjectRef, Repo, Serializable, StateRef, function
+from dryml.core import Object, ObjectRef, Repo, Serializable, function
 from dryml.core.execute import CoreExecutionError, CoreOptions, PreparedCoreCall
 from dryml.core.store.dir import DirStore
 from dryml.execute import Executor, ExecutionOutput, WorkerSetup
@@ -197,6 +197,52 @@ def _signature_owned_increment(value):
     return value + 2
 
 
+def _saved_live_automatic_reference():
+    """Select a worker-published live receipt through the public function boundary."""
+    from unittest.mock import patch
+    from dryml.core import AutoRef, Ref, function
+    from dryml.core.execute import current_context
+
+    live = TrainingValue(7)
+    saved = current_context().repo.save(live)
+
+    def select(value):
+        return value
+
+    select.__annotations__ = {"value": Ref[AutoRef], "return": Ref[AutoRef]}
+    select = function(select)
+
+    with (
+        patch.object(TrainingValue, "save_state_to_dir_imp", side_effect=AssertionError("recapture")),
+        patch.object(TrainingValue, "restore_state_from_dir_imp", side_effect=AssertionError("restore")),
+    ):
+        selected = select(live)
+        assert selected is saved
+        return selected
+
+
+def test_real_subprocess_saved_live_automatic_reference(tmp_path):
+    """Worker-local automatic selection returns the exact current saved Node."""
+    from dryml.core import ConcreteNode, require_saved
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    executor = CoreExecutor(
+        SubProcessConfig(spool_directory=spool),
+        core=CoreOptions(repo=repo, return_objects=False),
+    )
+    try:
+        future = executor.submit(_saved_live_automatic_reference)
+        selected = future.result(timeout=20)
+        assert isinstance(selected, ConcreteNode)
+        assert require_saved(selected) is selected
+        assert repo.load(selected).value == 7
+        future.cleanup(timeout=5)
+    finally:
+        executor.close(cancel=True, timeout=5)
+
+
 class _BoundCallable:
     """Retain an ordinary instance capture for bound and callable-owner coverage."""
 
@@ -362,9 +408,12 @@ def test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_kee
     try:
         future = executor.submit(_train_and_report, value)
         stateful, stateless, existing, metric = future.result(timeout=40)
-        assert isinstance(stateful, StateRef)
+        from dryml.core import ConcreteNode, require_saved
+        assert isinstance(stateful, ConcreteNode)
+        assert require_saved(stateful) is stateful
         assert isinstance(stateless, ConcreteDefinition)
         assert isinstance(existing, ObjectRef)
+        assert existing.object_id == value.object_id
         assert metric == 3.0
         assert value.value == 6
         assert value.last_state_ref is not None
@@ -372,11 +421,11 @@ def test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_kee
 
         nested = executor.submit(_update_child_and_return_it, root)
         returned = nested.result(timeout=40)
-        assert isinstance(returned, StateRef)
+        assert require_saved(returned) is returned
         assert root.child.value == 8
-        assert returned == root.last_state_ref.at(next(
+        assert returned.graph_equal(root.last_state_ref.at(next(
             path for path, child in root._runtime_projection.items() if child is root.child
-        ))
+        )))
         cleanup_checked(nested)
 
         control = executor.submit(_control_store_path)

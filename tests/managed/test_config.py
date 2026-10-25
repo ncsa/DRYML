@@ -97,8 +97,8 @@ def test_public_error_reasons_and_result_values_are_stable_and_immutable():
     """Caller-visible failures use static reasons and projections are value types."""
 
     error = ManagedConfigError(message="detail may be human-readable")
-    status = ManagedStatus("not_started", "a" * 64, None, 0, None, None, False, None)
-    result = InterruptRequestResult("not_running", "a" * 64, None, 0)
+    status = ManagedStatus("not_started", "a" * 64, None, None, 0, None, None, False, None, None)
+    result = InterruptRequestResult("not_running", "a" * 64, None, None, 0)
 
     assert error.reason == "invalid_config"
     assert "invalid_config" in str(error)
@@ -106,3 +106,16 @@ def test_public_error_reasons_and_result_values_are_stable_and_immutable():
         status.state = "running"
     with pytest.raises(FrozenInstanceError):
         result.outcome = "requested"
+
+
+def test_start_snapshot_keeps_exact_saved_node_and_callback_membership(tmp_path):
+    from tests.managed.u15_fixtures import setup
+    control, live, saved = setup(tmp_path)
+    callbacks = [lambda *args: None]
+    config = ManagedConfig(rerun=True, start_from=saved, callbacks=callbacks)
+    snapshot = config.snapshot()
+    callbacks.clear()
+    assert snapshot.start_from is saved and len(snapshot.callbacks) == 1
+    for invalid in (object(), saved.state, control.state_repo.describe(live).with_realization(states={"$": None})):
+        with pytest.raises(ManagedConfigError, match="invalid_start"):
+            ManagedConfig(start_from=invalid)

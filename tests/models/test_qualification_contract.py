@@ -72,12 +72,12 @@ from tests.qualification.ml_workflow_fixtures import load_manifest
 from tests.qualification.ml_workflow_workloads import case_from_manifest
 m = load_manifest(__import__('sys').argv[1], fixture_store=__import__('sys').argv[2], tfds_data_dir=__import__('sys').argv[3], environment={key: 'test' for key in __import__('tests.qualification.ml_workflow_fixtures', fromlist=['REQUIRED_ENVIRONMENT_KEYS']).REQUIRED_ENVIRONMENT_KEYS})
 c = case_from_manifest(m, workload='W3', framework='tf', execution='managed-local')
-print(json.dumps({'digest': c.w3_test_ref.digest(), 'loaded': sorted(n for n in __import__('sys').modules if n in {'tensorflow', 'torch', 'jax', 'jaxlib', 'flax', 'optax', 'pandas', 'tensorflow_datasets'})}))
+print(json.dumps({'digest': c.w3_test_ref.exact_digest(), 'loaded': sorted(n for n in __import__('sys').modules if n in {'tensorflow', 'torch', 'jax', 'jaxlib', 'flax', 'optax', 'pandas', 'tensorflow_datasets'})}))
 """
     environment = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, [str(Path.cwd() / "src"), str(Path.cwd()), os.environ.get("PYTHONPATH")]))}
     result = subprocess.run([sys.executable, "-c", code, str(path), str(store_path), str(tmp_path / "tfds")], check=True, capture_output=True, text=True, env=environment)
     observed = json.loads(result.stdout)
-    assert observed == {"digest": manifest.references.numpy.digest(), "loaded": []}
+    assert observed == {"digest": manifest.references.numpy.exact_digest(), "loaded": []}
 
 
 def test_fixture_manifest_portable_tfds_identity_excludes_local_root(tmp_path):

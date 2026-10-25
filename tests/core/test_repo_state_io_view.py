@@ -19,23 +19,23 @@ class ViewValue(Serializable):
         self.value = int(Path(src_dir, "value").read_text(encoding="ascii"))
 
 
-def test_state_io_view_does_not_open_or_commit_borrowed_store_indexes(tmp_path, monkeypatch):
+def test_state_io_view_preserves_borrowed_store_handles(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store")
     caller = Repo(store)
     view = Repo._for_state_io((store,))
-    opened = []
     committed = []
-    monkeypatch.setattr(store, "open_query_index", lambda: opened.append(True))
+    index = store.open_query_index()
+    monkeypatch.setattr(index, "close", lambda: pytest.fail("borrowed index closed"))
     monkeypatch.setattr(store, "commit", lambda: committed.append(True))
 
     obj = ViewValue(4, repo=view)
     state = view.save_object(obj)
     obj.value = 7
-    view.restore_state_ref_into(obj, state)
+    loaded = view.load_state_ref(state, reuse_live="never")
     view.close()
 
-    assert obj.value == 4
-    assert opened == []
+    assert obj.value == 7
+    assert loaded.value == 4 and loaded.object_id == obj.object_id
     assert committed == []
     assert caller.default_store is store
 
@@ -65,15 +65,17 @@ def test_state_io_view_preserves_an_active_caller_sqlite_connection(tmp_path):
     store = DirStore(tmp_path / "store", query_index="sqlite")
     caller = Repo(store)
     index = store.open_query_index()
+    index.maintain_store()
     connection = index._connections.connection()
     view = Repo._for_state_io((store,))
     obj = ViewValue(4, repo=view)
     state = view.save_object(obj)
     obj.value = 7
-    view.restore_state_ref_into(obj, state)
+    loaded = view.load_state_ref(state, reuse_live="never")
     view.close()
 
     assert store.open_query_index() is index
     assert connection.execute("SELECT 1").fetchone() == (1,)
-    assert obj.value == 4
+    assert obj.value == 7
+    assert loaded.value == 4 and loaded.object_id == obj.object_id
     assert caller.default_store is store

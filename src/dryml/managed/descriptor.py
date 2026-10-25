@@ -8,22 +8,18 @@ import types
 from dataclasses import replace
 
 from dryml.annotations import attach_annotation, own_annotations
-from dryml.core.reference_values import StateRef
 
 from .config import ManagedConfig
 from .errors import ManagedConfigError, ManagedDeclarationError
 
 
-def managed_operation(*, resumable: bool = False, return_state_ref: bool = False,
+def managed_operation(*, resumable: bool = False,
                       store_parameter: str | None = None):
     """Create a checked descriptor for one synchronous managed instance method.
 
     Args:
         resumable: Exact bool declaring whether a later lifecycle may resume from
             an associated Object-state checkpoint.
-        return_state_ref: Exact bool selecting an invocation-captured final
-            ``StateRef`` result instead of the method body's result. The body must
-            explicitly annotate its return as ``None``.
         store_parameter: Optional keyword-only parameter name whose ``None`` or
             ``Store`` value selects this invocation's publication authority.
 
@@ -40,7 +36,7 @@ def managed_operation(*, resumable: bool = False, return_state_ref: bool = False
         invoke the authored method and creates no lifecycle authority.
     """
 
-    if type(resumable) is not bool or type(return_state_ref) is not bool:
+    if type(resumable) is not bool:
         raise ManagedDeclarationError(message="resumable must be an exact bool")
     if store_parameter is not None and (
             type(store_parameter) is not str or not store_parameter.isidentifier()):
@@ -50,7 +46,7 @@ def managed_operation(*, resumable: bool = False, return_state_ref: bool = False
         """Validate and retain one exact native method function."""
 
         return ManagedOperation(
-            target, resumable=resumable, return_state_ref=return_state_ref,
+            target, resumable=resumable,
             store_parameter=store_parameter,
         )
 
@@ -63,9 +59,8 @@ class ManagedOperation:
     Args:
         target: Exact synchronous Python function with a required keyword-only
             ``managed`` parameter.
-        resumable: Exact declaration flag retained for future resume policy.
-        return_state_ref: Exact declaration flag selecting a final StateRef result
-            after successful publication and completion association.
+        resumable: Exact declaration flag required for ordinary unfinished resume;
+            a usable latest recovery checkpoint is also mandatory.
         store_parameter: Optional declared keyword-only Store control excluded from
             ordinary call identity and used only for publication selection.
 
@@ -84,9 +79,9 @@ class ManagedOperation:
     from dryml.core.signatures import _FUNCTION_DECLARATION_PARTICIPANT
 
     __dryml_function_participant__ = _FUNCTION_DECLARATION_PARTICIPANT
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
 
     def __init__(self, target: object, *, resumable: bool,
-                 return_state_ref: bool = False,
                  store_parameter: str | None = None):
         """Create a statically checked declaration without evaluating annotations."""
 
@@ -103,7 +98,6 @@ class ManagedOperation:
         self._executable = executable
         self._function_handoff_owner = handoff_owner
         self._resumable = resumable
-        self._return_state_ref = return_state_ref
         self._store_parameter = store_parameter
         self._invocation_parameters: dict[str, str] = {}
         self._author_signature = _native_signature(authored)
@@ -127,11 +121,6 @@ class ManagedOperation:
                 raise ManagedDeclarationError(
                     message="store_parameter must name a keyword-only parameter with None default"
                 )
-        if return_state_ref and not _is_none_annotation(
-                self._author_signature.return_annotation):
-            raise ManagedDeclarationError(
-                message="return_state_ref requires an explicit None return annotation"
-            )
         self._instance_parameter = parameters[0].name
         self._signature_plan = None
         self._member: str | None = None
@@ -158,12 +147,6 @@ class ManagedOperation:
         """Return the author-declared exact resume capability."""
 
         return self._resumable
-
-    @property
-    def return_state_ref(self) -> bool:
-        """Return whether successful calls expose their captured final StateRef."""
-
-        return self._return_state_ref
 
     @property
     def store_parameter(self) -> str | None:
@@ -407,6 +390,8 @@ class ManagedOperation:
 class _ManagedComposite:
     """Private descriptor retaining an executable wrapper around one declaration."""
 
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
+
     def __init__(self, descriptor: ManagedOperation,
                  outer: types.FunctionType) -> None:
         """Retain already-validated member and executable wrapper evidence."""
@@ -437,6 +422,7 @@ class _BoundComposite:
     """Bound managed controls that execute one retained outer wrapper."""
 
     __dryml_execute_owner__ = "managed"
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
 
     def __init__(self, composite: _ManagedComposite, instance: object) -> None:
         """Bind the composite while retaining the public managed call surface."""
@@ -445,20 +431,28 @@ class _BoundComposite:
         self._descriptor = composite._descriptor
         self._instance = instance
         self.__name__ = composite.__name__
+        self.__dryml_execute_carriers__ = (self, self._descriptor,
+            self._descriptor._target, self._descriptor._executable, composite._outer)
         self.__qualname__ = composite.__qualname__
         self.__doc__ = composite.__doc__
         self.__wrapped__ = composite._outer
         self.__signature__ = _bound_signature(self._descriptor)
 
     def __call__(self, *args: object, managed: ManagedConfig | None = None,
-                 **kwargs: object) -> object:
-        """Execute the retained outer wrapper and its one inner lifecycle."""
+                  **kwargs: object) -> object:
+        """Admit once; execute the retained outer wrapper only on execution.
+
+        args/kwargs are ordinary authored inputs and managed optional ManagedConfig.
+        Returns InvocationResult on execution/replay or a terminating recovery
+        disposition. Managed errors propagate; wrappers run under the same owner
+        as realization/body/finalization and are skipped on completed replay.
+        """
 
         if managed is not None and type(managed) is not ManagedConfig:
             raise ManagedConfigError(message="managed must be a ManagedConfig or None")
-        return self._composite._outer(
-            self._instance, *args, managed=managed, **kwargs,
-        )
+        from .runtime import invoke
+        return invoke(self._descriptor, self._instance, args, managed, kwargs,
+                      outer=self._composite._outer)
 
     def __dryml_execute_invoke__(self, args, kwargs, *, repo, on_raw_result):
         """Execute the outer wrapper before Execute publishes its delivered value."""
@@ -474,17 +468,28 @@ class _BoundComposite:
 
     def request_interrupt(self, *, state_repo: object = None,
                           control_store: object = None,
-                          expected_attempt_id: str | None = None) -> object:
-        """Delegate cooperative interruption to the enclosed declaration."""
+                          expected_run_id: str | None = None,
+                          expected_invocation_id: str | None = None,
+                          expected_generation: int | None = None) -> object:
+        """Delegate selected run/invocation/generation request control.
+
+        state_repo/control_store are optional borrowed resources; expected_run_id,
+        expected_invocation_id and expected_generation fence stale caller intent.
+        Returns InterruptRequestResult or propagates ManagedError; may publish a
+        request but never invokes the outer wrapper or managed body.
+        """
 
         return _BoundOperation(self._descriptor, self._instance).request_interrupt(
             state_repo=state_repo, control_store=control_store,
-            expected_attempt_id=expected_attempt_id,
+            expected_run_id=expected_run_id, expected_invocation_id=expected_invocation_id,
+            expected_generation=expected_generation,
         )
 
 
 class _BoundOperation:
     """Short-lived callable view that validates managed calls before execution."""
+
+    __dryml_execute_adapter__ = "dryml.managed.execute_adapter:ManagedExecuteAdapter"
 
     def __init__(self, descriptor: ManagedOperation, instance: object):
         """Bind the declaration and advertise the caller-facing signature."""
@@ -492,6 +497,7 @@ class _BoundOperation:
         self._descriptor = descriptor
         self._instance = instance
         self.__name__ = descriptor.__name__
+        self.__dryml_execute_carriers__ = (self, descriptor, descriptor._target, descriptor._executable)
         self.__qualname__ = descriptor.__qualname__
         self.__doc__ = descriptor.__doc__
         self.__wrapped__ = descriptor._target
@@ -503,27 +509,37 @@ class _BoundOperation:
         Args:
             *args: Ordinary positional method arguments.
             managed: Optional caller-owned ManagedConfig selecting state/control
-                authority, rerun policy, and checkpoint callbacks.
+                authority, rerun/start policy, and checkpoint callbacks. A supplied
+                SavedNode start always requires explicit rerun.
             **kwargs: Ordinary keyword method arguments.
 
         Raises:
             ManagedConfigError: If config or normalized ordinary arguments are
                 unsupported.
             ManagedError: If selected lifecycle authority cannot be used safely.
+            ManagedResultError: If a normalized result is outside the closed
+                durable grammar; failure precedes automatic final capture.
 
         Side Effects:
-            Acquires retained state ownership, then invokes the raw method only
-            after a running control snapshot is committed.
+            Validates ordinary arguments once, prepares/restores a selected saved
+            start, admits a run and executes the authored body under the lifetime
+            owner. Explicit checkpoints and initial/final selections can publish
+            protected authority. Failed preparation preserves previous current;
+            callback failure preserves the associated latest checkpoint.
 
         Returns:
-            The wrapped method's ordinary return value, or its invocation-captured
-            final StateRef when the declaration selects ``return_state_ref``, after
-            final publication and control completion association succeed.
+            A detached reconciliation disposition when pending authority required
+             repair; it never falls through into body execution. Successful calls
+             and compatible replay return detached InvocationResult with lazy value.
         """
 
         if managed is not None and type(managed) is not ManagedConfig:
             raise ManagedConfigError(message="managed must be a ManagedConfig or None")
-        from .runtime import invoke
+        from .runtime import invoke, _consume_outer_handoff
+
+        handoff = _consume_outer_handoff(self._descriptor, self._instance, args, managed, kwargs)
+        if handoff is not None:
+            return handoff()
 
         return invoke(self._descriptor, self._instance, args, managed, kwargs)
 
@@ -570,13 +586,17 @@ class _BoundOperation:
 
         return status(self._descriptor, self._instance, state_repo=state_repo, control_store=control_store)
 
-    def request_interrupt(self, *, state_repo: object = None, control_store: object = None, expected_attempt_id: str | None = None) -> object:
+    def request_interrupt(self, *, state_repo: object = None, control_store: object = None,
+                          expected_run_id: str | None = None, expected_invocation_id: str | None = None,
+                          expected_generation: int | None = None) -> object:
         """Publish a cooperative interruption request to selected running authority.
 
         Args:
             state_repo: Explicit selected state Repo or Store override.
             control_store: Explicit selected control Store override.
-            expected_attempt_id: Optional stale-attempt precondition.
+            expected_run_id: Optional UUID-hex stable-run precondition.
+            expected_invocation_id: Optional UUID-hex active-caller precondition.
+            expected_generation: Optional positive integer authority fence.
 
         Raises:
             ManagedError: If selected authority cannot safely accept a request.
@@ -593,7 +613,8 @@ class _BoundOperation:
 
         return request_interrupt(
             self._descriptor, self._instance, state_repo=state_repo,
-            control_store=control_store, expected_attempt_id=expected_attempt_id,
+            control_store=control_store, expected_run_id=expected_run_id,
+            expected_invocation_id=expected_invocation_id, expected_generation=expected_generation,
         )
 
 
@@ -839,6 +860,7 @@ def _native_signature(target: types.FunctionType) -> inspect.Signature:
 def _bound_signature(descriptor: ManagedOperation) -> inspect.Signature:
     """Project a caller signature that replaces injected context with config policy."""
 
+    from .model import InvocationResult
     author_signature = descriptor.author_signature
     parameters = list(author_signature.parameters.values())[1:]
     projected = []
@@ -848,21 +870,8 @@ def _bound_signature(descriptor: ManagedOperation) -> inspect.Signature:
         projected.append(parameter)
     return author_signature.replace(
         parameters=projected,
-        return_annotation=(StateRef if descriptor.return_state_ref else author_signature.return_annotation),
+        return_annotation=InvocationResult,
     )
-
-
-def _is_none_annotation(annotation: object) -> bool:
-    """Accept only native or canonical postponed spellings of explicit ``None``."""
-
-    if annotation is None:
-        return True
-    if type(annotation) is not str:
-        return False
-    text = annotation.strip()
-    while len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
-        text = text[1:-1].strip()
-    return text == "None"
 
 
 def _managed_member_names(cls: type) -> set[str]:

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import base64
 import os
-import pickle
 import subprocess
 import sys
 
@@ -259,7 +257,7 @@ def _experiment(*, repo=None, epochs=1):
 def test_jax_native_iterator_yields_prepared_authored_batches():
     """The JAX bridge yields native batches and closes an exhausted traversal."""
     jax = pytest.importorskip("jax")
-    import dryml.jax
+    import dryml.jax  # noqa: F401 - activate the explicit JAX adapter
     from dryml.data.native import PreparedDataset
     from dryml.jax.training_data import iter_training_batches
 
@@ -306,7 +304,7 @@ def test_jax_invocation_telemetry_receives_host_logs_after_commits(tmp_path):
     final = exp.train(
         callbacks=[lambda values: logs.append(dict(values))],
         managed=ManagedConfig(state_repo=repo),
-    )
+    ).final_state_ref
 
     assert [values["event"] for values in logs] == [
         "train_batch_end", "train_batch_end", "train_batch_end", "epoch_end",
@@ -314,7 +312,7 @@ def test_jax_invocation_telemetry_receives_host_logs_after_commits(tmp_path):
     assert [values["step"] for values in logs] == [1, 2, 3, 3]
     assert [values["batch"] for values in logs[:3]] == [0, 1, 2]
     assert all(type(values["loss"]) is float for values in logs)
-    assert exp.train.status(state_repo=repo).final_state_ref == final
+    assert exp.train.status(state_repo=repo).final.graph_equal(final)
 
 
 def test_jax_training_executes_one_model_apply_per_accepted_update(monkeypatch):
@@ -570,7 +568,7 @@ def test_jax_managed_checkpoint_failure_retains_accepted_update_for_retry(tmp_pa
     with pytest.raises(RuntimeError, match="post-commit checkpoint callback failed"):
         exp.train(managed=ManagedConfig(state_repo=repo, callbacks=[fail_once]))
 
-    checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
+    checkpoint = exp.train.status(state_repo=repo).checkpoint
     assert failures == [1]
     assert checkpoint is not None
     assert (exp.state.step, exp.state.examples_seen, exp.state.next_batch, exp.state.target_epoch) == (1, 2, 1, 1)

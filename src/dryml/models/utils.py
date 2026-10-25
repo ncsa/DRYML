@@ -355,7 +355,7 @@ def _fit_one_shot(exp, *, fit_candidate, encode_candidate, callbacks=(), observe
     x, y, examples = materialize_supervised(exp.train_data, strict_numpy=True)
     proposed.record_fit(examples=examples)
     proposed.finish_epoch()
-    TrainState._validate_restored_state(proposed.__getstate__())
+    TrainState._validate_restored_state(proposed.__getstate__()["fields"])
 
     try:
         exp.model.prep_train()

@@ -1,6 +1,11 @@
+"""Managed training and run-stable, exact-checkpoint Artifact observations.
+
+Training/evaluation failures preserve associated recovery state. Normal calls
+return InvocationResult; completed replay performs no consumer work.
+"""
+
 from __future__ import annotations
 
-import functools
 import inspect
 import math
 import os
@@ -13,13 +18,12 @@ from collections.abc import Mapping
 from concurrent.futures import CancelledError as FuturesCancelledError
 
 from dryml.artifacts import Artifact, Value
-from dryml.core import Mat, Object, StateRef, Template
+from dryml.core import Mat, Object, Node, Template
 from dryml.core.factory import FactorySpec
 from dryml.core.object import Serializable
 from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.managed import (
     ManagedConfig,
-    ManagedConfigError,
     ManagedRerunRequiredError,
     managed_operation,
 )
@@ -31,45 +35,14 @@ from .train_spec import TrainState
 
 
 def _experiment_train_wrapper(target):
-    """Prepend evaluation and declare Experiment-only telemetry controls."""
+    """Declare transient telemetry without changing admitted arguments or controls."""
 
     target._declare_invocation_parameters(
         callbacks="observer_factories",
         observer_strict="observer_strict",
     )
 
-    @functools.wraps(target)
-    def wrapped(
-        self,
-        *,
-        callbacks=None,
-        observer_strict=False,
-        managed=None,
-    ):
-        observer_configs = _freeze_observer_configs(callbacks)
-        if type(observer_strict) is not bool:
-            raise TypeError("Experiment observer_strict must be an exact bool.")
-        config = ManagedConfig() if managed is None else managed
-        managed_callbacks = [] if config.callbacks is None else list(config.callbacks)
-        if len(managed_callbacks) >= 64:
-            raise ManagedConfigError(message="Experiment evaluation leaves room for at most 63 caller callbacks")
-
-        def evaluate(obj, context):
-            obj._evaluate_checkpoint(context)
-
-        return target(
-            self,
-            managed=ManagedConfig(
-                state_repo=config.state_repo,
-                control_store=config.control_store,
-                rerun=config.rerun,
-                callbacks=[evaluate, *managed_callbacks],
-            ),
-            callbacks=observer_configs,
-            observer_strict=observer_strict,
-        )
-
-    return wrapped
+    return target
 
 
 def _freeze_observer_configs(callbacks) -> tuple[object, ...]:
@@ -202,7 +175,7 @@ class Experiment(Serializable):
             falls back to training or validation data.
          artifacts: String-keyed Template-role Definition mapping, or ``None``.
               Recipes remain inert until a checkpoint binds
-             ``this`` to its exact Experiment StateRef.
+              ``this`` to its exact Experiment SavedNode.
          checkpoint_every_steps: Positive exact optimizer-step cadence for
              intermediate checkpoints, or ``None`` to suppress intermediate
              checkpoints. The terminal checkpoint always occurs.
@@ -263,7 +236,7 @@ class Experiment(Serializable):
         self.state = TrainState()
 
     @_experiment_train_wrapper
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def train(self, *, callbacks=None, observer_strict=False, managed) -> None:
         """Train and evaluate the exact terminal Experiment checkpoint.
 
@@ -279,8 +252,9 @@ class Experiment(Serializable):
                 recovery, history, and Artifact authority.
 
         Returns:
-            The managed boundary returns the exact completed terminal StateRef;
-            this authored body returns ``None``.
+            InvocationResult with ``value is None`` and the exact terminal
+            SavedNode in ``final_state_ref``. Replay performs no evaluation or
+            telemetry delivery; this authored body returns ``None``.
 
         Raises:
             Exception: Propagates training, strict telemetry, checkpoint,
@@ -295,26 +269,28 @@ class Experiment(Serializable):
         callbacks = _freeze_observer_configs(callbacks)
         if type(observer_strict) is not bool:
             raise TypeError("Experiment observer_strict must be an exact bool.")
+        managed._prepend_checkpoint_callback(_evaluate_experiment_checkpoint)
         self._preflight_artifacts()
         if managed.is_resuming and self.state.pending_observation is not None:
-            retained = managed.checkpoint_state_ref
+            if self.state.pending_observation_run_id != managed.run_id:
+                raise ValueError("Experiment observation belongs to another run.")
+            retained = managed.latest_checkpoint
             row_key = self._occurrence_key(
-                self.state.pending_observation_attempt_id,
+                self.state.pending_observation_run_id,
                 self.state.pending_observation.sequence,
             )
             history = ExperimentData.get_or_create(
-                retained.object_projection().reference, repo=managed.state_repo,
+                retained.object_view(), repo=managed.state_repo,
             )
             completed = history._rows.get(row_key)
             if (
                 completed is None
                 or completed["evaluation_status"] != "completed"
-                or completed["facts"]["state_ref"] != retained
+                or not completed["facts"]["state_ref"].graph_equal(retained)
             ):
-                replayed = managed.checkpoint()
-                if replayed != retained:
-                    raise RuntimeError("Experiment checkpoint replay changed its retained StateRef.")
+                self._evaluate_checkpoint(managed)
             if self.state.pending_observation_terminal:
+                managed.final_state(retained)
                 return
         if self.state.is_trained:
             return
@@ -350,7 +326,7 @@ class Experiment(Serializable):
             observer_session.close(suppress=sys.exc_info()[0] is not None)
         if self.state.phase == TrainState.training:
             self.state.phase = TrainState.trained
-        self._stage_checkpoint(managed, terminal=True)
+        managed.final_state(self._stage_checkpoint(managed, terminal=True))
 
     def _checkpoint_bridge(self, managed):
         """Return a safe-point bridge that applies the retained checkpoint cadence.
@@ -366,7 +342,7 @@ class Experiment(Serializable):
 
         return checkpoint
 
-    def _stage_checkpoint(self, managed, *, terminal: bool = False) -> StateRef:
+    def _stage_checkpoint(self, managed, *, terminal: bool = False) -> Node:
         """Persist one retry-stable observation before entering a managed safe point."""
 
         prior = self.state.pending_observation
@@ -374,31 +350,33 @@ class Experiment(Serializable):
         self.state.pending_observation_time = time.time_ns() // 1_000_000
         self.state.pending_observation_prev_state_ref = self.last_state_ref
         self.state.pending_observation_prev_row_key = (
-            None if prior is None else self._occurrence_key(self.state.pending_observation_attempt_id, prior.sequence)
+            None if prior is None else self._occurrence_key(self.state.pending_observation_run_id, prior.sequence)
         )
-        self.state.pending_observation_attempt_id = managed.attempt_id
+        self.state.pending_observation_run_id = managed.run_id
         self.state.pending_observation_terminal = terminal
         return managed.checkpoint()
 
     @staticmethod
-    def _occurrence_key(attempt_id: str | None, sequence: int) -> str:
+    def _occurrence_key(run_id: str | None, sequence: int) -> str:
         """Return the durable key for one managed safe-point occurrence."""
 
-        if not attempt_id:
-            raise RuntimeError("Experiment observation has no managed attempt identity.")
-        return f"v1:{attempt_id}:{sequence}"
+        if not run_id:
+            raise RuntimeError("Experiment observation has no managed run identity.")
+        return f"v2:{run_id}:{sequence}"
 
     def _evaluate_checkpoint(self, context) -> None:
         """Publish and reconcile one exact checkpoint's Artifact history row."""
 
-        checkpoint = context.checkpoint_state_ref
+        checkpoint = context.latest_checkpoint
         observation = self.state.pending_observation
         if checkpoint is None or observation is None:
             raise RuntimeError("Experiment evaluation requires an associated pending observation.")
-        row_key = self._occurrence_key(self.state.pending_observation_attempt_id, observation.sequence)
+        if self.state.pending_observation_run_id != context.run_id:
+            raise ValueError("Experiment observation belongs to another run.")
+        row_key = self._occurrence_key(self.state.pending_observation_run_id, observation.sequence)
         names, recipes = self._artifact_recipes()
         history = ExperimentData.get_or_create(
-            checkpoint.object_projection().reference, repo=context.state_repo,
+            checkpoint.object_view(), repo=context.state_repo,
         )
         existing = history._rows.get(row_key)
         already_completed = existing is not None and existing["evaluation_status"] == "completed"
@@ -497,10 +475,8 @@ class Experiment(Serializable):
         _, recipes = self._artifact_recipes()
         if not recipes:
             return
-        proof = StateRef(
-            self.object_ref,
-            {path: "dryml-" + "0" * 64 for path in self.object_ref.objects},
-        )
+        from dryml.managed.runtime import _receiver
+        proof = _receiver(self)
         for name, recipe in recipes.items():
             roots = self._artifact_recipe_roots(recipe)
             unknown = roots.difference({"this"})
@@ -558,8 +534,9 @@ class Experiment(Serializable):
             artifact_cls: Concrete Artifact class supplied by a resolved recipe.
 
         Raises:
-            TypeError: If ``compute`` is not a resumable managed operation returning
-                its final StateRef, or requires ordinary caller arguments.
+            TypeError: If ``compute`` is not a resumable managed operation or
+                requires ordinary caller arguments. Managed calls now return
+                InvocationResult with direct completed SavedNode metadata.
 
         Side Effects:
             Inspects the class declaration only; no receiver is constructed.
@@ -569,9 +546,9 @@ class Experiment(Serializable):
         descriptor = getattr(compute, "_descriptor", compute)
         if not isinstance(descriptor, ManagedOperation):
             raise TypeError(f"Artifact recipe {name!r} requires a managed compute operation.")
-        if not descriptor.resumable or not descriptor.return_state_ref:
+        if not descriptor.resumable:
             raise TypeError(
-                f"Artifact recipe {name!r} compute must be resumable and return its final StateRef."
+                f"Artifact recipe {name!r} compute must be resumable."
             )
         ordinary = (
             parameter for parameter in descriptor.author_signature.parameters.values()
@@ -638,36 +615,41 @@ class Experiment(Serializable):
         }
         status = artifact.compute.status(**controls)
         if status.state == "completed":
-            result_ref = status.final_state_ref
+            result_ref = status.final
         else:
             try:
-                result_ref = artifact.compute(managed=ManagedConfig(**controls))
+                result = artifact.compute(managed=ManagedConfig(**controls))
             except ManagedRerunRequiredError as error:
                 # A retained initial receiver whose failed compute had no safe
-                # checkpoint needs its explicitly fenced fresh Artifact attempt.
+                # checkpoint needs its explicitly fenced fresh Artifact run.
                 if error.reason == "rerun_required":
-                    result_ref = artifact.compute(managed=ManagedConfig(rerun=True, **controls))
+                    result = artifact.compute(managed=ManagedConfig(rerun=True, **controls))
                 elif error.reason == "already_completed":
                     raced_status = artifact.compute.status(**controls)
-                    result_ref = raced_status.final_state_ref
+                    status = raced_status
+                    result = None
                 else:
                     raise
-            status = artifact.compute.status(**controls)
+            if result is not None:
+                status = result.status
+                result_ref = result.final_state_ref
+            else:
+                result_ref = status.final
         if (
-                not isinstance(result_ref, StateRef)
+                not isinstance(result_ref, Node)
                 or status.state != "completed"
-                or status.final_state_ref is None
-                or result_ref != status.final_state_ref):
+                or status.final is None
+                or not result_ref.graph_equal(status.final)):
             raise RuntimeError(
-                "Artifact compute did not return its managed completed StateRef."
+                "Artifact compute did not return its managed completed SavedNode."
             )
         artifact = Artifact.recover(
             initial, repo=context.state_repo,
             control_store=context.control_store, reuse_live="never",
         )
-        if artifact.last_state_ref != result_ref:
+        if not artifact.last_state_ref.graph_equal(result_ref):
             raise RuntimeError(
-                "Artifact recovery did not restore its managed completed StateRef."
+                "Artifact recovery did not restore its managed completed SavedNode."
             )
         _experiment_boundary("artifact_completed")
         return result_ref, self._artifact_scalars(name, artifact)
@@ -737,10 +719,20 @@ class Experiment(Serializable):
         return None
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
-        pickle_save(self.state, os.path.join(dest_dir, "experiment_state.pkl"))
+        """Write version-2 run-aware TrainState; IO/validation failures propagate."""
+        pickle_save({"version": 2, "state": self.state}, os.path.join(dest_dir, "experiment_state.pkl"))
 
     def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
-        self.state = pickle_load(os.path.join(src_dir, "experiment_state.pkl"))
+        """Validate run-aware state before installation; reject old records intact."""
+        payload = pickle_load(os.path.join(src_dir, "experiment_state.pkl"))
+        if type(payload) is not dict or set(payload) != {"version", "state"} or type(payload["version"]) is not int or payload["version"] != 2 or type(payload["state"]) is not TrainState:
+            raise ValueError("Unsupported Experiment state version.")
+        self.state = payload["state"]
+
+
+def _evaluate_experiment_checkpoint(obj, context):
+    """Evaluate after association and before caller checkpoint callbacks."""
+    obj._evaluate_checkpoint(context)
 
 
 class _UnknownDataset:

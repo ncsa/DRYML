@@ -47,6 +47,10 @@ The no-argument and option-first forms also select `good-enough`. This routine
 gate runs smoke and medium tests without coverage, excludes package and heavy
 tests, and deliberately uses the checked-in representative policy for selected
 integration functions and parameter products.
+Target 10–20 minutes locally. Detailed process/platform, concurrency, native
+backend, fault-window, and repeated persistence products belong in explicit
+exhaustive coverage; keep small routine representatives. Measure the real local
+`good-enough` wall time before pushing test-selection changes.
 
 Run the exhaustive suite **only when the user explicitly requests it**. Earlier
 instrumented full runs took roughly 2.5 hours. Do not infer permission from a
@@ -60,10 +64,11 @@ require an explicit user request, as do broad `medium`, `heavy`, and `profile`
 runs that bypass the representative selection. Do not substitute `pytest tests`
 or a broad focused-directory invocation to bypass this policy. Targeted tests
 for an actual change or failure remain appropriate. Routine platform CI jobs use
-`good-enough`; one Linux Python 3.12 heavy job runs the explicitly scoped
+`good-enough` on Linux Python 3.12 only. Explicit exhaustive/coverage dispatches
+add the full Python/platform matrix; one Linux Python 3.12 heavy job runs the scoped
 `tests/framework_tests.txt` and `tests/native_estimator_tests.txt` selections in a
-shared pip environment. This hosted exception does not authorize local broad
-heavy or exhaustive runs; there is no scheduled exhaustive gate.
+shared pip environment only on those explicit dispatches. This does not authorize
+local broad heavy or exhaustive runs; there is no scheduled exhaustive gate.
 Automatic test CI runs on pull requests only, with superseded runs cancelled per
 PR. Manual suite dispatch remains available and uses a separate concurrency group.
 

@@ -200,12 +200,13 @@ def _known_instance_owner(target: Callable[..., Any]) -> CallableOwner | None:
     """Recognize only the concrete core owners already used by transport."""
 
     classes = _native_mro(type(target))
-    from dryml.managed.descriptor import _BoundComposite, _BoundOperation
     from dryml.methods.method import Method
 
     if Method in classes:
         return "method"
-    if _BoundOperation in classes or _BoundComposite in classes:
+    if any(type(_native_dict(cls).get("__dryml_execute_owner__")) is str
+           and _native_dict(cls).get("__dryml_execute_owner__") == "managed"
+           and _native_dict(cls).get("__dryml_execute_adapter__") is not None for cls in classes):
         return "managed"
     return None
 
@@ -221,15 +222,9 @@ def _owner_carriers(
 
     if owner != "managed":
         return (target,)
-    descriptor = object.__getattribute__(target, "_descriptor")
-    from dryml.managed.descriptor import ManagedOperation
-
-    if type(descriptor) is ManagedOperation:
-        carriers = [target, descriptor, descriptor._target, descriptor._executable]
-        composite = getattr(target, "_composite", None)
-        outer = getattr(composite, "_outer", None)
-        if type(outer) is types.FunctionType:
-            carriers.append(outer)
+    namespace = object.__getattribute__(target, "__dict__")
+    carriers = namespace.get("__dryml_execute_carriers__")
+    if type(carriers) is tuple:
         return _unique_carriers(*carriers)
     return (target,)
 

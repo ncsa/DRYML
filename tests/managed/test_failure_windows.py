@@ -5,7 +5,7 @@ from __future__ import annotations
 import multiprocessing
 import os
 import shutil
-import warnings
+from uuid import UUID
 
 import pytest
 
@@ -13,14 +13,367 @@ pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 
 from dryml.core import Repo
 from dryml.core.object import Pickleable
-from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
-from dryml.managed import ManagedConfig, ManagedControlError, ManagedInterrupted, ManagedPublicationError, managed_operation
+from dryml.managed import ManagedConfig, ManagedInterrupted, managed_operation
 from dryml.managed.control import ManagedControlStore
 from dryml.managed import context as context_module
 from dryml.managed import runtime as runtime_module
 from dryml.managed import storage as storage_module
 from dryml.managed.errors import ManagedRecoveryError
+
+
+@pytest.mark.parametrize("boundary", ["validation", "restore", "association", "ready", "before_cas", "after_cas"])
+def test_u15_preparation_failure_preserves_exact_authority_and_restart_never_executes(tmp_path, monkeypatch, boundary):
+    """Each start cut retains exact intent evidence and terminates recovery-only."""
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    from dryml.core.store.retention import RetentionAuthority
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state="completed")
+    live.value = 91
+    original_admit = control.admit_prepared
+    original_write = control.write_preparation
+    original_adopt = RetentionAuthority.adopt
+    original_prepare = control.state_repo.prepare_restore
+    original_read = control.control_store.read_states
+    def fail(*args, **kwargs):
+        raise OSError("U15 injected " + boundary)
+    if boundary == "validation":
+        monkeypatch.setattr(control.control_store, "read_states", fail)
+    elif boundary == "restore":
+        monkeypatch.setattr(control.state_repo, "prepare_restore", fail)
+    elif boundary == "association":
+        monkeypatch.setattr(RetentionAuthority, "adopt", fail)
+    elif boundary == "ready":
+        def write(proposed, **kwargs):
+            if proposed.phase == "ready":
+                fail()
+            return original_write(proposed, **kwargs)
+        monkeypatch.setattr(control, "write_preparation", write)
+    else:
+        def admit(prepared, **kwargs):
+            if boundary == "after_cas":
+                original_admit(prepared, **kwargs)
+            fail()
+        monkeypatch.setattr(control, "admit_prepared", admit)
+    with pytest.raises(Exception):
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    pending = control.read_preparation(old.operation_id)
+    current = control.inspect(old.operation_id)
+    assert current == (pending.proposed if boundary == "after_cas" else old)
+    assert not pending.settled
+    monkeypatch.setattr(control, "admit_prepared", original_admit)
+    monkeypatch.setattr(control, "write_preparation", original_write)
+    monkeypatch.setattr(RetentionAuthority, "adopt", original_adopt)
+    monkeypatch.setattr(control.state_repo, "prepare_restore", original_prepare)
+    monkeypatch.setattr(control.control_store, "read_states", original_read)
+    counts = Value.restores, Value.captures, Value.bodies
+    callbacks = []
+    result = enter(control, live, config=ManagedConfig(callbacks=[lambda *args: callbacks.append(args)]),
+                   realize=lambda _: pytest.fail("recovery realized"),
+                   execute=lambda *args: pytest.fail("recovery executed"))
+    assert result.disposition == ("run_admitted" if boundary == "after_cas" else "preparation_abandoned")
+    assert (Value.restores, Value.captures, Value.bodies) == counts
+    assert callbacks == []
+    assert control.read_preparation(old.operation_id).settled
+    ledger = control.control_store.retention.read(str(UUID(pending.token)))
+    if ledger is not None:
+        assert ledger.disposition == ("adopted" if boundary == "after_cas" else "released")
+
+
+def test_u15_post_hook_failure_invalidates_live_but_preserves_old_current(tmp_path):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state="completed")
+    Value.fail_restore = True
+    try:
+        with pytest.raises(Exception, match="fresh materialization"):
+            enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    finally:
+        Value.fail_restore = False
+    assert live._restore_failed and control.inspect(old.operation_id) == old
+    from dryml.managed.identity import AdmissionIdentity
+    result = runtime_module.admit_execution(AdmissionIdentity(old.receiver, old.member, old.argument_digest),
+        Value.run, ManagedConfig().snapshot(), control,
+        realize=lambda _: pytest.fail("recovery must not require a usable live receiver"),
+        execute=lambda *args: pytest.fail("recovery executed"))
+    assert result.disposition == "preparation_abandoned"
+    assert (Value.restores, Value.captures, Value.bodies) == (1, 0, 0)
+
+
+def test_u15_interrupt_during_preparation_fences_next_admission_cas(tmp_path, monkeypatch):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state="running")
+    original = control.state_repo.prepare_restore
+    def prepare(*args, **kwargs):
+        outcome, requested = control.request_interrupt_if_running(old.operation_id)
+        assert outcome == "requested" and requested.generation == old.generation + 1
+        return original(*args, **kwargs)
+    monkeypatch.setattr(control.state_repo, "prepare_restore", prepare)
+    with pytest.raises(Exception, match="generation_conflict"):
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    interrupted = control.inspect(old.operation_id)
+    assert interrupted.run_id == old.run_id and interrupted.interrupt_request is not None
+    assert enter(control, live).disposition == "preparation_abandoned"
+    assert Value.bodies == 0
+
+
+def test_u15_interrupted_preparation_recovery_never_transfers_restore_receipt(tmp_path, monkeypatch):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved)
+    original = control.admit_prepared
+    monkeypatch.setattr(control, "admit_prepared", lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    token = control.read_preparation(old.operation_id).token
+    assert Value.restores == 1
+    monkeypatch.setattr(control, "admit_prepared", original)
+    result = enter(control, live)
+    assert result.disposition == "preparation_abandoned" and Value.restores == 1
+    current, value, resuming = enter(control, live)
+    assert current.run_id == old.run_id and resuming and value == 1
+    assert Value.restores == 2 and control.read_preparation(old.operation_id).token != token
+
+
+@pytest.mark.parametrize("after", [False, True])
+def test_u15_uncertain_cas_keeps_both_fingerprints_and_reconciles_without_execution(tmp_path, monkeypatch, after):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved)
+    original = control._replace_file
+    def publish(path, payload):
+        if path.endswith("current.json"):
+            if after:
+                original(path, payload)
+            raise OSError("CAS uncertain")
+        return original(path, payload)
+    monkeypatch.setattr(control, "_replace_file", publish)
+    with pytest.raises(Exception):
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    preparation = control.read_preparation(old.operation_id)
+    assert preparation.previous == old and preparation.phase == "ready"
+    monkeypatch.setattr(control, "_replace_file", original)
+    result = enter(control, live, realize=lambda _: pytest.fail("pending receiver work"),
+        execute=lambda *args: pytest.fail("pending execution"))
+    assert result.disposition == ("run_admitted" if after else "preparation_abandoned")
+    assert result.current == (preparation.proposed if after else old)
+    assert (Value.restores, Value.captures, Value.bodies) == (1, 0, 0)
+    resumed, value, resuming = enter(control, live)
+    assert resuming and value == 1 and resumed.run_id == result.current.run_id
+    assert resumed.invocation_id not in {result.invocation_id, preparation.proposed.invocation_id}
+    assert (Value.restores, Value.captures, Value.bodies) == (2, 0, 0)
+
+
+def test_u15_incomplete_finalization_records_failure_and_returns_latest_without_hooks(tmp_path):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state="finalizing")
+    result = enter(control, live, realize=lambda _: pytest.fail("finalizing realized"),
+        execute=lambda *args: pytest.fail("finalizing executed"))
+    assert result.disposition == "finalization_incomplete"
+    assert result.current.run_id == old.run_id and result.current.state == "failed"
+    assert result.current.checkpoint.graph_equal(saved)
+    assert (Value.restores, Value.captures, Value.bodies) == (0, 0, 0)
+
+
+def test_u15_interrupt_after_admission_preserves_new_run_and_blocks_execution(tmp_path, monkeypatch):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state="completed")
+    original = control.admit_prepared
+    def admit(*args, **kwargs):
+        current = original(*args, **kwargs)
+        assert control.request_interrupt_if_running(current.operation_id)[0] == "requested"
+        return current
+    monkeypatch.setattr(control, "admit_prepared", admit)
+    with pytest.raises(Exception, match="interrupted"):
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=saved),
+              execute=lambda *args: pytest.fail("interrupted admission executed"))
+    current = control.inspect(old.operation_id)
+    assert current.run_id != old.run_id and current.interrupt_request is not None
+    assert current.checkpoint.graph_equal(saved)
+    assert control.read_preparation(old.operation_id).settled
+    assert (Value.restores, Value.captures, Value.bodies) == (1, 0, 0)
+
+
+@pytest.mark.parametrize("failure", ["grant_error", "disconnected", "physical_garbage"])
+def test_u15_only_unreferenced_physical_garbage_failure_is_a_cleanup_report(tmp_path, monkeypatch, failure):
+    from tests.managed.u15_fixtures import enter, setup
+    from dryml.core.store.retention import RetentionAuthority, StateRemovalOutcome
+    from dataclasses import replace
+    control, live, saved = setup(tmp_path)
+    first, _, _ = enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+    from dryml.core.store.retention import grants
+    for grant in grants(control.control_store, saved.state.key):
+        if grant.token != str(UUID(first.intents[-1].token)):
+            control.control_store.retention.release(grant.token, (control.control_store,))
+    live.value = 2
+    next_start = control.state_repo.save(live)
+    original_release = RetentionAuthority.release
+    def release(self, token, stores):
+        if failure == "grant_error":
+            raise OSError("grant removal failed")
+        if failure == "disconnected":
+            return replace(self.read(token), disposition="release-pending")
+        return original_release(self, token, stores)
+    monkeypatch.setattr(RetentionAuthority, "release", release)
+    if failure == "physical_garbage":
+        monkeypatch.setattr(control.control_store, "delete_state", lambda key:
+            StateRemovalOutcome("cleanup-pending", cleanup_error=OSError("physical garbage removal failed")))
+        reports = []
+        enter(control, live, config=ManagedConfig(rerun=True, start_from=next_start),
+              execute=lambda owner, *args: reports.append(owner.cleanup_report))
+        assert len(reports[0]) == 1
+        assert control.read_preparation(first.operation_id).settled
+    else:
+        with pytest.raises((OSError, ManagedRecoveryError)):
+            enter(control, live, config=ManagedConfig(rerun=True, start_from=next_start),
+                  execute=lambda *args: pytest.fail("unresolved release fell into execution"))
+        assert not control.read_preparation(first.operation_id).settled
+        assert control.inspect(first.operation_id).run_id != first.run_id
+
+
+def _u15_prepared_worker(root, saved, reached, release):
+    """Spawn target stopped after the one-shot restore but before current CAS."""
+    from tests.managed.u15_fixtures import enter
+    store = DirStore(root, query_index="none")
+    repo = Repo(store)
+    live = repo.load(saved)
+    control = ManagedControlStore(store, repo)
+    def prepared(*args, **kwargs):
+        reached.set()
+        release.recv()
+        raise AssertionError("parent must terminate the prepared owner")
+    control.admit_prepared = prepared
+    enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+
+
+def test_u15_spawned_prepared_owner_loss_reconciles_without_hooks_or_receipt(tmp_path):
+    from tests.managed.u15_fixtures import Value, enter, seed, setup
+    control, live, saved = setup(tmp_path)
+    old = seed(control, live, saved, state="completed")
+    ctx = multiprocessing.get_context("spawn")
+    reached = ctx.Event()
+    release_reader, release_writer = ctx.Pipe(duplex=False)
+    process = ctx.Process(target=_u15_prepared_worker,
+        args=(control.control_store.base_dir, saved, reached, release_reader))
+    try:
+        process.start()
+        assert reached.wait(20)
+        process.terminate()
+        process.join(10)
+        assert process.exitcode != 0
+        prepared = control.read_preparation(old.operation_id)
+        assert prepared.phase == "ready" and control.inspect(old.operation_id) == old
+        recovered = enter(control, live, realize=lambda _: pytest.fail("restart receiver work"),
+                          execute=lambda *args: pytest.fail("restart body work"))
+        assert recovered.disposition == "preparation_abandoned"
+        assert (Value.restores, Value.captures, Value.bodies) == (0, 0, 0)
+        assert control.control_store.retention.read(str(UUID(prepared.token))).disposition == "released"
+        fresh, value, resuming = enter(control, live, config=ManagedConfig(rerun=True, start_from=saved))
+        assert fresh.run_id != old.run_id and not resuming and Value.restores == 1
+        assert control.read_preparation(old.operation_id).token != prepared.token
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+        release_reader.close()
+        release_writer.close()
+
+
+@pytest.mark.parametrize("fault", ["publish_before", "publish_after", "index", "control_before", "control_after"])
+def test_u16_checkpoint_faults_keep_exact_latest_and_provisional_evidence_without_reexecution(tmp_path, monkeypatch, fault):
+    from dryml.core.store.retention import grants
+    from dryml.managed.control import ControlSnapshot
+    from dryml.managed.identity import AdmissionIdentity
+    from tests.managed.u16_fixtures import Value, setup
+    control, live = setup(tmp_path, index="sqlite")
+    store = control.control_store
+    seen = []
+    def body(obj, ctx):
+        obj.value = 1
+        ctx.checkpoint()
+        obj.value = 2
+        ctx.checkpoint()
+    Value.action = body
+    original_publish = store.publish_save_batch
+    original_index = store._complete_index_mutation
+    original_replace = ManagedControlStore._replace_file
+    def callback(obj, ctx):
+        seen.append(ctx.latest_checkpoint)
+        if fault.startswith("publish"):
+            def publish(batch):
+                if fault == "publish_after":
+                    original_publish(batch)
+                raise OSError("injected publication cut")
+            monkeypatch.setattr(store, "publish_save_batch", publish)
+        elif fault == "index":
+            monkeypatch.setattr(store, "_complete_index_mutation", lambda *args:
+                (_ for _ in ()).throw(OSError("injected index phase")))
+        else:
+            def replace(path, payload):
+                if path.endswith("current.json"):
+                    if fault == "control_after":
+                        original_replace(path, payload)
+                    raise OSError("injected control cut")
+                return original_replace(path, payload)
+            monkeypatch.setattr(ManagedControlStore, "_replace_file", staticmethod(replace))
+    with pytest.raises(Exception) as raised:
+        live.run(managed=ManagedConfig(state_repo=control.state_repo, callbacks=[callback]))
+    assert len(seen) == 1 and Value.bodies == 1 and Value.restores == 0
+    operation_id = live.run.status(state_repo=control.state_repo).operation_id if not fault.startswith("control") else (
+        AdmissionIdentity.from_call(control.state_repo.describe(live), Value.run, (), {}).operation_id)
+    raw = control._read_optional(control._current_path(control._operation_path(operation_id)))
+    current = ControlSnapshot.from_bytes(raw)
+    if fault != "control_after":
+        assert current.checkpoint.graph_equal(seen[0])
+    else:
+        preparation = control.read_preparation(operation_id)
+        assert current.to_bytes() == preparation.proposed.to_bytes()
+        assert preparation.previous.checkpoint.graph_equal(seen[0])
+    assert grants(store, seen[0].state.key)
+    if fault == "publish_after":
+        report = raised.value.report
+        assert report is not None
+        publication = report.publications[0]
+        assert publication.retention_token and publication.protected_state_keys
+        assert store.retention.read(publication.retention_token).disposition == "prepared"
+    monkeypatch.setattr(store, "publish_save_batch", original_publish)
+    monkeypatch.setattr(store, "_complete_index_mutation", original_index)
+    monkeypatch.setattr(ManagedControlStore, "_replace_file", staticmethod(original_replace))
+    counts = Value.restores, Value.captures, Value.bodies
+    facts = AdmissionIdentity.from_call(control.state_repo.describe(live), Value.run, (), {})
+    with control.admission(facts) as owner:
+        preparation = control.read_preparation(operation_id)
+        if preparation is not None and not preparation.settled:
+            runtime_module._settle_preparation(control, owner, preparation)
+        control._finish_projection()
+    assert (Value.restores, Value.captures, Value.bodies) == counts
+    assert not store.pending_mutations()
+
+
+def test_u16_only_physical_garbage_failure_preserves_checkpoint_and_callback_success(tmp_path, monkeypatch):
+    from dryml.core.store.retention import StateRemovalOutcome
+    from tests.managed.u16_fixtures import Value, enter, setup
+    control, live = setup(tmp_path)
+    seen = []
+    def callback(obj, ctx):
+        seen.append((ctx.latest_checkpoint, ctx.cleanup_report))
+        monkeypatch.setattr(control.control_store, "delete_state", lambda key:
+            StateRemovalOutcome("cleanup-pending", cleanup_error=OSError("physical removal failed")))
+    def body(obj, ctx):
+        obj.value = 1
+        ctx.checkpoint()
+        obj.value = 2
+        final = ctx.checkpoint()
+        ctx.final_state(final)
+        return ctx.cleanup_report
+    Value.action = body
+    report, final = enter(control, live, config=ManagedConfig(callbacks=[callback]))
+    assert len(seen) == 2 and seen[1][0].graph_equal(final)
+    assert seen[0][1] == () and len(seen[1][1]) == len(report) == 1
+    assert report[0][2].cleanup_error is not None
 
 
 class FailureWindowValue(Pickleable):
@@ -40,6 +393,16 @@ class FailureWindowValue(Pickleable):
 class CrashWindowValue(Pickleable):
     """Spawn-safe receiver used to terminate real lifecycle publication windows."""
 
+    restores = captures = bodies = 0
+
+    def restore_state_from_dir_imp(self, directory, *, codec):
+        type(self).restores += 1
+        return super().restore_state_from_dir_imp(directory, codec=codec)
+
+    def save_state_to_dir_imp(self, directory, *, codec):
+        type(self).captures += 1
+        return super().save_state_to_dir_imp(directory, codec=codec)
+
     def __init__(self, value=0):
         self.value = value
 
@@ -47,6 +410,7 @@ class CrashWindowValue(Pickleable):
     def checkpoint_then_return(self, *, managed):
         """Checkpoint once on fresh entry and avoid a callback on resumed entry."""
 
+        type(self).bodies += 1
         if managed.is_resuming:
             return "resumed"
         self.value = 1
@@ -76,23 +440,23 @@ class HookWindowValue(Pickleable):
 
         self.handoffs = 0
 
-    @managed_operation(return_state_ref=True)
+    @managed_operation()
     def complete(self, *, managed) -> None:
         """Return normally so injected publication windows are reachable."""
 
-    @managed_operation(return_state_ref=True)
+    @managed_operation()
     def fail(self, *, managed) -> None:
         """Fail in the workload body before final publication."""
 
         raise ValueError("body failed")
 
-    @managed_operation(return_state_ref=True)
+    @managed_operation()
     def warn(self, *, managed) -> None:
         """Return an unwanted value to exercise warning-filter failure."""
 
         return object()
 
-    @managed_operation(return_state_ref=True)
+    @managed_operation()
     def interrupt(self, *, managed) -> None:
         """Stop at a managed safe point before completion."""
 
@@ -111,20 +475,51 @@ def _crash_window_worker(store_root, state_ref, member, boundary, reached, relea
     store = DirStore(store_root)
     repo = Repo._for_state_io((store,))
     try:
-        value = repo.load_state_ref(state_ref, reuse_live="never")
+        value = repo.load(state_ref, cache="none")
 
         def checkpoint_boundary(stage):
             if stage == boundary:
                 reached.set()
-                release.wait()
+                release.recv()
 
         def completion_boundary(stage):
             if stage == boundary:
                 reached.set()
-                release.wait()
+                release.recv()
 
         context_module._checkpoint_boundary = checkpoint_boundary
         runtime_module._completion_boundary = completion_boundary
+        if boundary == "provisional_handoff":
+            original_retire = runtime_module._retire_publications
+            def retire(control, root):
+                if root.kind == "final":
+                    reached.set()
+                    release.recv()
+                return original_retire(control, root)
+            runtime_module._retire_publications = retire
+        if boundary in {"completion_cas", "completion_sql_committed"}:
+            from dryml.managed.control import ControlSnapshot
+            from dryml.managed.identity import operation_digest
+            operation_id = operation_digest(repo.describe(value), member)
+            control = ManagedControlStore(store, repo)
+            def stop_if_completed():
+                raw = control._read_optional(control._current_path(control._operation_path(operation_id)))
+                if raw is not None and ControlSnapshot.from_bytes(raw).state == "completed":
+                    reached.set()
+                    release.recv()
+            if boundary == "completion_cas":
+                original = ManagedControlStore._finish_projection
+                def finish(self, *args):
+                    stop_if_completed()
+                    return original(self, *args)
+                ManagedControlStore._finish_projection = finish
+            else:
+                index = store.open_query_index()
+                original = index._ack_store_projection
+                def ack(*args):
+                    stop_if_completed()
+                    return original(*args)
+                index._ack_store_projection = ack
         getattr(value, member)(managed=ManagedConfig(state_repo=store))
     finally:
         repo.close()
@@ -136,18 +531,25 @@ def _terminate_at_boundary(tmp_path, member, boundary):
     store = DirStore(tmp_path / "store")
     repo = Repo((store,))
     value = CrashWindowValue(repo=repo)
-    seed = repo.save_object(value, store=store, deep_capture=True)
+    seed = repo.save(value)
+    CrashWindowValue.restores = CrashWindowValue.captures = CrashWindowValue.bodies = 0
     ctx = multiprocessing.get_context("spawn")
-    reached, release = ctx.Event(), ctx.Event()
+    reached = ctx.Event()
+    release, release_writer = ctx.Pipe(duplex=False)
     process = ctx.Process(
         target=_crash_window_worker,
         args=(os.fspath(store.base_dir), seed, member, boundary, reached, release),
     )
-    process.start()
-    assert reached.wait(20), f"worker did not reach {boundary}"
-    process.terminate()
-    process.join(20)
-    assert process.exitcode is not None and process.exitcode != 0
+    try:
+        process.start()
+        assert reached.wait(20), f"worker did not reach {boundary}"
+        process.terminate()
+        process.join(20)
+        assert process.exitcode is not None and process.exitcode != 0
+    finally:
+        if process.is_alive():
+            process.terminate(); process.join(10)
+        release.close(); release_writer.close()
     return store, value
 
 
@@ -156,22 +558,22 @@ def test_checkpoint_association_failure_never_advertises_or_notifies_orphan_stat
 
     store = DirStore(tmp_path / "store")
     value = FailureWindowValue(repo=Repo((store,)))
-    original = ManagedControlStore._transition_running_fields
+    original = ManagedControlStore.admit_prepared
     calls = 0
 
-    def fail_checkpoint(self, operation_id, **kwargs):
+    def fail_checkpoint(self, preparation, **kwargs):
         nonlocal calls
-        if kwargs["kind"] == "checkpoint" and calls == 0:
+        if any(v.kind == "latest" for v in preparation.proposed.intents) and calls == 0:
             calls += 1
             raise OSError("association failed")
-        return original(self, operation_id, **kwargs)
+        return original(self, preparation, **kwargs)
 
-    monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", fail_checkpoint)
+    monkeypatch.setattr(ManagedControlStore, "admit_prepared", fail_checkpoint)
     with pytest.raises(OSError, match="association failed"):
         value.checkpoint(managed=ManagedConfig(state_repo=store))
     status = value.checkpoint.status(state_repo=store)
-    assert (status.state, status.failure_code, status.checkpoint_state_ref) == ("failed", "publication_error", None)
-    assert status.final_state_ref is None
+    assert (status.state, status.failure_code, status.checkpoint) == ("failed", "publication_error", None)
+    assert status.final is None
 
 
 def test_second_checkpoint_association_failure_retains_prior_checkpoint_without_callbacks(tmp_path, monkeypatch):
@@ -191,23 +593,23 @@ def test_second_checkpoint_association_failure_retains_prior_checkpoint_without_
 
     store = DirStore(tmp_path / "store")
     value = TwoCheckpoints(repo=Repo((store,)))
-    original = ManagedControlStore._transition_running_fields
+    original = ManagedControlStore.admit_prepared
     transitions = 0
     callbacks = []
 
-    def fail_second_association(self, operation_id, **kwargs):
+    def fail_second_association(self, preparation, **kwargs):
         nonlocal transitions
         transitions += 1
         if transitions == 3:
             raise OSError("second association failed")
-        return original(self, operation_id, **kwargs)
+        return original(self, preparation, **kwargs)
 
-    monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", fail_second_association)
+    monkeypatch.setattr(ManagedControlStore, "admit_prepared", fail_second_association)
     with pytest.raises(OSError, match="second association failed"):
         value.checkpoint(managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: callbacks.append(args)]))
     status = value.checkpoint.status(state_repo=store)
     assert len(callbacks) == 1
-    assert (status.state, status.failure_code, status.checkpoint_state_ref is not None) == (
+    assert (status.state, status.failure_code, status.checkpoint is not None) == (
         "failed", "publication_error", True,
     )
 
@@ -218,19 +620,14 @@ def test_checkpoint_save_failure_runs_no_callbacks_and_records_failure(tmp_path,
     store = DirStore(tmp_path / "store")
     value = FailureWindowValue(repo=Repo((store,)))
     callbacks = []
-    original = Repo.save_object
-
-    def fail_checkpoint_save(self, *args, **kwargs):
-        if kwargs.get("report_stores") is True:
-            raise OSError("checkpoint state write failed")
-        return original(self, *args, **kwargs)
-
-    monkeypatch.setattr(Repo, "save_object", fail_checkpoint_save)
+    def fail_checkpoint_save(*args, **kwargs):
+        raise OSError("checkpoint state write failed")
+    monkeypatch.setattr(storage_module, "_publish_checkpoint", fail_checkpoint_save)
     with pytest.raises(OSError, match="checkpoint state write failed"):
         value.checkpoint(managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: callbacks.append(args)]))
     status = value.checkpoint.status(state_repo=store)
     assert callbacks == []
-    assert (status.state, status.checkpoint_state_ref) == ("failed", None)
+    assert (status.state, status.checkpoint) == ("failed", None)
 
 
 def test_interrupted_transition_failure_is_control_failure_not_success(tmp_path, monkeypatch):
@@ -244,23 +641,22 @@ def test_interrupted_transition_failure_is_control_failure_not_success(tmp_path,
 
     store = DirStore(tmp_path / "store")
     value = Interrupting(repo=Repo((store,)))
-    original = ManagedControlStore._transition_running_fields
+    original = ManagedControlStore.transition
     calls = 0
 
-    def fail_terminal(self, operation_id, **kwargs):
+    def fail_terminal(self, operation_id, proposed, **kwargs):
         nonlocal calls
         calls += 1
-        if calls == 2:
+        if proposed.state == "interrupted":
             raise OSError("interruption control write failed")
-        return original(self, operation_id, **kwargs)
+        return original(self, operation_id, proposed, **kwargs)
 
-    monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", fail_terminal)
-    with pytest.raises(ManagedControlError, match="interruption_recording_failed") as caught:
+    monkeypatch.setattr(ManagedControlStore, "transition", fail_terminal)
+    with pytest.raises(OSError, match="interruption control write failed"):
         value.checkpoint(managed=ManagedConfig(state_repo=store))
-    assert type(caught.value.__cause__) is OSError
     status = value.checkpoint.status(state_repo=store)
-    assert status.state == "failed"
-    assert status.checkpoint_state_ref is not None
+    assert status.interruption_requested and status.state == "failed"
+    assert status.checkpoint is not None
 
 
 def test_indeterminate_checkpoint_association_is_not_replaced_by_generic_failure(tmp_path, monkeypatch):
@@ -268,25 +664,28 @@ def test_indeterminate_checkpoint_association_is_not_replaced_by_generic_failure
 
     store = DirStore(tmp_path / "store")
     value = FailureWindowValue(repo=Repo((store,)))
-    original = ManagedControlStore._clear_intent_and_acknowledge
-
-    def leave_checkpoint_pending(self, operation, snapshot, digest):
-        if snapshot.checkpoint_digest is not None and snapshot.state == "running":
-            raise ManagedPublicationError("indeterminate", "checkpoint acknowledgement is uncertain")
-        return original(self, operation, snapshot, digest)
-
-    monkeypatch.setattr(ManagedControlStore, "_clear_intent_and_acknowledge", leave_checkpoint_pending)
-    with pytest.raises(ManagedPublicationError) as caught:
-        value.checkpoint(managed=ManagedConfig(state_repo=store))
-    assert caught.value.outcome == "indeterminate"
-    with pytest.raises(ManagedControlError, match="pending_reconciliation"):
-        value.checkpoint.status(state_repo=store)
-    monkeypatch.setattr(ManagedControlStore, "_clear_intent_and_acknowledge", original)
+    original = ManagedControlStore._finish_projection
+    def leave_checkpoint_pending(self, *args):
+        path = self._current_path(self._operation_path(operation_id))
+        from dryml.managed.control import ControlSnapshot
+        raw = self._read_optional(path)
+        if raw is not None and ControlSnapshot.from_bytes(raw).checkpoint is not None:
+            raise OSError("checkpoint acknowledgement is uncertain")
+        return original(self, *args)
     from dryml.managed.identity import operation_digest
-
-    ManagedControlStore(store, Repo((store,))).reconcile(operation_digest(value.object_ref, "checkpoint"))
+    operation_id = operation_digest(Repo._for_state_io((store,)).describe(value), "checkpoint")
+    monkeypatch.setattr(ManagedControlStore, "_finish_projection", leave_checkpoint_pending)
+    with pytest.raises(OSError, match="acknowledgement is uncertain"):
+        value.checkpoint(managed=ManagedConfig(state_repo=store))
+    control = ManagedControlStore(store, Repo._for_state_io((store,)))
+    assert control._pending_mutations(operation_id)
+    committed = control.inspect(operation_id)
+    assert committed.checkpoint is not None
+    monkeypatch.setattr(ManagedControlStore, "_finish_projection", original)
+    result = value.checkpoint(managed=ManagedConfig(state_repo=store))
+    assert result.disposition == "run_admitted" and result.current.to_bytes() == committed.to_bytes()
     status = value.checkpoint.status(state_repo=store)
-    assert (status.state, status.checkpoint_state_ref is not None) == ("failed", True)
+    assert (status.state, status.checkpoint is not None) == ("failed", True)
 
 
 @pytest.mark.parametrize(
@@ -308,8 +707,16 @@ def test_spawned_crash_preserves_only_associated_checkpoint_or_final_state(
 
     store, value = _terminate_at_boundary(tmp_path, member, boundary)
     status = getattr(value, member).status(state_repo=store)
-    assert (status.checkpoint_state_ref is not None) is expected_checkpoint
-    assert (status.final_state_ref is not None) is expected_final
+    assert (status.checkpoint is not None) is expected_checkpoint
+    assert status.final is None
+    if member == "complete":
+        before = CrashWindowValue.restores, CrashWindowValue.captures, CrashWindowValue.bodies
+        result = value.complete(managed=ManagedConfig(state_repo=store))
+        assert result.disposition == "completion_recorded"
+        assert result.current.state == "completed" and result.current.final is not None
+        assert (CrashWindowValue.restores, CrashWindowValue.captures, CrashWindowValue.bodies) == before
+        assert value.complete(managed=ManagedConfig(state_repo=store)).value == "complete"
+        return
     if boundary == "interrupted_transition":
         assert status.state == "interrupted"
     elif expected_final:
@@ -318,19 +725,31 @@ def test_spawned_crash_preserves_only_associated_checkpoint_or_final_state(
         assert (status.state, status.failure_code) == ("failed", "owner_lost")
 
 
-def test_spawned_callback_window_recovery_does_not_replay_observers(tmp_path):
-    """A callback delivered before process death is not redelivered merely by resume."""
-
+def test_spawned_callback_window_recovery_does_not_replay_observers(
+        tmp_path, monkeypatch, record_testsuite_property):
+    """Reconciliation has zero hooks/body; a separate resume freshly restores once."""
+    from dryml.managed.identity import AdmissionIdentity
     store, value = _terminate_at_boundary(tmp_path, "checkpoint_then_return", "callbacks_finished")
     calls = []
     recovered = Repo._for_state_io((store,))
     try:
-        live = recovered.load_state_ref(value.checkpoint_then_return.status(state_repo=store).checkpoint_state_ref, reuse_live="never")
-        assert live.checkpoint_then_return(
-            managed=ManagedConfig(state_repo=store, callbacks=[lambda *args: calls.append(args)]),
-        ) == "resumed"
+        control = ManagedControlStore(store, recovered)
+        descriptor = CrashWindowValue.checkpoint_then_return
+        identity = AdmissionIdentity.from_call(recovered.describe(value), descriptor, (), {})
+        before = control.inspect(identity.operation_id)
+        with control.admission(identity) as owner:
+            assert owner.current.to_bytes() == before.to_bytes()
+            assert (CrashWindowValue.restores, CrashWindowValue.captures, CrashWindowValue.bodies) == (0, 0, 0)
+        result = value.checkpoint_then_return(managed=ManagedConfig(state_repo=recovered,
+            callbacks=[lambda *args: calls.append(args)]))
+        assert result.value == "resumed"
+        after = control.inspect(identity.operation_id)
+        assert after.run_id == before.run_id and after.invocation_id != before.invocation_id
+        assert after.checkpoint.graph_equal(before.checkpoint)
+        assert (CrashWindowValue.restores, CrashWindowValue.captures, CrashWindowValue.bodies) == (1, 1, 1)
+        assert value.value == 1
     finally:
-        recovered.close()
+        recovered.close(flush=False)
     assert calls == []
 
 
@@ -352,39 +771,36 @@ def test_private_post_publication_hook_is_not_called_before_completed_associatio
         with pytest.raises(ManagedInterrupted):
             value.interrupt(managed=config)
     elif window == "warning":
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", RuntimeWarning)
-            with pytest.raises(RuntimeWarning, match="discarded"):
-                value.warn(managed=config)
+        from dryml.managed import ManagedResultError
+        with pytest.raises(ManagedResultError):
+            value.warn(managed=config)
     elif window == "publication":
         monkeypatch.setattr(
-            runtime_module, "_publish_managed_state_result",
+            storage_module, "_publish_checkpoint",
             lambda *args, **kwargs: (_ for _ in ()).throw(OSError("publication failed")),
         )
         with pytest.raises(OSError, match="publication failed"):
             value.complete(managed=config)
     elif window == "validation":
         monkeypatch.setattr(
-            storage_module, "_validate_publication_closure",
+            storage_module, "_validate_selection",
             lambda *args, **kwargs: (_ for _ in ()).throw(OSError("validation failed")),
         )
-        with pytest.raises(RepoSaveError) as caught:
+        with pytest.raises(OSError, match="validation failed"):
             value.complete(managed=config)
-        assert str(caught.value.__cause__.__cause__) == "validation failed"
-        assert caught.value.report is not None
     else:
-        original = ManagedControlStore._transition_running_fields
+        original = ManagedControlStore.admit_prepared
         calls = 0
 
-        def fail_final_association(self, operation_id, **kwargs):
+        def fail_final_association(self, preparation, **kwargs):
             nonlocal calls
             calls += 1
-            if calls == 1:
+            if any(v.kind == "final" for v in preparation.proposed.intents):
                 raise OSError("association failed")
-            return original(self, operation_id, **kwargs)
+            return original(self, preparation, **kwargs)
 
         monkeypatch.setattr(
-            ManagedControlStore, "_transition_running_fields", fail_final_association,
+            ManagedControlStore, "admit_prepared", fail_final_association,
         )
         with pytest.raises(OSError, match="association failed"):
             value.complete(managed=config)
@@ -405,32 +821,108 @@ def test_deletion_at_publication_hook_fails_fresh_control_association(tmp_path, 
     def boundary(current):
         if current == stage:
             state_ref = value.last_state_ref
-            shutil.rmtree(store._snapshot_path(state_ref.digest()))
+            shutil.rmtree(store.state_data_path(state_ref.state.key))
             deleted.append(state_ref)
 
     monkeypatch.setattr(context_module, "_checkpoint_boundary", boundary)
-    monkeypatch.setattr(runtime_module, "_completion_boundary", boundary)
-    with pytest.raises(ManagedRecoveryError) as caught:
+    monkeypatch.setattr(runtime_module, "_completion_boundary", boundary, raising=False)
+    from dryml.core.repo import RepoLoadError
+    with pytest.raises((ManagedRecoveryError, RepoLoadError)):
         getattr(value, member)(managed=ManagedConfig(
             state_repo=repo, callbacks=[lambda *args: callbacks.append(args)],
         ))
     assert len(deleted) == 1 and callbacks == []
-    assert caught.value.report is not None
     status = getattr(value, member).status(state_repo=repo)
     assert status.state == "failed"
-    assert status.checkpoint_state_ref is None and status.final_state_ref is None
+    assert status.checkpoint is None and status.final is None
     assert repo._topology_leases == 0
 
 
 def test_later_status_and_invocation_revalidate_deleted_completed_state(tmp_path):
-    """A successful event leaves no continuing authority for independent recovery."""
+    """Reclaimed final is historical metadata; missing value fails only lazy read."""
 
     store = DirStore(tmp_path / "state")
     repo = Repo(store)
     value = CrashWindowValue(repo=repo)
-    assert value.complete(managed=ManagedConfig(state_repo=repo)) == "complete"
-    shutil.rmtree(store._snapshot_path(value.last_state_ref.digest()))
-    with pytest.raises(ManagedRecoveryError):
-        value.complete.status(state_repo=repo)
-    with pytest.raises(ManagedRecoveryError):
-        value.complete(managed=ManagedConfig(state_repo=repo, rerun=True))
+    result = value.complete(managed=ManagedConfig(state_repo=repo))
+    assert result.value == "complete"
+    shutil.rmtree(store.state_data_path(result.final_state_ref.state.key))
+    assert value.complete.status(state_repo=repo).state == "completed"
+    assert value.complete(managed=ManagedConfig(state_repo=repo)).value == "complete"
+    from dryml.managed.results import result_path
+    from dryml.managed import ManagedResultError
+    os.unlink(result_path(store, result.result_reference.key))
+    replay = value.complete(managed=ManagedConfig(state_repo=repo))
+    assert replay.status.state == "completed"
+    with pytest.raises(ManagedResultError): replay.value
+
+
+@pytest.mark.parametrize("boundary,complete", [("result_installed", False), ("finalization_intent", False),
+    ("final_capture_started", False), ("provisional_handoff", True),
+    ("final_state_published", True), ("final_associated", True),
+    ("before_completion", True), ("completion_cas", True), ("completion_sql_committed", True),
+    ("completion_recorded", True)])
+def test_spawned_result_finalization_recovery_terminates_without_hooks(tmp_path, boundary, complete):
+    """Real owner loss preserves complete evidence; incomplete capture cannot invent final."""
+    store, live = _terminate_at_boundary(tmp_path, "complete", boundary)
+    counts = CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores
+    config = ManagedConfig(state_repo=store)
+    if boundary == "result_installed":
+        from dryml.managed import ManagedRerunRequiredError
+        with pytest.raises(ManagedRerunRequiredError): live.complete(managed=config)
+    elif boundary == "completion_recorded":
+        assert live.complete(managed=config).value == "complete"
+    else:
+        outcome = live.complete(managed=config)
+        assert outcome.disposition == ("completion_recorded" if complete else "finalization_incomplete")
+        assert outcome.current.state == ("completed" if complete else "failed")
+        if complete:
+            assert live.complete(managed=config).value == "complete"
+            assert outcome.current.result_ack.mutation_id is not None
+            for root in outcome.current.intents:
+                for publication in root.publications:
+                    assert store.retention.read(publication.retention_token).disposition == "released"
+    assert (CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores) == counts
+
+
+@pytest.mark.parametrize("stale", ["run_id", "invocation_id", "generation", "release_pending"])
+def test_finalization_recovery_refuses_stale_prepared_final(tmp_path, stale):
+    """Adopted physical grants cannot promote a retired or mismatched final intent."""
+    from dataclasses import replace
+    from pathlib import Path
+    from uuid import UUID, uuid4
+
+    store, live = _terminate_at_boundary(tmp_path, "complete", "provisional_handoff")
+    repo = Repo._for_state_io((store,))
+    try:
+        control = ManagedControlStore(store, repo)
+        operation_id = live.complete.status(state_repo=repo).operation_id
+        preparation = control.read_preparation(operation_id)
+        root, = preparation.proposed.intents
+        assert root.kind == "final" and root.disposition == "prepared"
+        assert store.retention.read(str(UUID(root.token))).disposition == "adopted"
+        changes = ({"disposition": stale} if stale == "release_pending" else
+                   {stale: root.generation - 1 if stale == "generation" else uuid4().hex})
+        changed = replace(preparation, proposed=replace(preparation.proposed,
+            intents=(replace(root, **changes),)))
+        Path(control._preparation_path(operation_id)).write_bytes(changed.to_bytes())
+        counts = CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores
+        outcome = live.complete(managed=ManagedConfig(state_repo=repo))
+        assert outcome.disposition == "finalization_incomplete"
+        assert outcome.current.state == "failed" and outcome.current.final is None
+        assert (CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores) == counts
+    finally:
+        repo.close(flush=False)
+
+
+def test_spawned_incomplete_finalization_keeps_latest_then_separate_resume_restores(tmp_path):
+    store, live = _terminate_at_boundary(tmp_path, "checkpoint_then_return", "final_capture_started")
+    config = ManagedConfig(state_repo=store)
+    outcome = live.checkpoint_then_return(managed=config)
+    assert outcome.disposition == "finalization_incomplete" and outcome.current.checkpoint is not None
+    assert outcome.current.final is None and outcome.current.state == "failed"
+    assert (CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores) == (0, 0, 0)
+    result = live.checkpoint_then_return(managed=config)
+    assert result.value == "resumed" and result.execution.run_id == outcome.run_id
+    assert result.execution.invocation_id != outcome.invocation_id
+    assert (CrashWindowValue.bodies, CrashWindowValue.captures, CrashWindowValue.restores) == (1, 1, 1)

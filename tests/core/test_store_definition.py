@@ -12,6 +12,7 @@ from dryml.core import Object, Repo, RepoDefinitionError, RepoReconstructionErro
 from dryml.core import session as core_session
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import DefinitionRecord
+from dryml.core.node_prepare import NodePreparation
 from dryml.core.store.store import Store, StoreAuthorityError
 from dryml.core.store.zip import ZipStore
 
@@ -255,7 +256,7 @@ def test_cached_zip_hit_keeps_dirty_transaction_and_cache_cleanup_never_commits(
     record = _record("dirty")
 
     with session.resource_cache():
-        archive.write_definition_record(record)
+        archive.publish_node(record.definition)
         assert archive._archive_dirty
         assert Store.from_definition(definition) is archive
 
@@ -265,19 +266,19 @@ def test_cached_zip_hit_keeps_dirty_transaction_and_cache_cleanup_never_commits(
     dryml.configure(repo=None)
     reopened = ZipStore.open_existing(path)
     try:
-        assert reopened.read_definition_record(record.digest) is None
+        assert reopened.read_node(NodePreparation((record.definition,)).digest(record.definition, domain="dryml-recipe-root/v1")) is None
     finally:
         reopened.close()
 
     with session.resource_cache():
         owned = Store.from_definition(definition)
         assert owned is not archive
-        owned.write_definition_record(record)
+        owned.publish_node(record.definition)
         owned.commit()
 
     reopened = ZipStore.open_existing(path)
     try:
-        assert reopened.read_definition_record(record.digest) == record
+        assert reopened.read_node(NodePreparation((record.definition,)).digest(record.definition, domain="dryml-recipe-root/v1")).graph_equal(record.definition)
     finally:
         reopened.close()
 
@@ -286,14 +287,14 @@ def test_cached_zip_hit_keeps_dirty_transaction_and_cache_cleanup_never_commits(
 
     with session.resource_cache():
         owned = Store.from_definition(definition)
-        owned.write_definition_record(discarded)
+        owned.publish_node(discarded.definition)
         assert owned._archive_dirty
 
     assert path.read_bytes() == committed
     reopened = ZipStore.open_existing(path)
     try:
-        assert reopened.read_definition_record(record.digest) == record
-        assert reopened.read_definition_record(discarded.digest) is None
+        assert reopened.read_node(NodePreparation((record.definition,)).digest(record.definition, domain="dryml-recipe-root/v1")).graph_equal(record.definition)
+        assert reopened.read_node(NodePreparation((discarded.definition,)).digest(discarded.definition, domain="dryml-recipe-root/v1")) is None
     finally:
         reopened.close()
 
@@ -306,7 +307,7 @@ def test_cached_zip_commit_rekeys_its_live_transaction(tmp_path):
     try:
         with session.resource_cache():
             cached = Store.from_definition(definition)
-            cached.write_definition_record(_record("committed"))
+            cached.publish_node(_record("committed").definition)
             cached.commit()
 
             assert Store.from_definition(definition) is cached
@@ -323,7 +324,7 @@ def test_cached_zip_does_not_rekey_after_external_archive_replacement(tmp_path):
     try:
         with session.resource_cache():
             cached = Store.from_definition(definition)
-            replacement.write_definition_record(_record("replacement"))
+            replacement.publish_node(_record("replacement").definition)
             replacement.commit()
 
             assert Store.from_definition(definition) is not cached

@@ -83,11 +83,11 @@ def test_dispatch_preserves_every_managed_decorator_order_and_declaration(
 
     if placement == "direct":
         result = operation(argument_state, managed=config)
-        assert result is argument
+        assert result.value.graph_equal(argument_state)
     elif placement == "in_process":
         view = dispatch.with_options(backend=dispatch.InProcess())
         result = view.run(operation, argument_state, managed=config)
-        assert result is argument
+        assert result.value.graph_equal(argument_state)
     else:
         repo.save_object(subject, deep_capture=True)
         spool = tmp_path / "spool"
@@ -100,13 +100,13 @@ def test_dispatch_preserves_every_managed_decorator_order_and_declaration(
             ),
             python=PythonExecutableSpec(sys.executable),
         )
-        assert isinstance(view.run(operation, argument_state), StateRef)
+        assert view.run(operation, argument_state).value.graph_equal(argument_state)
 
     status = operation.status(
         state_repo=repo, control_store=control_store,
     )
     assert status.state == "completed"
-    restored = repo.load_state_ref(status.final_state_ref, reuse_live="never")
+    restored = repo.load_state_ref(status.final, reuse_live="never")
     assert (restored.calls, restored.value) == (1, 3)
 
 
@@ -210,7 +210,7 @@ def test_dispatch_subprocess_retains_explicit_direct_managed_config(tmp_path):
         state_repo=repo, control_store=control_store,
         callbacks=[_count_dispatch_checkpoint],
     )
-    assert subject.advance(managed=initial) == 1
+    assert subject.advance(managed=initial).value == 1
     rerun = ManagedConfig(
         state_repo=repo, control_store=control_store, rerun=True,
         callbacks=[_count_dispatch_checkpoint],
@@ -223,10 +223,10 @@ def test_dispatch_subprocess_retains_explicit_direct_managed_config(tmp_path):
         python=PythonExecutableSpec(sys.executable),
     )
 
-    assert view.run(subject.advance, managed=rerun) == 2
+    assert view.run(subject.advance, managed=rerun).value == 2
 
     status = subject.advance.status(state_repo=repo, control_store=control_store)
-    restored = repo.load_state_ref(status.final_state_ref, reuse_live="never")
+    restored = repo.load_state_ref(status.final, reuse_live="never")
     assert (status.state, restored.value, restored.checkpoint_callbacks) == (
         "completed", 2, 2,
     )
@@ -262,10 +262,10 @@ def test_dispatch_discovers_declarations_on_a_managed_function_stack(
     )
     if placement == "in_process":
         with core_config(repo=repo):
-            assert view.run(declared_managed_call, subject, 3) == 3
+            assert view.run(declared_managed_call, subject, 3).value == 3
     else:
         repo.save_object(subject, deep_capture=True)
-        assert view.run(declared_managed_call, subject, 3) == 3
+        assert view.run(declared_managed_call, subject, 3).value == 3
     status_kwargs = {"state_repo": repo}
     if placement == "subprocess":
         status_kwargs["control_store"] = control_store
@@ -289,7 +289,7 @@ def test_dispatch_runs_ordinary_managed_wrappers(
     if placement == "in_process":
         view = dispatch.with_options(backend=dispatch.InProcess())
         with core_config(repo=repo):
-            assert view.run(subject.advance, 2) == 12
+            assert view.run(subject.advance, 2).value == (2 if subject_type is OuterWrappedManagedValue else 12)
     else:
         repo.save_object(subject, deep_capture=True)
         spool = tmp_path / "spool"
@@ -299,9 +299,9 @@ def test_dispatch_runs_ordinary_managed_wrappers(
             core=CoreOptions(repo=repo, return_objects=False),
             python=PythonExecutableSpec(sys.executable),
         )
-        assert view.run(subject.advance, 2) == 12
+        assert view.run(subject.advance, 2).value == (2 if subject_type is OuterWrappedManagedValue else 12)
     restored = repo.load_state_ref(
-        subject.advance.status(state_repo=repo).final_state_ref,
+        subject.advance.status(state_repo=repo).final,
         reuse_live="never",
     )
     assert restored.events == events

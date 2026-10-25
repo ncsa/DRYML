@@ -1,3 +1,10 @@
+"""Explicit query predicates and retained legacy reference/selector adapters.
+
+Ordinary Node patterns need no wrapper. QueryPredicate owns boolean, explicit
+absence and captured-support syntax; shared query preparation owns interpretation.
+Authoring these values performs no construction, capture or Store IO.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,6 +13,171 @@ import json
 from typing import Any
 
 from .utils.stable_hash import stable_int_hash
+
+
+@dataclass(frozen=True, slots=True, init=False, eq=False)
+class QueryPredicate:
+    """Explicit boolean, absence, or correlated-support query value.
+
+    Args:
+        value (Node | GeneratorSelector | QueryPredicate): Supplied pattern or
+            captured exact support. Ordinary Node selection needs no wrapper.
+    Raises:
+        TypeError: For an unsupported value or boolean operand.
+    Side Effects:
+        None. Authoring never binds defaults, constructs, captures, allocates
+        identities, or accesses a Store. Runtime providers remain runtime-only.
+    """
+
+    kind: str
+    value: Any
+    operands: tuple
+
+    def __init__(self, value):
+        from .node import Node
+        from .generator import GeneratorSelector
+        if isinstance(value, QueryPredicate):
+            kind, value, operands = value.kind, value.value, value.operands
+        elif isinstance(value, Node):
+            kind, operands = "node", ()
+        elif isinstance(value, GeneratorSelector):
+            kind, operands = "support", ()
+        else:
+            raise TypeError("QueryPredicate requires a Node or captured Generator support.")
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "value", value)
+        object.__setattr__(self, "operands", operands)
+
+    @classmethod
+    def _make(cls, kind, value=None, operands=()):
+        result = object.__new__(cls)
+        object.__setattr__(result, "kind", kind)
+        object.__setattr__(result, "value", value)
+        object.__setattr__(result, "operands", operands)
+        return result
+
+    @classmethod
+    def absent(cls, facet, *, path="$"):
+        """Require an existing Node occurrence to lack one exact facet.
+
+        Args:
+            facet (str): ``identity`` or ``state``; other facets stay unspecified.
+            path (GraphPathLike): Metadata path to the constrained Node.
+        Returns:
+            QueryPredicate: Immutable explicit absence, distinct from omission.
+        Raises:
+            ValueError: For an unknown facet.
+            GraphPathError: For a malformed path. A missing endpoint does not match.
+        Side Effects:
+            None. Reference and quotation paths are inspected only as metadata.
+        """
+        from .utils.graph.path import normalize_path
+        if facet not in {"identity", "state"}:
+            raise ValueError("Absence facet must be identity or state.")
+        return cls._make("absent", (facet, normalize_path(path)))
+
+    @classmethod
+    def support(cls, generator, *, max_assignments=65_536):
+        """Capture exact correlated Generator support, retaining its proof cap.
+
+        Args:
+            generator (Generator): Description and provider capture to verify.
+            max_assignments (int): Positive proof bound, at most 65,536.
+        Returns:
+            QueryPredicate: Conservative prefilter plus exact assignment witness.
+        Raises:
+            TypeError: If ``generator`` is not a Generator.
+            ParameterizationError: For invalid input, providers or proof bound.
+        Side Effects:
+            None until matching; matching may call provider proof methods, never
+            sampling. Unsupported proofs and exceeded caps raise, not approximate.
+        """
+        from .generator import Generator
+        if not isinstance(generator, Generator):
+            raise TypeError("support requires a Generator.")
+        return cls(generator.support_selector(max_assignments=max_assignments))
+
+    def __and__(self, other):
+        """Return conjunction with a Node/predicate; invalid operands raise TypeError."""
+        return self._make("and", operands=(self, QueryPredicate(other)))
+
+    def __or__(self, other):
+        """Return disjunction with a Node/predicate; invalid operands raise TypeError."""
+        return self._make("or", operands=(self, QueryPredicate(other)))
+
+    def __invert__(self):
+        """Return explicit logical negation; omission itself is never negation."""
+        return self._make("not", operands=(self,))
+
+    def __bool__(self):
+        raise TypeError("Compose QueryPredicate values with &, | and ~, not Python and/or/not.")
+
+    def compile(self, *, domain="node"):
+        """Prepare this predicate once against detached metadata semantics.
+
+        Args:
+            domain (str): ``node`` for recipe/identified/saved graph metadata,
+                ``local_state`` for descriptors, or ``occurrence`` for a caller's
+                explicitly selected relationship endpoint. These modes do not
+                assert independent Store membership in any of those domains.
+        Returns:
+            An operation-owned prepared matcher with ``matches(target)``. Its
+            NodePreparation owns graph facts; no Store coverage is implied.
+        Raises:
+            QueryDomainError: For invalid domains or donor-identity constraints in
+                local-state queries, including masked boolean branches.
+            TypeError: For unsupported graph leaves or unavailable parameter names.
+        Side Effects:
+            Pure metadata preparation only. No defaults, target construction,
+            identity allocation, capture or state IO.
+        """
+        from .query.node_pattern import _PreparedPredicate
+        return _PreparedPredicate(self, domain=domain)
+
+    def matches(self, target, *, domain="node"):
+        """Return exact predicate acceptance of detached Node/LocalState metadata.
+
+        Args:
+            target (Node | LocalState): Metadata candidate, never a live Object.
+            domain (str): Explicit domain accepted by :meth:`compile`.
+        Returns:
+            bool: Whether every supplied constraint and exact witness holds.
+        Raises:
+            QueryDomainError: For an inapplicable domain/identity constraint.
+            TypeError: For unsupported metadata values.
+            ParameterizationError: For provider failures or unavailable/bounded proof.
+        Side Effects:
+            As for ``compile``; support proof can invoke trusted provider methods.
+        """
+        return self.compile(domain=domain).matches(target)
+
+    def to_data(self):
+        """Return closed ``dryml-node-query-predicate`` v1 portable metadata.
+
+        Returns a mapping using the shared Node codec, preserving aliases, roles,
+        exact facets, Match leaves and built-in domains. Runtime providers raise
+        ParameterizationError; unsupported values raise TypeError/ValueError.
+        Encoding never invokes a provider, resolves targets or accesses a Store.
+        """
+        from .query.node_pattern import _predicate_to_data
+        return _predicate_to_data(self)
+
+    @classmethod
+    def from_data(cls, data):
+        """Decode closed predicate data without target resolution or execution.
+
+        Args:
+            data (Mapping): Canonical v1 predicate envelope from ``to_data``.
+        Returns:
+            QueryPredicate: Fresh handles retaining the encoded alias partition.
+        Raises:
+            ValueError, ParameterizationError: For malformed/unsupported data or
+                exceeded codec bounds. Opaque provider deserialization is forbidden.
+        Side Effects:
+            None beyond pure metadata decoding and validation.
+        """
+        from .query.node_pattern import _predicate_from_data
+        return _predicate_from_data(data)
 
 
 @dataclass(frozen=True, slots=True, init=False, eq=False)
@@ -23,6 +195,10 @@ class ObjectSelector:
     exposes their corresponding ObjectRef association when an API explicitly
     requires persistent authority; generated projections weaken nested states,
     while directly constructed selectors retain caller-supplied exact pins.
+    This existing V2 query value is distinct from Node's named operation view;
+    its legacy digest/export boundary rejects unrepresentable identity-3 facets
+    rather than discarding them. Use Node.object_projection_equal for exact
+    comparison of the new operation view without runtime or Store integration.
     """
 
     definition: Any
@@ -218,7 +394,9 @@ class Selector:
 
         Returns:
             A selector whose original complete CDef, when available, is retained
-            for a later :meth:`exact` or :meth:`restore` edit.
+            for a later :meth:`exact` or :meth:`restore` edit. Node endpoints are
+            edited at every alias; independent equal nodes and quoted data remain
+            separate.
 
         Raises:
             QueryPathError: If the selected occurrence is unavailable.
@@ -230,7 +408,7 @@ class Selector:
         """
 
         from .categorical import _project_categorical_definition_with_origins
-        from .query.path import get_subtree, normalize_path, replace_subtree
+        from .query.path import get_subtree, normalize_path
 
         norm = normalize_path(path)
         subtree = get_subtree(self.root, norm)
@@ -242,7 +420,7 @@ class Selector:
             drop_class=drop_class,
         )
         return Selector(
-            replace_subtree(self.root, norm, projected, _origins=origins),
+            _replace_selector_subtree(self.root, norm, projected, _origins=origins),
             strict=self.strict,
             cls_policy=self.cls_policy,
             exact_root=self.exact_root,
@@ -255,7 +433,9 @@ class Selector:
             path: Root-relative subtree to restore.
 
         Returns:
-            A selector with the original subtree restored.
+            A selector with the original subtree restored at every alias of a
+            selected Node. Independent equal nodes and quoted data stay separate;
+            non-Node endpoints retain structural-slot replacement semantics.
 
         Raises:
             QueryPathError: If no original exact CDef is available or ``path``
@@ -265,14 +445,14 @@ class Selector:
             None. Restoration is an immutable selector edit.
         """
 
-        from .query.path import QueryPathError, get_subtree, normalize_path, replace_subtree
+        from .query.path import QueryPathError, get_subtree, normalize_path
 
         if self.exact_root is None:
             raise QueryPathError("restore() requires an original ConcreteDefinition.")
         norm = normalize_path(path)
         exact_path = _exact_authority_path(self.root, self.exact_root, norm)
         return Selector(
-            replace_subtree(self.root, norm, get_subtree(self.exact_root, exact_path)),
+            _replace_selector_subtree(self.root, norm, get_subtree(self.exact_root, exact_path)),
             strict=self.strict,
             cls_policy=self.cls_policy,
             exact_root=self.exact_root,
@@ -287,7 +467,8 @@ class Selector:
             path: Root-relative selected subtree.
 
         Returns:
-            A selector carrying the exact replacement.
+            A selector carrying the exact replacement at every alias of a selected
+            Node. Independent equal nodes and quoted data remain separate.
 
         Raises:
             QueryPathError: If no exact authority exists for an implicit edit.
@@ -298,7 +479,7 @@ class Selector:
         """
 
         from .definition import ConcreteDefinition
-        from .query.path import QueryPathError, get_subtree, normalize_path, replace_subtree
+        from .query.path import QueryPathError, get_subtree, normalize_path
 
         norm = normalize_path(path)
         if definition is None:
@@ -309,11 +490,23 @@ class Selector:
         if not isinstance(definition, ConcreteDefinition):
             raise TypeError("exact() requires a ConcreteDefinition.")
         return Selector(
-            replace_subtree(self.root, norm, definition),
+            _replace_selector_subtree(self.root, norm, definition),
             strict=self.strict,
             cls_policy=self.cls_policy,
             exact_root=self.exact_root,
         )
+
+
+def _replace_selector_subtree(root, path, replacement, *, _origins=None):
+    """Use occurrence-coherent Node edits while keeping literal slot edits structural."""
+    from .node import Node, _coalesce, _rewrite
+    from .query.path import get_subtree, replace_subtree
+
+    selected = get_subtree(root, path)
+    if isinstance(selected, Node) and isinstance(replacement, Node):
+        return _coalesce(_rewrite(root, {selected._occurrence: replacement},
+                                  reset_construction=True, enter_quoted=False))
+    return replace_subtree(root, path, replacement, _origins=_origins)
 
 
 def _exact_authority_path(selector_root, exact_root, path):
@@ -395,6 +588,15 @@ def _resolve_state_selectors(source: Any, scope, *, require_scope: bool = True):
     active: set[int] = set()
 
     def visit(value):
+        if isinstance(value, QueryPredicate):
+            if require_scope:
+                raise TypeError("Prepare scoped Node leaves before composing QueryPredicate values.")
+            roots = tuple(operand for operand in value.operands)
+            if value.kind == "node":
+                roots = (*roots, value.value)
+            elif value.kind == "support":
+                roots = (*roots, value.value._generator.definition)
+            return any([visit(root) for root in roots])
         if isinstance(value, StateSelectorRef):
             if not require_scope:
                 return True

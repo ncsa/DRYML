@@ -1,7 +1,7 @@
 """Own SQLite handle creation, configuration, and process-local read leases.
 
 Standalone scopes roll back pending work and close their handles; managers cache
-autocommit handles by process/thread/access mode and protect leased readers from
+autocommit handles by process/thread/task/access mode and protect leased readers from
 teardown. Validation and SQLite failures propagate to the connection owner.
 Unreachable managers finalize unleased pools before SQLite's own cyclic-GC
 finalizers; inherited parent pools are never explicitly closed in a child.
@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 import threading
 from typing import TYPE_CHECKING
-from weakref import WeakSet, finalize
+from weakref import WeakSet, finalize, ref
 
 from ....paths import to_file_uri
 from ..model import QueryIndexError
@@ -24,6 +24,17 @@ from .utils import wal_runtime_is_known_safe
 
 if TYPE_CHECKING:
     import sqlite3
+
+
+def _connection_key(readonly):
+    """Keep synchronous callers thread-local and async callers task-local."""
+    import asyncio
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    key = (os.getpid(), threading.get_ident(), readonly)
+    return key if task is None else key + (task,)
 
 
 @contextmanager
@@ -132,10 +143,10 @@ def _finalize_connections(connections, leases, pid):
 
 
 class SQLiteConnectionManager:
-    """Own SQLite connections for one index path per process and thread.
+    """Own SQLite connections for one index path per process, thread and task.
 
     Connections are opened lazily in SQLite autocommit mode, keyed by
-    ``(pid, thread_id, readonly)``, and initialized with DRYML's required
+    ``(pid, thread_id, readonly[, asyncio_task])``, and initialized with DRYML's required
     PRAGMAs. If a process forks, the child uses a different PID key and opens
     its own connection instead of reusing the parent's connection object;
     inherited registry/manager locks, handle bookkeeping, and read leases are
@@ -144,6 +155,9 @@ class SQLiteConnectionManager:
     process retains strict removal through transaction cleanup.
     Cached handles are never shared between keys, but disable SQLite's thread
     affinity so a coordinator can close handles after their worker threads end.
+    Completed asyncio tasks retire their cached handles; active read leases defer
+    that cleanup until lease exit. Completion callbacks hold only a weak manager
+    reference and never close handles inherited from another process.
 
     Args:
         config: A ``SQLiteQueryIndexConfig`` containing database path, journal,
@@ -177,6 +191,7 @@ class SQLiteConnectionManager:
         self._connections = {}
         self._file_identities = {}
         self._leases = set()
+        self._tasks = WeakSet()
         self._lock = threading.RLock()
         self._lock_pid = os.getpid()
         # Retain pool bookkeeping, not the manager, so owner cycles remain collectible.
@@ -203,7 +218,7 @@ class SQLiteConnectionManager:
         return _database_path(self.config)
 
     def connection(self, *, readonly: bool = False) -> sqlite3.Connection:
-        """Return this process/thread's live connection to the active sidecar.
+        """Return this process/thread/task's live connection to the active sidecar.
 
         Args:
             readonly: A ``bool`` selecting SQLite read-only mode.
@@ -227,9 +242,10 @@ class SQLiteConnectionManager:
         Side Effects:
             May create a writable database and its parent directory. Caches the
             resulting handle until an explicit close, idle publication barrier,
-            file-identity change, or manager collection.
+            file-identity change, task completion, or manager collection. A read
+            lease defers task-completion cleanup until the lease exits.
             The handle remains assigned exclusively to the current process,
-            thread-key, and access mode despite permitting manager-owned close
+            thread/task key, and access mode despite permitting manager-owned close
             from a coordinator thread.
         """
 
@@ -245,6 +261,7 @@ class SQLiteConnectionManager:
             self._connections = {}
             self._file_identities = {}
             self._leases = set()
+            self._tasks = WeakSet()
             self._lock_pid = pid
             self._finalizer = finalize(self, _finalize_connections, self._connections, self._leases, pid)
             with self._registry_lock():
@@ -253,7 +270,7 @@ class SQLiteConnectionManager:
 
     def _connection(self, *, readonly=False):
         _validate_connection_arguments(self.config, readonly=readonly)
-        key = (os.getpid(), threading.get_ident(), readonly)
+        key = _connection_key(readonly)
         con = self._connections.get(key)
         if con is not None:
             if con.in_transaction:
@@ -279,13 +296,30 @@ class SQLiteConnectionManager:
             raise
         self._connections[key] = con
         self._file_identities[key] = after
+        if len(key) == 4 and key[3] not in self._tasks:
+            self._tasks.add(key[3])
+            manager_ref = ref(self)
+            pid, thread_id = key[:2]
+
+            def retire_task(task):
+                manager = manager_ref()
+                if manager is None or os.getpid() != pid:
+                    return
+                with manager._process_lock():
+                    manager._tasks.discard(task)
+                    for mode in (False, True):
+                        task_key = (pid, thread_id, mode, task)
+                        if task_key in manager._connections:
+                            manager._close_cached(task_key)
+
+            key[3].add_done_callback(retire_task)
         return con
 
     @contextmanager
     def _read_lease(self):
         """Lease a process-local reader; inherited child unwind leaves it alone."""
 
-        key = (os.getpid(), threading.get_ident(), True)
+        key = _connection_key(True)
         with self._process_lock():
             if key in self._leases:
                 raise QueryIndexError("A SQLite read view is already active on this thread.")
@@ -298,6 +332,8 @@ class SQLiteConnectionManager:
             if os.getpid() == key[0]:
                 with self._process_lock():
                     self._leases.remove(key)
+                    if len(key) == 4 and key[3].done():
+                        self._close_cached(key)
 
     def close_current(self) -> None:
         """Close unleased cached handles owned by the current process and thread.

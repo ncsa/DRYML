@@ -4,11 +4,13 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import Definition, Object, Repo, Serializable
+from dryml.core import Object, Repo, Serializable
 from dryml.core.query import EdgePolicy, RelationshipKind, field
 from dryml.core.links import DefLink
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import NodeNameRecord
+from tests.core.test_repo_aliases import _saved_digest
 
 
 class QueryIdentityLeaf(Serializable):
@@ -34,10 +36,10 @@ def test_reference_identity_filters_use_the_unified_producer(tmp_path):
     repo = Repo(DirStore(tmp_path / "store", query_index="memory"))
     state = repo.save_object(QueryIdentityLeaf(3, repo=repo))
 
-    assert repo.query().object_refs().object_id(state.object_id).one() == state.object
-    assert repo.query().object_refs().namespace(state.object_id.namespace).one() == state.object
-    assert repo.query().object_refs().sel(state.definition).one() == state.object
-    assert repo.query().state_refs().state_hash(next(iter(state.states.values()))).one() == state
+    assert repo.query().object_refs().object_id(state.object_id).one().graph_equal(state.object_view())
+    assert repo.query().object_refs().namespace(state.object_id.namespace).one().graph_equal(state.object_view())
+    assert repo.query().object_refs().sel(state.creation_view()).one().graph_equal(state.object_view())
+    assert repo.query().saved().state_hash(state.state.key.codec_hash).one().graph_equal(state)
 
 
 def test_reference_metadata_and_alias_restrictions_stay_in_one_query(tmp_path):
@@ -45,16 +47,15 @@ def test_reference_metadata_and_alias_restrictions_stay_in_one_query(tmp_path):
 
     repo = Repo(DirStore(tmp_path / "store", query_index="memory"))
     state = repo.save_object(QueryIdentityLeaf(3, repo=repo))
-    repo.set_metadata(state.object, {"project": "forecasting"})
-    repo.set_alias("selected", state)
+    repo.set_metadata(state.object_view(), {"project": "forecasting"})
+    repo.default_store.compare_and_set_node_name(NodeNameRecord("selected", "saved", _saved_digest(state)), expected=None)
 
     assert (
         repo.query()
-        .object_refs()
+        .saved()
         .alias("selected")
         .where(field("object", "project").eq("forecasting"))
-        .one()
-        == state.object
+        .one().graph_equal(state)
     )
 
 
@@ -77,8 +78,8 @@ def test_reference_containment_uses_explicit_roots_and_nonempty_paths(tmp_path):
         .collect()
     )
 
-    assert occurrences.one().target == state
-    assert occurrences.query().owners().cdefs().one() == owner.definition
+    assert occurrences.one().target.graph_equal(state)
+    assert occurrences.query().owners().cdefs().one().graph_equal(owner.creation_view())
 
 
 def test_reference_contains_restricts_aggregate_object_identities(tmp_path):
@@ -88,4 +89,4 @@ def test_reference_contains_restricts_aggregate_object_identities(tmp_path):
     child = repo.save_object(QueryIdentityLeaf(3, repo=repo))
     aggregate = repo.save_object(QueryIdentityWrapper(child, repo=repo))
 
-    assert repo.query().object_refs().contains(child.object).one() == aggregate.object
+    assert repo.query().object_refs().contains(child.object_view()).one().graph_equal(aggregate.object_view())

@@ -134,7 +134,7 @@ def test_keras_invocation_telemetry_uses_native_callbacks_after_accounting(tmp_p
     final = exp.train(
         callbacks=[Observer(), tf.keras.callbacks.CSVLogger(str(csv_path))],
         managed=ManagedConfig(state_repo=repo),
-    )
+    ).final_state_ref
 
     batch_events = [event for event in events if event[0] == "batch"]
     epoch_events = [event for event in events if event[0] == "epoch"]
@@ -144,7 +144,7 @@ def test_keras_invocation_telemetry_uses_native_callbacks_after_accounting(tmp_p
     assert all("loss" in event[3] for event in (*batch_events, *epoch_events))
     assert events[-1] == ("close",)
     assert "loss" in csv_path.read_text(encoding="utf-8")
-    assert exp.train.status(state_repo=repo).final_state_ref == final
+    assert exp.train.status(state_repo=repo).final.graph_equal(final)
 
 
 def test_keras_invocation_telemetry_rejects_non_native_callback_before_updates(tmp_path):
@@ -267,9 +267,9 @@ def test_tf_managed_experiment_smoke_returns_its_terminal_receipt(tmp_path):
     )
     exp = Experiment(model, train_fn, train_data=dataset, repo=repo)
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
 
-    assert final == exp.train.status(state_repo=repo).final_state_ref
+    assert final.graph_equal(exp.train.status(state_repo=repo).final)
     assert exp.state.phase == TrainState.trained
     assert exp.state.examples_seen == 4
 
@@ -519,29 +519,31 @@ def test_tf_sequential_factory_state_ref_round_trip(tmp_path):
 
     state = repo.save_object(root, deep_capture=True)
     repo.save_object(FactoryTopology(peer, peer, repo=repo), deep_capture=True)
-    repo.set_metadata(state.object, {"scenario": "explicit-factory"})
+    repo.set_metadata(state.object_view(), {"scenario": "explicit-factory"})
     repo.close(flush=True)
     reopened = Repo(stores=tmp_path)
-    state_hash = next(iter(state.states.values()))
+    state_hash = next(iter(state.state_spec().values())).key.codec_hash
 
-    assert reopened.query().sel(state.object).state_hash(state_hash).where(
+    assert reopened.query().sel(state.object_view()).state_hash(state_hash).where(
         field("object", "scenario").eq("explicit-factory")
-    ).state_refs().one() == state
-    assert list(
+    ).state_refs().one().graph_equal(state)
+    matches = list(
         reopened.query().sel(root.definition)
         .categorical(drop=("layer_defs",), recursive=True)
         .exact(path="primary")
         .cdefs()
         .stored()
         .collect()
-    ) == [root.definition]
+    )
+    assert len(matches) == 1
+    assert matches[0].graph_equal(root.definition)
 
     loaded = reopened.load_state_ref(state, reuse_live="never")
 
     np.testing.assert_allclose(loaded.primary(value).numpy(), expected)
     assert loaded.primary is loaded.mirror
-    assert loaded.object_ref == state.object
-    assert loaded.last_state_ref == state
+    assert reopened.describe(loaded).object_projection_equal(state)
+    assert loaded.last_state_ref.graph_equal(state)
 
 
 def test_tf_model_map_unbatched_image_uses_backend_batch_axis():
@@ -1558,12 +1560,13 @@ def test_keras_strict_stop_telemetry_resumes_without_extra_updates(tmp_path):
 
     final = resumed.train(managed=ManagedConfig(
         state_repo=repo, control_store=resume_control,
-    ))
+    )).final_state_ref
     status = resumed.train.status(
         state_repo=repo, control_store=resume_control,
     )
 
-    assert final == status.final_state_ref == resumed.last_state_ref
+    assert final.graph_equal(status.final)
+    assert final.graph_equal(resumed.last_state_ref)
     assert (resumed.state.epoch, resumed.state.step, resumed.state.target_epoch) == (2, 4, None)
     assert int(resumed.train_fn.optimizer.obj.iterations.numpy()) == stopped_iterations
     resumed_optimizer_values = [
@@ -1615,12 +1618,13 @@ def test_keras_managed_early_stopping_resumes_validation_and_returns_terminal_st
         exp.train(managed=ManagedConfig(state_repo=repo, callbacks=[interrupt_first_epoch]))
     assert (exp.state.step, exp.state.pending_epoch_postlude) == (2, 0)
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
     status = exp.train.status(state_repo=repo)
     loaded = repo.load_state_ref(final, reuse_live="never")
 
     assert failures == [2]
-    assert final == status.final_state_ref == exp.last_state_ref
+    assert final.graph_equal(status.final)
+    assert final.graph_equal(exp.last_state_ref)
     assert (loaded.state.epoch, loaded.state.step, loaded.state.target_epoch) == (2, 4, None)
     assert loaded.train_fn.early_stopping.accepted_target == 2
     assert loaded.train_fn.early_stopping.restored is True

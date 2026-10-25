@@ -1,9 +1,7 @@
 """Managed streaming folds with versioned positive root-EOF recovery evidence.
 
-New progress uses v2. Legacy active progress remains resumable, but ambiguous
-v1 exhausted progress requires an explicit managed rerun without rewriting old
-snapshots. Completed historical Values remain readable; truncation in those
-results cannot be detected automatically.
+Progress v3 binds carry and positive root-EOF evidence to a stable managed run.
+Incompatible prior versions are rejected without rewriting their snapshots.
 """
 
 from __future__ import annotations
@@ -18,12 +16,12 @@ from typing import Any, Generic, TypeVar
 
 import numpy as np
 
-from dryml.core import AutoRef, ConcreteDefinition, Definition, ObjectRef, Ref, StateRef
+from dryml.core import AutoRef, ConcreteDefinition, Definition, Node, Ref
 from dryml.core.dtype import normalize_dtype
 from dryml.core.tensor_spec import Dynamic, SpecTree, TensorSpec, as_tensor_spec, is_spec_tree, iter_specs, spec_tree_is_batched
 from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.data import Dataset
-from dryml.managed import ManagedContext, ManagedRerunRequiredError, managed_operation
+from dryml.managed import ManagedContext, managed_operation
 from dryml.methods import Accumulator, ImplementationSelectionError, Method
 from dryml.methods.signature import satisfies, spec_node
 
@@ -33,11 +31,11 @@ from .value import Value, _VALUE_FORMAT, _VALUE_VERSION
 ResultT = TypeVar("ResultT")
 _PROGRESS_FILENAME = "fold-progress.pkl"
 _PROGRESS_FORMAT = "dryml.artifacts.fold-progress"
-_PROGRESS_VERSION = 2
+_PROGRESS_VERSION = 3
 _PROGRESS_KEYS = frozenset((
     "state", "count", "carry", "source_binding", "source_spec",
     "observed_spec", "carry_spec", "observation_devices", "program",
-    "backend_devices", "operation_id", "attempt_id",
+    "backend_devices", "operation_id", "run_id",
 ))
 
 
@@ -62,9 +60,9 @@ class Fold(Value[ResultT], Generic[ResultT]):
     preserves the prior Value payload. After payload installation, the managed
     lifecycle may still fail publication; readiness then remains true while the
     operation honestly raises instead of reporting completion.
-    Only positively observed root-output EOF authorizes exhausted progress. Legacy
-    v1 active progress can resume; v1 exhausted progress loads as ambiguous and
-    requires ``ManagedConfig(rerun=True)`` before carry or source execution.
+    Only positively observed root-output EOF authorizes exhausted progress.
+    Resume requires the same operation/run, source and program; an invocation ID
+    may change. Prior progress versions fail without conversion or source access.
     """
 
     def __init__(
@@ -119,7 +117,7 @@ class Fold(Value[ResultT], Generic[ResultT]):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True, store_parameter="store")
+    @managed_operation(resumable=True, store_parameter="store")
     def compute(
             self, *, checkpoint_every: int = 1000, store=None,
             managed: ManagedContext) -> None:
@@ -139,18 +137,16 @@ class Fold(Value[ResultT], Generic[ResultT]):
             TypeError: If the retained source does not materialize as a Dataset.
             ImplementationSelectionError: If a declared Method contract cannot be
                 selected or its input/output validation fails.
-            ManagedRerunRequiredError: If legacy exhausted progress lacks trustworthy
-                EOF evidence; use ``ManagedConfig(rerun=True)`` for a fresh traversal.
             Exception: Propagates source, Method, result-validation, interruption,
                 and managed-publication failures without exposing a partial result.
 
         Returns:
-            The managed boundary returns this invocation's exact completed
-            :class:`~dryml.core.StateRef` after final publication. The authored
-            body returns ``None``.
+            InvocationResult whose ``value`` is None and ``final_state_ref`` is
+            the completed SavedNode. The authored body returns None; use
+            ``fold.value()`` for the installed domain result.
 
         Side Effects:
-            Materializes a fresh source cursor unless resuming trusted v2 exhausted progress,
+            Materializes a fresh source cursor unless resuming v3 exhausted progress,
             checkpoints host carry and position at safe points, and atomically
             installs one validated terminal payload before final publication.
         """
@@ -288,7 +284,7 @@ class Fold(Value[ResultT], Generic[ResultT]):
             "program": self._program_evidence(),
             "backend_devices": _carry_backend_devices(carry_record),
             "operation_id": managed.operation_id,
-            "attempt_id": managed.attempt_id,
+            "run_id": managed.run_id,
         }
         if state == "exhausted":
             progress["eof"] = "root-output-eof"
@@ -305,17 +301,11 @@ class Fold(Value[ResultT], Generic[ResultT]):
             raise ValueError("Fold resume has no saved progress.")
         if (
                 progress["operation_id"] != managed.operation_id
-                or progress["attempt_id"] != managed.attempt_id
+                or progress["run_id"] != managed.run_id
                 or progress["source_binding"] != _source_binding_evidence(self.src)
                 or progress["program"] != self._program_evidence()
         ):
-            raise ValueError("Fold checkpoint belongs to an incompatible source, program, or attempt.")
-        if self._fold_progress_version == 1 and progress["state"] == "exhausted":
-            raise ManagedRerunRequiredError(
-                "rerun_required",
-                "Fold legacy exhausted progress has ambiguous EOF evidence; "
-                "use ManagedConfig(rerun=True) for a fresh traversal.",
-            )
+            raise ValueError("Fold checkpoint belongs to an incompatible source, program, or run.")
         return progress
 
     def _program_evidence(self) -> dict[str, str | None]:
@@ -342,14 +332,14 @@ class Fold(Value[ResultT], Generic[ResultT]):
         self._fold_progress_version = _PROGRESS_VERSION
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
-        """Write count/progress separately from Value, preserving restored v1 provenance.
+        """Write closed v3 run-aware count/progress separately from Value.
 
         Args:
             dest_dir: Existing payload directory supplied by framework state IO.
             codec: Framework-selected state codec (progress uses trusted pickle).
 
         Returns:
-            None. New progress is v2; unchanged restored v1 state stays v1.
+            None. Progress carries stable run identity and positive EOF evidence.
 
         Raises:
             OSError: If writing the progress payload fails.
@@ -366,15 +356,14 @@ class Fold(Value[ResultT], Generic[ResultT]):
         }, os.path.join(dest_dir, _PROGRESS_FILENAME))
 
     def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
-        """Restore validated v1/v2 progress without materializing source or native carry.
+        """Restore v3 progress without materializing source or native carry.
 
         Args:
             src_dir: Framework-validated payload directory containing progress.
             codec: Framework-selected codec (progress uses trusted pickle).
 
         Returns:
-            None. Valid v1 exhausted state loads as ambiguous; compute resume
-            rejects it during body admission, leaving explicit rerun possible.
+            None. Older or malformed records fail intact before installation.
 
         Raises:
             ValueError: If envelope, version, grammar, or carry evidence is invalid.
@@ -469,16 +458,8 @@ class Fold(Value[ResultT], Generic[ResultT]):
 
         source_ref = self.src
         repo = managed.state_repo
-        if isinstance(source_ref, StateRef):
-            source = repo.load_state_ref(source_ref, reuse_live="never", cache="none")
-        elif isinstance(source_ref, ObjectRef):
-            source = repo.build_object_ref(source_ref)
-        elif isinstance(source_ref, ConcreteDefinition):
-            source = repo._load_structural(source_ref, require_store=False, cache="none")
-        elif isinstance(source_ref, Definition):
-            source = repo._load_structural(
-                source_ref.concretize(repo=repo), require_store=False, cache="none",
-            )
+        if isinstance(source_ref, Node):
+            source = repo.build(source_ref, cache="none")
         else:
             raise TypeError("Fold source reference is not a supported DRYML reference.")
         if not isinstance(source, Dataset):
@@ -516,10 +497,8 @@ def _validate_checkpoint_every(value: int) -> int:
 def _source_binding_evidence(source: object) -> dict[str, str]:
     """Encode one inert source binding identity without retaining its graph."""
 
-    if isinstance(source, StateRef):
-        return {"kind": "state-ref", "digest": source.digest()}
-    if isinstance(source, ObjectRef):
-        return {"kind": "object-ref", "digest": source.digest()}
+    if isinstance(source, Node):
+        return {"kind": "node", "digest": source.exact_digest()}
     if isinstance(source, ConcreteDefinition):
         return {"kind": "concrete-definition", "digest": source.stable_hash()}
     if isinstance(source, Definition):
@@ -814,7 +793,7 @@ def _carry_backend_devices(record: object) -> tuple[tuple[str, str, str, tuple[i
 
 
 def _validate_progress_payload(payload: object) -> tuple[int, dict[str, Any] | None]:
-    """Validate a closed v1/v2 envelope without certifying legacy exhaustion."""
+    """Validate closed v3 progress before installing carry or invoking a source."""
 
     fields = {"format", "version", "processed_count", "progress"}
     if not isinstance(payload, dict) or set(payload) != fields:
@@ -822,7 +801,7 @@ def _validate_progress_payload(payload: object) -> tuple[int, dict[str, Any] | N
     if (
             payload["format"] != _PROGRESS_FORMAT
             or type(payload["version"]) is not int
-            or payload["version"] not in {1, _PROGRESS_VERSION}
+            or payload["version"] != _PROGRESS_VERSION
     ):
         raise ValueError("Fold progress payload format or version is unsupported.")
     count = payload["processed_count"]
@@ -837,11 +816,11 @@ def _validate_progress_payload(payload: object) -> tuple[int, dict[str, Any] | N
     if type(state) is not str or state not in {"active", "exhausted"}:
         raise ValueError("Fold active progress state is unsupported.")
     expected_keys = _PROGRESS_KEYS
-    if payload["version"] == 2 and state == "exhausted":
+    if state == "exhausted":
         expected_keys = expected_keys | {"eof"}
     if set(progress) != expected_keys:
         raise ValueError("Fold active progress is malformed.")
-    if payload["version"] == 2 and state == "exhausted" and (
+    if state == "exhausted" and (
             type(progress["eof"]) is not str or progress["eof"] != "root-output-eof"):
         raise ValueError("Fold exhausted progress requires root-output EOF evidence.")
     if type(progress["count"]) is not int or progress["count"] <= 0 or progress["count"] != count:
@@ -862,8 +841,8 @@ def _validate_progress_payload(payload: object) -> tuple[int, dict[str, Any] | N
         raise ValueError("Fold checkpoint program evidence is invalid.")
     if program["finalizer"] is not None and type(program["finalizer"]) is not str:
         raise ValueError("Fold checkpoint finalizer evidence is invalid.")
-    if not all(type(progress[name]) is str and progress[name] for name in ("operation_id", "attempt_id")):
-        raise ValueError("Fold checkpoint attempt evidence is invalid.")
+    if not all(type(progress[name]) is str and progress[name] for name in ("operation_id", "run_id")):
+        raise ValueError("Fold checkpoint run evidence is invalid.")
     carry_spec = _decode_spec_tree(progress["carry_spec"])
     _restore_carry(progress["carry"], carry_spec, materialize=False)
     if progress["backend_devices"] != _carry_backend_devices(progress["carry"]):

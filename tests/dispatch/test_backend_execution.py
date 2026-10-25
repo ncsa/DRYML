@@ -12,8 +12,8 @@ import pytest
 import dryml.dispatch as dispatch
 import dryml.core.execute as core_execute
 from dryml.core import (
-    AutoRef, Definition, Object, ObjectRef, Ref, Repo, Serializable, StateRef,
-    function,
+    AutoRef, Definition, Node, Object, Ref, Repo, Serializable,
+    function, require_saved,
 )
 from dryml.core.execute import CoreExecutionFuture, CoreOptions
 from dryml.core.store.dir import DirStore
@@ -70,7 +70,7 @@ def _aliased_results(value: _StatefulResult):
     """
 
     result = _StatefulResult(value.value + 1)
-    return result, result, value.object_ref
+    return result, result, value.last_state_ref.object_view()
 
 
 def _reference_kind(value: Ref[AutoRef]) -> str:
@@ -232,7 +232,7 @@ def test_dispatch_materializes_a_symbolic_definition_in_a_real_worker(
 def test_dispatch_preserves_core_reference_and_alias_recovery(
         tmp_path) -> None:
     """
-    Keep StateRef/ObjectRef and result aliases under the existing core policy.
+    Keep saved/object-view Node semantics and result aliases across transport.
     """
 
     repo = Repo(DirStore(tmp_path / "store", query_index="none"))
@@ -247,10 +247,11 @@ def test_dispatch_preserves_core_reference_and_alias_recovery(
 
     first, second, original = dispatch.run(_aliased_results, value)
 
-    assert isinstance(first, StateRef)
+    assert require_saved(first) is first
     assert first is second
-    assert isinstance(original, ObjectRef)
-    assert original == value.object_ref
+    assert repo.load_state_ref(first, reuse_live="never").value == 5
+    assert isinstance(original, Node)
+    assert original.graph_equal(repo.describe(value).object_view())
 
 
 def test_dispatch_carries_explicit_reference_assertion_to_worker(tmp_path) -> None:
@@ -266,7 +267,7 @@ def test_dispatch_carries_explicit_reference_assertion_to_worker(tmp_path) -> No
     value = _StatefulResult(4, repo=repo)
     state = repo.save(value, deep_capture=True)
 
-    assert dispatch.run(_reference_kind, Ref(state)) == "StateRef"
+    assert dispatch.run(_reference_kind, Ref(state)) == "ConcreteNode"
     assert dispatch.run(
         _reference_kind, Ref(Definition(_DefinitionInput, 8))
     ) == "Definition"

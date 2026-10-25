@@ -1,14 +1,15 @@
 """Dependency-light cross-platform advisory locks for cooperating processes.
 
 This module is DRYML's sole owner of native advisory-lock APIs.  It coordinates
-same-process leases before delegating to POSIX ``flock`` or Windows byte-range
-locking; consumers retain their own paths, lifetime, and recovery policies.
+same-process leases before delegating to POSIX ``flock`` or Windows ``LockFileEx``
+byte-range locking; consumers retain their own paths, lifetime, and recovery policies.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import contextmanager
+from functools import lru_cache
 import errno
 import os
 import stat
@@ -24,6 +25,9 @@ try:
     import msvcrt
 except ImportError:  # pragma: no cover - selected on POSIX hosts.
     msvcrt = None
+
+_LOCKFILE_FAIL_IMMEDIATELY = 0x1
+_LOCKFILE_EXCLUSIVE_LOCK = 0x2
 
 
 class LockError(OSError):
@@ -96,6 +100,42 @@ def _is_windows_contention(error: OSError) -> bool:
     return error.errno == errno.EACCES
 
 
+@lru_cache(maxsize=1)
+def _windows_lock_api():
+    """Bind the native ABI once; cache no descriptors, lock state or lease evidence."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Overlapped(ctypes.Structure):
+        _fields_ = (("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
+                    ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD),
+                    ("hEvent", wintypes.HANDLE))
+
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    lock, unlock = api.LockFileEx, api.UnlockFileEx
+    lock.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                     wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped))
+    unlock.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                       wintypes.DWORD, ctypes.POINTER(Overlapped))
+    lock.restype = unlock.restype = wintypes.BOOL
+    return ctypes, Overlapped, lock, unlock
+
+
+def _windows_range_lock(handle, *, shared=False, blocking=False, unlock=False):
+    """Lock or unlock byte zero on a synchronous native handle without changing EOF."""
+    ctypes, Overlapped, lock_native, unlock_native = _windows_lock_api()
+    overlapped = Overlapped()
+    if unlock:
+        operation = unlock_native
+        arguments = (handle, 0, 1, 0, ctypes.byref(overlapped))
+    else:
+        operation = lock_native
+        flags = (0 if shared else _LOCKFILE_EXCLUSIVE_LOCK) | (0 if blocking else _LOCKFILE_FAIL_IMMEDIATELY)
+        arguments = (handle, flags, 0, 1, 0, ctypes.byref(overlapped))
+    if not operation(*arguments):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def _lock_file(fd: int, *, shared: bool, blocking: bool) -> bool:
     """Apply one native lock without taking ownership of ``fd``."""
 
@@ -114,14 +154,11 @@ def _lock_file(fd: int, *, shared: bool, blocking: bool) -> bool:
     if msvcrt is None:
         raise LockUnavailableError("No supported advisory-lock primitive is available on this platform.")
     try:
-        # The Windows CRT permits locking byte zero beyond EOF, avoiding a
-        # racy write before acquiring the shared coordination range.
-        os.lseek(fd, 0, os.SEEK_SET)
+        handle = msvcrt.get_osfhandle(fd)
     except OSError as error:
         raise LockError(f"Windows advisory lock preparation failed: {error}") from error
     try:
-        operation = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
-        msvcrt.locking(fd, operation, 1)
+        _windows_range_lock(handle, shared=shared, blocking=blocking)
     except OSError as error:
         if not blocking and _is_windows_contention(error):
             return False
@@ -134,8 +171,8 @@ def try_lock_file(fd: int, *, shared: bool = False) -> bool:
 
     Args:
         fd: Open file descriptor whose lock lifetime the caller owns.
-        shared: Request a shared reader lock where POSIX supports it.  Windows
-            uses its compatible exclusive byte-range fallback.
+        shared: Request a shared reader lock on POSIX or Windows. Independent
+            readers overlap while exclusive requests remain incompatible.
 
     Returns:
         ``True`` when the lock was acquired, or ``False`` only when another
@@ -174,8 +211,7 @@ def unlock_file(fd: int) -> None:
     if msvcrt is None:
         raise LockUnavailableError("No supported advisory-lock primitive is available on this platform.")
     try:
-        os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        _windows_range_lock(msvcrt.get_osfhandle(fd), unlock=True)
     except OSError as error:
         raise LockError(f"Windows advisory unlock failed: {error}") from error
 
@@ -196,7 +232,7 @@ def _reserve_slot(path: str, *, shared: bool, blocking: bool) -> tuple[_PathStat
 
     state = _path_state(path)
     thread_id = threading.get_ident()
-    effective_shared = shared and fcntl is not None
+    effective_shared = shared
     with state.condition:
         while True:
             own_exclusive = state.exclusive_owner == thread_id
@@ -258,9 +294,8 @@ class FileLock:
 
     Args:
         path: Existing or prospective durable lock-file path.
-        shared: Request a shared reader lease on POSIX.  Windows uses an
-            exclusive fallback because its byte-range adapter has no equivalent
-            shared mode.
+        shared: Request a shared reader lease on POSIX or Windows. Independent
+            readers may overlap; an exclusive owner excludes both modes.
 
     The instance owns only the file descriptor it opens.  It never unlinks the
     path, may be released repeatedly, and cannot be acquired again until a
@@ -470,8 +505,8 @@ def interprocess_read_lock(path: str | os.PathLike[str]):
     Raises:
         LockError: The lock path or native adapter fails.
 
-    POSIX readers overlap.  The Windows byte-range adapter uses an exclusive
-    fallback, preserving safety while sacrificing reader/reader overlap.
+    Independent readers overlap through native shared locks on POSIX and Windows;
+    neither platform substitutes process-local protection for the native lease.
     """
 
     with FileLock(path, shared=True):

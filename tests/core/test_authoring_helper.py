@@ -198,3 +198,17 @@ def test_authoring_helper_rejects_invalid_configuration(options):
 
     with pytest.raises(TypeError):
         authoring_helper(**options)
+
+
+def test_authoring_helper_accepts_node_results_without_weakening_facets():
+    """An explicit authoring policy can supply a normalized, facet-bearing Node."""
+
+    from dryml.core import ObjectId
+
+    selected = Definition(AuthoredValue, 7).concretize().with_identity(ObjectId(("helper",)))
+
+    @authoring_helper(author_definition=lambda arguments: selected, should_author=lambda arguments: True)
+    def helper(value):
+        pytest.fail("authoring invoked the concrete helper")
+
+    assert helper(1) is selected

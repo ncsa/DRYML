@@ -136,6 +136,6 @@ def test_parent_failure_evicts_a_greedily_restored_materializing_seed(tmp_path):
     finally:
         FailingSeedParent.fail_construction = False
 
-    assert "mutated and evicted candidates" in str(error.value)
+    assert "requires fresh materialization" in str(error.value)
     assert candidate._last_state_hash is None
     assert candidate not in reopened._all_live_candidates()

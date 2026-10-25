@@ -9,7 +9,6 @@ from dryml.core.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition, Definition, stable_hash_function
 from dryml.core.freeze import FrozenDict, FrozenList, FrozenTuple
-from dryml.core.utils.stable_hash import StableHashGraphHasher
 
 
 def test_definition_hash_1():
@@ -189,9 +188,9 @@ def test_mapping_insertion_order_is_not_part_of_definition_identity():
         test={"outer": {"dtype": "float32", "seed": 7, "batch_size": 32}},
     ).concretize()
 
-    assert first == second
+    assert first.graph_equal(second)
     assert first.stable_hash() == second.stable_hash()
-    assert hash(first) == hash(second)
+    assert len({first, second}) == 2
 
 
 def test_frozen_dict_hash_matches_order_independent_mapping_equality():
@@ -250,13 +249,16 @@ def test_v2_persisted_hash_cache_must_match_identity_record():
         parameters=cdef._bound_args,
         stable_hash_cache=cdef.stable_hash(),
     )
-    assert restored == cdef
+    assert restored.graph_equal(cdef)
     assert restored.stable_hash() == cdef.stable_hash()
 
 
 @pytest.mark.parametrize("depth", (10, 20, 40))
 def test_v2_persisted_hash_cache_validation_reuses_validated_nested_hashes(monkeypatch, depth):
-    """Hydrating cached nested V2 records performs linear hash work."""
+    """Current portable Node hydration retains nested topology and warm key reuse."""
+
+    from dryml.core.node_codec import decode_node_graph, encode_node_graph
+    from dryml.core.node_prepare import NodePreparation
 
     cdef = Definition(objects.TestNest2, None).concretize()
     cdef.stable_hash()
@@ -266,31 +268,14 @@ def test_v2_persisted_hash_cache_validation_reuses_validated_nested_hashes(monke
         cdef.stable_hash()
         persisted.append(cdef)
 
-    dispatch = StableHashGraphHasher.dispatch
-    cdef_visits = 0
-
-    def count_cdef_visits(self, obj, ctx):
-        nonlocal cdef_visits
-        if isinstance(obj, ConcreteDefinition):
-            cdef_visits += 1
-        return dispatch(self, obj, ctx)
-
-    monkeypatch.setattr(StableHashGraphHasher, "dispatch", count_cdef_visits)
-    restored = None
-    for state_source in persisted:
-        state = state_source.__getstate__()
-        if restored is not None:
-            state = dict(state)
-            state["parameters"] = FrozenDict(
-                (name, restored if isinstance(value, ConcreteDefinition) else value)
-                for name, value in state["parameters"].items()
-            )
-        next_restored = object.__new__(ConcreteDefinition)
-        next_restored.__setstate__(state)
-        restored = next_restored
-
-    assert restored == cdef
-    assert cdef_visits <= 2 * depth
+    data = encode_node_graph(NodePreparation((cdef,)))
+    restored = decode_node_graph(data)
+    assert restored is not cdef and restored.graph_equal(cdef)
+    prepared = NodePreparation((restored,))
+    assert prepared.exact_key(restored) == cdef.exact_key()
+    before = dict(prepared.counts)
+    assert prepared.exact_key(restored) == cdef.exact_key()
+    assert prepared.counts == before
 
 
 def test_v2_parameter_order_is_not_part_of_identity():

@@ -66,7 +66,7 @@ def test_ae1_ae8_ae22_authority_metadata_and_query_effects(tmp_path, monkeypatch
         .collect()
     )
 
-    assert selected.one() == state
+    assert selected.one().graph_equal(state)
     assert reopened._num_constructions == 0
     assert selected.sources(state)
     assert "source" in repr(selected.diagnostic())
@@ -81,15 +81,15 @@ def test_ae10_ae20_traversal_algebra_fixed_sets_and_terminals(tmp_path):
     root = repo.save_object(
         AcceptanceRoot(DefLink.finalized(EdgeKind.REF, child), repo=repo)
     )
-    root_query = repo.query().sel(root.definition).cdefs().stored()
+    root_query = repo.query().sel(root).saved().stored()
     occurrences = root_query.nested(child, edges=EdgePolicy.ALL).through(
         RelationshipKind.REFERENCE
     )
-    fixed = IdentitySet((child.object,), bounded=True)
+    fixed = IdentitySet((child.object_view(),), bounded=True)
     combined = occurrences.targets().union(fixed).take(1)
 
-    assert occurrences.one().target == child
-    assert occurrences.owners().cdefs().one() == root.definition
+    assert occurrences.one().target.graph_equal(child)
+    assert occurrences.owners().one().graph_equal(root)
     assert combined.bounded and combined.requested_limit == 1
     assert combined.count() == 1
 
@@ -103,13 +103,16 @@ def test_ae21_ae23_save_load_and_missing_sidecar_recover_from_authority(tmp_path
     state = repo.save_object(AcceptanceLeaf("saved", repo=repo))
     index = store.open_query_index()
     index.rebuild()
-    before = store.read_state_ref_record(state.digest()).to_bytes()
+    _, digest = store._node_metadata_address(state, "capture")
+    path = Path(store._node_path("graphs", digest))
+    before = path.read_bytes()
+    index.close()
     index.path.unlink()
 
     reopened = Repo(DirStore(store.base_dir, query_index="sqlite"))
-    assert reopened.query().sel(state).state_refs().stored().one() == state
+    assert reopened.query().sel(state).state_refs().stored().one().graph_equal(state)
     assert reopened.load_state_ref(state, reuse_live="never").name == "saved"
-    assert store.read_state_ref_record(state.digest()).to_bytes() == before
+    assert path.read_bytes() == before
 
 
 def test_ae24_trusted_selector_import_is_explicit_and_backend_free(tmp_path, monkeypatch):

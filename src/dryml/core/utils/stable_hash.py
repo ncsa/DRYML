@@ -206,7 +206,7 @@ class StableHashGraphHasher(GraphHasher):
 
     def dispatch(self, obj, ctx: GraphCtx) -> str:
         from ..canonical import node_kind, NodeKind
-        from ..definition import Definition, ConcreteDefinition
+        from ..definition import Definition, ConcreteDefinition, ConcreteNode
         from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
         from ..links import DefLink
         from ..object import Object
@@ -226,13 +226,17 @@ class StableHashGraphHasher(GraphHasher):
             return self._hash_sequence("builtins.tuple", obj, ctx)
 
         if kind in {NodeKind.SET, NodeKind.FROZEN_SET}:
-            return self._hash_set("builtins.set", obj, ctx)
+            marker = "builtins.frozenset" if type(obj) is frozenset else "builtins.set"
+            return self._hash_set(marker, obj, ctx)
 
         if kind in {NodeKind.DICT, NodeKind.FROZEN_DICT}:
             return self._hash_mapping("builtins.dict", obj, ctx)
 
         if isinstance(obj, (Definition, ConcreteDefinition)):
             type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
+            if isinstance(obj, ConcreteNode):
+                # A capability view is not a new legacy construction-key domain.
+                type_marker = f"{ConcreteDefinition.__module__}.{ConcreteDefinition.__qualname__}"
             if isinstance(obj, ConcreteDefinition):
                 from ..cdef_identity import stable_hash_domain
 

@@ -13,10 +13,11 @@ import pytest
 
 from dryml.annotations import Annotation, annotations_for_method, attach_annotation
 from dryml.core import Repo, Serializable, function
+from dryml.core.object import Pickleable
 from dryml.core import signatures
 from dryml.core.signatures import function_normalization_handoff
 from dryml.core.execute import (
-    ExecutionContext, SharedDirStoreStrategy, invoke_prepared_call, worker_context,
+    ExecutionContext, SharedDirStoreStrategy, _invoke_prepared_outcome, worker_context,
 )
 from dryml.core.store.dir import DirStore
 from dryml.execute import Executor
@@ -45,7 +46,8 @@ def _recording_wrapper(target):
         finally:
             receiver.events.append("finally")
         receiver.events.append("after")
-        return result + 10
+        from dryml.managed import InvocationResult
+        return result if isinstance(result, InvocationResult) else result + 10
 
     return wrapped
 
@@ -54,7 +56,9 @@ def _default_captured_wrapper(target):
     """Forward through an exact target retained in a function default."""
 
     def wrapped(*args, __target=target, **kwargs):
-        return __target(*args, **kwargs) + 1
+        from dryml.managed import InvocationResult
+        result = __target(*args, **kwargs)
+        return result if isinstance(result, InvocationResult) else result + 1
 
     return functools.wraps(target)(wrapped)
 
@@ -73,7 +77,7 @@ def _chain_wrapper(target):
     return wrapped
 
 
-class OuterManaged(Serializable):
+class OuterManaged(Pickleable):
     """Importable fixture with an ordinary wrapper outside managed lifecycle."""
 
     def __init__(self, value=0):
@@ -172,7 +176,7 @@ def test_all_decorator_orders_preserve_one_managed_boundary(
     assert (annotations[0].key, annotations[0].value) == (
         "test.composition", "present",
     )
-    assert subject.operation(3, managed=ManagedConfig(state_repo=repo)) == 3
+    assert subject.operation(3, managed=ManagedConfig(state_repo=repo)).value == 3
     assert calls and calls[0][0] is subject
     assert len(calls) == 1
     assert subject.operation.status(state_repo=repo).state == "completed"
@@ -187,7 +191,7 @@ def test_outer_wrapper_exposes_managed_controls_and_preserves_its_behavior(
 
     assert subject.operation.status(state_repo=repo).state == "not_started"
     assert inspect.signature(subject.operation).parameters["value"].annotation == "int"
-    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)) == 12
+    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)).value == 2
     assert subject.events == ["before", "body", "finally", "after"]
     assert subject.operation.status(state_repo=repo).state == "completed"
 
@@ -195,6 +199,26 @@ def test_outer_wrapper_exposes_managed_controls_and_preserves_its_behavior(
     with pytest.raises(ValueError, match="negative"):
         failing.operation(-1, managed=ManagedConfig(state_repo=repo))
     assert failing.events == ["before", "body", "error", "finally"]
+
+
+def test_u19_composite_replay_skips_outer_return_and_materialization_boundaries(tmp_path, monkeypatch):
+    """Both direct and transported replay bypass the complete execution wrapper."""
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    subject = OuterManaged(repo=repo)
+    first = subject.operation(2, managed=ManagedConfig(state_repo=repo))
+    before = list(subject.events)
+    monkeypatch.setattr(signatures.SignaturePlan, "prepare_return", lambda *args, **kwargs: pytest.fail("return normalized"))
+    monkeypatch.setattr(repo, "materialize_boundary", lambda *args, **kwargs: pytest.fail("receiver materialized"))
+    replay = subject.operation(2, managed=ManagedConfig(state_repo=repo))
+    assert replay.value == first.value == 2
+    strategy = SharedDirStoreStrategy()
+    prepared = strategy.prepare(subject.operation, (2,), {}, repo=repo, control_store=None, update_args=False)
+    output = strategy.invoke(prepared.invocation, repo=repo, update_args=False)
+    transported = strategy.recover(output, prepared, repo=repo, args=(2,), kwargs={}, return_objects=False, update_args=False)
+    assert transported.value == 2
+    assert transported.execution.run_id == replay.execution.run_id
+    assert transported.execution.invocation_id != replay.execution.invocation_id
+    assert subject.events == before
 
 
 def test_outer_wrapper_reconstructs_as_one_managed_target_in_a_worker(
@@ -218,10 +242,14 @@ def test_outer_wrapper_reconstructs_as_one_managed_target_in_a_worker(
     with worker_context(ExecutionContext(repo, None)):
         output = strategy.invoke(prepared.invocation, repo=repo, update_args=False)
 
-    assert strategy.recover(
+    result = strategy.recover(
         output, prepared, repo=repo, args=(3,), kwargs={},
         return_objects=False, update_args=False,
-    ) == 13
+    )
+    assert result.value == 3
+    assert result.status.state == "completed"
+    restored = repo.load_state_ref(result.final_state_ref, reuse_live="never")
+    assert (restored.value, restored.events) == (3, ["before", "body"])
 
 
 def test_managed_wrapper_function_handoff_runs_once_and_resets_after_failure(
@@ -231,7 +259,7 @@ def test_managed_wrapper_function_handoff_runs_once_and_resets_after_failure(
     repo = Repo((DirStore(tmp_path / "state"),))
     subject = InnerFunctionManaged(repo=repo)
 
-    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)) == 12
+    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)).value == 12
     assert subject.events == ["before", "body", "finally", "after"]
     assert subject.operation.status(state_repo=repo).state == "completed"
 
@@ -256,10 +284,16 @@ def test_outer_managed_composite_reconstructs_in_a_fresh_subprocess(tmp_path):
     spool.mkdir()
 
     with Executor(SubProcessConfig(spool_directory=spool)) as executor:
-        assert executor.run(
-            invoke_prepared_call, prepared.invocation,
+        output = executor.run(
+            _invoke_prepared_outcome, prepared.invocation, 67_108_864, 67_108_864,
+            False, False, 65_536,
             worker_setup=prepared.worker_setup(),
-        ) == 14
+        )
+    result = SharedDirStoreStrategy().recover(output, prepared, repo=repo,
+        args=(4,), kwargs={}, return_objects=False, update_args=False)
+    assert result.value == 4
+    assert result.status.state == "completed"
+    assert repo.load_state_ref(result.final_state_ref, reuse_live="never").events == ["before", "body"]
 
 
 def test_hidden_managed_aliases_and_copied_wrapper_evidence_are_rejected():
@@ -292,7 +326,7 @@ def test_managed_wrapper_chain_preserves_every_wrapper_and_one_function_boundary
     repo = Repo((DirStore(tmp_path / "state"),))
     subject = ChainFunctionManaged(repo=repo)
 
-    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)) == 2
+    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)).value == 2
     assert subject.events == [
         "wrapper:before", "wrapper:before", "body", "wrapper:finally",
         "wrapper:finally",
@@ -356,7 +390,7 @@ def test_hidden_managed_finalization_accepts_default_captured_target(
 
     repo = Repo((DirStore(tmp_path / "state"),))
     subject = Subject(repo=repo)
-    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)) == 3
+    assert subject.operation(2, managed=ManagedConfig(state_repo=repo)).value == 2
 
 
 def test_function_handoff_lease_expires_and_is_shared_once_across_context_copies(monkeypatch):
@@ -422,7 +456,7 @@ def test_codec_transports_a_nested_callback_capturing_managed_declaration_and_co
 
     def callback(receiver, value, *, _declaration=declaration,
                  _first=config, _second=config):
-        return _declaration(receiver, value, managed=_first) + int(
+        return _declaration(receiver, value, managed=_first).value + int(
             _first is _second
         )
 

@@ -14,14 +14,12 @@ import dryml.locking as locking_module
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
-from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.query.model import QueryIndexBusy, QueryIndexError
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 import dryml.core.query.sqlite.index as sqlite_index_module
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core.query.sqlite.schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
 from dryml.core.symbol import ImportRef
 
 
@@ -166,6 +164,18 @@ def _stored_root_count(path: Path) -> int:
         con.close()
 
 
+def _recipe_root_count(path: Path) -> int:
+    with closing(require_sqlite().connect(path)) as con:
+        return con.execute("SELECT COUNT(*) FROM store_projection_rows WHERE family='recipe_root'").fetchone()[0]
+
+
+def _publish_without_projection(store, root, monkeypatch):
+    with monkeypatch.context() as scoped:
+        scoped.setattr(store, "_complete_index_mutation", lambda *a, **k: None)
+        store.publish_node(root)
+    assert store.authority_cut().pending
+
+
 def _generation(path: Path) -> int:
     sqlite3 = require_sqlite()
     con = sqlite3.connect(path)
@@ -176,12 +186,12 @@ def _generation(path: Path) -> int:
 
 
 def _save_root_definition(store: DirStore, cdef: ConcreteDefinition) -> None:
-    store.write_definition_record(DefinitionRecord(cdef))
+    store.publish_node(cdef)
 
 
 def _request_store(path):
     store = DirStore(path, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
-    store.write_definition_record(DefinitionRecord(_cdef("request-root")))
+    store.publish_node(_cdef("request-root"))
     store.rebuild_query_index()
     return store
 
@@ -204,10 +214,9 @@ def _query_thread(query, stores, outcomes, *, name=None):
 
 
 @pytest.mark.timeout(40)
-def test_u2_single_flight_waits_outside_resources_and_rejects_pending_admission(tmp_path, monkeypatch):
+def test_u2_single_flight_waits_outside_resources_without_inventory(tmp_path, monkeypatch):
     """A waiter holds no cut or lease while its owner validates real authority."""
     import dryml.core.query.query as query_module
-    from dryml.core.query.model import QueryIndexUnavailable, QueryWouldScanError
 
     store = _request_store(tmp_path / "store")
     index = store.open_query_index()
@@ -215,16 +224,16 @@ def test_u2_single_flight_waits_outside_resources_and_rejects_pending_admission(
     entered, release, joined = threading.Event(), threading.Event(), threading.Event()
     calls, owner, waiter = [], [], []
     original = index.refresh
-    validate = index._validate_store_roots
+    validate = index._store_certificate
     original_fence = store.authority_read_fence
     held = threading.local()
     identity = index._connections._path_identity()
     generation = index.status().generation
     wait = query_module._RefreshAttempt.wait
 
-    def refresh(policy, *, stats=None):
+    def refresh(policy, *, stats=None, **kwargs):
         calls.append(policy)
-        return original(policy, stats=stats)
+        return original(policy, stats=stats, **kwargs)
 
     @contextmanager
     def fence():
@@ -253,19 +262,15 @@ def test_u2_single_flight_waits_outside_resources_and_rejects_pending_admission(
         return wait(attempt)
 
     monkeypatch.setattr(index, "refresh", refresh)
-    monkeypatch.setattr(index, "_validate_store_roots", compare)
+    monkeypatch.setattr(index, "_store_certificate", compare)
     monkeypatch.setattr(store, "authority_read_fence", fence)
     monkeypatch.setattr(query_module._RefreshAttempt, "wait", observe)
     first = _query_thread(query, store, owner)
     second = None
     try:
         assert entered.wait(10)
-        with pytest.raises(QueryWouldScanError):
-            query.cdefs().stored().scan_policy("forbid").take(1)
-        with pytest.raises(QueryIndexUnavailable):
-            query.cdefs().stored().require_indexed().take(1)
         assert not joined.is_set()
-        second = _query_thread(query.cdefs(), store, waiter)
+        second = _query_thread(query.cdefs().scan_policy("forbid").require_indexed(), store, waiter)
         assert joined.wait(10)
     finally:
         release.set()
@@ -274,8 +279,8 @@ def test_u2_single_flight_waits_outside_resources_and_rejects_pending_admission(
             second.join(15)
     assert not first.is_alive() and second is not None and not second.is_alive()
     assert calls == [True]
-    assert owner[0].refresh_action == "validate" and owner[0].store_scan_count == 2
-    assert waiter[0].refresh_action == "waited" and waiter[0].store_scan_count == 1
+    assert owner[0].refresh_action == "validate" and owner[0].store_scan_count == 0
+    assert waiter[0].refresh_action == "waited" and waiter[0].store_scan_count == 0
     assert not index._connections._leases
     assert not query._refresh_bindings[0].request.in_flight
     assert index._connections._path_identity() == identity and index.status().generation == generation
@@ -302,11 +307,12 @@ def test_u2_old_waiter_observes_failed_attempt_after_fast_retry(tmp_path, monkey
     uuids = tuple(item.status().diagnostics["index_uuid"] for item in indexes)
     generation = _generation(index.path)
     for name, store in zip(("a", "b"), stores):
-        store.write_definition_record(DefinitionRecord(_cdef(name)))
-    tokens = tuple(backend._dirty_markers() for backend in indexes)
+        _publish_without_projection(store, _cdef(name), monkeypatch)
+        store.mark_query_index_dirty()
+    tokens = tuple(store.authority_cut().pending for store in stores)
     primary = KeyboardInterrupt("owner interrupted") if interrupted else PermissionError("owner failed")
     entered, fail, joined, observe = (threading.Event() for _ in range(4))
-    original = index._clear_dirty
+    original = index._ack_store_projection
     wait = query_module._RefreshAttempt.wait
     calls, owner, waiter = [], [], []
     captures = {}
@@ -320,9 +326,9 @@ def test_u2_old_waiter_observes_failed_attempt_after_fast_retry(tmp_path, monkey
     for store, backend in zip(stores, indexes):
         refresh = backend.refresh
 
-        def cycle(policy, *, stats=None, _store=store, _refresh=refresh):
+        def cycle(policy, *, stats=None, _store=store, _refresh=refresh, **kwargs):
             calls.append((_store, policy))
-            return _refresh(policy, stats=stats)
+            return _refresh(policy, stats=stats, **kwargs)
 
         monkeypatch.setattr(backend, "refresh", cycle)
 
@@ -330,12 +336,12 @@ def test_u2_old_waiter_observes_failed_attempt_after_fast_retry(tmp_path, monkey
 
     def acknowledge(*args, **kwargs):
         acknowledgements.append(args[0])
-        assert index._build_claim_path().exists()
         assert _generation(index.path) > generation
         assert not index._connections._leases
         if len(acknowledgements) == 1:
-            assert not a.query_index_is_dirty() and b.query_index_is_dirty()
-            assert set(args[0]) == set(tokens[1])
+            assert index._build_claim_path().exists()
+            assert not a.authority_cut().pending and b.authority_cut().pending
+            assert {record.intent["mutation_id"] for record in args[0].receipts} == set(tokens[1])
             entered.set()
             assert fail.wait(15)
             raise primary
@@ -349,15 +355,12 @@ def test_u2_old_waiter_observes_failed_attempt_after_fast_retry(tmp_path, monkey
         repo._configuration_lock.release()
         assert repo._topology_leases == 0
         for store, backend in zip(stores, indexes):
-            probe = locking_module.FileLock(store._writer_lock_path)
-            assert probe.acquire(blocking=False)
-            probe.release()
             assert (os.getpid(), threading.get_ident(), True) not in backend._connections._leases
         joined.set()
         assert observe.wait(15)
         return wait(attempt)
 
-    monkeypatch.setattr(index, "_clear_dirty", acknowledge)
+    monkeypatch.setattr(index, "_ack_store_projection", acknowledge)
     monkeypatch.setattr(SourceCapture, "__init__", retain)
     monkeypatch.setattr(query_module._RefreshAttempt, "wait", delayed)
     first = _query_thread(query, stores, owner, name="failed-owner")
@@ -365,21 +368,21 @@ def test_u2_old_waiter_observes_failed_attempt_after_fast_retry(tmp_path, monkey
     try:
         assert entered.wait(10), owner
         second = _query_thread(query, stores, waiter, name="old-waiter")
-        assert joined.wait(10)
-        assert _stored_root_count(index.path) == 2
-        b.write_definition_record(DefinitionRecord(_cdef("late-b")))
-        later_tokens = set(index._dirty_markers())
-        assert set(tokens[1]) < later_tokens
+        assert joined.wait(10), waiter
+        assert _recipe_root_count(index.path) == 2
         fail.set()
         first.join(10)
         assert not first.is_alive() and owner == [primary]
-        assert set(index._dirty_markers()) == later_tokens
+        _publish_without_projection(b, _cdef("late-b"), monkeypatch)
+        later_tokens = set(b.authority_cut().pending)
+        assert set(tokens[1]) < later_tokens
+        assert set(b.authority_cut().pending) == later_tokens
         assert not index._build_claim_path().exists()
         successful_a = indexes[0].status().diagnostics["index_uuid"]
         assert successful_a != uuids[0]
         retry = query.explain(analyze=True)
-        assert retry.refresh_action == "rebuild" and retry.store_scan_count == 3
-        assert retry.result_count == 4 and _stored_root_count(index.path) == 3
+        assert retry.refresh_action == "validate" and retry.store_scan_count == 0
+        assert retry.result_count == 4 and _recipe_root_count(index.path) == 3
         assert calls == [(a, True), (b, True), (b, True)]
         assert indexes[0].status().diagnostics["index_uuid"] == successful_a
     finally:
@@ -415,13 +418,14 @@ def test_u2_waiter_interruption_detaches_and_self_reentry_refuses(tmp_path, monk
     query = store.query().refresh(True)
     index = store.open_query_index()
     store.mark_query_index_dirty()
-    original = index._capture_authority_cut
+    import dryml.core.query.authority as authority
+    original = authority.capture_store_projection
     identity = index._connections._path_identity()
     entered, release = threading.Event(), threading.Event()
     owner, waiter, reentered = [], [], []
 
-    def capture():
-        cut = original()
+    def capture(*args, **kwargs):
+        cut = original(*args, **kwargs)
         assert index._build_claim_path().exists()
         assert not index._connections._leases
         with pytest.raises(QueryIndexBusy, match="reentr"):
@@ -434,7 +438,7 @@ def test_u2_waiter_interruption_detaches_and_self_reentry_refuses(tmp_path, monk
     def interrupt(timeout=None):
         raise KeyboardInterrupt("waiter detached")
 
-    monkeypatch.setattr(index, "_capture_authority_cut", capture)
+    monkeypatch.setattr(authority, "capture_store_projection", capture)
     first = _query_thread(query, store, owner)
     second = None
     try:
@@ -488,13 +492,13 @@ def test_u2_multiple_flights_reversed_cohorts_and_late_request(tmp_path, monkeyp
             finally:
                 held.depth -= 1
 
-    def refresh(policy, *, stats=None):
+    def refresh(policy, *, stats=None, **kwargs):
         position = len(calls)
         calls.append(policy)
         if position < 2:
             entered[position].set()
             assert release[position].wait(20)
-        return original(policy, stats=stats)
+        return original(policy, stats=stats, **kwargs)
 
     def observe(attempt):
         for query in (a, b, fresh):
@@ -556,13 +560,13 @@ def test_u2_successful_joins_recheck_later_cohort_before_claiming_remainder(tmp_
     wait = query_module._RefreshAttempt.wait
     calls, outcomes, frozen_attempts = [], [[], [], []], []
 
-    def refresh(policy, *, stats=None):
+    def refresh(policy, *, stats=None, **kwargs):
         position = len(calls)
         calls.append(policy)
         if position < 2:
             entered[position].set()
             assert release[position].wait(20)
-        return original(policy, stats=stats)
+        return original(policy, stats=stats, **kwargs)
 
     def observe(attempt):
         if threading.current_thread().name != "frozen-obligations":
@@ -601,7 +605,7 @@ def test_u2_successful_joins_recheck_later_cohort_before_claiming_remainder(tmp_
     assert all(len(items) == 1 and not isinstance(items[0], BaseException) for items in outcomes), outcomes
     assert len(frozen_attempts) == 2 and frozen_attempts[0] is not frozen_attempts[1]
     assert calls == [True, True, True]
-    assert outcomes[1][0].store_scan_count == 2  # owned C cycle + fresh evaluation only
+    assert outcomes[1][0].store_scan_count == 0
 
 
 @pytest.mark.timeout(40)
@@ -617,7 +621,7 @@ def test_u2_owner_baseexception_notifies_all_blocked_waiters(tmp_path, monkeypat
     wait = query_module._RefreshAttempt.wait
     primary = SystemExit("injected owner unwind")
     index = store.open_query_index()
-    original = index._validate_store_roots
+    original = index._store_certificate
     generation = index.status().generation
 
     def validate(con, issues, **kwargs):
@@ -632,7 +636,7 @@ def test_u2_owner_baseexception_notifies_all_blocked_waiters(tmp_path, monkeypat
             joined.notify_all()
         return wait(attempt)
 
-    monkeypatch.setattr(index, "_validate_store_roots", validate)
+    monkeypatch.setattr(index, "_store_certificate", validate)
     monkeypatch.setattr(query_module._RefreshAttempt, "wait", observe)
     threads = [_query_thread(query, store, outcomes[0])]
     try:
@@ -651,11 +655,11 @@ def test_u2_owner_baseexception_notifies_all_blocked_waiters(tmp_path, monkeypat
                and "interrupted" in str(items[0]) for items in outcomes[1:])
     assert not query._refresh_bindings[0].request.in_flight
     assert not index._connections._leases and not index._build_claim_path().exists()
+    monkeypatch.setattr(index, "_store_certificate", original)
     assert index.status().generation == generation
     probe = locking_module.FileLock(store._writer_lock_path)
     assert probe.acquire(blocking=False)
     probe.release()
-    monkeypatch.setattr(index, "_validate_store_roots", original)
     assert query.explain(analyze=True).refresh_action == "validate"
 
 
@@ -668,7 +672,7 @@ def test_u2_published_attempt_outcome_survives_later_owner_interruption(tmp_path
     index = store.open_query_index()
     identity = index._connections._path_identity()
     generation = index.status().generation
-    validate = index._validate_store_roots
+    validate = index._store_certificate
     entered, release, blocked = (threading.Event() for _ in range(3))
     primary = KeyboardInterrupt("owner interrupted before success notification")
     owner, waiting, interruptions, validations = [], [], [], []
@@ -680,7 +684,7 @@ def test_u2_published_attempt_outcome_survives_later_owner_interruption(tmp_path
         assert release.wait(15)
         return validate(con, issues, **kwargs)
 
-    monkeypatch.setattr(index, "_validate_store_roots", compare)
+    monkeypatch.setattr(index, "_store_certificate", compare)
     first = _query_thread(query, store, owner)
     second = attempt = notify = None
     try:
@@ -719,7 +723,7 @@ def test_u2_published_attempt_outcome_survives_later_owner_interruption(tmp_path
         second.join(10)
         assert not second.is_alive(), "published success stranded its already-blocked terminal"
         assert len(waiting) == 1 and waiting[0].refresh_action == "waited", waiting
-        assert waiting[0].result_count == 1 and waiting[0].store_scan_count == 1
+        assert waiting[0].result_count == 1 and waiting[0].store_scan_count == 0
     finally:
         release.set()
         first.join(15)
@@ -732,7 +736,7 @@ def test_u2_published_attempt_outcome_survives_later_owner_interruption(tmp_path
     assert not first.is_alive() and second is not None and not second.is_alive()
     assert interruptions == [primary] and attempt.done and attempt.failure is None
     assert query.explain(analyze=True).refresh_action == "reused"
-    assert validations == [True] and len(request.completed) == 1 and not request.in_flight
+    assert validations and len(request.completed) == 1 and not request.in_flight
     assert index._connections._path_identity() == identity and index.status().generation == generation
     assert not index._connections._leases and not index._build_claim_path().exists()
     assert all(not con.in_transaction for con in index._connections._connections.values())
@@ -755,7 +759,7 @@ if not hasattr(os, "fork"):
     emit({{"skipped": True}})
 else:
     store = DirStore({str(tmp_path / "request-fork")!r}, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
-    store.write_definition_record(__import__("dryml.core.store.records", fromlist=["DefinitionRecord"]).DefinitionRecord(cdef("root")))
+    store.publish_node(cdef("root"))
     store.rebuild_query_index()
     query = store.query().refresh(True)
     derived = query.cdefs()
@@ -773,7 +777,8 @@ else:
             held.set()
             assert release.wait(15)
     thread = threading.Thread(target=hold, daemon=True)
-    with idx._retained_read_view() as parent_view:
+    with idx._connections._read_lease() as (parent_con, _):
+        parent_con.execute("BEGIN")
         thread.start()
         assert held.wait(2)
         read_fd, write_fd = os.pipe()
@@ -818,9 +823,10 @@ else:
             release.set()
             thread.join(2)
         assert not thread.is_alive()
-        assert parent_view._active and parent_view._con.in_transaction
+        assert parent_con.in_transaction
         assert len(idx._connections._leases) == 1
-        assert next(parent_view.iter_stored_identity_cdef_batches(batch_size=1)).cdefs == (cdef("root"),)
+        assert parent_con.execute("SELECT COUNT(*) FROM store_projection_rows WHERE family='recipe_root'").fetchone() == (1,)
+        parent_con.execute("ROLLBACK")
     assert ready and status == 0, payload
     assert not idx._connections._leases and not request.in_flight
     assert repo._topology_leases == 0 and repo_query.refresh(False).count() == 1
@@ -837,18 +843,17 @@ else:
 def test_explicit_cycle_declined_live_claim_validates_actual_candidate(tmp_path, monkeypatch):
     """Old ready-looking data under a live builder confers no completion credit."""
     from dryml.core.query.model import QueryStats
-    from dryml.core.store.records import MainRefRecord
+    import dryml.core.query.authority as authority
 
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
-    root, main = _cdef("root"), _cdef("main")
-    store.write_definition_record(DefinitionRecord(root))
-    store.write_definition_record(DefinitionRecord(main), stored_root=False)
+    root = _cdef("root")
+    store.publish_node(root)
     store.rebuild_query_index()
-    store.write_main_ref(MainRefRecord(DefinitionRecord(main).digest))
+    store.mark_query_index_dirty()
     index = store.open_query_index()
     claimed, release = threading.Event(), threading.Event()
     errors = []
-    original_capture = index._capture_authority_cut
+    original_capture = authority.capture_store_projection
     original_claim = index._build_claim
     original_fence = store.authority_read_fence
     held = threading.local()
@@ -862,11 +867,11 @@ def test_explicit_cycle_declined_live_claim_validates_actual_candidate(tmp_path,
             finally:
                 held.depth -= 1
 
-    def capture():
+    def capture(*args, **kwargs):
         if threading.current_thread() is worker:
             claimed.set()
             assert release.wait(10)
-        return original_capture()
+        return original_capture(*args, **kwargs)
 
     @contextmanager
     def claim(**kwargs):
@@ -886,20 +891,21 @@ def test_explicit_cycle_declined_live_claim_validates_actual_candidate(tmp_path,
 
     worker = threading.Thread(target=rebuild, daemon=True)
     monkeypatch.setattr(store, "authority_read_fence", fence)
-    monkeypatch.setattr(index, "_capture_authority_cut", capture)
+    monkeypatch.setattr(authority, "capture_store_projection", capture)
     monkeypatch.setattr(index, "_build_claim", claim)
+    monkeypatch.setattr(sqlite_index_module, "_BUILD_CLAIM_WAIT_SECONDS", 0.05)
     worker.start()
     try:
         assert claimed.wait(10)
         stats = QueryStats()
-        with pytest.raises(QueryIndexBusy, match="diverges"):
+        with pytest.raises(QueryIndexBusy, match="Timed out"):
             index.refresh(True, stats=stats)
-        assert stats.store_scan_count == 2
-        assert stats.refresh_action == "sqlite-validate"
+        assert stats.store_scan_count == 0
+        assert stats.refresh_action == "none"
         report = index.reconcile()
-        assert not report.changed and report.action == "validate"
-        assert report.diagnostics["store_scan_count"] == 2
-        assert any("diverges" in (issue.detail or "") for issue in report.issues)
+        assert not report.changed and not report.validated
+        assert report.diagnostics["store_scan_count"] == 0
+        assert any("Timed out" in issue.message for issue in report.issues)
         assert not index._connections._leases
     finally:
         release.set()
@@ -912,68 +918,87 @@ def test_explicit_cycle_declined_live_claim_validates_actual_candidate(tmp_path,
 def test_explicit_cycle_declined_claim_accepts_substantively_valid_candidate(tmp_path, monkeypatch):
     """A non-owner may succeed by validating, never by claiming a replacement."""
     from dryml.core.query.model import QueryStats
-    from dryml.core.store.records import MainRefRecord
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
-    record = store.write_definition_record(DefinitionRecord(_cdef("main")), stored_root=False)
+    store.publish_node(_cdef("main"))
     store.rebuild_query_index()
     index = store.open_query_index()
-    store.write_main_ref(MainRefRecord(record.digest))
     other = SQLiteStoreQueryIndex(source_key=index.source_key, path=index.path,
                                   config=index.config, store=store, dirty_path=index.dirty_path)
-    original_claim = index._build_claim
-
-    @contextmanager
-    def claim(**kwargs):
-        assert not index._connections._leases
-        with other._build_claim(force=True) as acquired:
-            assert acquired
-            other._rebuild_owned()
-            with original_claim(**kwargs) as ours:
-                assert not ours
-                yield ours
-
-    monkeypatch.setattr(index, "_build_claim", claim)
-    report = index.reconcile()
-    assert not report.changed and report.action == "validate"
-    assert report.generation_after > report.generation_before
-    assert report.diagnostics == {"store_scan_count": 2, "refresh_action": "sqlite-validate"}
-    assert any("roots differ" in issue.message for issue in report.issues)
+    before = index._connections._path_identity(), index.current_generation()
+    monkeypatch.setattr(index, "_build_claim", lambda **k: pytest.fail("ready certificate acquired a replacement claim"))
+    stats = QueryStats()
+    with other._build_claim(force=True) as acquired:
+        assert acquired
+        index.refresh(True, stats=stats)
+    assert stats.store_scan_count == 0 and stats.refresh_action == "sqlite-validate"
+    assert (index._connections._path_identity(), index.current_generation()) == before
+    assert len(index.projection_rows("recipe_root", refresh=False)) == 1
     assert not index._connections._leases and not index._build_claim_path().exists()
     other.close()
 
 
-def test_explicit_cycle_detects_wal_generation_change_in_active_destination(tmp_path, monkeypatch):
-    """The retained transaction alone cannot prove continuity behind a WAL writer."""
+def test_format4_explicit_refresh_reuses_current_authority_certificate(tmp_path):
+    """Current Store coverage has no legacy whole-inventory validation obligation."""
     from dryml.core.query.model import QueryStats
     from dryml.core.query.sqlite.utils import wal_runtime_is_known_safe
 
     if not wal_runtime_is_known_safe(require_sqlite().sqlite_version_info):
         pytest.skip("installed SQLite is not qualified for WAL")
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="wal"))
-    store.rebuild_query_index()
+    store.publish_node(_cdef("current"))
     index = store.open_query_index()
-    original = index._validate_store_roots
-    mutations = []
-
-    def validate(con, issues, **kwargs):
-        original(con, issues, **kwargs)
-        if not mutations:
-            identity = index._connections._path_identity()
-            with closing(require_sqlite().connect(index.path)) as writer, writer:
-                writer.execute("UPDATE catalog_state SET generation = generation + 1")
-            assert index._connections._path_identity() == identity
-            mutations.append(1)
-
-    monkeypatch.setattr(index, "_validate_store_roots", validate)
+    before, identity = index.status(), index._connections._path_identity()
     stats = QueryStats()
     index.refresh(True, stats=stats)
-    assert mutations == [1]
-    assert stats.store_scan_count == 2 and stats.refresh_action == "sqlite-rebuild"
+    assert stats.store_scan_count == 0
+    assert index.current_generation() == before.generation
+    assert index._connections._path_identity() == identity
+    assert len(index.projection_rows("recipe_root", refresh=False)) == 1
+    assert stats.refresh_action == "sqlite-validate"
     assert not index._connections._leases
 
 
-def test_explicit_cycle_destination_change_discards_validation_cut(tmp_path, monkeypatch):
+@pytest.mark.parametrize("operation", ("status", "refresh", "inspection"))
+def test_store_validation_contention_never_becomes_rebuild_or_incompatibility(
+        tmp_path, monkeypatch, operation):
+    """An active reader's typed contention survives status and explicit maintenance."""
+    from dryml.core.query.model import QueryStats
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    _save_root_definition(store, _cdef("root"))
+    index = store.open_query_index()
+    before = index.status()
+    identity = index._connections._path_identity()
+    original = index._store_certificate
+    original_status = index.status
+    primary = QueryIndexBusy("replacement blocked by an active reader")
+
+    def busy(con, cut, **kwargs):
+        original(con, cut, **kwargs)
+        raise primary
+
+    monkeypatch.setattr(index, "_store_certificate", busy)
+    if operation == "inspection":
+        from dataclasses import replace
+        monkeypatch.setattr(index, "status", lambda: replace(before, state="dirty"))
+    stats = QueryStats()
+    with pytest.raises(QueryIndexBusy, match="active reader") as raised:
+        if operation == "status":
+            index.status()
+        else:
+            index.refresh(True, stats=stats)
+    assert raised.value is primary
+    assert stats.store_scan_count == 0
+    assert not index._connections._leases and not index._build_claim_path().exists()
+    monkeypatch.setattr(index, "_store_certificate", original)
+    monkeypatch.setattr(index, "status", original_status)
+    assert index.status().diagnostics["index_uuid"] == before.diagnostics["index_uuid"]
+    assert index._connections._path_identity() == identity
+
+
+@pytest.mark.parametrize("replacement_policy", ("native", "refuse-active"))
+def test_explicit_cycle_destination_change_discards_validation_cut(tmp_path, monkeypatch, replacement_policy):
     """Replacing a destination during comparison cannot validate the old inode."""
     from dryml.core.query.model import QueryStats
 
@@ -983,9 +1008,20 @@ def test_explicit_cycle_destination_change_discards_validation_cut(tmp_path, mon
     index = store.open_query_index()
     other = SQLiteStoreQueryIndex(source_key=index.source_key, path=index.path,
                                   config=index.config, store=store, dirty_path=index.dirty_path)
-    original = index._validate_store_roots
+    original = index._store_certificate
     original_claim = index._build_claim
     replaced = []
+    before = index.status().diagnostics["index_uuid"]
+    blocked = os.name == "nt" or replacement_policy == "refuse-active"
+    if replacement_policy == "refuse-active":
+        activate = other._activate_replacement
+
+        def refuse_active(*args, **kwargs):
+            if index._connections._leases:
+                raise QueryIndexBusy("replacement blocked by an active reader")
+            return activate(*args, **kwargs)
+
+        monkeypatch.setattr(other, "_activate_replacement", refuse_active)
 
     def validate(con, issues, **kwargs):
         original(con, issues, **kwargs)
@@ -1000,25 +1036,24 @@ def test_explicit_cycle_destination_change_discards_validation_cut(tmp_path, mon
         with original_claim(**kwargs) as acquired:
             yield acquired
 
-    monkeypatch.setattr(index, "_validate_store_roots", validate)
+    monkeypatch.setattr(index, "_store_certificate", validate)
     monkeypatch.setattr(index, "_build_claim", claim)
     stats = QueryStats()
-    before = index.status().diagnostics["index_uuid"]
-    if os.name == "nt":
+    if blocked:
         with pytest.raises(QueryIndexBusy, match="active reader"):
             index.refresh(True, stats=stats)
-        assert stats.store_scan_count == 1 and stats.refresh_action == "sqlite-validate"
+        assert stats.store_scan_count == 0
+        monkeypatch.setattr(index, "_store_certificate", original)
         assert index.status().diagnostics["index_uuid"] == before
         assert not replaced
-        monkeypatch.setattr(index, "_validate_store_roots", original)
         index.refresh(True, stats=stats)
-        assert stats.store_scan_count == 2 and stats.refresh_action == "sqlite-validate"
+        assert stats.store_scan_count == 0 and stats.refresh_action == "sqlite-validate"
         assert index.status().diagnostics["index_uuid"] == before
     else:
         index.refresh(True, stats=stats)
         assert len(replaced) == 1
-        assert stats.store_scan_count == 2 and stats.refresh_action == "sqlite-rebuild"
-        assert index.status().diagnostics["index_uuid"] != replaced[0]
+        assert stats.store_scan_count == 0 and stats.refresh_action == "sqlite-validate"
+        assert index.status().diagnostics["index_uuid"] == replaced[0] != before
     assert not index._connections._leases and not index._build_claim_path().exists()
     other.close()
 
@@ -1026,16 +1061,16 @@ def test_explicit_cycle_destination_change_discards_validation_cut(tmp_path, mon
 @pytest.mark.timeout(30)
 def test_explicit_validation_holds_authority_fence_through_comparison(tmp_path, monkeypatch):
     """A main writer cannot cross the validation cut; later authority is not credit."""
-    from dryml.core.store.records import MainRefRecord
+    from dryml.core.store.records import NodeNameRecord
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
-    store.write_definition_record(DefinitionRecord(_cdef("root")))
-    main = store.write_definition_record(DefinitionRecord(_cdef("main")), stored_root=False)
+    store.publish_node(_cdef("root"))
+    main = store.publish_node(_cdef("main"))
     store.rebuild_query_index()
     index = store.open_query_index()
     generation = index.status().generation
     attempted, entered = threading.Event(), threading.Event()
-    original_validate = index._validate_store_roots
+    original_validate = index._store_certificate
     errors = []
     checks = []
 
@@ -1047,7 +1082,7 @@ def test_explicit_validation_holds_authority_fence_through_comparison(tmp_path, 
                 probe.release()
             checks.append(acquired)
             attempted.set()
-            store.write_main_ref(MainRefRecord(main.digest))
+            store.compare_and_set_node_name(NodeNameRecord("main", "recipe", main.digest), expected=None)
             entered.set()
         except BaseException as error:
             errors.append(error)
@@ -1056,13 +1091,15 @@ def test_explicit_validation_holds_authority_fence_through_comparison(tmp_path, 
     worker = threading.Thread(target=writer, daemon=True)
 
     def validate(con, issues, **kwargs):
-        worker.start()
-        assert attempted.wait(10)
-        assert not entered.is_set()
-        assert con.in_transaction and index._connections._leases
+        if worker.ident is None:
+            worker.start()
+            assert attempted.wait(10)
+            assert not entered.is_set()
+        if threading.current_thread() is not worker:
+            assert con.in_transaction and index._connections._leases
         original_validate(con, issues, **kwargs)
 
-    monkeypatch.setattr(index, "_validate_store_roots", validate)
+    monkeypatch.setattr(index, "_store_certificate", validate)
     try:
         index.refresh(True)
     finally:
@@ -1070,9 +1107,9 @@ def test_explicit_validation_holds_authority_fence_through_comparison(tmp_path, 
             worker.join(10)
     assert not worker.is_alive() and not errors and entered.is_set()
     assert checks == [False]
-    assert index.status().generation == generation
+    assert store.authority_cut().epoch > 0
     assert not index._connections._leases
-    monkeypatch.setattr(index, "_validate_store_roots", original_validate)
+    monkeypatch.setattr(index, "_store_certificate", original_validate)
     index.refresh(True)
     assert index.status().generation > generation
 
@@ -1086,10 +1123,14 @@ def test_overlapping_foreign_destination_owner_is_refused_after_claim(tmp_path, 
 
     path = tmp_path / "shared.sqlite"
     config = SQLiteQueryIndexConfig(path=path, journal_mode="delete")
-    first, second = (DirStore(tmp_path / name, query_index=config) for name in ("first", "second"))
-    records = tuple(store.write_definition_record(DefinitionRecord(_cdef(name)))
-                    for store, name in ((first, "first"), (second, "second")))
-    authority_paths = tuple(Path(store._definition_path(record.digest)) for store, record in zip((first, second), records))
+    paths = tuple(tmp_path / name for name in ("first", "second"))
+    records = []
+    for base, name in zip(paths, ("first", "second")):
+        writer = DirStore(base, query_index="none")
+        records.append(writer.publish_node(_cdef(name)))
+        writer.close()
+    first, second = (DirStore(base, query_index=config) for base in paths)
+    authority_paths = tuple(Path(store._node_path("definitions/roots", record.digest)) for store, record in zip((first, second), records))
     authority_bytes = tuple(path.read_bytes() for path in authority_paths)
     contender = second.open_query_index()
     preflight, release = threading.Event(), threading.Event()
@@ -1129,6 +1170,7 @@ def test_overlapping_foreign_destination_owner_is_refused_after_claim(tmp_path, 
             con.execute(f"PRAGMA user_version = {schema_version}")
             assert con.execute("SELECT store_key FROM catalog_state WHERE singleton = 1").fetchone() == (owner.source_key,)
         first.mark_query_index_dirty()
+        second.mark_query_index_dirty()
         identity = (path.stat().st_dev, path.stat().st_ino)
         contents = path.read_bytes()
         tokens = tuple(backend._dirty_markers() for backend in (owner, contender))
@@ -1211,6 +1253,9 @@ else:
 @pytest.mark.timeout(30)
 def test_u7_readiness_waits_for_build_claim_before_authority_fence(tmp_path, monkeypatch):
     """A claimed rebuilder can capture while a query waits outside every fence."""
+    import dryml.core.query.authority as authority
+    import dryml.core.query.sqlite.index as index_module
+    from dryml.core.query.sqlite.connection import SQLiteConnectionManager
 
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     root = _cdef("ready")
@@ -1222,9 +1267,22 @@ def test_u7_readiness_waits_for_build_claim_before_authority_fence(tmp_path, mon
     held = threading.local()
     errors = []
     waits = []
-    original_cut = index._capture_authority_cut
+    original_cut = authority.capture_store_projection
     original_claim = index._build_claim
     original_fence = store.authority_read_fence
+    original_generation = index_module._read_generation
+    generation_leases = []
+    generation_barriers = []
+
+    def generation(con):
+        if threading.current_thread() is worker and any(con is cached for cached in index._connections._connections.values()):
+            key = (os.getpid(), threading.get_ident(), True)
+            generation_leases.append(key in index._connections._leases)
+            assert key in index._connections._leases
+            SQLiteConnectionManager._close_idle_current_process_for_path(index.path)
+            assert con.execute("SELECT 1").fetchone() == (1,)
+            generation_barriers.append(True)
+        return original_generation(con)
 
     @contextmanager
     def fence():
@@ -1235,11 +1293,11 @@ def test_u7_readiness_waits_for_build_claim_before_authority_fence(tmp_path, mon
             finally:
                 held.depth -= 1
 
-    def capture():
+    def capture(*args, **kwargs):
         if threading.current_thread() is worker:
             claimed.set()
             assert preflight.wait(10)
-        return original_cut()
+        return original_cut(*args, **kwargs)
 
     @contextmanager
     def claim(**kwargs):
@@ -1261,16 +1319,19 @@ def test_u7_readiness_waits_for_build_claim_before_authority_fence(tmp_path, mon
 
     worker = threading.Thread(target=rebuild, daemon=True)
     monkeypatch.setattr(store, "authority_read_fence", fence)
-    monkeypatch.setattr(index, "_capture_authority_cut", capture)
+    monkeypatch.setattr(authority, "capture_store_projection", capture)
     monkeypatch.setattr(index, "_build_claim", claim)
+    monkeypatch.setattr(index_module, "_read_generation", generation)
     worker.start()
     try:
         assert claimed.wait(10)
-        assert tuple(store.query().cdefs().stored().take(1)) == (root,)
+        assert store.query().cdefs().stored().take(1).one().graph_equal(root)
     finally:
         preflight.set()
         worker.join(10)
     assert not worker.is_alive() and not errors and waits == ["outside"]
+    assert generation_leases and all(generation_leases)
+    assert len(generation_barriers) == len(generation_leases)
     assert not index._connections._leases and not index._build_claim_path().exists()
 
 
@@ -1294,8 +1355,9 @@ def test_u7_replacement_preserves_active_same_process_reader(tmp_path):
         finally:
             index._connections.close_current()
 
-    with index.read_view() as view:
-        old = view.index_uuid, view.generation, view.file_identity
+    with index._connections._read_lease() as (con, identity):
+        con.execute("BEGIN")
+        old = (*con.execute("SELECT index_uuid,generation FROM catalog_state").fetchone(), identity)
         worker = threading.Thread(target=rebuild, daemon=True)
         worker.start()
         try:
@@ -1305,38 +1367,36 @@ def test_u7_replacement_preserves_active_same_process_reader(tmp_path):
                 assert len(errors) == 1 and isinstance(errors[0], QueryIndexBusy)
             else:
                 assert not errors
-            assert view._active and view._con.in_transaction
-            assert next(view.iter_stored_identity_cdef_batches(batch_size=1)).cdefs == (root,)
-            assert (view.index_uuid, view.generation, view.file_identity) == old
+            assert con.in_transaction
+            assert con.execute("SELECT COUNT(*) FROM store_projection_rows WHERE family='recipe_root'").fetchone() == (1,)
+            assert con.execute("SELECT index_uuid,generation FROM catalog_state").fetchone() == old[:2]
         finally:
             worker.join(10)
+            con.execute("ROLLBACK")
     assert not index._connections._leases
     if errors:
         index.rebuild(force=True)
-    with index._retained_read_view() as fresh:
-        assert fresh.generation > old[1]
-        assert fresh.index_uuid != old[0] and fresh.file_identity != old[2]
-        assert next(fresh.iter_stored_identity_cdef_batches(batch_size=1)).cdefs == (root,)
+    assert index.current_generation() > old[1]
+    assert index.status().diagnostics["index_uuid"] != old[0]
+    assert index._connections._path_identity() != old[2]
+    assert store.query().cdefs().stored().refresh(False).one().graph_equal(root)
 
 
 @pytest.mark.timeout(30)
-def test_u7_main_writer_waits_through_paging_and_direct_verification(tmp_path, monkeypatch):
-    """A supported main publication cannot change the cut between pages and proof."""
-
-    from dryml.core.query.source import SourceCapture
-    from dryml.core.query.sqlite.index import SQLiteQueryIndexReadView
-    from dryml.core.store.records import MainRefRecord
+def test_u13_main_writer_runs_outside_pages_and_invalidates_continuation(tmp_path, monkeypatch):
+    """Detached paging permits writers and explicitly refuses a changed cut."""
+    from dryml.core.query.model import QueryError
+    from dryml.core.query.source import _NodePage
+    from dryml.core.store.records import NodeNameRecord
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
-    root, main = sorted((_cdef("first"), _cdef("second")), key=lambda value: value.graph_hash(), reverse=True)
-    _save_root_definition(store, root)
-    store.write_definition_record(DefinitionRecord(main), stored_root=False)
-    store.write_main_ref(MainRefRecord(DefinitionRecord(root).digest))
+    root, main = (store.publish_node(_cdef(name)) for name in ("first", "second"))
+    initial = NodeNameRecord("main", "recipe", root.digest)
+    store.compare_and_set_node_name(initial, expected=None)
     store.rebuild_query_index()
     attempting, done = threading.Event(), threading.Event()
     errors = []
-    original_page = SQLiteQueryIndexReadView.iter_stored_identity_cdef_batches
-    original_direct = SourceCapture.read_exact_stored_cdef
+    original_expand = _NodePage.expand
     checks = []
 
     def publish():
@@ -1347,7 +1407,7 @@ def test_u7_main_writer_waits_through_paging_and_direct_verification(tmp_path, m
                 probe.release()
             checks.append(acquired)
             attempting.set()
-            store.write_main_ref(MainRefRecord(DefinitionRecord(main).digest))
+            store.compare_and_set_node_name(NodeNameRecord("main", "recipe", main.digest), expected=initial)
             done.set()
         except BaseException as error:
             errors.append(error)
@@ -1355,26 +1415,22 @@ def test_u7_main_writer_waits_through_paging_and_direct_verification(tmp_path, m
 
     worker = threading.Thread(target=publish, daemon=True)
 
-    def page(view, **kwargs):
-        if not worker.is_alive() and not attempting.is_set():
+    def expand(page, *args, **kwargs):
+        if not attempting.is_set():
             worker.start()
-        assert attempting.wait(10) and not done.is_set()
-        yield from original_page(view, **kwargs)
-
-    def direct(capture, source, target):
-        assert not done.is_set()
-        return original_direct(capture, source, target)
+            assert attempting.wait(10) and done.wait(10)
+        return original_expand(page, *args, **kwargs)
 
     with monkeypatch.context() as scoped:
-        scoped.setattr(SQLiteQueryIndexReadView, "iter_stored_identity_cdef_batches", page)
-        scoped.setattr(SourceCapture, "read_exact_stored_cdef", direct)
+        scoped.setattr(_NodePage, "expand", expand)
         try:
-            assert tuple(store.query().cdefs().stored().refresh(False).require_indexed().take(1)) == (root,)
+            with pytest.raises(QueryError, match="changed|continuation"):
+                store.query().cdefs().stored().refresh(False).require_indexed().take(1)
         finally:
             if worker.ident is not None:
                 worker.join(10)
-    assert not worker.is_alive() and not errors and checks == [False] and done.is_set()
-    assert tuple(store.query().cdefs().stored().refresh(False).take(1)) == (main,)
+    assert not worker.is_alive() and not errors and checks == [True] and done.is_set()
+    assert store.query().cdefs().alias("main").refresh(False).one().graph_equal(_cdef("second"))
     assert not store.open_query_index()._connections._leases
 
 
@@ -1386,12 +1442,12 @@ def test_u7_cancelled_retained_entry_releases_transaction_and_fence(tmp_path, mo
     store.rebuild_query_index()
     index = store.open_query_index()
 
-    def interrupt(con):
+    def interrupt(con, *args, **kwargs):
         assert con.in_transaction and index._connections._leases
         raise KeyboardInterrupt("retained entry cancelled")
 
     with monkeypatch.context() as scoped:
-        scoped.setattr(sqlite_index_module, "_read_generation", interrupt)
+        scoped.setattr(index, "_store_certificate", interrupt)
         with pytest.raises(KeyboardInterrupt, match="entry cancelled"):
             store.query().cdefs().stored().refresh(False).take(1)
     assert not index._connections._leases
@@ -1848,8 +1904,7 @@ def test_rebuild_preserves_same_root_token_published_after_capture(tmp_path, mon
         store.mark_query_index_dirty(root)
     captured = set(index._dirty_markers())
     assert bool(captured) is captured_token
-    original_capture = index._capture_authority_cut
-    original_clear = index._clear_dirty
+    original_activate = index._activate_replacement
     later, errors, acknowledgements = [], [], []
 
     def publish():
@@ -1858,29 +1913,22 @@ def test_rebuild_preserves_same_root_token_published_after_capture(tmp_path, mon
         except BaseException as error:
             errors.append(error)
 
-    def capture():
-        cut = original_capture()
-        assert set(cut[3]) == captured
+    def activate(*args, **kwargs):
+        result = original_activate(*args, **kwargs)
+        assert set(index._dirty_markers()) == captured
         worker = threading.Thread(target=publish, daemon=True)
         worker.start()
         worker.join(10)
         assert not worker.is_alive() and not errors
-        return cut
+        acknowledgements.append(captured)
+        return result
 
-    def clear(markers, **kwargs):
-        assert index._build_claim_path().exists()
-        assert _stored_root_count(index.path) == 1
-        assert not index._connections._leases
-        acknowledgements.append(set(markers))
-        return original_clear(markers, **kwargs)
-
-    monkeypatch.setattr(index, "_capture_authority_cut", capture)
-    monkeypatch.setattr(index, "_clear_dirty", clear)
+    monkeypatch.setattr(index, "_activate_replacement", activate)
     stats = QueryStats()
     index.rebuild(stats=stats)
 
     assert acknowledgements == [captured]
-    assert stats.store_scan_count == 1 and stats.result_count == 1
+    assert stats.store_scan_count == 1 and _recipe_root_count(index.path) == 1
     assert len(later) == 1 and set(index._dirty_markers()) == set(later)
     assert not any(marker.exists() for marker in captured)
     assert index.status().state == "dirty"
@@ -1973,13 +2021,12 @@ def test_windows_claim_seam_unlocks_and_closes_before_cleanup(tmp_path, monkeypa
     """The Windows claim path releases its handle before unlinking the claim."""
 
     class FakeMSVCRT:
-        LK_NBLCK = 1
-        LK_UNLCK = 2
         calls = []
+        get_osfhandle = staticmethod(lambda fd: fd)
 
-        @classmethod
-        def locking(cls, fd, operation, size):
-            cls.calls.append((fd, operation, size))
+    def native_range_lock(handle, *, shared=False, blocking=False, unlock=False):
+        assert not closed
+        FakeMSVCRT.calls.append((handle, shared, blocking, unlock))
 
     index = _index(tmp_path / "index.sqlite")
     closed = False
@@ -1997,13 +2044,14 @@ def test_windows_claim_seam_unlocks_and_closes_before_cleanup(tmp_path, monkeypa
 
     monkeypatch.setattr(locking_module, "fcntl", None)
     monkeypatch.setattr(locking_module, "msvcrt", FakeMSVCRT)
+    monkeypatch.setattr(locking_module, "_windows_range_lock", native_range_lock)
     monkeypatch.setattr(sqlite_index_module.os, "close", close)
     monkeypatch.setattr(index, "_unlink_claim_if_owned", unlink_after_close)
 
     with index._build_claim(force=True) as acquired:
         assert acquired
 
-    assert [call[1] for call in FakeMSVCRT.calls] == [FakeMSVCRT.LK_NBLCK, FakeMSVCRT.LK_UNLCK]
+    assert [call[1:] for call in FakeMSVCRT.calls] == [(False, False, False), (False, False, True)]
     assert not index._build_claim_path().exists()
 
 
@@ -2139,9 +2187,10 @@ else:
         os.close(read_fd)
         try:
             child_con = idx._connections.connection(readonly=False)
-            root = cdef("fork-child")
-            write_result = idx.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
-            payload = json.dumps({{"new_connection": child_con is not parent_con, "generation": write_result.generation}}).encode()
+            child_con.execute("BEGIN IMMEDIATE")
+            child_con.execute("UPDATE catalog_state SET generation=generation+1 WHERE singleton=1")
+            child_con.execute("COMMIT")
+            payload = json.dumps({{"new_connection": child_con is not parent_con, "generation": idx.current_generation()}}).encode()
             os.write(write_fd, payload)
             os._exit(0)
         except BaseException as exc:
@@ -2152,8 +2201,7 @@ else:
     payload = os.read(read_fd, 4096)
     os.close(read_fd)
     data = json.loads(payload.decode())
-    with idx.read_view() as view:
-        data["visible"] = len(view.exact_ids(cdef("fork-child"))) == 1
+    data["visible"] = idx.current_generation() == 1
     data["status"] = status
     emit(data)
 ''')
@@ -2214,16 +2262,55 @@ def test_dirty_marker_recovers_object_committed_without_index_in_separate_proces
     result = _run_worker(f'''
 idx = store_index({str(tmp_path)!r})
 idx.refresh("auto")
-with idx.read_view() as view:
-    ids = view.exact_ids(cdef("object-without-index"))
-    emit({{"count": len(ids), "generation": view.generation}})
+rows = idx.projection_rows("recipe_root", refresh=False)
+emit({{"count": len(rows), "generation": idx.current_generation()}})
 ''')
 
     assert result["count"] == 1
     assert result["generation"] > 0
     assert not store.query_index_is_dirty()
-    with store.open_query_index().read_view() as view:
-        assert len(view.exact_ids(root)) == 1
+    assert store.query().cdefs().stored().sel(root).refresh(False).count() == 1
+
+
+@pytest.mark.parametrize("managed_in_builder", [False, True], ids=["cold-builder", "cold-reader"])
+def test_store_coverage_survives_cross_process_managed_imports(tmp_path, managed_in_builder):
+    """Import state cannot invalidate a complete Core-only Store cut or its misses."""
+    built = _run_worker(f'''
+import sys
+if {managed_in_builder!r}:
+    import dryml.managed
+assert ("dryml.managed" in sys.modules) is {managed_in_builder!r}
+idx = store_index({str(tmp_path)!r})
+idx.store.publish_node(cdef("cross-process"))
+idx.store.mark_query_index_dirty()
+idx.refresh("auto")
+emit({{"generation": idx.status().generation, "identity": list(idx._connections._path_identity())}})
+''')
+    observed = _run_worker(f'''
+import sys
+from dryml.core.query.model import QueryIndexUnavailable
+if {not managed_in_builder!r}:
+    import dryml.managed
+assert ("dryml.managed" in sys.modules) is {not managed_in_builder!r}
+idx = store_index({str(tmp_path)!r})
+query = idx.store.query().cdefs().stored().refresh(False)
+assert query.sel(cdef("cross-process")).count() == 1
+assert query.sel(cdef("absent")).count() == 0
+assert query.count() == 1
+assert not idx.store.query_index_is_dirty()
+assert idx.status().state == "ready"
+if {not managed_in_builder!r}:
+    assert idx.projection_rows("lifecycle", refresh=False) == ()
+else:
+    try:
+        idx.projection_rows("lifecycle", refresh=False)
+    except QueryIndexUnavailable:
+        pass
+    else:
+        raise AssertionError("Lifecycle reads require their owner")
+emit({{"generation": idx.status().generation, "identity": list(idx._connections._path_identity())}})
+''')
+    assert observed == built
 
 
 def test_crash_mid_rebuild_leaves_building_state_and_recovers(tmp_path):
@@ -2238,7 +2325,7 @@ def test_crash_mid_rebuild_leaves_building_state_and_recovers(tmp_path):
 
     proc = _start_worker(f'''
 idx = store_index({str(tmp_path)!r})
-idx.initialize_empty(build_state="building")
+idx._run_write_transaction(lambda con: con.execute("UPDATE catalog_state SET build_state='building' WHERE singleton=1"))
 Path({str(ready)!r}).write_text("ready")
 while True:
     time.sleep(1)
@@ -2250,7 +2337,7 @@ while True:
 
     idx = store.open_query_index()
 
-    assert idx.status().state == "building"
+    assert idx.status().state == "dirty"
     report = idx.validate(thorough=True)
     assert not report.ok
     assert any("not ready" in issue.message for issue in report.issues)
@@ -2259,8 +2346,8 @@ while True:
     result = _run_worker(f'''
 idx = store_index({str(tmp_path)!r})
 idx.refresh("auto")
-with idx.read_view() as view:
-    emit({{"state": idx.status().state, "count": len(view.exact_ids(cdef("building-recovery"))), "generation": view.generation}})
+rows = idx.projection_rows("recipe_root", refresh=False)
+emit({{"state": idx.status().state, "count": len(rows), "generation": idx.current_generation()}})
 ''')
 
     assert result["state"] == "ready"
@@ -2275,3 +2362,36 @@ def _wait_for(path: Path, *, timeout: float = 5.0) -> None:
             return
         time.sleep(0.01)
     raise TimeoutError(f"Timed out waiting for {path}")
+
+
+def test_format4_store_reader_leases_are_thread_local(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store.publish_node(_cdef("node"))
+    index = store.open_query_index()
+    manager, entered, release = index._connections, threading.Event(), threading.Event()
+    observations = []
+    def reader():
+        try:
+            with manager._read_lease() as (con, _):
+                con.execute("BEGIN")
+                observations.append(con)
+                entered.set()
+                assert release.wait(10)
+                assert con.in_transaction
+                con.execute("ROLLBACK")
+        finally:
+            manager.close_current()
+    thread = threading.Thread(target=reader)
+    thread.start()
+    try:
+        assert entered.wait(10)
+        with manager._read_lease() as (con, _):
+            assert con is not observations[0] and not con.in_transaction
+            manager.close_all_current_process()
+            assert len(manager._leases) == 2
+            assert con.execute("SELECT COUNT(*) FROM store_projection_cut").fetchone() == (1,)
+    finally:
+        release.set()
+        thread.join(10)
+    assert not thread.is_alive() and not manager._leases
+    assert len(index.projection_rows("recipe_root", refresh=False)) == 1

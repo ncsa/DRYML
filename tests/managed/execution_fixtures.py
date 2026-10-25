@@ -7,6 +7,7 @@ from pathlib import Path
 
 from dryml.annotations import Annotation, attach_annotation
 from dryml.core import function
+from dryml.core import SavedNode
 from dryml.core.object import Pickleable
 from dryml.core.signatures import Mat, Ref
 from dryml.core.reference_values import StateRef
@@ -37,12 +38,12 @@ def _annotate(target):
 def _matrix_method(written_order):
     """Build one method with its actual written A/F/M order."""
 
-    def operation(self, value: Mat[StateRef], *, managed) -> Mat[StateRef]:
+    def operation(self, value: Mat[MatrixArgument], *, managed) -> Ref[SavedNode]:
         """Materialize one saved argument and return it through the same boundary."""
 
         self.calls += 1
         self.value += value.value
-        return value
+        return value.last_state_ref
 
     decorators = {"A": _annotate, "F": function, "M": managed_operation()}
     member = operation
@@ -121,7 +122,9 @@ def _recording_wrapper(target):
     def wrapped(self, value, *, managed):
         self.events.append("before")
         try:
-            return target(self, value, managed=managed) + 10
+            from dryml.managed import InvocationResult
+            result = target(self, value, managed=managed)
+            return result if isinstance(result, InvocationResult) else result + 10
         finally:
             self.events.append("after")
             marker = getattr(self, "wrapper_exit_marker", None)
@@ -230,15 +233,15 @@ class ConflictingManagedWorldDiscoveryValue(Pickleable):
 
 @environment_req(source="managed-dispatch-discovery")
 @function
-def declared_managed_call(receiver, value: int) -> int:
+def declared_managed_call(receiver, value: int):
     """Carry a passive requirement through Dispatch into a managed member call."""
 
     return receiver.advance(value)
 
 
 def nested_managed_call(
-        receiver, value: Ref[StateRef], nested_config,
-) -> Ref[StateRef]:
+        receiver, value: Ref[SavedNode], nested_config,
+) -> Ref[SavedNode]:
     """Use a StateRef at the nested Mat boundary and preserve it for the caller."""
 
     receiver.operation_afm(
@@ -247,7 +250,7 @@ def nested_managed_call(
     return value
 
 
-def nested_managed_advance(receiver, value: int, nested_config) -> int:
+def nested_managed_advance(receiver, value: int, nested_config):
     """Call a primitive managed member with config held in nested data."""
 
     return receiver.advance(value, managed=nested_config["config"][0])

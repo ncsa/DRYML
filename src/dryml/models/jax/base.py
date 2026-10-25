@@ -1076,7 +1076,7 @@ class Training(TrainFunction):
                 postlude_pending=True,
                 metrics=epoch_metrics,
             )
-        candidate_state._validate_restored_state(candidate_state.__getstate__())
+        candidate_state._validate_restored_state(candidate_state.__getstate__()["fields"])
         committed = False
         try:
             _training_commit_boundary("before_model")

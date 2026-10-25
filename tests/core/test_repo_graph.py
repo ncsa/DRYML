@@ -1,16 +1,16 @@
 import pytest
 
-from dryml.core import ConcreteDefinition, Definition, Object, Repo, Serializable
+from dryml.core import Definition, Object, Repo, Serializable
 from dryml.core.cdef_identity import cdef_node_key
 from dryml.core.object import WorkspaceCapable
 from dryml.core.query.path import GraphPath, Index, Key, Parameter, SetMember, get_subtree
 from dryml.core.repo import RepoGraphError, RepoSaveError, default_repo, get_default_repo
 from dryml.core.repo_plan import GraphApplyResult, collect_runtime_roots
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
 from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.core.workspaces import WorkspaceManager
 from dryml.core._content_facts import _primitive_size
+from tests.core.test_repo_aliases import _saved_digest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
@@ -625,7 +625,8 @@ def test_get_cached_is_exact_and_rejects_cross_tier_ambiguity():
     repo.cache_strong(first)
     repo.cache_strong(second)
 
-    assert first.definition == second.definition
+    assert first.definition.graph_equal(second.definition)
+    assert first.definition != second.definition
     assert repo.get_cached(first.definition) is first
     assert repo.get_cached(second.definition) is second
 
@@ -663,7 +664,8 @@ def test_independent_current_nodes_keep_workspace_and_store_bindings(tmp_path):
     repo.set_object_store(first, store)
     repo.set_object_store(second, store)
 
-    assert first == second
+    assert first.graph_equal(second)
+    assert first != second
     assert cdef_node_key(first) is not cdef_node_key(second)
     assert repo.strong_obj_cache[first] is first_obj
     assert repo.weak_obj_cache[second] is second_obj
@@ -731,8 +733,8 @@ def test_save_object_uses_direct_state_ref_controls(tmp_path):
 
     state = repo.save_object(obj, store=store, alias="saved")
 
-    assert store.read_definition_record(DefinitionRecord(obj.definition).digest) is not None
-    assert store.read_object_alias("saved").object_ref == state.object
+    assert store.read_node(_saved_digest(state), kind="saved").graph_equal(state)
+    assert store.read_node_name("saved").root_digest == _saved_digest(state)
 
 
 def test_save_object_without_store_raises_repo_save_error():
@@ -749,9 +751,9 @@ def test_save_uses_direct_controls_for_one_loaded_object(tmp_path):
     obj = GraphLeaf("saved", repo=repo)
     repo.pin(obj)
 
-    repo.save(obj, store=store)
+    state = repo.save(obj, store=store)
 
-    assert store.read_definition_record(DefinitionRecord(obj.definition).digest) is not None
+    assert store.read_node(_saved_digest(state), kind="saved").graph_equal(state)
 
 
 def test_save_skips_ephemeral_child_under_serializable_parent(tmp_path):
@@ -762,8 +764,8 @@ def test_save_skips_ephemeral_child_under_serializable_parent(tmp_path):
 
     state = repo.save_object(parent)
 
-    assert store.read_state_ref_record(state.digest()).state_ref == state
-    assert len(state.states) == 1
+    assert store.read_node(_saved_digest(state), kind="saved").graph_equal(state)
+    assert len(state.state_spec()) == 1
 
 
 def test_save_traverses_skipped_ephemeral_to_save_serializable_descendant(tmp_path):
@@ -776,8 +778,8 @@ def test_save_traverses_skipped_ephemeral_to_save_serializable_descendant(tmp_pa
 
     state = repo.save_object(parent)
 
-    assert len(state.states) == 2
-    assert leaf._last_state_hash in state.states.values()
+    assert len(state.state_spec()) == 2
+    assert state.at('$[@param("child")][@param("children")][0]').state.key.codec_hash == leaf._last_state_hash
 
 
 def test_explicit_ephemeral_root_save_creates_object_dir(tmp_path):
@@ -787,7 +789,8 @@ def test_explicit_ephemeral_root_save_creates_object_dir(tmp_path):
 
     state = repo.save_object(obj)
 
-    assert state.states == {}
+    assert len(state.state_spec()) == 0
+    assert store.read_node(_saved_digest(state), kind="saved").graph_equal(state)
 
 
 def test_live_ephemeral_alias_forces_save(tmp_path):
@@ -797,7 +800,7 @@ def test_live_ephemeral_alias_forces_save(tmp_path):
 
     state = repo.save_object(obj, alias="leaf")
 
-    assert store.read_object_alias("leaf").object_ref == state.object
+    assert store.read_node_name("leaf").root_digest == _saved_digest(state)
 
 
 def test_retired_ephemeral_depth_is_not_a_save_option(tmp_path):

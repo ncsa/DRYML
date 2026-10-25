@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import subprocess
+import sys
 
 import dill
 import pytest
@@ -11,7 +13,7 @@ import pytest
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 from dryml.core import (
-    SKIP_ARGS, Definition, Object, ObjectRef, Repo, Serializable,
+    SKIP_ARGS, Definition, Node, Object, ObjectRef, Repo, Serializable,
 )
 from dryml.core.execute import CoreOptions, SharedDirStoreStrategy, prepare_shared_storage
 from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_invocation, invoke_invocation
@@ -31,6 +33,36 @@ class SavedValue(Serializable):
 
     def restore_state_from_dir_imp(self, src_dir, *, codec):
         self.value = int((Path(src_dir) / "value").read_text(encoding="ascii"))
+
+
+def test_ordinary_core_transport_without_managed_imports(tmp_path):
+    """A fresh interpreter transports ordinary work with managed unavailable."""
+    script = '''
+import sys
+class NoManaged:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "dryml.managed" or fullname.startswith("dryml.managed."):
+            raise ImportError("managed deliberately unavailable")
+sys.meta_path.insert(0, NoManaged())
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
+from dryml.core.execute_codec import encode_invocation, invoke_invocation, decode_outcome
+repo = Repo(DirStore(sys.argv[1], query_index="none"))
+def add(value): return value + 1
+wire = encode_invocation(add, (4 + 2j,), {}, repo=repo)
+outcome = decode_outcome(invoke_invocation(wire, repo=repo), repo=repo)
+assert outcome["success"] and outcome["result"] == 5 + 2j
+class Add:
+    def __call__(self, value): return value + 1
+wire = encode_invocation(Add(), (4,), {}, repo=repo)
+outcome = decode_outcome(invoke_invocation(wire, repo=repo), repo=repo)
+assert outcome["success"] and outcome["result"] == 5
+assert not any(n == "dryml.managed" or n.startswith("dryml.managed.") for n in sys.modules)
+repo.close(flush=False)
+'''
+    completed = subprocess.run([sys.executable, "-c", script, str(tmp_path / "isolated")],
+                               capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr
 
 
 class SavedBlob(Serializable):
@@ -100,11 +132,11 @@ def _blob_size(value):
     return len(value.payload)
 
 
-def _reference_identity(value: Ref[ObjectRef]) -> Ref[ObjectRef]:
+def _reference_identity(value: Ref[Node]) -> Ref[Node]:
     return value
 
 
-def _return_assertion(value: Ref[ObjectRef]):
+def _return_assertion(value: Ref[Node]):
     """Return one transient assertion to prove result transport rejects it."""
     return Ref(value)
 
@@ -160,8 +192,8 @@ def _invoke(strategy, fn, args, *, repo, **kwargs):
     """Prepare and execute one codec call directly in an explicit worker Repo."""
     prepared = strategy.prepare(fn, args, {}, repo=repo, control_store=None, update_args=False, **kwargs)
     result = strategy.recover(
-        strategy.invoke(prepared.invocation, repo=repo, update_args=False), prepared,
-        repo=repo, args=args, kwargs={}, return_objects=False, update_args=False,
+        strategy.invoke(prepared.invocation, repo=repo, update_args=False, raw_traceback=True), prepared,
+        repo=repo, args=args, kwargs={}, return_objects=False, update_args=False, allow_raw_traceback=True,
     )
     return prepared, result
 
@@ -188,11 +220,11 @@ def test_symbolic_definition_transport_preserves_ref_data_and_mat_delivery(
 
     assert value == 7
     assert isinstance(restored, Definition)
-    assert restored.stable_hash() == definition.stable_hash()
-    assert restored_asserted.stable_hash() == definition.stable_hash()
+    assert restored.graph_equal(definition)
+    assert restored_asserted.graph_equal(definition)
     assert repr(restored.kwargs["labels"]).startswith("F[")
     assert restored_skipped.args is None
-    assert restored_skipped.stable_hash() == skipped.stable_hash()
+    assert restored_skipped.graph_equal(skipped)
 
 
 def test_saved_authority_is_used_without_detecting_or_saving_later_mutation(tmp_path):
@@ -219,12 +251,37 @@ def test_pinned_reference_intent_and_diamond_aliases_cross_one_graph(tmp_path):
 
     _, reference = _invoke(
         strategy, _reference_identity, (saved,), repo=repo,
-        selections={"value": ReferenceSelection(saved.object, store)},
+        selections={"value": ReferenceSelection(saved, store)},
     )
     _, diamond = _invoke(strategy, _same, (["shared"],) * 2, repo=repo)
 
-    assert reference == saved.object
+    assert reference.graph_equal(saved)
     assert diamond is True
+
+
+def test_u19_mat_node_selection_preserves_exact_replica_without_fallback(tmp_path, monkeypatch):
+    """A transported saved Node pin controls both metadata and full-key delivery."""
+    from contextlib import contextmanager
+    first, second = DirStore(tmp_path / "first", query_index="none"), DirStore(tmp_path / "second", query_index="none")
+    repo = Repo([first, second])
+    value = SavedValue(7, repo=repo)
+    saved = repo.save(value, store=first)
+    replica = repo.save(value, store=second, states=saved.state_spec())
+    assert replica.graph_equal(saved)
+    strategy = SharedDirStoreStrategy()
+    monkeypatch.setattr(first, "read_states", lambda *args: pytest.fail("unpinned replica used"))
+    prepared = strategy.prepare(_read_value, (saved,), {}, repo=repo, control_store=None,
+        update_args=False, selections={"value": ReferenceSelection(saved, second)})
+    output = strategy.invoke(prepared.invocation, repo=repo, update_args=False)
+    assert strategy.recover(output, prepared, repo=repo, args=(saved,), kwargs={}, return_objects=False, update_args=False) == 7
+    constructions = repo._num_constructions
+    @contextmanager
+    def unavailable(keys):
+        yield {}
+    monkeypatch.setattr(second, "read_states", unavailable)
+    failed = decode_outcome(strategy.invoke(prepared.invocation, repo=repo, update_args=False), repo=repo)
+    assert not failed["success"] and failed["reason"] == "RepoLoadError"
+    assert repo._num_constructions == constructions
 
 
 def test_ref_and_mat_assertions_cross_to_worker_signature_activation(tmp_path):
@@ -240,7 +297,7 @@ def test_ref_and_mat_assertions_cross_to_worker_signature_activation(tmp_path):
     )
     _, materialized = _invoke(strategy, _read_value, (Mat(saved),), repo=repo)
 
-    assert reference == saved.object
+    assert reference.graph_equal(saved)
     assert materialized == 4
 
 
@@ -250,7 +307,7 @@ def test_result_transport_rejects_unconsumed_assertions(tmp_path):
     value = SavedValue(4, repo=repo)
     saved = repo.save_object(value, deep_capture=True)
     invocation = encode_invocation(
-        _return_assertion, (saved.object,), {}, repo=repo,
+        _return_assertion, (saved,), {}, repo=repo,
     )
 
     outcome = decode_outcome(invoke_invocation(invocation, repo=repo), repo=repo)
@@ -270,7 +327,7 @@ def test_frozen_storage_snapshot_is_reused_and_rejects_unknown_selected_store(tm
         monkeypatch.setattr(repo, "to_definition", lambda: pytest.fail("unexpected second Repo export"))
         prepared = SharedDirStoreStrategy().prepare(
             _reference_identity, (saved,), {}, repo=repo, control_store=None,
-            update_args=False, selections={"value": ReferenceSelection(saved.object, store)},
+            update_args=False, selections={"value": ReferenceSelection(saved, store)},
             _frozen_storage=snapshot.frozen_storage,
         )
         assert prepared.storage_setup == snapshot.storage_setup
@@ -279,7 +336,7 @@ def test_frozen_storage_snapshot_is_reused_and_rejects_unknown_selected_store(tm
         with pytest.raises(CoreCallCodecError, match="unsupported selected Store"):
             SharedDirStoreStrategy().prepare(
                 _reference_identity, (saved,), {}, repo=repo, control_store=None,
-                update_args=False, selections={"value": ReferenceSelection(saved.object, other)},
+                update_args=False, selections={"value": ReferenceSelection(saved, other)},
                 _frozen_storage=snapshot.frozen_storage,
             )
     finally:
@@ -521,7 +578,7 @@ def test_malformed_nodes_fail_before_symbol_resolution_without_sensitive_fields(
     repo = Repo(DirStore(tmp_path / "state"))
     secret = "transport-secret-marker"
     payload = dill.dumps({
-        "version": 2, "root": 0,
+        "version": 3, "root": 0, "graphs": None, "adapters": {},
         "nodes": [{"tag": "import", "module": "math", "qualname": None, "extra": secret}],
     }, protocol=5)
     monkeypatch.setattr(ImportRef, "resolve", lambda self: pytest.fail("symbol resolution ran"))
@@ -535,7 +592,7 @@ def test_malformed_assertion_fails_before_symbol_resolution(tmp_path, monkeypatc
     """Invalid assertion kinds fail during inert graph validation."""
     repo = Repo(DirStore(tmp_path / "state"))
     payload = dill.dumps({
-        "version": 2,
+        "version": 3, "graphs": None, "adapters": {},
         "root": 0,
         "nodes": [
             {"tag": "assertion", "kind": "unsupported", "target": 1},
@@ -556,7 +613,7 @@ def test_malformed_definition_shape_fails_before_symbol_resolution(
 
     repo = Repo(DirStore(tmp_path / "state"))
     payload = dill.dumps({
-        "version": 2,
+        "version": 3, "graphs": None, "adapters": {},
         "root": 0,
         "nodes": [
             {"tag": "definition", "cls": 1, "args": 2, "kwargs": 3},
@@ -577,7 +634,7 @@ def test_malformed_path_kind_fails_with_codec_error(tmp_path):
     """An unhashable path kind is rejected without leaking a raw TypeError."""
     repo = Repo(DirStore(tmp_path / "state"))
     payload = dill.dumps({
-        "version": 2, "root": 0,
+        "version": 3, "root": 0, "graphs": None, "adapters": {},
         "nodes": [{"tag": "path", "kind": [], "value": "marker"}],
     }, protocol=5)
 

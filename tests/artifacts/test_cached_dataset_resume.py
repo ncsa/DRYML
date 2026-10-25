@@ -68,14 +68,17 @@ def test_eof_checkpoint_resumes_without_reopening_source(tmp_path):
         cache.compute(
             codec="numpy", managed=ManagedConfig(state_repo=repo, callbacks=[stop_after_association]),
         )
+    failed = cache.compute.status(state_repo=repo)
 
     _reject_source_open = True
     try:
         state = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
     finally:
         _reject_source_open = False
-    restored = repo.load_state_ref(state, reuse_live="never")
+    restored = repo.load_state_ref(state.final_state_ref, reuse_live="never")
     assert [item.item() for item in restored] == [7]
+    assert state.execution.run_id == failed.run_id
+    assert state.execution.invocation_id != failed.invocation_id
 
 
 def test_working_snapshot_records_only_the_prior_ready_state_reference(tmp_path):
@@ -91,20 +94,21 @@ def test_working_snapshot_records_only_the_prior_ready_state_reference(tmp_path)
     other = DirStore(tmp_path / "other")
     repo = Repo((store, other))
     cache = CachedDataset(EOFCheckpointDataset())
-    prior = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
+    prior = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo)).final_state_ref
+    from dryml.artifacts.dataset import _saved_digest
     workdir = store.create_local_state_staging()
     token = store._local_state_staging_id(workdir)
     marker = {
         "format": _WORK_FORMAT, "version": _VERSION, "token": token,
-        "object_ref_digest": cache.object_ref.digest(), "operation_id": "replace",
-        "attempt_id": "attempt", "state": "retained",
+        "object_ref_digest": repo.describe(cache).object_projection_digest(), "operation_id": "replace",
+        "run_id": "run", "state": "retained",
     }
     (tmp_path / "store" / ".staging" / token / _WORK_MARKER).write_text(json.dumps(marker))
     cache._cache_payload = {
         "mode": "working", "codec": "numpy", "spec": cache.spec, "expected": 1,
         "count": 0, "work_token": token, "chunks": [],
-        "object_ref_digest": cache.object_ref.digest(), "operation_id": "replace",
-        "attempt_id": "attempt", "prior_ready_state_digest": prior.digest(),
+        "object_ref_digest": repo.describe(cache).object_projection_digest(), "operation_id": "replace",
+        "run_id": "run", "prior_ready_state_digest": _saved_digest(prior),
     }
 
     checkpoint = repo.save_object(cache, store=store, deep_capture=True)
@@ -114,8 +118,8 @@ def test_working_snapshot_records_only_the_prior_ready_state_reference(tmp_path)
     assert restored.processed_count == 0
     with pytest.raises(ArtifactNotReadyError):
         _ = restored.spec
-    assert restored._cache_payload["prior_ready_state_digest"] == prior.digest()
-    assert _prior_ready_state_ref(repo, restored._cache_payload) == prior
+    assert restored._cache_payload["prior_ready_state_digest"] == _saved_digest(prior)
+    assert _prior_ready_state_ref(repo, restored._cache_payload).graph_equal(prior)
     assert [item.item() for item in repo.load_state_ref(_prior_ready_state_ref(repo, restored._cache_payload), reuse_live="never")] == [7]
     restored._cache_payload["prior_ready_state_digest"] = "0" * 64
     with pytest.raises(Exception, match="prior ready state"):
@@ -164,7 +168,7 @@ def test_sweep_reclaims_only_explicitly_reclaimable_direct_children(tmp_path):
         marker = {
             "format": _WORK_FORMAT, "version": _VERSION, "token": token,
             "object_ref_digest": "object", "operation_id": "operation",
-            "attempt_id": "attempt", "state": state,
+            "run_id": "run", "state": state,
         }
         (tmp_path / "store" / ".staging" / token / _WORK_MARKER).write_text(json.dumps(marker))
         return workdir
@@ -232,7 +236,7 @@ def test_explicit_rerun_uses_new_token_and_marks_only_superseded_work(tmp_path):
     assert new_marker["state"] == "retained"
 
 
-@pytest.mark.parametrize("failure", ("missing", "ambiguous", "wrong-marker"))
+@pytest.mark.parametrize("failure", ("missing", "ambiguous", "wrong-marker", "old-version"))
 def test_resume_rejects_invalid_work_before_source_open(tmp_path, monkeypatch, failure):
     """Missing, ambiguous, or foreign work metadata never opens a resume source."""
 
@@ -264,18 +268,22 @@ def test_resume_rejects_invalid_work_before_source_open(tmp_path, monkeypatch, f
         cache.compute(codec="numpy", target_chunk_bytes=1, managed=ManagedConfig(
             state_repo=repo, callbacks=[stop_after_checkpoint],
         ))
-    checkpoint = cache.compute.status(state_repo=repo).checkpoint_state_ref
+    checkpoint = cache.compute.status(state_repo=repo).checkpoint
     restored = repo.load_state_ref(checkpoint, reuse_live="never")
     token = restored._cache_payload["work_token"]
     recovered_stores = [store, other]
     if failure == "missing":
-        store.discard_local_state_staging(store._resolve_local_state_staging_id(token))
+        assert store._discard_abandoned_staging(token, store._staging_owner(token))
     elif failure == "ambiguous":
         (tmp_path / "other" / ".staging" / token).mkdir(parents=True)
     else:
         marker = tmp_path / "store" / ".staging" / token / _WORK_MARKER
         record = json.loads(marker.read_text(encoding="utf-8"))
-        record["attempt_id"] = "another-attempt"
+        if failure == "old-version":
+            record["version"] = 2
+            record["attempt_id"] = record.pop("run_id")
+        else:
+            record["run_id"] = "another-run"
         marker.write_text(json.dumps(record), encoding="utf-8")
     recovered = Repo._for_state_io(tuple(recovered_stores))
     monkeypatch.setattr(CachedDataset, "_load_source", lambda *_: (_ for _ in ()).throw(AssertionError("source opened")))
@@ -298,23 +306,113 @@ def test_completed_cache_restores_in_a_fresh_process_without_source_or_work(tmp_
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     cache = CachedDataset(ArrayDataset(np.asarray([[3], [4]], dtype=np.int32)))
-    state = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
-    for work in (tmp_path / "store" / ".staging").iterdir():
-        store.discard_local_state_staging(work)
+    state = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo)).final_state_ref
+    assert not any(path.name == "cache-work.json" for path in (tmp_path / "store" / ".staging").rglob("cache-work.json"))
     program = """
 import sys
 from dryml.core import Repo
 from dryml.core.store.dir import DirStore
 store = DirStore.open_existing(sys.argv[1])
-record = store.read_state_ref_record(sys.argv[2])
+record = store.read_node(sys.argv[2], kind='saved')
 repo = Repo._for_state_io((store,))
-cache = repo.load_state_ref(record.state_ref, reuse_live='never')
+cache = repo.load_state_ref(record, reuse_live='never')
 assert cache.spec is not None
 assert len(cache) == 2
 assert [[item.item() for item in cache] for _ in range(2)] == [[3, 4], [3, 4]]
 """
     completed = subprocess.run(
-        [sys.executable, "-c", program, str(tmp_path / "store"), state.digest()],
+        [sys.executable, "-c", program, str(tmp_path / "store"), __import__('dryml.artifacts.dataset', fromlist=['_saved_digest'])._saved_digest(state)],
         capture_output=True, text=True, check=False,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_completed_cache_replay_never_reinstalls_generation_or_reopens_source(tmp_path, monkeypatch):
+    """Only a newly acknowledged completion runs the cache publication hook."""
+    from dryml.artifacts import CachedDataset
+    from dryml.core import Repo
+
+    repo = Repo(DirStore(tmp_path / "store", query_index="none"))
+    cache = CachedDataset(EOFCheckpointDataset())
+    hook = CachedDataset._managed_post_publication
+    calls = []
+
+    def observed(self, *args):
+        calls.append(args[0])
+        return hook(self, *args)
+
+    monkeypatch.setattr(CachedDataset, "_managed_post_publication", observed)
+    result = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
+    generation = cache._cache_generation
+    monkeypatch.setattr(CachedDataset, "_load_source", lambda *_: pytest.fail("replay reopened source"))
+    replay = cache.compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
+    assert len(calls) == 1
+    assert cache._cache_generation is generation
+    assert result.final_state_ref.graph_equal(replay.final_state_ref)
+    assert result.execution.run_id == replay.execution.run_id
+    assert result.execution.invocation_id != replay.execution.invocation_id
+
+
+def test_cache_old_manifest_rejection_preserves_source_and_receiver(tmp_path):
+    """A prior cache envelope is rejected without rewriting or partial install."""
+    from dryml.artifacts import CacheIntegrityError, CachedDataset
+    from dryml.artifacts.dataset import _payload_record
+
+    cache = CachedDataset(EOFCheckpointDataset())
+    current = {"mode": "uncomputed"}
+    cache._cache_payload = current
+    record = _payload_record(None)
+    record["version"] = 2
+    raw = json.dumps(record)
+    path = tmp_path / "cache-manifest.json"
+    path.write_text(raw)
+    with pytest.raises(CacheIntegrityError, match="unsupported"):
+        cache.restore_state_from_dir_imp(str(tmp_path), codec=cache.state_codec)
+    assert cache._cache_payload is current
+    assert path.read_text() == raw
+
+
+def test_cache_same_run_resume_in_a_fresh_process_releases_allocator_lease(tmp_path):
+    """Retained EOF work crosses processes without borrowing an expired allocator."""
+    script = """
+import sys
+from dryml.artifacts import CachedDataset
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
+from dryml.managed import ManagedConfig
+from tests.artifacts.test_cached_dataset_resume import EOFCheckpointDataset
+store = DirStore(sys.argv[1], query_index='none')
+repo = Repo(store)
+cache = CachedDataset(EOFCheckpointDataset())
+def stop(*_):
+    raise RuntimeError('associated')
+try:
+    cache.compute(codec='numpy', managed=ManagedConfig(state_repo=repo, callbacks=[stop]))
+except RuntimeError as error:
+    assert str(error) == 'associated'
+status = cache.compute.status(state_repo=repo)
+from dryml.artifacts.dataset import _saved_digest
+print(_saved_digest(status.checkpoint), status.run_id, status.invocation_id)
+repo.close(flush=False)
+"""
+    first = subprocess.run([sys.executable, "-c", script, str(tmp_path / "store")], capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    digest, run, invocation = first.stdout.strip().splitlines()[-1].split()
+    resume = """
+import sys
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
+from dryml.managed import ManagedConfig
+import tests.artifacts.test_cached_dataset_resume as fixtures
+store = DirStore.open_existing(sys.argv[1], query_index='none')
+repo = Repo(store)
+cache = repo.load_state_ref(store.read_node(sys.argv[2], kind='saved'), reuse_live='never')
+fixtures._reject_source_open = True
+result = cache.compute(codec='numpy', managed=ManagedConfig(state_repo=repo))
+assert result.execution.run_id == sys.argv[3]
+assert result.execution.invocation_id != sys.argv[4]
+assert [item.item() for item in cache] == [7]
+assert not list(__import__('pathlib').Path(store.base_dir, '.staging').rglob('cache-work.json'))
+"""
+    second = subprocess.run([sys.executable, "-c", resume, str(tmp_path / "store"), digest, run, invocation], capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr

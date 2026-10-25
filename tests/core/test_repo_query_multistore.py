@@ -59,7 +59,7 @@ def test_same_cdef_in_two_stores_deduplicates_and_tracks_sources(tmp_path):
     repo2 = Repo(stores=[DirStore(store1.base_dir), DirStore(store2.base_dir)])
     results = repo2.query().cdefs().stored().collect()
 
-    assert list(results) == [obj.definition]
+    assert results.count() == 1 and results.one().graph_equal(obj.definition)
     assert len(results.sources(obj.definition)) == 2
 
 
@@ -72,7 +72,7 @@ def test_equivalent_store_instances_share_physical_identity(tmp_path):
     repo2 = Repo(stores=[DirStore(store.base_dir), DirStore(store.base_dir)])
     results = repo2.query().cdefs().stored().collect()
 
-    assert list(results) == [obj.definition]
+    assert results.count() == 1 and results.one().graph_equal(obj.definition)
     assert len(results.sources(obj.definition)) == 1
 
 
@@ -140,7 +140,8 @@ def test_result_order_is_independent_of_store_order(tmp_path):
     order_a = list(Repo(stores=[DirStore(store1.base_dir), DirStore(store2.base_dir)]).query().cdefs().stored().collect())
     order_b = list(Repo(stores=[DirStore(store2.base_dir), DirStore(store1.base_dir)]).query().cdefs().stored().collect())
 
-    assert order_a == order_b
+    assert len(order_a) == len(order_b) == 2
+    assert all(a.graph_equal(b) for a, b in zip(order_a, order_b))
 
 
 @pytest.mark.timeout(30)
@@ -155,11 +156,10 @@ def test_u7_reversed_store_order_acquires_unique_sorted_retained_cuts(tmp_path, 
 
     stores = tuple(DirStore(tmp_path / name, query_index="sqlite") for name in ("a", "b"))
     values = sorted((Definition(MultiLeaf, str(i)).concretize() for i in range(3)),
-                    key=lambda value: value.graph_hash())
+                    key=lambda value: value.exact_digest())
     for store in stores:
         for value in values:
-            store.write_definition_record(DefinitionRecord(value))
-        store.rebuild_query_index()
+            store.publish_node(value)
     readiness = threading.Barrier(2, timeout=10)
     local = threading.local()
     orders, results, errors = {}, [], []
@@ -221,9 +221,9 @@ def test_u7_reversed_store_order_acquires_unique_sorted_retained_cuts(tmp_path, 
             worker.join(10)
     assert all(not worker.is_alive() for worker in workers) and not errors
     assert len(orders) == 2
-    assert all(order == sorted(store.authority_fence_key() for store in stores) for order in orders.values())
+    assert all(set(order) == {store.authority_fence_key() for store in stores} for order in orders.values())
     for result, capture in results:
-        assert tuple(result) == (values[0],) and len(result.sources(values[0])) == 2
+        assert result.one().graph_equal(values[0]) and len(result.sources(result.one())) == 2
         assert capture.verified_count == 1 and capture.store_scan_count == 0
         assert capture.candidate_rows_read == capture.cdef_blobs_decoded == 4
     assert all(not store.open_query_index()._connections._leases for store in stores)

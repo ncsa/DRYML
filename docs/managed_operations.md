@@ -1,346 +1,534 @@
 # Managed Operations
 
-`dryml.managed` provides a synchronous, checkpointed lifecycle for methods that
-mutate DRYML Object state. It is lazy at `dryml.managed`: importing `dryml` or
-`dryml.core` does not import managed, execute, or dispatch. Managed does not
-submit work, start threads, provision environments, or sandbox code. It operates
-on trusted same-host Objects and Stores using local filesystem locks.
+Managed member arguments use the shared [signature contract](signatures.md),
+including explicit Node metadata refinements and materializing Object roles.
 
-## Declaring And Calling
+`dryml.managed` owns the lifecycle of state-mutating Object methods. Its
+durable-result lifecycle supports explicit checkpoints, optional immutable initial state,
+exact final selection, detached completion replay, deterministic starts,
+two-phase rerun, resume, operation-scoped ownership, fenced control CAS, metadata
+history, and independent status/interruption control. Importing Core does not
+import managed, Execute, Dispatch, or optional frameworks.
 
-Decorate an exact synchronous instance method with `@managed_operation`. The
-method must declare a required keyword-only `managed` parameter. Coroutines,
-generators, static/class methods, properties, and arbitrary or inconsistent
-callables are rejected. A synchronous `functools.wraps` wrapper chain is supported
-when every layer retains its exact forwarded target in a closure or default and
-exposes consistent signature evidence; every wrapper body still runs at its
-authored position. `@managed_operation` composes with one `@dryml.function` layer
-and one passive annotation layer in any written order without creating a second
-lifecycle or normalization boundary. Copied metadata alone is not declaration
-evidence.
+## Integration status
 
-Managed declarations also compose with Python's standard `@abstractmethod` in
-either decorator order. An abstract managed operation keeps its normal ABC
-obligation through the managed descriptor and any supported outer wrapper. A
-concrete subclass may inherit a concrete managed operation or replace an
-abstract managed operation with another `@managed_operation`; it may not replace
-an inherited managed member with a plain concrete method. That declaration fails
-at class finalization with `ManagedDeclarationError`, before any lifecycle starts.
-`@managed_operation(resumable=True)` permits a compatible unfinished attempt to
-restore its retained Object state before re-entering the method body.
+The previous StateRef/current-v2 execution path is retired. A decorated direct call
+now validates ordinary arguments once, selects admission, prepares/restores a
+selected saved start and executes the authored body with `ManagedContext`.
+Normal success returns `InvocationResult`: `.value` is the durable ordinary return,
+`.final_state_ref` is historical SavedNode metadata, `.status` is detached status,
+and `.execution` distinguishes operation, run, current caller and producer IDs.
+Compatible completed calls replay this metadata without receiver payload IO or
+mutation, even on an older compatible live receiver. A pending-repair
+call returns an explicit `AdmissionOutcome`; that is reconciliation, not ordinary
+method success. Declarations retain their checked synchronous signature rules.
 
-`return_state_ref=True` is an opt-in completion-result contract. The authored
-body must have an explicit `-> None` annotation, including its canonical
-postponed form; missing or incompatible annotations fail declaration. After
-successful body execution, publication, and final association, the caller
-receives that invocation's exact completed `StateRef`. A non-None body result is
-discarded with a fixed `RuntimeWarning`; if warning filters turn it into an error,
-final success is withheld. Unflagged managed methods retain ordinary return
-normalization.
+Core Execute's managed-owned adapter admits detached targets before materialization;
+it shares direct-call start, replay and recovery policy. Models and Artifacts consume
+the same InvocationResult and SavedNode contracts. Bounded local/subprocess consumer
+proofs and optional-backend limits are recorded in
+[Object State Lifecycle Verification](object_state_lifecycle_verification.md).
+Acquiring low-level admission or constructing metadata alone does not retain
+private state. U15's selected saved-start handshake does acquire physical grants.
 
-`store_parameter="store"` declares one optional keyword-only Store control for
-checkpoint and final closure publication. Omitted or `None` preserves normal Repo
-routing and required replicas. One explicit supported Store overrides placement
-for that invocation without changing source lookup, object identity, or control
-authority. It is definition-transported by the supported core worker path rather
-than serialized as an arbitrary live resource; no other Store parameter is
-accepted.
+### Execute transport boundaries
+
+[Generic Execute](execute.md) supplies detached invocation-graph transport;
+the managed-owned adapter interprets managed declarations, configuration and
+completion results. Generic Execute does not inspect status or
+rerun a managed method automatically. Admission, selected-start restoration and
+completion replay remain managed policy, including when invoked in a worker.
+
+Explicit transported configurations carry supported direct-DirStore descriptors
+and frozen callback membership, rather than live Repo/Store resources. Workers
+reopen those descriptors through their Session resource cache; unsupported
+resource types have no transport fallback. See [Repos and Stores](repos.md) for
+authority and resource lifetimes. Trusted same-host transport does not provision
+environments or promise automatic code migration in long-lived sessions; the
+[code-shift limitation](solutions/architecture-patterns/2026-09-18-code-shift-in-long-lived-sessions.md)
+continues to apply.
+
+## Caller configuration and start selection
+
+`ManagedConfig` remains immutable and keyword-only. It accepts borrowed
+`state_repo`/`control_store`, exact-boolean `rerun`, optional `start_from` SavedNode,
+and the caller-owned checkpoint callback list. `snapshot()` retains the immutable
+start metadata and copies callback membership into a tuple. Config construction
+checks saved completeness only; it does not promise current availability.
 
 ```python
-from dryml import Repo
-from dryml.core.object import Pickleable
-from dryml.core.store.dir import DirStore
-from dryml.managed import ManagedConfig, ManagedInterrupted, managed_operation
-
-
-class Counter(Pickleable):
-    def __init__(self, value=0):
-        self.value = value
-
-    @managed_operation(resumable=True)
-    def advance(self, amount, *, managed):
-        self.value += amount
-        managed.checkpoint()
-        if self.value >= 10:
-            managed.interrupt()
-        return self.value
-
-
-state = DirStore("./counter-state")
-control = DirStore("./counter-control")
-repo = Repo([state])
-counter = Counter(repo=repo)
-try:
-    counter.advance(2, managed=ManagedConfig(state_repo=repo, control_store=control))
-except ManagedInterrupted:
-    # Inspect or resume using the same state Repo and selected control Store.
-    raise
+config = ManagedConfig(
+    state_repo=repo,
+    control_store=control_store,
+    rerun=True,
+    start_from=checkpoint_b,
+)
+result = experiment.train(epochs=20, managed=config)  # user-authored managed method
+value = result.value
+final = result.final_state_ref
 ```
 
-The bound method accepts ordinary arguments plus `managed: ManagedConfig | None`.
-Method code receives a private `ManagedContext`, never the configuration itself.
-`ManagedConfig.state_repo` accepts a borrowed `Repo`, an existing borrowed
-`Store`, or `None`. A Store is wrapped in a private one-Store Repo with ordinary
-unconfigured closure behavior; paths and Store lists are not managed inputs.
-`None` uses the configured current Repo at the moment the managed method is
-invoked and fails when none is configured. A temporary nested session selection
-therefore applies to an omitted `state_repo`; an explicit `state_repo` always
-wins. The selected Repo is retained intact, including its routes and replicas,
-and is never reduced to the Store containing a prior StateRef.
+Supplying `start_from` without `rerun=True` fails with `start_requires_rerun`
+**before restore or cleanup**, on absent, completed and unfinished operations alike.
+Rerun selects supplied start, otherwise the operation's immutable recorded initial,
+otherwise current live state. It never opens an unselected initial payload and
+never falls back from an unavailable/incompatible selected start. A saved start
+seeds latest recovery without reserialization; a live start creates no checkpoint.
+An override changes neither operation identity nor the recorded initial default.
 
-Ordinary authored arguments and returns use the shared [Signatures](signatures.md)
-boundary. The receiver and injected `managed` control are excluded. Managed binds
-and selects before lifecycle publication, realizes Mat arguments under its retained
-ownership reservation, then applies a fresh return boundary after its terminal
-interruption guard and before final publication. Unannotated structural returns
-therefore materialize; use a top-level `Ref[StateRef]`, `Ref[ObjectRef]`, or other
-supported Ref form when returning structural data deliberately.
+Ordinary compatible completed calls select replay. Ordinary unfinished calls
+require both `resumable=True` and a usable latest recovery checkpoint, restore
+that checkpoint, retain the run ID, and allocate a fresh invocation ID. Changed
+normalized ordinary arguments require explicit rerun. Missing latest recovery
+does not fall back to initial or live state.
 
-`control_store` is an optional exact `DirStore`. When omitted, an Execute worker
-uses its setup-selected control Store; otherwise it resolves once from the
-effective `state_repo.default_store`, not from a matching route or root save
-destination. Explicit `control_store` always wins. An absent, unwritable,
-ZipStore, or otherwise unsupported effective default fails before workload
-execution; choose an independent supported control Store explicitly. `rerun` is
-an exact bool. `callbacks` is `None` or a caller-owned list of at most 64
-callables; invocation snapshots that list without mutating it.
+Rerun is two phase: journal a proposed run/start token while old current remains;
+validate selected state, prepare/protect physical grants, consume Core's one-shot
+`Repo.prepare_restore`, confirm the saved recovery association, then admit by exact
+owner/generation CAS. Only after confirmed association/admission are superseded
+non-durable start/latest/final roots released. Initial, durable and independent
+user-save grants survive. Garbage reclamation uses full StateKeys after all
+source leases end. Only already-unreferenced physical garbage-removal OSErrors
+become a cleanup report; grant, publication, control and index failures propagate.
 
-When a `ManagedConfig` crosses core Execute, it is a detached invocation-graph
-value, not a transferred live Repo or Store. Supported direct-DirStore state and
-control resources are reopened in the worker through its active Session resource
-cache, so matching worker resources are reused and different supported opening
-settings remain distinct. ZipStore and arbitrary live resources remain rejected
-for this transport. Capture snapshots the exact policy and callback membership;
-callbacks execute in the worker after the same publication-and-association
-boundary as local callbacks. Explicit config fields retain precedence over worker
-defaults, while omitted fields use the invocation-time current Repo and the
-worker control default described above. An explicit transported config opens
-selected authority during worker decode, so malformed or unavailable authority
-fails before the managed method mutates state. Plain resource descriptors in
-workload code remain inert until that code requests reconstruction.
+A no-selected-start live rerun may still borrow deferred bytes from its former final
+(for example a completed CachedDataset). Its old final association is retired at
+admission, with the grant carried as explicit `release_pending` debt until the new
+final publication replaces it. This does not select or restore that old checkpoint,
+designate an initial state, or fabricate latest recovery. Failed execution retires
+the debt; a failed retirement remains inspectable on the primary exception as
+`cleanup_error`/`cleanup_outcomes`. A subsequent invocation reconciles that debt
+without execution before a separate retry. Required grant/index failures are never
+converted to successful physical-garbage reports.
 
-`Experiment.train(callbacks=..., observer_strict=...)` is a narrow exception to
-ordinary authored-argument identity. Those two declaration-owned values configure
-invocation telemetry, not training behavior, and are excluded from the managed
-argument digest. No other managed argument receives that exemption. Compatible
-resume may therefore change or omit telemetry without `rerun=True`; retained
-updates and the attempt identifier do not change, and external telemetry is not
-replayed. Local callback instances remain process-local. Core Execute accepts only
-`FactorySpec` observer entries for this slot, rejects a live callback/client during
-capture, reconstructs each observer after worker admission, and never embeds it in
-managed control or Object state. See [Models](models.md#invocation-telemetry) for
-backend protocols, strict/default delivery, and cleanup behavior.
+Before-hook validation failure leaves the live receiver usable. Hook failure can
+invalidate it while preserving old persisted current; there is no rollback.
+Uncertain CAS retains exact previous/proposed fingerprints and both resource sides.
+Accepted interruption advances the independent generation fence and is checked
+at admission CAS and the execution handoff.
 
-Execute reports worker loss, cancellation, and lost delivery through its ordinary
-execution errors. It does not inspect status, reconcile an operation, retry, or
-rerun a managed method automatically. After such an error, reconnect to the
-chosen state/control authority and use `status()` or make an explicit compatible
-managed call to decide recovery.
+Pending recovery **terminates**: unadmitted preparation is fenced/abandoned and its
+exact resources reconciled, while old current survives; admitted preparation keeps
+its run/latest; incomplete finalization becomes a failure preserving latest;
+recorded completion is inspected without final payload reads. No receiver restore,
+capture, callback or body is replayed. A separate invocation must freshly prepare
+or restore for later work. There is no cross-invocation restore receipt. Complete
+result/final evidence is confirmed idempotently and completed without normalizing
+again or replaying consumer hooks. A prepared final association can be completed
+after a crash only when its token, run, invocation and generation match the
+preparation and its exact saved selection, resources, adopted physical grants,
+result and publication acknowledgements are freshly confirmed. A former run's
+`release_pending` final is not a candidate. An incomplete capture records failure and
+preserves latest recovery; a separate resumable invocation must restore freshly.
 
-`Fold.compute(checkpoint_every=1000, store=None)` is resumable. At each positive
-exact cadence it saves processed-yield count and bounded host carry together, and
-it saves an exhausted checkpoint only after positive root-output EOF, before
-finalization. Compatible recovery uses the
-same managed attempt and argument authority, restores state before body entry,
-reselects Method implementations without rerunning the initializer, and skips a
-fresh Dataset cursor to the saved count. Trusted version-2 exhausted recovery retries finalization
-without loading the source. `store` uses the managed Store-override path, so it
-governs checkpoint and final publication without creating Fold control records.
+## Author checkpoint and selection controls
 
-Version-1 active Fold progress remains compatible. Valid legacy exhausted progress
-restores as ambiguous and is rejected during Fold body resume admission with
-`ManagedRerunRequiredError("rerun_required", ...)` and explicit `rerun=True`
-guidance. Managed has already entered running authority and restored framework
-state; Fold rejects before native carry allocation, role selection/invocation, or
-source acquisition. The ordinary failed transition retains the checkpoint and a
-valid receiver for fresh rerun. Save/load preserves legacy provenance. Restore-hook
-failures for malformed/unknown envelopes retain the normal invalid-graph behavior.
-No automatic migration or repair of historical completed Values occurs.
+The injected context exposes read-only `initial_state_ref`, `latest_checkpoint`,
+`final_state_ref`, `is_resuming`, operation/run/invocation IDs and generation.
+`cleanup_report` exposes accumulated physical-garbage-only removal outcomes.
+References are immutable SavedNode metadata; they are not cached availability
+proofs. Context mutation is limited to its original active process/thread/task.
+Retired or foreign use raises `inactive_context`, recursive callback mutation
+raises `recursive_checkpoint`, and stale generation/ownership fails before capture.
 
-An incompatible cadence or other authored argument requires `rerun=True` under
-the normal argument-digest rule. A rerun starts a new cursor, count, initializer,
-and carry but does not clear an already completed Value before replacement succeeds.
-Interruption, branch failure, ownership conflict, or publication failure is never
-reported as completed. A successful direct or supported same-host worker invocation
-leaves an exact final StateRef that a result reader can restore without the
-source/model payload or this control Store.
+```python
+@managed_operation(resumable=True)
+def train(self, epochs, *, managed):
+    if managed.initial_state_ref is None:
+        managed.checkpoint(initial=True)
+    for epoch in range(epochs):
+        self.train_epoch()
+        best = managed.checkpoint(durable=True)
+    managed.final_state(best)
+    return {"epochs": epochs}
+```
 
-`CachedDataset.compute(codec=..., store=None, target_chunk_bytes=None)` combines
-both declaration options. A checkpoint associates only progress metadata and an
-opaque Store-owned work token; sealed bytes remain in retained direct-DirStore
-working storage. Compatible resume authenticates that dependency before source
-access and applies the saved yield position to a fresh cursor. Completed
-same-codec rerun can republish without source access. Finished state is
-self-contained, while a progress StateRef ceases to be resumable if its working
-dependency is removed.
-See [Generic Execute](execute.md) for backend lifecycle boundaries,
-[Repos and Stores](repos.md) for borrowed Store authority, and
-[Session](session.md) for the cache scope used during worker reconstruction.
+The body above returns an ordinary dictionary. Its caller receives InvocationResult
+after the dictionary, exact selected final, required grants and index prerequisites
+are confirmed and completion's own fenced mutation is acknowledged.
 
-Bound operations also provide
-`status(*, state_repo=None, control_store=None)` and
-`request_interrupt(*, state_repo=None, control_store=None, expected_attempt_id=None)`.
-They read only caller-selected authority and do not run workload hooks. Status
-returns immutable `ManagedStatus` values such as `not_started`, `running`,
-`interrupted`, `failed`, or `completed`. An interruption request returns immutable
-`InterruptRequestResult` status; it requests a later cooperative safe point and
-does not guarantee another checkpoint.
+`checkpoint(states=None, durable=False, initial=False)` uses Core's routed save
+batches. `states` accepts a partial StateSpec or rooted LocalState map: explicitly
+selected compatible states skip capture, and each remaining distinct live stateful
+node captures once. The returned SavedNode is complete, including for an empty or
+entirely stateless graph. No checkpoint is implicitly initial. `initial=True`
+designates it explicitly; `initial_state(saved)` can instead select an existing
+complete graph, including the first designation during resumed execution. Exact
+repeat designation is idempotent; another initial raises `initial_conflict`.
+Equality preserves facets, sharing, roles, quotations **and retained construction
+evidence**, and does not use packet placement or hashes as sufficient proof.
 
-An ordinary wrapper outside a managed declaration exposes the same bound call,
-`status`, and `request_interrupt` surface before its first call. Its before/after,
-exception, and return-value logic is not bypassed: the inner declaration owns the
-one lifecycle, and the outer wrapper receives its completed result. Conversely, a
-wrapper inside managed runs after managed admission. Opaque wrappers, copied
-DRYML-owner metadata, aliases for one hidden managed declaration, duplicate
-managed layers, and unsupported async/generator forms fail during declaration or
-class finalization rather than silently changing lifecycle ownership.
+`final_state(saved)` checks the receiver projection against the original supplied
+graph, current live codec compatibility and fresh state availability, then protects
+that unchanged selection with an independent final root. It neither saves nor
+restores the live receiver. Earlier or mixed-point states are allowed when
+compatible; the live object may remain later than final. Selecting a final protects
+it even if a subsequent checkpoint supersedes latest. Designation does not record
+completion, and a later exception or accepted interruption still prevents success.
 
-## State, Control, And Ownership
+Each explicit checkpoint associates complete latest recovery and required grants/
+index acknowledgements **before** running its configured callbacks in list order.
+A callback exception reaches the author, stops later callbacks in that event and
+leaves the associated checkpoint latest. An uncaught exception fails the invocation;
+a caught ordinary checkpoint/callback error can continue to valid state finalization.
+Confirmed uncommitted association preparations settle without hooks before later
+work. Uncertain control/index work remains explicit recovery, not a success guess.
+Callbacks run outside capture reservations, Store writer and short control locks.
 
-The invocation context exposes read-only `state_repo`, `control_store`,
-`operation_id`, `attempt_id`, `is_resuming`, and `checkpoint_state_ref`.
-`state_repo` is the resolved borrowed Repo; a Store input is therefore visible
-through its temporary wrapper. Contexts are runtime-created, cannot be
-constructed by callers, reused after exit, transferred to another thread/process,
-or entered recursively.
+The result owner executes the authored body under the same owner,
+then normalizes/encodes the ordinary value **before** requesting state
+finalization. It uses the explicit final unchanged, or captures once if no final
+was selected. Automatic final capture invokes zero checkpoint callbacks. An explicit
+terminal checkpoint selected as final therefore has one capture/one callback, with
+no second capture or callback at finalization. Owning return normalization runs
+once; separately nested `@function` calls keep their own boundaries. Replay runs
+ordinary argument normalization for compatibility but no return normalization.
 
-Before user code, managed validates selected state and control authority and
-acquires the Cartesian set of every distinct physical state Store and every
-stateful ObjectId in the exact receiver graph. The lock order is stable. Any
-shared Store/ObjectId pair conflicts even when callers use different control
-Stores, route orders, or Store handles; disjoint physical Store sets are
-independent. Direct DirStores use an in-root managed lock namespace; a
-path-backed ZipStore uses a sibling namespace derived from its archive path, not
-its extraction directory. Unsupported Store identity/topology fails before user
-code. Incomplete owner-probe evidence is a recovery error, never proof that an
-owner is gone.
+## Durable ordinary values and fresh lazy access
 
-The resolved state Repo, control Store, and physical state Store set remain fixed
-for an invocation. Adding, removing, replacing, or closing connected resources
-while that topology lease is active fails. Later routing/default-order changes can
-affect a later checkpoint but not the in-flight save or selected control Store.
-Managed borrows caller Repos and Stores: it releases only temporary wrappers and
-leases it created, and never closes borrowed handles.
+The result grammar is closed:
 
-## Checkpoints And Recovery
+- Exact Python `None`, `bool`, `int`, `float`, `complex`, `str`, `bytes`.
+- Exact `list`, `tuple`, `dict`, `set`, `frozenset` recursively containing supported
+  values. Keys/set members must be admitted hashable values.
+- Nonobject NumPy scalars and exact `ndarray`, using the common explicit dtype
+  codec, including structured nonobject dtypes, shape, byte order and logical bytes.
+- Explicit immutable Core metadata: Definition/ConcreteDefinition/ConcreteNode,
+  ObjectId, StateKey, LocalState, IdentitySpec and StateSpec. Graph codecs preserve
+  sharing, quotation and retained construction and never materialize metadata.
+  Every metadata root in one result uses one shared Node table and one decode
+  owner. Returning a parent alongside its child, or two parents sharing a child,
+  preserves that same occurrence across values; independent recipe-equal nodes
+  remain independent. IdentitySpec/StateSpec roots use the same table too.
 
-`ManagedContext.checkpoint()` deep-captures through the selected Repo's normal
-routing policy with the invocation's exact graph reservation. It does not pass
-an explicit Store or force placement/replication. `interrupt(cause=None)` follows
-the same checkpoint boundary, then records interruption and raises
-`ManagedInterrupted`, optionally chained from `cause`.
+Containers retain distinct tags, dictionary insertion order, DAG aliases and scalar
+floating bits (including negative zero, infinities and NaN payloads). Cycles,
+arbitrary subclasses, custom/opaque values (including frozen summary dataclasses),
+callables, generators, live Objects/resources and object-dtype arrays are rejected.
+Return a supported container for a custom summary. There is no pickle/dill or
+resource fallback. The separate managed result codec defaults to an 8 MiB byte
+budget, 65,536 nodes/container entries, depth 80 and 262,144 integer bits;
+the node budget includes shared metadata handles and their internal wrappers,
+and metadata graph depth includes retained construction edges. Malformed shared
+views, tags, references, versions and bounds raise `ManagedResultError`.
+Unsupported returns fail before automatic final capture.
 
-Before a checkpoint or final state is associated with control authority, managed
-requires every routed publication and required exact-recovery dependency to be
-complete. It commits every dirty buffered Store required by the report, including
-reused state or embedded-reference sources, but does not blanket-flush unrelated
-connected Stores. A ZipStore commit can publish earlier buffered work in that
-required archive. Managed then validates each selected replica and exact recovery,
-including fresh path-backed ZipStore views, before associating the StateRef in the
-control Store. A publication, commit, validation, or association failure leaves
-completed immutable state intact, preserves the prior associated checkpoint, and
-does not report a new checkpoint or final success. Core partial `StoreReport`
-evidence remains available through publication failures.
+Result bytes are immutable and content addressed at
+`managed/results/v2/<shard>/<sha256>/current.json` in the selected control Store.
+Their result kind/version/key is retained in current and history metadata. Result
+metadata embeds its complete metadata closure; references in a value **do not**
+grant retention of private StateKey data. State cleanup therefore does not prevent
+status, replay or value access while result bytes remain.
 
-Checkpoint and final callers consume a private, one-use completed-publication
-event instead of immediately repeating the publisher's exact closure validation.
-It matches the full StateRef, exact report and originating Repo, active invocation
-and graph ownership, process/thread, selected replicas, and required durable
-recovery coverage. This event describes a completed operation, not continuing
-Store validity. It holds no Store fence, topology lease, or open payload source
-and is neither serialized nor recorded in control. It expires before lifecycle
-boundary hooks, callbacks, and invocation exit.
+The closed `dryml-managed-result` packet and typed result reference are version 2.
+The packet has exactly `schema`, `version`, `nodes`, `root`, and `metadata` fields.
+`metadata` is null when absent, otherwise one `dryml-node-graph/v1` identity-3 block
+with a single shared table and exact authenticated root views. Each `metadata`
+result row contains a view index, rather than a separate graph blob. All views
+must be referenced by reachable result rows; forged views, unused blocks/roots,
+and invalid wrapper values fail closed. Managed Execute adapter version 2 carries
+only the typed v2 reference and detached source descriptor. Result packet/reference
+v1, adapter v1 and the old result storage namespace are incompatible and are
+rejected with original bytes intact, without migration or resource fallback.
 
-After required commits, the publisher checks connected replicas and exact closure
-within one explicit Repo read cut. Required direct durability shares that proof
-only for the exact same built-in handles, views, and selection coverage while
-the cut remains uninterrupted. Different coverage or overridden readers retain
-independent validation. Every required ZipStore is freshly reopened and validated
-under an independent durable cut; temporary Repos and reopened Stores close
-before event delivery. All publisher fences close before control acquisition.
-Each selected built-in replica's locally advertised payloads are checked in its
-own view; a valid first replica cannot hide corruption in another selected replica.
-Control association, post-callback decisions, later status, resume, and recovery
-always observe fresh authority, so deletion after publication can still prevent
-association and deletion after completion can still prevent recovery.
+InvocationResult retains only detached values and a `ResultSource` (canonical local
+DirStore path plus persistent UUID), never an open Repo/Store, connection, reader,
+lease or availability proof. Closing the original Repo or worker leaves status,
+IDs and reference inspection usable. Every `.value` access opens a **fresh** source,
+validates its UUID and result kind/version/key, protects the byte-read lifetime,
+checks the content hash and decodes anew. Missing/corrupt result bytes, an absent
+source or another Store installed at the same path raises `ManagedResultError`
+only on lazy access, with no reexecution. A prior decoded value cannot extend a
+stale source's validity. Unsupported source kinds have no serialization substitute.
 
-Framework-owned checkpoint, completion, and interruption field updates acquire the
-short control lock, then a new explicit Repo read cut with ordered Store fences.
-They reread current/pending authority and check the running owner and generation;
-an interruption decision uses the newly read request. Within this one cut,
-consistent digest resolution and complete-equality StateRef closure validation may
-be shared across current/proposed checkpoint and final fields. Every occurrence
-still checks its receiver ObjectRef association. A changed final StateRef needs its
-own closure validation, even when a lookup hash collides.
+Completion replay preserves the original run and producer invocation, while
+allocating a fresh caller invocation. It runs no body, restore, capture, checkpoint
+callback, owning return normalization or `_managed_post_publication` consumer hook.
+That optional private consumer receives `(final_saved_node, borrowed_repo, report)`
+only after a new completion is acknowledged; `report` is None for selected finals.
+Its failure propagates while completion remains recorded and is never redelivered.
+The raised consumer error exposes detached `.invocation_result` metadata rather
+than a failed lifecycle projection.
 
-This sharing requires unchanged built-in Store readers; overridden readers retain
-their independent authoritative calls. General caller-supplied control builders
-also retain separate current/proposed validation boundaries and their original
-invocation/error order. The field-update cut ends after synchronized current
-replacement, before acknowledgement hooks and callbacks. An acknowledgement
-fault confirms current authority afresh; pending-intent reconciliation, callback
-work (including disjoint nested invocations), post-callback decisions, later
-status, resume, and recovery never inherit an earlier transition's proof.
+Uncaught authored/result errors retain execution IDs, optional
+`checkpoint_state_ref`, and detached `.failed_result` inspection. Publication or
+index ambiguity retains its authoritative mutation/cut evidence instead of
+pretending to contain an ordinary successful value. A committed completion whose
+own index projection fails remains completed, raises the explicit partial error,
+and withholds ordinary delivery. A later repair call terminates with
+`AdmissionOutcome("completion_recorded", ...)`; a subsequent call replays the value.
 
-Callbacks receive `(live_object, context)` in caller order only after both state
-publication and control association succeed. They may inspect
-`context.checkpoint_state_ref` or save an independent result through
-`context.state_repo`. They are trusted developer code and must not mutate the
-managed Object or context. A callback error stops later callbacks, retains the
-associated checkpoint, records `callback_error` best-effort, and is re-raised;
-there is no retry or rollback of external effects. Final completion is not a
-callback boundary.
+Managed publication uses provisional internal Core grants, not a permanent user-save
+root for each checkpoint. Root association reuses the two-phase preparation journal:
+prepare/protect new physical grants, confirm adoption, CAS current, acknowledge the
+owning control mutation, then retire only superseded non-durable start/latest/final
+tokens. Initial, durable, independent user and active-reader protection are separate.
+Partial Core publications preserve their exact provisional resource ledger/report;
+they never become latest just because bytes exist. Pending recovery performs no
+capture, restore, body or callbacks. Later resumable execution freshly restores.
 
-`Experiment.train` is the scoped exception to the usual absence of a terminal
-callback boundary: it explicitly stages and checkpoints its terminal training
-state inside its own managed body. Its private observer runs first after that
-checkpoint is published and associated, writes the pending ExperimentData row,
-then evaluates checkpoint-bound Artifacts in canonical artifact-key order and records their
-terminal row status. Only then do caller callbacks run in their original order,
-followed by the normal interruption decision. This is Experiment policy, not a
-generic managed final-hook protocol. A callback failure retains the associated
-checkpoint and any independently published Artifact/history state; it never
-reports overall managed completion.
+### Explicit Retention And Cleanup By Operation
 
-The `callbacks` above are `ManagedConfig.callbacks`; they are strict durable-
-checkpoint observers receiving `(live_object, context)`. They are unrelated to
-`Experiment.train(callbacks=...)`, whose Keras-native or Torch/JAX host events are
-best-effort by default, have no durable association, and run inside trainer-native
-event ordering after DRYML has retained truthful accounting. A telemetry observer
-cannot replace this managed callback boundary or make external reporting
-recoverable.
+During a body, `managed.retain(saved)` adds an independent explicit root for a
+complete compatible SavedNode, without capture, restore or private-state serialization.
+Repeating the exact retained selection is idempotent. `managed.release(saved)`
+releases matching explicit and durable roots only: initial/latest/final roots,
+another operation, independent user saves and active readers remain effective.
+Both validate the original active caller and owner/generation fence. Released root
+metadata remains inspectable. Explicit roots and durable checkpoints survive reruns
+until explicitly released.
 
-Experiment accepts only its direct `Mapping[str, Template] | None` artifact
-mapping. It validates the configured Template-role Definition quotations before it
-changes training phase or invokes the trainer. This is Experiment-owned inert
-definition checking, not a managed lifecycle hook: it may inspect recipe roots and
-managed declarations but does not construct Artifacts, materialize training
-inputs, or publish state.
+```python
+first = managed.checkpoint()
+managed.retain(first)
+# Later, after another checkpoint replaces latest:
+outcomes = managed.release(first)
+```
 
-Status, interruption, resume, and recovery locate retained StateRefs across the
-caller-supplied state Repo rather than re-evaluating current routing. One complete,
-non-conflicting exact closure is sufficient; identical replicas are accepted, but
-missing, conflicting, or incomplete authority raises `ManagedRecoveryError`.
-Control records contain no Repo locator, Store handle, portable definition, or
-state payload. After restart, callers reconnect the required state Stores and
-select the intended control Store themselves.
+Outside a body, use the selected control authority and detached operation ID:
 
-Compatible unfinished work resumes its retained attempt by restoring the supplied
-live graph. Completed or incompatible unfinished work requires `rerun=True`,
-which starts a new attempt from current valid live state without resetting it.
-Resume restores Object state, not a Python stack, unsaved external resources, or
-semantic compatibility with changed method code. A restore-hook failure invalidates
-the supplied graph for later framework state IO; load a fresh exact graph from the
-retained checkpoint before retrying.
+```python
+from dryml.managed.control import ManagedControlStore
 
-## Control Format
+control = ManagedControlStore(control_store, repo)
+roots = control.list_checkpoints(result.execution.operation_id)
+outcomes = control.cleanup_checkpoints(
+    result.execution.operation_id, tokens=[root.token for root in roots]
+)
+historical_roots = control.list_checkpoints(
+    result.execution.operation_id, include_released=True
+)
+```
 
-Managed control is separate bounded canonical JSON authority rooted at `managed/`
-in the selected control DirStore. It uses the `dryml-managed` v1 format gate,
-generation-numbered current snapshots, a stable control lock, staged initial
-operation directories, and `dryml-managed-pending` v1 replacement intents.
-Records retain lifecycle identity, state, request, ownership evidence, and
-associated StateRef digests, not checkpoint payloads or a continuation. Reads do
-not initialize an absent namespace. Malformed, pending, incomplete, unreadable,
-or unsupported control authority is a control/recovery error, not absent or
-successful work. See [Formats](formats.md) for the durable grammar.
+Each root exposes its kind, token, saved selection, disposition and exact affected
+Store/full-key resources. Listing reads bounded current metadata, not payloads or
+all operation history. `tokens=None` explicitly cleans all remaining associations,
+including initial/latest/final/durable roots. Unknown tokens fail before release.
+Cleanup takes nonblocking operation ownership: an active invocation returns an
+`already_running` conflict immediately rather than waiting or interrupting it.
+Unsettled preparation requires separate reconciliation before explicit cleanup.
+
+Cleanup journals `release_pending` before releasing grants, then acknowledges
+`released` without erasing historical checkpoint/final/result metadata. A disconnected
+or failed grant target stays pending/protected. Reconnect its exact Store and retry
+the same tokens; acknowledged targets are not granted authority over other roots.
+The returned per-target `StateCleanupOutcome` entries use the Repo cleanup contract
+in [Repos and Stores](repos.md#inventory-explicit-retention-and-federated-cleanup).
+Independent targets continue after ordinary target failure; unsafe dependent work
+is unattempted. Grant/association/withdrawal/index failures never become successful
+garbage reports. Required failures in automatic checkpoint/rerun cleanup propagate
+with `.cleanup_outcomes`; independent completed deletions are preserved.
+
+An active foreign reader can leave a released root's payload `in-use`; no deletion
+is queued, so retry `repo.delete_states([key])` after that reader exits. Release
+inside the same caller's key scope instead reports `in-use` without retiring its
+root; retry release after leaving the scope. All own reader/publication leases end
+before automatic cleanup enters a separate exclusive deletion phase, never an upgrade.
+
+Only failure to remove already-unreferenced private garbage after confirmed
+authority/index changes preserves checkpoint/result success. `managed.cleanup_report`
+and `InvocationResult.cleanup_report` expose `(domain, key, removal_outcome)` entries;
+retry the exact incarnation via `store.retry_state_removal(key, removal_outcome.incarnation)`.
+Ordinary `InvocationResult` success is unchanged. Historical completion, exact saved
+references and `.value` remain inspectable after state cleanup. Loading reclaimed
+state raises unavailable; a compatible completed call replays its result without
+body, capture or restore. A separately unavailable ordinary-result source fails only
+on `.value`, without reexecution. No per-checkpoint whole-Store liveness scan or
+deletion of history is used to repair derived indexes.
+
+`interrupt(cause=None)` validates the optional BaseException cause, makes one explicit
+checkpoint, then requests and records interruption; the resulting ManagedInterrupted
+chains that cause. External requests need not capture unsaved live state. Safe points
+check fresh run/invocation/generation/request authority before state association and
+after callbacks/body return. Catching an Exception cannot turn an accepted request
+into success, including after final selection. KeyboardInterrupt preserves latest
+without an extra capture and is surfaced as ManagedInterrupted with its cause.
+
+## Identity and metadata-first admission
+
+The selected control authority domain and stable **operation ID** identify a
+logical operation. The operation digest uses the receiver's canonical object
+projection (`dryml-object-projection/v2`) plus its declared managed member:
+
+- ObjectIds, sharing, topology and typed link roles are retained.
+- State selections on graph references are omitted recursively.
+- Quoted recipe/configuration data stays exact, including checkpoint pins inside
+  those quotations.
+- Normalized ordinary arguments are **separate compatibility evidence**. Changing
+  arguments does not fork operation identity; ordinary reuse/resume requires a
+  match. Higher-level explicit rerun preparation may select new arguments.
+
+Three identifiers have deliberately different meanings:
+
+| Identifier | Lifetime |
+|---|---|
+| Operation ID | Stable projection-plus-member digest within selected control authority |
+| Run ID | UUID allocated on first start or explicit new run; retained across resume |
+| Invocation ID | Fresh UUID for every admission, including a completed-replay caller |
+
+`producer_invocation_id` records which invocation produced completion. A later
+caller has its own fresh invocation ID and does not replace that producer merely
+by inspecting historical completion. `attempt_id` and `expected_attempt_id` are
+removed in this breaking cutover; use run/invocation/generation preconditions.
+
+`AdmissionIdentity.from_call(receiver, declaration, args, kwargs)` accepts a
+detached concrete Node and a checked managed declaration. Binding/default
+normalization never needs a live Object. Stateful receiver identities must
+already be bound. Ordinary values use the bounded closed argument grammar;
+unsupported values fail without custom serialization hooks. A signature adapter
+with explicitly selected authority can construct `AdmissionIdentity` from its
+normalized argument digest directly.
+
+`ManagedControlStore.admission(identity)` acquires ownership and examines selected
+control metadata before any realization. Its `OperationAdmission` exposes
+`current`, stable `run_id`, fresh `invocation_id`, and an execution-only
+`realize(callable)` seam. That callable receives the detached Node while the
+**same owner remains held**. Transport integration must use this seam before
+receiver reconstruction, so completed replay selection need not open a reclaimed
+receiver checkpoint. Recovery admissions report `reconciled=True` and refuse
+realization: reconciliation terminates separately from execution.
+
+The managed-owned internal `runtime.admit_execution(identity, declaration,
+config.snapshot(), control, realize=..., execute=...)` layers U15 policy on that
+same admission. It accepts detached receiver and normalized argument authority;
+only an execution branch calls `realize` with state-unpinned receiver metadata,
+then performs the selected one-shot restore. The same lifetime owner remains held
+through `execute(admission, running_snapshot, live, is_resuming)`. This integration
+callback is not a public completed-operation result or a replacement state machine.
+
+## Operation ownership and shared mutation
+
+Ownership is **one nonblocking lifetime operation lock**, keyed by selected
+control authority domain plus operation ID. A duplicate same-operation admission
+raises `ManagedConflictError("already_running", ...)`; it does not wait, join or
+take over. Different selected control Stores are independent authority domains.
+Callers must choose the intended domain consistently.
+
+There is no persisted Cartesian descendant Store/ObjectId exclusion and no
+process-local graph-wide managed overlap rejection. Distinct operations can share
+saved dataset identities and the same read-only live dataset, including across
+threads, tasks and same-host spawned workers. Each operation has independent
+control/results/provenance ownership. **Callers synchronize shared live mutation**,
+including reads/captures/restores affected by that mutation. Core's exclusive
+state-IO reservations still protect actual overlapping capture/restore/reuse;
+they are not an operation-lifetime lock.
+
+An ownership token belongs to its creating process, thread and asyncio task.
+Inherited, foreign and retired tokens cannot mutate authority or release another
+token's lock. Active invocation ID and generation are mandatory owner fences for
+checkpoint, interruption, completion and resource-release authorization. Root
+intent metadata retains exact affected resources and irreversible dispositions;
+stale callers cannot modify another invocation's ledger. A metadata authorization
+is not a transferable physical grant-release receipt.
+
+## Independent short control
+
+The lock order for paths that need multiple resources is:
+
+1. Lifetime operation owner, for an admitted execution owner.
+2. StateKey leases globally ordered by Store authority domain and full StateKey.
+3. Store writer fences ordered by stable authority domain.
+4. Short SQL transactions **or** short control CAS, without overlapping them.
+
+Short control never acquires/waits for an earlier-order lock, performs graph
+preparation, runs a hook, or reads private state. Builders and metadata decoding
+run outside short control. Store journal registration/invalidation precedes CAS;
+classification, Store projection/SQL maintenance and acknowledgement occur after
+control is released. Pending journal evidence invalidates coverage through that
+gap. Projection failure preserves committed control and mutation/cut evidence;
+it is an actionable partial outcome, not permission to overwrite completion.
+
+Control publication never waits for short control while retaining a Store writer
+fence. Its registered mutation remains protected through a nonblocking short-lock
+acquisition; contention refuses with `control_busy` and retained cancelled-cut
+evidence for reconciliation after Store fences end. This avoids a gap in which an
+independent Store recovery could acknowledge an uncommitted cut before its CAS.
+
+`inspect(operation_id)` reads current detached metadata. `status(operation_id)`
+additionally observes ownership without taking or waiting for the lifetime lock.
+Owner loss requires a successful nonblocking operation-lock probe **before** the
+final short control read, with unchanged run/invocation/generation. Timeouts and
+descendant locks never prove death. Status projects proven loss as
+`failed`/`owner_lost` without rewriting current authority.
+
+External interruption accepts optional `expected_run_id`,
+`expected_invocation_id`, and `expected_generation`. It reports stale preconditions
+without mutation, or commits a request and advances generation. Accepted
+interruption fences the old owner's checkpoint/success boundary. These controls
+remain responsive while an admitted owner holds its lifetime lock; they do not
+guarantee that another safe point or checkpoint will occur.
+
+## Persistent authority and historical inspection
+
+The selected control DirStore owns:
+
+- Area envelope: `dryml-managed`, **format 2**.
+- Current authority: `dryml-managed-current`, **record version 4**.
+- Pending authority: `dryml-managed-pending`, **record version 2**.
+- Version-1 named managed Node records and version-2 history with result references.
+- Version-3 root intents with explicit kind, SavedNode selection and provisional
+  publication token/exact Store-ack evidence; earlier versions are rejected.
+- Version-1 Store acknowledgement evidence (UUID, exact mutation UUID and its own
+  journal epoch, plus optional provisional token), not a cached availability proof.
+  Finalizing current retains the typed result reference and its result publication
+  acknowledgement before automatic capture; associated final intents retain capture
+  and provisional evidence so recovery can finish token retirement without recapture.
+- Version-2 result packets/references and the `managed/results/v2` namespace;
+  managed Execute adapter version 2 validates nested result references before
+  reconstruction or resource opening. Current record version 4 and history version 2
+  retain these explicitly versioned nested references.
+- Version-1 start/root-association preparation sidecars under
+  `managed/operations/v2/starts/v1/<shard>/<operation>/current.json`, containing exact
+  previous/proposed current metadata, the physical retention token, disposition
+  and reconciliation acknowledgement. These are intents, not current authority
+  or serialized process-local restoration capabilities. The same bounded sidecar
+  now also journals checkpoint/initial/final root replacements, with no second
+  operation-current state machine.
+- Nested `dryml-node-graph/v1` / identity-3 graph, reference and StateKey codecs.
+
+Area format 2 does **not** admit old current-record versions 2 or 3. Every owning reader
+rejects incompatible nested versions as well as old area/current/pending records,
+preserving source bytes. No old authority is automatically converted, deleted or
+overwritten. A pending replacement is reconciled only against its exact
+previous/proposed generation and byte fingerprints under operation ownership.
+
+Decoded current and start-preparation records retain their validated source bytes
+as a private bounded immutable fact. This preserves exact CAS evidence when fresh
+Node handles reorder unordered containers or authenticated packet tables. It is
+not cached external proof: reads and publication still freshly validate persisted
+bytes, ownership and generation. Replacing a record discards its source-byte fact;
+new values use canonical JSON with valid Node packets. Nested previous/proposed
+snapshots preserve their original packet evidence. Logical snapshot, history and
+root-selection equality uses exact Node graph comparison (including facets,
+aliases, roles and quotations), never packet placement or digest equality alone.
+Logically equal graphs need not have identical storage bytes.
+Advancing preparation from prepared to ready validates unchanged non-intent fields
+logically when root intents change; it never manufactures a source-byte witness by
+re-encoding a replacement. The sidecar and previous-current CAS still compare
+their exact expected bytes against freshly read authority.
+
+Current/history snapshots retain bounded detached receiver and SavedNode metadata.
+Status and replay admission do not open any referenced private payload, even after
+checkpoint reclamation. Metadata existence alone neither protects state from
+deletion nor proves availability. Actual execution/restoration must establish
+those separate contracts at its own admission boundary.
+
+The managed-owned projection adapter journals current, history, preparation,
+root/finalization associations and ordinary-result records and contributes typed
+`lifecycle` rows alongside Core's generic `record` projection. Core never imports
+the managed owner. Coverage contract 3 certifies the implemented families only when
+the complete owner reader is registered; a cold rebuild with managed authority
+requires that adapter. Pending invalidation blocks refresh-disabled reads, including
+negative/count consumers. Completion journals its **own** invalidation before CAS,
+releases control before SQL/coverage commit, and acknowledges that exact mutation
+afterward. Earlier final-state acknowledgements cannot cover completion. Repair is
+metadata-only and performs zero body/capture/restore/return/consumer-hook work.
+
+## Worker diagnostics
+
+The accepted same-host Execute/Core worker diagnostic behavior is unchanged:
+bounded **unredacted raw tracebacks** are the default for worker failures and can
+contain exception text, source lines, local paths, private inputs or credentials.
+Use `raw_traceback=False` on the selected backend for secret-bearing work. This
+accepted diagnostic exception does not change other metadata/logging protection,
+make dispatched code untrusted, or imply a security sandbox.

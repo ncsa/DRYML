@@ -10,12 +10,13 @@ import sys
 import numpy as np
 import pytest
 
-from dryml.core import Definition, Par, Repo, StateRef
+from dryml.core import Definition, Node, Par, Repo
+from dryml.core.node import require_saved
 from dryml.core.object import Serializable
 from dryml.core.store.dir import DirStore
 from dryml.core.utils.graph.path import GraphPath, Parameter
 from dryml.data import ArrayDataset, Batch, as_supervised
-from dryml.managed import ManagedConfig
+from dryml.managed import InvocationResult, ManagedConfig
 from dryml.models import Experiment, ExperimentData, Model, TrainFunction, TrainState
 from dryml.models import utils
 
@@ -334,6 +335,7 @@ def test_direct_unsupported_requests_fail_before_source_acquisition(monkeypatch,
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_no_observer_experiment_publishes_final_associated_state_and_terminal_history(tmp_path):
+    """One accepted fit publishes exact final/history/artifact evidence and its value."""
     import pandas as pd
 
     repo = Repo(DirStore(tmp_path / "store"))
@@ -344,22 +346,26 @@ def test_no_observer_experiment_publishes_final_associated_state_and_terminal_hi
     terminal_calls = []
 
     def terminal(obj, context):
-        history = ExperimentData.find(context.checkpoint_state_ref.object_projection(), repo=repo)
+        history = ExperimentData.find(context.latest_checkpoint.object_view(), repo=repo)
         terminal_calls.append((obj.state.examples_seen, history.data.iloc[0].evaluation_status))
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo, callbacks=[terminal]))
+    result = exp.train(managed=ManagedConfig(state_repo=repo, callbacks=[terminal]))
+    assert isinstance(result, InvocationResult)
+    assert result.value is None
+    final = require_saved(result.final_state_ref)
 
-    assert isinstance(final, StateRef)
-    assert final == exp.train.status(state_repo=repo).final_state_ref
+    assert final.graph_equal(exp.train.status(state_repo=repo).final)
     assert terminal_calls == [(3, "completed")]
-    history = ExperimentData.find(final.object_projection(), repo=repo)
+    history = ExperimentData.find(final.object_view(), repo=repo)
     assert len(history.data) == 1
     row = history.data.iloc[0]
-    assert row.state_ref == final
+    assert row.state_ref.graph_equal(final)
     assert row.examples_seen == 3
     assert pd.isna(row.training_loss)
-    assert SavedModelValue.calls == [final.at(GraphPath((Parameter("model"),)))]
-    assert isinstance(row.eval_artifacts["fit"], StateRef)
+    assert len(SavedModelValue.calls) == 1
+    assert SavedModelValue.calls[0].graph_equal(final.at(GraphPath((Parameter("model"),))))
+    assert isinstance(row.eval_artifacts["fit"], Node)
+    require_saved(row.eval_artifacts["fit"])
     loaded = repo.load_state_ref(final, reuse_live="never")
     assert (loaded.state.step, loaded.state.epoch, loaded.state.examples_seen) == (1, 1, 3)
     assert loaded.state.pending_epoch_postlude is None
@@ -369,6 +375,7 @@ def test_no_observer_experiment_publishes_final_associated_state_and_terminal_hi
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_experiment_preacceptance_failure_marks_phase_failed_without_erasing_prior_fit(tmp_path, monkeypatch):
+    """Refused preparation preserves accepted fit/counts without a managed final."""
     repo = Repo(DirStore(tmp_path / "store"))
     exp = _previous_fit()
     prior_fit = exp.model._accepted_fit
@@ -383,7 +390,7 @@ def test_experiment_preacceptance_failure_marks_phase_failed_without_erasing_pri
     assert exp.state.phase == TrainState.failed
     assert (exp.state.step, exp.state.epoch, exp.state.examples_seen) == (1, 1, 3)
     assert exp.model._accepted_fit is prior_fit
-    assert exp.train.status(state_repo=repo).final_state_ref is None
+    assert exp.train.status(state_repo=repo).final is None
 
 
 def test_xgb_recipe_selection_and_inference_are_native_free():
@@ -536,6 +543,7 @@ def test_xgb_unsupported_training_controls_refuse_source_acquisition(monkeypatch
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_terminal_callback_failure_keeps_accepted_fit_and_success_counts(tmp_path):
+    """A callback failure keeps accepted fit/counts and the associated checkpoint."""
     repo = Repo(DirStore(tmp_path / "store"))
     exp = Experiment(MeanModel(), MeanTraining(), train_data=_data(), repo=repo)
 
@@ -548,12 +556,13 @@ def test_terminal_callback_failure_keeps_accepted_fit_and_success_counts(tmp_pat
     assert (exp.state.step, exp.state.epoch, exp.state.examples_seen) == (1, 1, 3)
     np.testing.assert_array_equal(exp.model(np.zeros((1, 1))), [3.0])
     status = exp.train.status(state_repo=repo)
-    assert status.final_state_ref is None
-    assert status.checkpoint_state_ref is not None
+    assert status.final is None
+    assert status.checkpoint is not None
 
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_terminal_publication_failure_keeps_accepted_fit_without_claiming_receipt(tmp_path, monkeypatch):
+    """Failed publication preserves accepted fit/counts without advertising a final."""
     repo = Repo(DirStore(tmp_path / "store"))
     exp = Experiment(MeanModel(), MeanTraining(), train_data=_data(), repo=repo)
 
@@ -566,7 +575,7 @@ def test_terminal_publication_failure_keeps_accepted_fit_without_claiming_receip
 
     assert (exp.state.step, exp.state.epoch, exp.state.examples_seen) == (1, 1, 3)
     np.testing.assert_array_equal(exp.model(np.zeros((1, 1))), [3.0])
-    assert exp.train.status(state_repo=repo).final_state_ref is None
+    assert exp.train.status(state_repo=repo).final is None
 
 
 def test_statsmodels_pure_specs_and_closed_configuration():

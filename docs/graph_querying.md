@@ -1,5 +1,195 @@
 # Graph Querying
 
+## Current Node Sources and Local-State Discovery
+
+`Repo.query()` and `Store.query()` execute against Store 4 authority. Ready SQLite
+schema-11/coverage-3 indexes supply contribution-scoped discovery postings. Rows reference
+the existing authenticated root/block and portable table/overlay occurrence locator; they are derived
+postings, not another authoritative graph representation.
+
+Choose the question explicitly:
+
+| Restriction | Domain |
+|---|---|
+| `cdefs()` | Represented recipe views; `stored()` requires independent recipe membership |
+| `object_refs()` | State-weakened Node object projections |
+| `saved()` / `state_refs()` | Complete saved Node graphs; `stored()` requires saved-root membership |
+| `local_states()` | Distinct installed full-StateKey manifests, independent of donor ObjectIds |
+| `local_states().available()` | Currently published data-directory availability, without payload authentication |
+| `local_states().retained()` | Physical per-key retention grants, independently of managed lifecycle policy |
+
+Source-backed graph results are Nodes. Domains remain tagged in collected
+membership, including stateless graphs whose recipe and saved descriptions have
+equal graph content. Node `==` compares immutable handles; use `graph_equal()` for
+fresh-token semantic comparisons. A header or embedded dependency is not an
+independently published root. Withdrawing one source contribution preserves other
+replicas and retained immutable metadata.
+
+An exact saved Node embedded through a Ref contributes saved **knowledge** even
+when its containing publication is a recipe. It does not thereby acquire its own
+saved-root membership or capture-metadata holder. Fixed collections and owner
+projections preserve source domain tags, including stateless saved roots whose
+graph content equals their recipe view. `contains(node)` accepts a current Node
+object projection (and the retained ObjectRef adapter) and checks proper subtree
+object-projection equality.
+
+```python
+states = (repo.query()
+          .local_states(origin=creation_node)
+          .available()
+          .refresh(False)
+          .require_indexed()
+          .take(10))
+
+exact = repo.query().local_states().state_key(known_key).refresh(False).one_or_none()
+compatible = repo.query().local_states(compatible_with=destination_node).take(10)
+saved = repo.query().saved().stored().sel(node_pattern).collect()
+```
+
+Exact full-key hit **and miss** use direct authority without opening SQLite or
+enumerating buckets/graphs/cache knowledge. This proves only the installed-variant
+domain. A hit reads and validates creation evidence separately. Exact-origin
+selection uses the CDef bucket relation; compatibility fingerprints are necessary
+prefilters followed by exact creation/configuration/codec checks. LocalState has
+no donor identity: identity-constrained local-state predicates raise
+`QueryDomainError`; select an explicit owner/occurrence instead.
+
+Candidate predicates preserve typed paths, roles, and identity/state correlation.
+Necessary predicates never replace exact Node/Generator residuals. All applicable
+ObjectId anchors are checked in every participating Store, including Stores whose
+candidate relation is empty. Missing/incompatible established anchors refuse the
+query. Negative/count answers require the complete requested coverage and mutation
+guards, independently of returned candidates.
+
+ObjectId, full-StateKey and supplied local string/integer/boolean/None constraints
+seek indexed local postings and direct occurrence-correlated edges, then join root
+contributions. Local facts are stored once per block/view, not as each descendant's
+complete feature list. Tied-set ordinals are presentation paths, never persisted
+occurrence identity. Aliases, unordered assignment and quotations remain exact
+residual obligations. A predicate without a supported safe anchor (for example,
+class-only, negation-only or unsupported scalar/support-only selection) visibly
+uses scan policy; `require_indexed()` and `scan_policy("forbid")` refuse before
+refresh/recovery inventory. Explicit domain enumeration without a selector remains
+available from its complete certified relation. Compatibility-only local-state
+discovery currently needs scan admission; exact-origin discovery seeks its bucket.
+
+`page_size(n)` bounds candidate pages. A short Store/SQLite cut captures candidate
+keys and immutable authority bytes. Connections/transactions and writer-blocking
+fences are released before shared block preparation, metadata expansion, residual
+evaluation, and yielding. The page is accepted only after revalidating that same
+cut. Continuation retains Store UUID/epoch/pending disposition, index file/UUID,
+schema/coverage/generation, source topology, and a deterministic keyset cursor.
+Alias, membership, availability, sidecar, coverage, or Repo topology changes cause
+explicit `QueryError`/index instability, preserving an already-delivered partial
+prefix; iteration does not silently restart. Federation uses per-Store cuts.
+
+Composed stages sharing a terminal also reject a changed Store/index cut rather
+than combining earlier and later evidence. Growing metadata demand on an
+unchanged cut replaces detached facts and readmits candidates without refunding
+work already charged to the terminal's verification budget. Requested metadata
+scope validation precedes selector narrowing and scalar early stopping: a later
+invalid populated field or conflicting holder cannot be hidden by a positive
+match or an empty candidate set. Scope-holder evidence does not itself consume
+candidate admissions or become part of the result universe.
+
+`take(0)` is source-free. `refresh(False)` performs no maintenance but still checks
+freshness. Missing/stale enabled coverage requires permitted recovery or visible
+refusal. No-scan/indexed-only controls reject required inventory before it starts.
+Ready explicit refresh validates compact certificates without historical inventory;
+`rebuild_query_index()` requests metadata-only inventory. Disabled/memory indexing,
+and automatic optional-backend unavailability, use visible metadata-only scan
+fallback when permitted. Explicit SQLite requirements and foreign/future sidecars
+refuse. Legacy standalone SQLite views do not cover Store-4 authority.
+
+Pure decoded/prepared metadata is operation-local, conservatively byte-bounded,
+and contains no open reader or lease. Fresh authority bytes and cut checks remain
+mandatory on reuse. Pure caches never establish membership, names, availability,
+retention, or completeness. Collected results fix membership; later payload use
+requires its own fresh protected read.
+
+## Node Pattern Semantics
+
+Ordinary selection accepts a naked `Node` authored with `Definition(...)`.
+The semantic compiler and detached metadata matcher are shared with the current
+source consumer. Selection never concretizes omitted fields merely to obtain a
+candidate key.
+
+Only supplied constraints participate. Query preparation does not concretize,
+fill defaults, construct an Object, allocate an ObjectId, capture state, or read
+state data. A soft Node omits unconstrained constructor parameters. A
+ConcreteNode anchors its complete concrete recipe and topology, without making
+unspecified identity/state facets into absence constraints. Supplied ObjectId and
+LocalState facets must match **the same corresponding occurrence**. LocalState
+identity includes its full `(cdef_digest, codec_hash)` key and creation evidence,
+never a donor ObjectId.
+
+Shared Node handles require shared candidate nodes; independently authored equal
+Nodes require independent nodes. Mat and Ref roles remain distinct; explicit Mat
+wrappers and direct materializing children are equivalent. Quotation is exact
+configuration, including its state/identity pins and omissions. Unordered graph
+members use a whole-assignment witness, including joins outside the set.
+`categorical(...)` can explicitly weaken recipe fields while retaining facets,
+aliases and roles. Existing `Match` leaves remain supported; a runtime
+`Satisfies` callable is not executed or serialized during graph preparation.
+`Exact(...)` compares nested Node values semantically, including their alias
+partition, roles, facets and quoted data; independent decoded handles need not
+compare equal in Python. A fully specified `FactorySpec` matches its complete
+argument/keyword shape. A factory containing `Match` leaves instead constrains
+the supplied pattern fields and permits additional candidate keyword fields.
+
+Use `QueryPredicate` only for the additional closed forms:
+
+```text
+predicate = Node
+          | predicate & predicate | predicate | predicate | ~predicate
+          | QueryPredicate.absent("identity" | "state", path=...)
+          | QueryPredicate.support(generator, max_assignments=...)
+```
+
+```python
+from dryml.core import Definition, QueryPredicate
+
+pattern = Definition(Model, width=64)  # omitted fields stay unconstrained
+predicate = QueryPredicate(pattern) & ~QueryPredicate.absent("state")
+matcher = predicate.compile()         # reusable pure graph preparation
+matches = matcher.matches(candidate_node)
+```
+
+`absent` requires an existing Node endpoint and constrains just that facet.
+Omitting a facet is unconstrained; `AnyValue()` requires a present constructor
+field; `Missing()` requires an absent constructor field. None is a wildcard for
+exact missing state. Use `&`, `|`, `~`; Python truth testing raises TypeError.
+Boolean evaluation does not hide unavailable exact support proofs in later
+branches. Support applies a conservative prefilter followed by a correlated
+assignment witness with the captured proof cap; bounds alone never accept.
+
+`compile(domain="local_state")` evaluates descriptor metadata against its
+creation evidence and exact state selection. It rejects donor-identity constraints
+even in negated or otherwise masked branches. To constrain an actual donor,
+select its relationship endpoint explicitly and match that Node with
+`domain="occurrence"`. This endpoint mode does not discover relationships or
+manufacture identity/state combinations. Generic `domain="node"` accepts recipe,
+identified and saved graph metadata; it does not assert membership in any Store
+domain. Source-domain counts, availability and retained/publication membership
+remain separate source contracts.
+
+`to_data()` / `from_data()` use the closed
+`dryml-node-query-predicate` v1 family with one shared authenticated Node graph.
+It preserves boolean forms, typed paths, aliases, fixed facets, Match leaves and
+built-in `UniformIntRange` / `UniformFromSet` domains. Runtime Generator providers
+are nonportable and rejected. Decoding never resolves targets or executes code.
+
+Legacy `Selector`, `GeneratorSelector`, and reference selectors remain explicit
+adapters. Legacy posting compilation retains an exact prepared residual and
+visible reasons; unsupported facet/predicate coverage requires scan fallback or
+refusal. Candidate IDs alone cannot certify Node acceptance or source completeness.
+
+## Retained Fixed-Reference and Composition API
+
+The following reference-specific descriptions apply to the retained fixed
+ObjectRef/StateRef adapters. Store-4 source membership and page lifetimes are the
+Node contracts above; Store-3 persistent inputs are not supported or migrated.
+
 Query V3 has one composable identity universe. `Repo.query()` captures identity
 knowledge from connected Stores and retained caches; `Store.query()` captures one
 Store's authority. Construction is inert. Restrictions and terminals inspect
@@ -17,8 +207,14 @@ existing API returns multiple retained Objects.
 from dryml.core import Definition
 
 models = repo.query().sel(Definition(Model)).cdefs().stored().collect()
-model = repo.load_object(models.one())
+model = repo.build(models.one())
 ```
+
+`cdefs()` returns concrete recipe Nodes, not necessarily complete saved graphs.
+`repo.build(concrete_recipe_node)` constructs the selected recipe, allocating
+missing identities and initializing unspecified state. To restore a complete
+SavedNode selected with `saved()` / `state_refs()`, use `repo.load(saved_node)` or
+`repo.load_state_ref(saved_node)`; loading does not initialize omitted state.
 
 `sel()` composes structural Definitions, complete CDefs, `Selector` values,
 Generator selectors, and exact references. Complete Definitions remain structural;
@@ -70,6 +266,12 @@ discarding prior query restrictions. During categorical projection,
 named drops are validated against the original
 selected traversal before projection; a projected name cannot hide an invalid or
 absent source path.
+
+A selected Node is edited coherently at every alias of that occurrence. Restoring
+one path in a shared graph therefore restores the same Node through its other
+paths; independent equal nodes remain independent. Quoted constructor metadata
+stays exact and separate from these graph edits. Non-Node value endpoints retain
+ordinary structural-slot replacement semantics.
 
 For a stored-CDef-only query whose Stores have ready SQLite indexes, `take(n)`
 uses graph-complete `(graph digest, encoded root)` keyset pages and a bounded
@@ -214,6 +416,9 @@ Direct occurrence terminals and both projections combine complete root-producer
 authority with external target metadata scopes before root or target filtering,
 including empty domains. Metadata holders contribute authority proof only, not
 candidate admissions or additional roots/targets.
+Fixed occurrence refinements retain their captured paths while reading explicit
+metadata scopes afresh at each terminal; those scopes remain subject to refresh,
+scan, and coverage controls without becoming discovery producers.
 
 ## Refresh Lifecycle And Scan Controls
 

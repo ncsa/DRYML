@@ -8,7 +8,9 @@ def test_definition_eq_1():
         objects.TestClass1, 10, test='a')
     def_2 = Definition(
         objects.TestClass1, 10, test='a')
-    assert def_1 == def_2
+    assert def_1 != def_2
+    assert def_1.graph_equal(def_2)
+    assert len({def_1, def_2}) == 2
 
 
 def test_definition_eq_2():
@@ -17,6 +19,7 @@ def test_definition_eq_2():
     def_2 = Definition(
         objects.TestClass1, 20, test='a')
     assert def_1 != def_2
+    assert not def_1.graph_equal(def_2)
 
 
 def test_definition_eq_3():

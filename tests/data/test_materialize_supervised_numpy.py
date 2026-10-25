@@ -217,7 +217,9 @@ def test_authored_take_never_reads_underlying_excess():
     (np.asarray([[], []], dtype=object), np.int64(1)),
 ))
 def test_runtime_drift_rejected_before_collation_and_without_later_reads(value, monkeypatch):
-    source = TrackingDataset((pair(), value, pair(2)))
+    """Validate actual yields, including values forbidden in construction metadata."""
+    source = TrackingDataset((pair(), pair(1), pair(2)))
+    source.values = (pair(), value, pair(2))
     monkeypatch.setattr(np, "stack", lambda *a, **k: pytest.fail("collation before validation"))
     with pytest.raises((TypeError, ValueError)):
         materialize_supervised(source, strict_numpy=True)

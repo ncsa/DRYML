@@ -53,13 +53,15 @@ from ..model import (
     V3ProjectionCoverage,
     CANONICAL_QUERY_SEMANTICS_VERSION,
 )
-from ..lowering import CandidateBatch, CandidateRelation, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, PhysicalRelationPlan, QueryTerminal, ScanPolicy
+from ..lowering import CandidateRelation, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, PhysicalRelationPlan, QueryTerminal, ScanPolicy
 from ..identity import identity_key
 from ..relationships import iter_direct_relationships, relationship_closure
 from ..utils import cdef_equal, chunked, feature_token_equal, stable_hash_from_blob, stable_hash_to_blob
 from . import SQLiteQueryIndexConfig, require_sqlite
 from .connection import SQLiteConnectionManager, _open_connection
-from .schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION, initialize_schema, stored_compatibility_decision, validate_schema
+from .schema import (SQLITE_QUERY_INDEX_SCHEMA_VERSION, STORE_COVERAGE_VERSION,
+                     STORE_PROJECTION_FAMILIES, STORE_UNAVAILABLE_FAMILIES,
+                     initialize_schema, stored_compatibility_decision, validate_schema)
 from .utils import is_sqlite_busy_error, wal_runtime_is_known_safe
 from .lowering import SQLiteOptimizerPolicy, SQLiteRelationCompiler
 from .... import filesystem
@@ -70,6 +72,31 @@ _CODEC = QueryIndexCodec()
 _REBUILD_BATCH_SIZE = 500
 _BUILD_CLAIM_STALE_SECONDS = 300.0
 _BUILD_CLAIM_WAIT_SECONDS = 30.0
+
+
+def _store_family_supported(family, store):
+    from ..authority import lifecycle_projection_supported
+    return family not in STORE_UNAVAILABLE_FAMILIES or lifecycle_projection_supported(store)
+
+
+def _store_row_digest(row):
+    from ...store.records import _json_bytes
+    family, source, key, payload = row
+    return int.from_bytes(hashlib.sha256(b"dryml-store-projection-row/v1\0" +
+        _json_bytes([family, source, key]) + b"\0" + payload).digest(), "big")
+
+
+def _store_intent_digest(record):
+    return _store_intent_data_digest(record.intent)
+
+
+def _store_intent_data_digest(data):
+    from ...store.records import _json_bytes
+    # SQL certifies the observed cut, not native durability. Lifecycle progress
+    # must not invalidate that cut's receipt; Store acknowledgement gates it.
+    data["status"] = "classified"
+    data["persistence_confirmed"] = True
+    return hashlib.sha256(b"dryml-store-projection-receipt/v1\0" + _json_bytes(data)).digest()
 
 
 @dataclass
@@ -144,6 +171,14 @@ class SQLiteStoreQueryIndex:
     Direct explicit refresh calls each reconcile one fresh authority cut; ready
     validation preserves the sidecar, and repair succeeds only after activation
     and captured-token acknowledgement. Report-oriented reconcile retains errors.
+
+    With a format-4 owning Store, schema-10 coverage is maintained through
+    ``maintain_store`` and read through ``projection_rows``. Legacy Query V3 views
+    are refused. Ready refresh uses the current authority certificate; explicit
+    rebuild inventories metadata without payload IO. Public Store mutations own
+    projection completion and exact journal acknowledgement synchronously. Coverage
+    is Store-local: absent owner namespaces need no process-local adapter; present
+    owner authority requires its complete reader before readiness or maintenance.
     """
 
     def __init__(
@@ -177,6 +212,392 @@ class SQLiteStoreQueryIndex:
     def source_key(self) -> str:
         return self._source_key
 
+    @property
+    def _store_projection(self):
+        return self.store is not None and hasattr(self.store, "store_uuid")
+
+    def preflight_store(self):
+        """Reject unavailable, foreign or future SQLite before authority effects.
+
+        Uses only backend/owner metadata. Missing and owned old/corrupt sidecars
+        remain eligible for visible metadata-only recovery. Returns None; SQLite
+        and QueryIndexError failures propagate without changing Store authority.
+        """
+        import math
+        if not self._store_projection:
+            raise QueryIndexUnavailable("Store projection preflight requires a format-4 owning Store.")
+        from ....paths import local_path_key
+        self.store._assert_state_owner_open()
+        if (local_path_key(self.path) != local_path_key(self.config.path)
+                or local_path_key(self._connections.path) != local_path_key(self.path)
+                or replace(self._connections.config, path=self.config.path) != self.config
+                or self.source_key != self.store.catalog_key()):
+            raise QueryIndexIncompatible("Store projection destination/source configuration disagrees with its owner.")
+        if (self.config.journal_mode not in {"auto", "wal", "delete"}
+                or self.config.durability not in {"normal", "full"}
+                or type(self.config.max_write_retries) is not int or self.config.max_write_retries < 0
+                or type(self.config.busy_timeout) not in {int, float}
+                or not math.isfinite(self.config.busy_timeout) or self.config.busy_timeout < 0):
+            raise QueryIndexError("Invalid SQLite persistent index configuration.")
+        require_sqlite()
+        decision = self._assert_sidecar_rebuildable()
+        if decision in {"compatible", "rebuild"}:
+            with self._connections._read_lease() as (con, _):
+                if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='store_projection_cut'").fetchone():
+                    certificate = con.execute("SELECT contract_version, store_uuid FROM store_projection_cut").fetchone()
+                    if certificate is not None and (type(certificate[0]) is not int
+                                                    or certificate[0] > STORE_COVERAGE_VERSION
+                                                    or certificate[1] != self.store.store_uuid):
+                        raise QueryIndexIncompatible("Future or foreign Store coverage certificate; refusing maintenance.")
+        self.store._bind_query_index(self)
+
+    def _store_certificate(self, con, cut, *, receipts=(), allow_pending=False, thorough=False):
+        from ...store import authority as a
+        if a.raw(self.store, ".dryml/query-index-destination.record") != self.store._query_index_binding(self):
+            raise QueryIndexDirty("Store projection destination binding is missing or changed.")
+        validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
+        certificate = con.execute(
+            "SELECT contract_version, store_uuid, epoch, index_uuid FROM store_projection_cut"
+        ).fetchall()
+        index_uuid = con.execute("SELECT index_uuid FROM catalog_state WHERE singleton=1").fetchone()[0]
+        if certificate != [(STORE_COVERAGE_VERSION, cut.store_uuid, cut.epoch, index_uuid)]:
+            raise QueryIndexDirty("SQLite coverage does not certify this Store authority cut.")
+        coverage = con.execute(
+            "SELECT family, supported, row_count, row_digest, dirty FROM store_projection_coverage"
+        ).fetchall()
+        if ({row[0] for row in coverage} != set(STORE_PROJECTION_FAMILIES)
+                or any(row[1] != 1 or not _store_family_supported(row[0], self.store)
+                       or row[2] < 0 or len(row[3]) != 32 or row[4] for row in coverage)):
+            raise QueryIndexDirty("Closed Store coverage contract is incomplete or changed.")
+        guards = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='trigger' "
+                    "AND name IN ('store_projection_insert','store_projection_update','store_projection_delete')")}
+        if len(guards) != 3:
+            raise QueryIndexDirty("Store projection publication guards are missing.")
+        seeks = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='index' "
+                    "AND name IN ('store_discovery_fact','store_discovery_token','store_discovery_parent','store_discovery_child')")}
+        if len(seeks) != 4:
+            raise QueryIndexDirty("Store discovery seek indexes are missing; rebuild derived state.")
+        if cut.pending:
+            if not allow_pending:
+                raise QueryIndexDirty("Store publication has unacknowledged projection work.")
+            by_id = {r.intent["mutation_id"]: r for r in receipts}
+            for identity in cut.pending:
+                record = by_id.get(identity)
+                row = con.execute("SELECT epoch, evidence FROM store_projection_receipts WHERE mutation_id=?",
+                                  (identity,)).fetchone()
+                if record is None or row != (record.intent["epoch"], _store_intent_digest(record)):
+                    raise QueryIndexDirty("SQLite lacks the exact captured mutation receipt.")
+        if thorough:
+            actual = {family: (0, 0) for family in STORE_PROJECTION_FAMILIES}
+            for row in con.execute("SELECT family, source, row_key, payload FROM store_projection_rows"):
+                count, digest = actual[row[0]]
+                actual[row[0]] = count + 1, digest ^ _store_row_digest(row)
+            if any(actual[f] != (count, int.from_bytes(digest, "big"))
+                   for f, _, count, digest, _ in coverage):
+                raise QueryIndexDirty("Store projection row witnesses disagree.")
+
+    def _store_status(self):
+        """Inspect current authority and coverage without repair or graph inventory."""
+        state, diagnostics, generation = "missing", {}, None
+        if self.path.exists():
+            try:
+                with self.store.authority_read_fence(), self._connections._read_lease() as (con, identity):
+                    con.execute("BEGIN")
+                    try:
+                        cut = self.store.authority_cut()
+                        validate_schema(con, store_key=self.source_key,
+                                        canonical_version=self.canonical_version, require_ready=False)
+                        generation = _read_generation(con)
+                        self._store_certificate(con, cut)
+                        if identity != self._connections._path_identity() or self._is_dirty():
+                            raise QueryIndexDirty("SQLite sidecar changed or has dirty tokens.")
+                        diagnostics = {"store_uuid": cut.store_uuid, "epoch": cut.epoch,
+                                       "coverage_contract": STORE_COVERAGE_VERSION,
+                                       "index_uuid": con.execute(
+                                           "SELECT index_uuid FROM catalog_state WHERE singleton=1").fetchone()[0]}
+                        state = "ready"
+                    finally:
+                        con.execute("ROLLBACK")
+            except QueryIndexBusy:
+                raise
+            except QueryIndexDirty as error:
+                state, diagnostics = "dirty", {"error": str(error)}
+            except QueryIndexIncompatible as error:
+                state, diagnostics = "incompatible", {"error": str(error)}
+            except Exception as error:
+                state = "corrupt" if _is_sqlite_corrupt_exception(error) else "incompatible"
+                diagnostics = {"error": str(error)}
+        return QueryIndexStatus("sqlite", self.source_key, generation, SQLITE_QUERY_INDEX_SCHEMA_VERSION,
+                                {"coverage_contract": STORE_COVERAGE_VERSION}, state,
+                                path=str(self.path), diagnostics=diagnostics)
+
+    def projection_rows(self, family, *, refresh=False):
+        """Read one certified format-4 relation as detached correlated byte rows.
+
+        ``family`` must be in coverage contract 2. ``refresh=False`` performs no
+        maintenance; True permits replay/rebuild before the short read cut. Returns
+        sorted (source path, correlation key, canonical JSON bytes) tuples. Missing,
+        stale, pending or incomplete coverage raises QueryIndexDirty. Lifecycle
+        reads require a complete registered owner reader even for an absent owner
+        namespace; otherwise they raise QueryIndexUnavailable. General certificate
+        checks require adapters only for owner namespaces actually present in the
+        Store. This is an index-level seam, not a Repo terminal.
+        """
+        if type(family) is not str or type(refresh) is not bool:
+            raise TypeError("Projection reads require a string family and boolean refresh.")
+        if family not in STORE_PROJECTION_FAMILIES:
+            raise ValueError("Unknown Store projection family.")
+        if family in STORE_UNAVAILABLE_FAMILIES:
+            from ..authority import lifecycle_projection_supported
+            if not lifecycle_projection_supported():
+                raise QueryIndexUnavailable("Store projection owner is not integrated: " + family)
+        if not self._store_projection:
+            raise QueryIndexUnavailable("Format-4 projection requires its owning Store.")
+        if refresh:
+            self.maintain_store()
+        with self.store.authority_read_fence():
+            if not self.path.exists() or self._is_dirty():
+                raise QueryIndexDirty("Store sidecar is missing or dirty; explicit maintenance required.")
+            with self._connections._read_lease() as (con, identity):
+                con.execute("BEGIN")
+                try:
+                    self._store_certificate(con, self.store.authority_cut())
+                    rows = tuple(con.execute("SELECT source, row_key, payload FROM store_projection_rows "
+                                             "WHERE family=? ORDER BY source, row_key", (family,)))
+                    if identity != self._connections._path_identity():
+                        raise QueryIndexDirty("Store sidecar changed during projection read.")
+                    return rows
+                finally:
+                    con.execute("ROLLBACK")
+
+    def maintain_store(self, *, rebuild=False, stats=None, quarantine_existing=False, scan_admission=None):
+        """Complete Store projection replay, SQL coverage commit and exact ack.
+
+        Replays classified journal records without application capture or payload
+        IO. A missing/stale/owned incompatible index uses visible staged metadata-
+        only rebuild; ``rebuild=True`` requests unconditional replacement. Returns
+        None only after captured work is acknowledged. Later writers cause bounded
+        retry or StoreCutChanged and are never acknowledged by an earlier cut.
+        A declined rebuild claim is revalidated against its captured authority
+        cut; a claimant's subsequent publication is retryable cut drift, not a
+        claim-contention failure for the completed replacement.
+        SQL ambiguity is resolved by rereading exact committed receipts before ack.
+        Store-owned native persistence recovery precedes projection reuse/ack;
+        visible classification or a SQL commit alone cannot confirm durability.
+        Unresolved native barriers raise StoreMutationError with pending evidence.
+        Foreign/future destinations and incomplete authority are preserved/refused.
+        ``quarantine_existing=True`` preserves the owned old sidecar on replacement;
+        ``stats`` optionally receives started inventory work and refresh action.
+        ``scan_admission`` is an optional zero-argument query policy callback,
+        invoked outside Store writer fences before any required rebuild inventory.
+        Its refusal propagates before inventory; explicit maintenance without a
+        callback retains its ordinary rebuild permission.
+        """
+        from ..authority import capture_store_projection
+        from ...store import authority as a
+        if type(rebuild) is not bool or type(quarantine_existing) is not bool:
+            raise TypeError("Store projection rebuild/quarantine controls must be boolean.")
+        if not self._store_projection:
+            raise QueryIndexUnavailable("Store projection maintenance requires a format-4 owning Store.")
+        self.preflight_store()
+        a.recover(self.store)
+        if not rebuild and self.status().state == "ready":
+            return
+        # Only maintenance ownership may inventory. The clean replay path checks
+        # epoch continuity using bounded pending records, not historical inventory.
+        cut, records = self.store.authority_cut(), self.store.pending_mutations()
+        replace_index = rebuild or not self.path.exists() or bool(self._dirty_markers())
+        base = None
+        if not replace_index:
+            try:
+                with self._connections._read_lease() as (con, _):
+                    validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
+                    base = con.execute("SELECT epoch, store_uuid FROM store_projection_cut").fetchone()
+                    coverage = con.execute("SELECT family, dirty FROM store_projection_coverage").fetchall()
+                    replace_index = (base is None or base[1] != cut.store_uuid
+                                     or {r[0] for r in coverage} != set(STORE_PROJECTION_FAMILIES)
+                                     or any(r[1] for r in coverage))
+                    if not replace_index:
+                        self._store_certificate(con, replace(cut, epoch=base[0], pending=()))
+                epoch = -1 if base is None else base[0]
+                for record in records:
+                    data = record.intent
+                    if data["base_epoch"] > epoch:
+                        replace_index = True
+                    epoch = max(epoch, data["epoch"])
+                replace_index |= epoch != cut.epoch
+            except QueryIndexBusy:
+                raise
+            except Exception as error:
+                if is_sqlite_busy_error(error):
+                    raise QueryIndexBusy("SQLite projection inspection is busy.") from error
+                replace_index = True
+        if replace_index:
+            if scan_admission is not None:
+                scan_admission()
+            with self._build_claim(force=True) as acquired:
+                if not acquired:
+                    if self.status().state == "ready":
+                        return
+                    if self.store.authority_cut() != cut:
+                        raise a.StoreCutChanged("Store changed after the competing projection rebuild; retry preparation.")
+                    raise QueryIndexBusy("Store projection replacement belongs to another maintainer; retry.")
+                self.preflight_store()
+                if stats is not None:
+                    stats.store_scan_count += 1
+                    stats.refresh_action = "sqlite-rebuild"
+                print("DRYML Store query index: metadata-only rebuild of missing/stale/older derived coverage.",
+                      file=sys.stderr, flush=True)
+                try:
+                    prepared = capture_store_projection(self.store, rebuild=True)
+                except a.StoreCutChanged:
+                    raise
+                except Exception:
+                    self._mark_dirty()
+                    raise
+                markers = self._dirty_markers()
+                replacement_path = self._replacement_path()
+                replacement = SQLiteStoreQueryIndex(source_key=self.source_key, path=replacement_path,
+                    config=replace(self.config, path=replacement_path), canonical_version=self.canonical_version)
+                try:
+                    replacement.initialize_empty(build_state="building", generation=self._replacement_generation_seed())
+                    replacement._run_write_transaction(lambda con: self._write_store_projection(con, prepared, initialize=True))
+                    con = replacement._connections.connection(readonly=True)
+                    self._store_certificate(con, prepared.cut, receipts=prepared.receipts,
+                                            allow_pending=True, thorough=True)
+                    if con.execute("PRAGMA quick_check").fetchone() != ("ok",):
+                        raise QueryIndexCorrupt("Staged Store projection failed SQLite validation.")
+                    replacement.close()
+                    self._checkpoint_and_cleanup_sidecars(replacement_path, label="staged")
+                    with self.store.writer_lock():
+                        prepared.witness.validate()
+                        self.preflight_store()
+                        SQLiteConnectionManager._close_idle_current_process_for_path(self.path)
+                        self._checkpoint_and_cleanup_sidecars(self.path, label="canonical", allow_corrupt=True)
+                        self._activate_replacement(replacement_path, quarantine_existing=quarantine_existing)
+                        self._confirm_store_projection(prepared)
+                        for marker in markers:
+                            filesystem.remove_file(marker, cleanup_directory=marker.parent, missing_ok=True)
+                        self._ack_store_projection(prepared)
+                finally:
+                    replacement.close()
+                    self._cleanup_replacement(replacement_path)
+            return
+        prepared = capture_store_projection(self.store)
+        with self.store.writer_lock():
+            prepared.witness.validate()
+            try:
+                self._confirm_store_projection(prepared)
+            except (QueryIndexDirty, QueryIndexIncompatible):
+                try:
+                    self._run_write_transaction(lambda con: self._write_store_projection(con, prepared))
+                except Exception:
+                    # COMMIT may have succeeded before its result was lost.
+                    self._confirm_store_projection(prepared)
+                self._confirm_store_projection(prepared)
+            self._ack_store_projection(prepared)
+
+    def acknowledge_store_mutation(self, identity, epoch):
+        """Acknowledge only an exact durable SQLite receipt under the Store fence.
+
+        ``identity``/``epoch`` name a classified Store mutation. Returns the current
+        authority cut; missing/mismatched receipts raise QueryIndexDirty before
+        consuming any pending work. Later pending mutations remain untouched.
+        Store-owned persistence confirmation is required independently of the SQL
+        receipt; unresolved native barriers raise StoreMutationError with pending
+        evidence. No graph preparation, SQL write or application work runs here.
+        """
+        from ...store import authority as a
+        from ...store.records import MutationIntentRecord
+        with self.store.writer_lock():
+            record = self.store._read_file(a._path(self.store, identity), MutationIntentRecord)
+            if record is None or record.intent["epoch"] != epoch:
+                raise QueryIndexDirty("Acknowledgement requires an exact classified mutation receipt.")
+            with self._connections._read_lease() as (con, file_identity):
+                con.execute("BEGIN")
+                try:
+                    validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
+                    certificate = con.execute("SELECT store_uuid, epoch, index_uuid FROM store_projection_cut").fetchone()
+                    index_uuid = con.execute("SELECT index_uuid FROM catalog_state WHERE singleton=1").fetchone()[0]
+                    receipt = con.execute("SELECT epoch, evidence FROM store_projection_receipts WHERE mutation_id=?",
+                                          (identity,)).fetchone()
+                    if (certificate is None or certificate[0] != self.store.store_uuid
+                            or certificate[1] < epoch or certificate[2] != index_uuid
+                            or receipt != (epoch, _store_intent_digest(record))
+                            or file_identity != self._connections._path_identity()):
+                        raise QueryIndexDirty("SQLite has not incorporated this exact mutation/cut.")
+                    self._store_certificate(con, replace(a.read_cut(self.store), epoch=certificate[1], pending=()))
+                finally:
+                    con.execute("ROLLBACK")
+            return a.acknowledge(self.store, identity, epoch)
+
+    def _confirm_store_projection(self, prepared):
+        with self._connections._read_lease() as (con, identity):
+            con.execute("BEGIN")
+            try:
+                self._store_certificate(con, prepared.cut, receipts=prepared.receipts, allow_pending=True)
+                if identity != self._connections._path_identity():
+                    raise QueryIndexDirty("SQLite projection destination changed before acknowledgement.")
+            finally:
+                con.execute("ROLLBACK")
+
+    def _ack_store_projection(self, prepared):
+        from ...store import authority as a
+        for record in prepared.receipts:
+            data = record.intent
+            a.acknowledge(self.store, data["mutation_id"], data["epoch"])
+
+    def _write_store_projection(self, con, prepared, *, initialize=False):
+        if not initialize:
+            validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
+            previous = con.execute("SELECT epoch FROM store_projection_cut").fetchone()
+            if previous is None:
+                raise QueryIndexDirty("Missing Store coverage requires explicit rebuild.")
+            self._store_certificate(con, replace(prepared.cut, epoch=previous[0], pending=()))
+            epoch = previous[0]
+            for record in prepared.receipts:
+                data = record.intent
+                if data["base_epoch"] > epoch:
+                    raise QueryIndexDirty("Projection replay lost epoch continuity; retry metadata rebuild.")
+                epoch = max(epoch, data["epoch"])
+            if epoch != prepared.cut.epoch:
+                raise QueryIndexDirty("Projection replay cut changed; retry metadata rebuild.")
+        else:
+            con.executemany("INSERT INTO store_projection_coverage VALUES (?, ?, 0, ?, 0)",
+                ((family, int(_store_family_supported(family, self.store)), bytes(32))
+                 for family in STORE_PROJECTION_FAMILIES))
+        witnesses = {f: [n, int.from_bytes(d, "big")] for f, n, d in con.execute(
+            "SELECT family, row_count, row_digest FROM store_projection_coverage")}
+        desired = defaultdict(dict)
+        for row in prepared.rows:
+            desired[row[1]][row[0], row[2]] = row
+        for source in prepared.sources:
+            old = {(r[0], r[2]): r for r in con.execute(
+                "SELECT family, source, row_key, payload FROM store_projection_rows WHERE source=?", (source,))}
+            new = desired[source]
+            for key, row in old.items():
+                if new.get(key) == row:
+                    continue
+                con.execute("DELETE FROM store_projection_rows WHERE family=? AND source=? AND row_key=?", row[:3])
+                witnesses[row[0]][0] -= 1
+                witnesses[row[0]][1] ^= _store_row_digest(row)
+            for key, row in new.items():
+                if old.get(key) == row:
+                    continue
+                con.execute("INSERT INTO store_projection_rows VALUES (?, ?, ?, ?)", row)
+                witnesses[row[0]][0] += 1
+                witnesses[row[0]][1] ^= _store_row_digest(row)
+        con.executemany("UPDATE store_projection_coverage SET row_count=?, row_digest=?, dirty=0 WHERE family=?",
+                        ((n, d.to_bytes(32, "big"), f) for f, (n, d) in witnesses.items()))
+        index_uuid = con.execute("SELECT index_uuid FROM catalog_state WHERE singleton=1").fetchone()[0]
+        con.execute("INSERT OR REPLACE INTO store_projection_cut VALUES (1, ?, ?, ?, ?)",
+                    (STORE_COVERAGE_VERSION, prepared.cut.store_uuid, prepared.cut.epoch, index_uuid))
+        con.executemany("INSERT OR REPLACE INTO store_projection_receipts VALUES (?, ?, ?)",
+                        ((data["mutation_id"], data["epoch"], _store_intent_data_digest(data))
+                         for r in prepared.receipts for data in (r.intent,)))
+        con.execute("UPDATE catalog_state SET generation=generation+1, build_state='ready', dirty=0, updated_at=?",
+                    (datetime.now(timezone.utc).isoformat(),))
+
     def initialize_empty(self, *, build_state: str = "ready", generation: int = 0) -> None:
         """Initialize an empty sidecar with an explicit state and generation.
 
@@ -205,11 +626,33 @@ class SQLiteStoreQueryIndex:
         con.execute("PRAGMA optimize")
 
     def current_generation(self) -> int:
+        """Return the ready generation under a short teardown-protected read lease.
+
+        Raises readiness/backend errors before reading. May maintain derived
+        state through the owning readiness policy; retains no connection lease.
+        """
         self._ensure_ready()
-        con = self._connections.connection(readonly=True)
-        return _read_generation(con)
+        with self._connections._read_lease() as (con, _):
+            return _read_generation(con)
 
     def status(self) -> QueryIndexStatus:
+        """Inspect current sidecar readiness without repair or graph inventory.
+
+        Returns:
+            QueryIndexStatus with current readiness and validation diagnostics.
+            Missing, dirty, incompatible, and corrupt evidence remains explicit.
+
+        Raises:
+            QueryIndexBusy: If an owned Store's status validation encounters typed
+                reader contention. Retry after the active reader closes; contention
+                does not establish incompatibility or authorize a rebuild.
+
+        Side Effects:
+            May open a short-lived leased SQLite read transaction, released before
+            returning or raising. Does not replace the index or mutate authority.
+        """
+        if self._store_projection:
+            return self._store_status()
         if self._is_dirty():
             return QueryIndexStatus(
                 backend="sqlite",
@@ -312,6 +755,17 @@ class SQLiteStoreQueryIndex:
         checks. Returns a ValidationReport; failures become error issues. This
         operation changes neither authority nor the index generation/file.
         """
+        if self._store_projection:
+            try:
+                with self.store.authority_read_fence(), self._connections._read_lease() as (con, _):
+                    con.execute("BEGIN")
+                    try:
+                        self._store_certificate(con, self.store.authority_cut(), thorough=thorough)
+                    finally:
+                        con.execute("ROLLBACK")
+                return ValidationReport("sqlite", self.source_key, True, ())
+            except Exception as error:
+                return ValidationReport("sqlite", self.source_key, False, (ValidationIssue("error", str(error)),))
         if thorough and self.store is not None:
             try:
                 self._assert_sidecar_rebuildable()
@@ -376,6 +830,10 @@ class SQLiteStoreQueryIndex:
         explicitly unavailable.
         """
 
+        if self._store_projection:
+            return V3ProjectionCoverage(backend="sqlite", store_key=self.source_key,
+                generation=None, projection_complete=False, authority_complete=False, indexed_only=False,
+                reason="Format-4 coverage is separate from the unintegrated legacy Query V3 consumer.")
         status = self.status()
         if status.state != "ready":
             return V3ProjectionCoverage(
@@ -419,6 +877,8 @@ class SQLiteStoreQueryIndex:
         view in the child for an independent transaction.
         """
 
+        if self._store_projection:
+            raise QueryIndexUnavailable("Legacy query read views do not cover format-4 Nodes; use projection_rows.")
         self._ensure_ready()
         with self._leased_read_view() as view:
             yield view
@@ -434,6 +894,8 @@ class SQLiteStoreQueryIndex:
         identify this view. All resources release on entry failure/cancellation.
         """
 
+        if self._store_projection:
+            raise QueryIndexUnavailable("Legacy query paging does not cover format-4 Nodes.")
         if self._is_dirty() or not self.path.exists():
             raise QueryIndexDirty("The query index is not ready inside the authority cut.")
         try:
@@ -471,13 +933,17 @@ class SQLiteStoreQueryIndex:
                     if os.getpid() == pid:
                         con.execute("ROLLBACK")
 
-    def refresh(self, policy, *, stats=None) -> None:
+    def refresh(self, policy, *, stats=None, scan_admission=None) -> None:
         """Perform one backend lifecycle call, with no cross-call completion cache.
 
         Args:
             policy: False for no work, auto for readiness recovery, or True/always
-                for one strict graph-exact reconciliation cycle on every call.
+                for an explicit validation cycle. Ready Store-4 cycles check compact
+                authority/coverage certificates; standalone legacy indexes retain
+                their strict graph-exact reconciliation cycle.
             stats: Optional QueryStats retaining started inventories even on error.
+            scan_admission: Optional zero-argument inventory admission callback for
+                the current-format query consumer; refusal precedes rebuild IO.
 
         Returns:
             None after the requested work succeeds. Ready explicit cycles validate
@@ -494,6 +960,11 @@ class SQLiteStoreQueryIndex:
             Tokens published after the maintenance cut survive.
         """
         if policy is False:
+            return
+        if self._store_projection:
+            self.maintain_store(stats=stats, scan_admission=scan_admission)
+            if stats is not None and (policy is True or policy == "always") and stats.refresh_action == "none":
+                stats.refresh_action = "sqlite-validate"
             return
         if policy is True or policy == "always":
             self._reconcile_cycle(_ReconcileProgress(stats if stats is not None else QueryStats()))
@@ -544,6 +1015,9 @@ class SQLiteStoreQueryIndex:
             Later tokens survive. Failure after activation does not imply rollback.
         """
 
+        if self._store_projection:
+            self.maintain_store(rebuild=force, stats=stats, quarantine_existing=quarantine_existing)
+            return
         self._assert_sidecar_rebuildable()
         with self._build_claim(force=force) as acquired:
             if not acquired:
@@ -574,6 +1048,20 @@ class SQLiteStoreQueryIndex:
             May replace derived files and acknowledge captured covered dirty
             tokens, preserving Store authority and later/unrelated tokens.
         """
+        if self._store_projection:
+            before = self.status()
+            before_identity = self._connections._path_identity()
+            stats, issues = QueryStats(), ()
+            try:
+                self.maintain_store(stats=stats)
+            except Exception as error:
+                issues = (ValidationIssue("error", str(error)),)
+            after = self.status()
+            return ReconcileReport("sqlite", self.source_key,
+                before.generation != after.generation or before_identity != self._connections._path_identity(),
+                "rebuild" if stats.store_scan_count else "replay", before.generation, after.generation,
+                validated=not issues, issues=issues,
+                diagnostics={"store_scan_count": stats.store_scan_count, "refresh_action": stats.refresh_action})
         before = None
         progress = _ReconcileProgress(QueryStats())
         try:
@@ -927,6 +1415,8 @@ class SQLiteStoreQueryIndex:
         Side Effects:
             None. Callers must verify every candidate against Store authority.
         """
+        if self._store_projection:
+            raise QueryIndexUnavailable("Legacy reference candidates do not cover format-4 Node authority.")
         namespace_filter = namespace if namespace else None
         if (
                 object_id is None and namespace_filter is None
@@ -984,12 +1474,12 @@ class SQLiteStoreQueryIndex:
         if not self.path.exists():
             return "missing"
         try:
-            con = self._connections.connection(readonly=True)
-            decision = stored_compatibility_decision(
-                con,
-                store_key=self.source_key,
-                canonical_version=self.canonical_version,
-            )
+            with self._connections._read_lease() as (con, _):
+                decision = stored_compatibility_decision(
+                    con,
+                    store_key=self.source_key,
+                    canonical_version=self.canonical_version,
+                )
         except Exception as exc:
             if is_sqlite_busy_error(exc):
                 raise QueryIndexBusy("SQLite compatibility inspection is busy; retry.") from exc
@@ -1099,6 +1589,8 @@ class SQLiteStoreQueryIndex:
         return result
 
     def _register_stored_roots(self, graph, roots, *, require_ready: bool):
+        if self._store_projection:
+            raise QueryIndexIncompatible("Format-4 projections must be published through Store mutation authority.")
         if require_ready and self._build_claim_path().exists():
             self._mark_dirty()
             raise QueryIndexBusy(
@@ -1419,6 +1911,9 @@ class SQLiteStoreQueryIndex:
         self._connections.close_all_current_process()
 
     def _ensure_ready(self) -> None:
+        if self._store_projection:
+            self.maintain_store()
+            return
         if self._is_dirty():
             self.rebuild()
             return
@@ -1552,7 +2047,8 @@ class SQLiteStoreQueryIndex:
         current = -1
         if self.path.exists():
             try:
-                current = _read_generation(self._connections.connection(readonly=True))
+                with self._connections._read_lease() as (con, _):
+                    current = _read_generation(con)
             except Exception:
                 pass
         return max(current + 1, time.time_ns())
@@ -2026,13 +2522,13 @@ class SQLiteStoreQueryIndex:
                 result = operation(con)
                 con.execute("COMMIT")
                 return result
-            except Exception as exc:
+            except BaseException as exc:
                 if began:
                     try:
                         con.execute("ROLLBACK")
                     except Exception:
                         self._connections.close_current()
-                if is_sqlite_busy_error(exc):
+                if isinstance(exc, Exception) and is_sqlite_busy_error(exc):
                     if attempt < max_retries:
                         time.sleep(delay)
                         delay = min(delay * 2, 0.25)

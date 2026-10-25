@@ -88,6 +88,16 @@ class ManagedRecoveryError(ManagedError):
     default_reason = "recovery_error"
 
 
+class ManagedResultError(ManagedError):
+    """Unsupported/malformed result or unavailable freshly reopened result source.
+
+    Carries the static ManagedError reason; never formats the rejected value.
+    Encoding failures precede automatic capture. Lazy failures never reexecute.
+    """
+
+    default_reason = "result_error"
+
+
 class ManagedRerunRequiredError(ManagedError):
     """Raised when selected operation authority requires an explicit rerun."""
 
@@ -110,6 +120,7 @@ __all__ = [
     "ManagedInterrupted",
     "ManagedPublicationError",
     "ManagedRecoveryError",
+    "ManagedResultError",
     "ManagedRerunRequiredError",
     "ManagedStoreError",
 ]

@@ -66,7 +66,7 @@ def test_repeated_notebook_dispatch_preserves_shell_and_kernel_task(tmp_path):
                 "import asyncio, os\n"
                 "from pathlib import Path\n"
                 "from dryml import dispatch\n"
-                "from dryml.core import Repo, StateRef\n"
+                "from dryml.core import Repo, require_saved\n"
                 "from dryml.core.execute import CoreOptions\n"
                 "from dryml.core.execute_codec import CoreCallCodecError\n"
                 "from dryml.core.store.dir import DirStore\n"
@@ -89,7 +89,7 @@ def test_repeated_notebook_dispatch_preserves_shell_and_kernel_task(tmp_path):
             for count in range(1, 4):
                 result = await execute(
                     f"result = view.run(notebook_fn, {count})\n"
-                    f"print('published', isinstance(result, StateRef), repo.query().cdefs().stored().count())\n"
+                    f"print('published', require_saved(result) is result, repo.query().cdefs().stored().count())\n"
                 )
                 assert f"published True {count}" in result
                 assert "DispatchCoverageWarning" not in result

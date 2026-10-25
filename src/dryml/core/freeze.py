@@ -90,6 +90,21 @@ class FrozenNDArray(np.ndarray):
 
     @staticmethod
     def from_array(a: np.ndarray, *, copy: bool = True, writeable: bool = False) -> "FrozenNDArray":
+        """Snapshot nonobject array contents without changing dtype or shape.
+
+        Args:
+            a (np.ndarray): Source logical contents.
+            copy (bool): Copy storage by default; internal callers may borrow it.
+            writeable (bool): Desired writeability, false for immutable values.
+        Returns:
+            FrozenNDArray: Tagged array snapshot with preserved dtype/byte order.
+        Raises:
+            TypeError: For object dtypes, which retain mutable Python references.
+        Side Effects:
+            Copies by default; ``copy=False`` can change source writeability.
+        """
+        if a.dtype.hasobject:
+            raise TypeError("Object-dtype arrays are not immutable construction values.")
         arr = np.array(a, copy=copy)
         try:
             arr.setflags(write=writeable)
@@ -104,6 +119,27 @@ class FrozenNDArray(np.ndarray):
 
     def __repr__(self) -> str:
         return f"FNDArray(shape={self.shape}, dtype={self.dtype}, writeable={getattr(self, '_frozen_writeable', False)})"
+
+    def __reduce_ex__(self, protocol):
+        """Preserve dtype byte order and immutable logical contents in pickle.
+
+        Args:
+            protocol (int): Requested pickle protocol (all supported protocols
+                use the same detached snapshot representation).
+        Returns:
+            tuple: Importable reconstruction function and dtype/shape/raw bytes.
+        Raises:
+            TypeError: For object-dtype arrays, which are not immutable values.
+        Side Effects:
+            Copies logical contents to bytes without retaining mutable buffers.
+        """
+        if self.dtype.hasobject:
+            raise TypeError("Object-dtype arrays are not immutable construction values.")
+        return _restore_frozen_array, (self.dtype, self.shape, self.tobytes(order="C"))
+
+
+def _restore_frozen_array(dtype, shape, data):
+    return FrozenNDArray.from_array(np.frombuffer(data, dtype=dtype).reshape(shape))
 
 
 frozen_container_types = (FrozenList, FrozenTuple, FrozenSet, FrozenDict)

@@ -22,11 +22,11 @@ from dataclasses import dataclass, field, replace
 from functools import cmp_to_key
 import os
 import threading
-from typing import Any, Generator
+from typing import Any, Generator, TYPE_CHECKING
 
 from ..canonical import matching_container_family
 from ..definition import ConcreteDefinition, Definition, selector_match
-from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+from ..freeze import FrozenDict
 from ..links import DefLink
 from ..object import Object
 from ..params import Match
@@ -41,7 +41,6 @@ from .model import (
     QueryCardinalityError,
     QueryIndexUnavailable,
     QueryStats,
-    QueryWouldScanError,
     RefreshPolicy,
 )
 from .path import (
@@ -51,7 +50,8 @@ from .path import (
     QueryPathError,
     iter_value_edges,
 )
-from .utils import cdef_equal
+if TYPE_CHECKING:
+    from .identity import IdentitySet, OccurrenceSet
 
 
 _DEFAULT_GENERATOR_WITNESS_LIMIT = 65_536
@@ -172,7 +172,10 @@ def _refresh_target(target, requests, capture):
                 continue
             stats = QueryStats()
             try:
-                target.index.refresh(True, stats=stats)
+                if getattr(target.index, "_store_projection", False):
+                    target.index.refresh(True, stats=stats, scan_admission=capture.require_scan)
+                else:
+                    target.index.refresh(True, stats=stats)
             finally:
                 capture.merge_maintenance_stats(stats)
             with ExitStack() as locks:
@@ -213,6 +216,13 @@ def _query_match(
     if isinstance(selector, Selector):
         selector = selector.root
 
+    from ..node import Node
+    from ..selector import QueryPredicate
+    if isinstance(selector, (Node, QueryPredicate)):
+        from .node_pattern import _PreparedPredicate
+        return _PreparedPredicate(QueryPredicate(selector), strict=strict,
+                                  class_match=class_match).matches(target)
+
     from ..selector import ObjectSelector
 
     if isinstance(selector, ObjectSelector):
@@ -237,7 +247,7 @@ def _query_match(
         return isinstance(target, ConcreteDefinition) and (
             _object_selector_value_match(selector, target)
             if _contains_object_selector(selector)
-            else cdef_equal(selector, target)
+            else selector.graph_equal(target)
         )
 
     from ..factory import FactorySpec
@@ -899,6 +909,26 @@ class _V3Restriction:
     kind: str
     value: Any
     scope: Any | None = None
+    prepared: Any = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self):
+        if self.kind != "sel":
+            return
+        from ..node import Node
+        from ..definition import ConcreteDefinition
+        from ..node import _as_node_view
+        from ..selector import QueryPredicate
+        from ..generator import GeneratorSelector
+        from .node_pattern import _PreparedPredicate
+        selector = self.value
+        if isinstance(selector, Selector):
+            if isinstance(selector.root, (Node, ConcreteDefinition)):
+                object.__setattr__(self, "prepared", _PreparedPredicate(
+                    QueryPredicate(_as_node_view(selector.root)), strict=selector.strict, class_match=selector.cls_policy))
+        elif isinstance(selector, (Node, QueryPredicate, GeneratorSelector)):
+            object.__setattr__(self, "prepared", _PreparedPredicate(QueryPredicate(selector)))
+        elif isinstance(selector, ConcreteDefinition):
+            object.__setattr__(self, "prepared", _PreparedPredicate(QueryPredicate(_as_node_view(selector)), strict=True, class_match="exact"))
 
 
 def _same_v3_scope(left, right) -> bool:
@@ -1115,6 +1145,7 @@ class IdentityQuery:
     max_depth_limit: int | None = None
     indexed_required: bool = False
     take_limit: int | None = None
+    candidate_page_size: int = 32
     _refresh_bindings: tuple[_RefreshBinding, ...] | None = field(
         default=None, compare=False, repr=False,
     )
@@ -1241,7 +1272,7 @@ class IdentityQuery:
         independent storage or metadata eligibility. ``None`` is a no-op.
 
         Args:
-            value: Definition, complete CDef, Selector, ObjectSelector,
+            value: Node, QueryPredicate, complete CDef, Selector, ObjectSelector,
                 GeneratorSelector, exact ObjectRef or StateRef, or ``None``.
 
         Returns:
@@ -1261,9 +1292,9 @@ class IdentityQuery:
         from ..definition import ConcreteDefinition, Definition
         from ..generator import GeneratorSelector
         from ..reference_values import ObjectRef, StateRef
-        from ..selector import ObjectSelector, Selector, _contains_state_selector
+        from ..selector import ObjectSelector, Selector, QueryPredicate, _contains_state_selector
 
-        if not isinstance(value, (Definition, ConcreteDefinition, Selector, ObjectSelector, GeneratorSelector, ObjectRef, StateRef)):
+        if not isinstance(value, (Definition, ConcreteDefinition, Selector, QueryPredicate, ObjectSelector, GeneratorSelector, ObjectRef, StateRef)):
             raise TypeError("IdentityQuery.sel requires a Definition, selector, generator, or exact reference.")
         selector_root = (
             value.root if isinstance(value, Selector)
@@ -1290,6 +1321,69 @@ class IdentityQuery:
         """Restrict retained members to StateRefs without projection or expansion."""
 
         return self._append("kind", "state_ref")
+
+    def saved(self) -> "IdentityQuery":
+        """Select complete saved Node graphs, without asserting local availability.
+
+        Returns an immutable plan. Terminals validate saved membership separately
+        from local state data and raise QueryError for incomplete authority.
+        """
+        return self._append("kind", "state_ref")
+
+    def local_states(self, *, origin=None, compatible_with=None) -> "IdentityQuery":
+        """Select distinct full-key LocalStates, independently of donor identities.
+
+        origin is an optional exact concrete creation Node; compatible_with is an
+        optional concrete destination. Necessary keys narrow candidates; exact
+        creation/compatibility checks remain mandatory. Returns a deferred plan;
+        identity constraints raise QueryDomainError at execution. No IO occurs.
+        """
+        query = self._append("kind", "local_state")
+        if origin is not None:
+            query = query._append("origin", origin.creation_view())
+        if compatible_with is not None:
+            from ..definition import ConcreteDefinition
+            if not isinstance(compatible_with, ConcreteDefinition):
+                raise TypeError("compatible_with requires a concrete destination Node.")
+            query = query._append("compatible", compatible_with)
+        return query
+
+    def state_key(self, key) -> "IdentityQuery":
+        """Restrict LocalStates by an exact full StateKey (direct hit and miss).
+
+        key must be StateKey or TypeError is raised. Returns a deferred plan;
+        exact authority lookup needs no SQLite or inventory and reads no payload.
+        """
+        from ..state_values import StateKey
+        if not isinstance(key, StateKey):
+            raise TypeError("state_key requires a full StateKey.")
+        return self._append("state_key", key)
+
+    def available(self) -> "IdentityQuery":
+        """Restrict LocalStates to currently published data-directory availability.
+
+        Returns a deferred plan. This metadata fact does not authenticate payload
+        bytes or promise future availability; use a Store read lease for payloads.
+        """
+        return self._append("available", None)
+
+    def retained(self) -> "IdentityQuery":
+        """Restrict LocalStates to authoritative physical retention grants.
+
+        Returns a deferred plan, reading grants at execution without changing
+        retention policy. Managed lifecycle associations remain a separate owner.
+        """
+        return self._append("retained", None)
+
+    def page_size(self, size) -> "IdentityQuery":
+        """Set the positive candidate-page bound; return an unevaluated plan.
+
+        size must be an exact positive int or ValueError is raised. Pages detach
+        before preparation/yield and continuation changes fail explicitly.
+        """
+        if type(size) is not int or size < 1:
+            raise ValueError("page size must be a positive exact int.")
+        return replace(self, candidate_page_size=size)
 
     def closure(self, edges=None) -> "IdentityQuery":
         """Expand retained identities through literal directed relationships.
@@ -1398,25 +1492,26 @@ class IdentityQuery:
         return self._append("namespace", _normalize_namespace(tuple(prefix)))
 
     def contains(self, value) -> "IdentityQuery":
-        """Restrict aggregates to a proper owned subtree exact ObjectRef.
+        """Restrict aggregates to a proper owned subtree object projection.
 
         Args:
-            value: Exact ObjectRef required below an aggregate root.
+            value: Node object projection or retained exact ObjectRef below a root.
 
         Returns:
             An immutable restricted query.
 
         Raises:
-            TypeError: If ``value`` is not an ObjectRef.
+            TypeError: If ``value`` is neither a Node nor an ObjectRef.
 
         Side Effects:
             None until a terminal executes.
         """
 
         from ..reference_values import ObjectRef
+        from ..node import Node
 
-        if not isinstance(value, ObjectRef):
-            raise TypeError("contains requires an ObjectRef.")
+        if not isinstance(value, (ObjectRef, Node)):
+            raise TypeError("contains requires a Node or ObjectRef.")
         return self._append("contains", value)
 
     def state_hash(self, value: str) -> "IdentityQuery":
@@ -1845,6 +1940,9 @@ class IdentityQuery:
             source_cuts = capture.source_cuts
             capture_rounds = capture.capture_rounds
             demand_recaptures = capture.demand_recaptures
+            from .source import node_query_stores
+            if node_query_stores(self, capture) is not None:
+                scan_required = capture.store_scan_count > 0
         return QueryStats(
             refresh_action=(capture.refresh_action if analyze else "none"),
             result_count=result_count,
@@ -2187,7 +2285,7 @@ class IdentityQuery:
         """Restart all dependent stages on demand growth or an invalidated cut."""
 
         from .model import QueryError
-        from .source import SourceCapture, _SourceRecapture
+        from .source import SourceCapture, _SourceRecapture, node_query_stores
 
         capture = SourceCapture(self)
         if (
@@ -2196,15 +2294,22 @@ class IdentityQuery:
                 and self._requires_authority_scan()
                 and not self._can_try_bounded_index()
                 and self._exact_stored_cdef_selector() is None
+                and node_query_stores(self, capture) is None
                 and not selective_state):
             capture.require_scan()
         if occurrence is not None:
             capture.max_depth_limit = occurrence.max_depth_limit
         if self.take_limit != 0:
             capture.index_presentations = self._index_presentations(capture, occurrence=occurrence)
+            current_projection = all(hasattr(item.store, "store_uuid") for item in capture.index_presentations)
+            from .source import _node_discovery_plan
+            for producer in {id(item.producer): item.producer for item in capture.index_presentations}.values():
+                # Occurrence presentations bind metadata scopes, not discovery sources.
+                if isinstance(producer, IdentityQuery) and node_query_stores(producer, capture) is not None:
+                    _node_discovery_plan(producer, capture)
             if capture.refresh_policy is True or capture.refresh_policy == "always":
                 # Configured SQLite can be refused before IO; optional targets must resolve first.
-                if any(
+                if not current_projection and any(
                     getattr(item.store, "query_index_policy", None) == "sqlite"
                     and (capture.refresh_policy == "always" or any(
                         not request.completed_domain(item.store.authority_fence_key())
@@ -2224,7 +2329,7 @@ class IdentityQuery:
                         with request._process_lock():
                             request.check(target.descriptor)
                             pending |= target.descriptor.destination not in request.completed
-                if pending:
+                if pending and not current_projection:
                     capture.require_scan()
                 for target, requests in obligations:
                     if capture.refresh_policy is True:
@@ -2232,7 +2337,10 @@ class IdentityQuery:
                     else:
                         stats = QueryStats()
                         try:
-                            target.index.refresh("always", stats=stats)
+                            if getattr(target.index, "_store_projection", False):
+                                target.index.refresh("always", stats=stats, scan_admission=capture.require_scan)
+                            else:
+                                target.index.refresh("always", stats=stats)
                         finally:
                             capture.merge_maintenance_stats(stats)
                 capture.refresh_policy = "auto"
@@ -2443,6 +2551,9 @@ class IdentityQuery:
     def _terminal_entries(self, capture):
         """Evaluate all fallible validation, then return qualified private entries."""
 
+        from .source import node_query_stores
+        if node_query_stores(self, capture) is not None:
+            return dict(self._iter_terminal_members(capture)), False
         if capture.indexed_required and self._requires_authority_inventory():
             raise QueryIndexUnavailable("Query V3 index coverage is not available for this plan.")
         captured = self._captured_members(capture)
@@ -2456,6 +2567,10 @@ class IdentityQuery:
         assert self.take_limit is not None
         if self.take_limit == 0:
             return {}, True
+        from .source import node_query_stores
+        if node_query_stores(self, capture) is not None:
+            import itertools
+            return dict(itertools.islice(self._iter_terminal_members(capture), self.take_limit)), True
         indexed = self._bounded_index_entries(capture)
         if indexed is not None:
             return indexed, True
@@ -2608,7 +2723,7 @@ class IdentityQuery:
     def _bounded_index_stores(self, capture):
         """Return producer Stores for the narrow paged stored-CDef plan shape."""
 
-        from .source import RepoSource, StoreSource
+        from .source import StoreSource
 
         if not self._can_try_bounded_index():
             return None
@@ -2667,13 +2782,18 @@ class IdentityQuery:
         before matching, while scalar terminals retain unordered early stopping.
         """
 
+        from .source import node_query_stores, iter_node_query
+        stores = node_query_stores(self, capture)
+        if stores is not None:
+            yield from iter_node_query(self, capture, stores)
+            return
         if capture.indexed_required and self._requires_authority_inventory():
             raise QueryIndexUnavailable("Query V3 index coverage is not available for this plan.")
         members, _, _ = self._captured_members(capture) if captured is None else captured
         stores = self._preflight_complete_sources(capture, producer_captured=True)
         if stores:
             capture.capture_stores(stores)
-        capture.reserve(entry[0] for entry in members.values())
+        capture.reserve_keys(members)
         generator_budget = capture.witness_budget()
         validation_domain = members
         metadata_matches = {}
@@ -2691,7 +2811,7 @@ class IdentityQuery:
             if restriction.kind == "metadata":
                 facts = scope_facts[id(restriction)]
                 metadata_matches[id(restriction)] = {
-                    key: self._matches_metadata(entry[0], restriction.value, facts)
+                    key: self._matches_metadata(entry[0], restriction.value, facts, kind=key.kind)
                     for key, entry in validation_domain.items()
                 }
             elif restriction.kind == "source":
@@ -2708,7 +2828,10 @@ class IdentityQuery:
         for key in keys:
             entry = members[key]
             for restriction in self.restrictions:
-                if restriction.kind == "metadata":
+                if restriction.kind == "kind":
+                    if restriction.value != key.kind:
+                        break
+                elif restriction.kind == "metadata":
                     if not metadata_matches[id(restriction)].get(key, False):
                         break
                 elif not self._matches(
@@ -2753,7 +2876,12 @@ class IdentityQuery:
 
     def _requires_authority_scan(self) -> bool:
         """Report planned inventory, including external and target metadata scopes."""
-
+        from .source import RepoSource, StoreSource, RetainedRepoLookupSource
+        if isinstance(self.source, StoreSource) and getattr(self.source.store, "query_index_policy", None) in {"memory", "none"}:
+            return self.take_limit != 0
+        if isinstance(self.source, (RepoSource, RetainedRepoLookupSource)) or (
+                isinstance(self.source, StoreSource) and hasattr(self.source.store, "store_uuid")):
+            return False  # Readiness/policy is checked only by an executing terminal.
         return self._requires_authority_inventory()
 
     def _external_authority_scopes(self):
@@ -2950,21 +3078,42 @@ class IdentityQuery:
 
         scopes = self._metadata_scopes()
         if isinstance(scope, StoreSource):
-            return (capture.capture_store(scope, metadata_scopes=scopes),)
-        if isinstance(scope, RepoSource):
+            stores = (scope.store,)
+        elif isinstance(scope, RepoSource):
             repo = scope.repo
             with repo.retain_topology(allow_physical_duplicates=True):
-                return capture.capture_stores(capture.repo_stores(repo), metadata_scopes=scopes)
-        raise TypeError("Query V3 authority scope is invalid.")
+                stores = capture.repo_stores(repo)
+        else:
+            raise TypeError("Query V3 authority scope is invalid.")
+        facts = capture.capture_stores(stores, metadata_scopes=scopes)
+        by_source = {fact.source: fact for fact in facts}
+        names = {item.value for item in self.restrictions if item.kind == "alias" and item.scope == scope}
+        for store in stores:
+            fact = by_source[self._source_evidence(store)]
+            if not hasattr(fact, "cut"):
+                continue
+            for name in names:
+                with store._metadata_read():
+                    record = store.read_node_name(name)
+                    fact.node_aliases[name] = None if record is None else (
+                        record.root_kind, store.read_node(record.root_digest, kind=record.root_kind))
+                if store.authority_cut() != fact.cut:
+                    from .model import QueryError
+                    raise QueryError("Store changed during scoped alias capture.")
+        return facts
 
     def _matches(self, restriction, value, evidence, capture, generator_budget, *, facts=()) -> bool:
         from ..definition import ConcreteDefinition, Definition
         from ..generator import GeneratorSelector
         from ..reference_values import ObjectRef, StateRef
         from ..selector import ObjectSelector, Selector
-        from .identity import SourceEvidence
 
         if restriction.kind == "kind":
+            from ..node import Node
+            from ..state_values import LocalState
+            if isinstance(value, (Node, LocalState)):
+                from .identity import _identity_kind
+                return _identity_kind(value) == restriction.value
             return (
                 (restriction.value == "cdef" and isinstance(value, ConcreteDefinition))
                 or (restriction.value == "object_ref" and isinstance(value, ObjectRef))
@@ -2974,6 +3123,9 @@ class IdentityQuery:
             return self._source_evidence(restriction.value) in evidence.sources
         if restriction.kind == "sel":
             selector = restriction.value
+            if restriction.prepared is not None:
+                target = value.definition if isinstance(value, (ObjectRef, StateRef)) else value
+                return restriction.prepared.matches(target, generator_budget=generator_budget)
             if isinstance(selector, ObjectSelector):
                 return _object_selector_matches(selector, value)
             if isinstance(selector, ObjectRef):
@@ -3003,20 +3155,38 @@ class IdentityQuery:
                 selector, target, strict=False, class_match="selector"
             )
         if restriction.kind == "object_id":
+            from ..node import Node, _all_nodes
+            if isinstance(value, Node):
+                return any(node.object_id == restriction.value for node in _all_nodes(value, quoted=False))
             ref = value.object if isinstance(value, StateRef) else value
             return isinstance(ref, ObjectRef) and restriction.value in ref.objects.values()
         if restriction.kind == "namespace":
+            from ..node import Node, _all_nodes
+            if isinstance(value, Node):
+                return any(node.object_id is not None and node.object_id.namespace[:len(restriction.value)] == restriction.value
+                           for node in _all_nodes(value, quoted=False))
             ref = value.object if isinstance(value, StateRef) else value
             return isinstance(ref, ObjectRef) and any(
                 item.namespace[:len(restriction.value)] == restriction.value
                 for item in ref.objects.values()
             )
         if restriction.kind == "contains":
+            from ..node import Node, _owned_nodes
+            if isinstance(value, Node):
+                target = restriction.value
+                if isinstance(target, ObjectRef):
+                    from ..node import _as_node_view
+                    target = _as_node_view(target.definition).bind(identities=target.objects)
+                return any(path and node.object_projection_equal(target)
+                           for path, node in _owned_nodes(value))
             ref = value.object if isinstance(value, StateRef) else value
             return isinstance(ref, ObjectRef) and any(
                 path and ref.at(path) == restriction.value for path in ref.objects
             )
         if restriction.kind == "state_hash":
+            from ..node import Node, _all_nodes
+            if isinstance(value, Node):
+                return any(node.state is not None and node.state.key.codec_hash == restriction.value for node in _all_nodes(value, quoted=False))
             return isinstance(value, StateRef) and restriction.value in value.states.values()
         if restriction.kind == "stored":
             if (
@@ -3046,6 +3216,12 @@ class IdentityQuery:
     def _matches_alias(value, alias, facts) -> bool:
         from ..reference_values import ObjectRef, StateRef
         from .model import QueryError
+
+        if facts and all(hasattr(fact, "node_aliases") for fact in facts):
+            targets = [fact.node_aliases[alias] for fact in facts if fact.node_aliases.get(alias) is not None]
+            if any(kind != targets[0][0] or not target.graph_equal(targets[0][1]) for kind, target in targets[1:]):
+                raise QueryError("Query V3 alias authority conflicts.")
+            return bool(targets) and value is not None and value.graph_equal(targets[0][1])
 
         targets = set()
         for fact in facts:
@@ -3085,7 +3261,7 @@ class IdentityQuery:
         return SourceEvidence.from_source(source)
 
     @staticmethod
-    def _matches_metadata(value, predicate, facts) -> bool:
+    def _matches_metadata(value, predicate, facts, *, kind=None) -> bool:
         from ..reference_values import ObjectRef, StateRef
         from .metadata import (
             _MISSING, _leaves, _lineage_projection, _snapshot_projection,
@@ -3093,10 +3269,16 @@ class IdentityQuery:
         )
         from .model import QueryError
         from .source import _MetadataReadFailure
+        from ..node import Node
+        if isinstance(value, Node):
+            from .identity import _identity_kind
+            domain = _identity_kind(value) if kind is None else kind
+            if domain == "cdef" or predicate_requires_state(predicate) and domain != "state_ref":
+                return False
 
-        if predicate_requires_state(predicate) and not isinstance(value, StateRef):
+        if predicate_requires_state(predicate) and not isinstance(value, (StateRef, Node)):
             return False
-        if not isinstance(value, (ObjectRef, StateRef)):
+        if not isinstance(value, (ObjectRef, StateRef, Node)):
             return False
         projections = {}
         for scope in {leaf.field.scope for leaf in _leaves(predicate)}:
@@ -3189,9 +3371,16 @@ class _RelationshipProjection:
             if not sources:
                 members.append(value)
         fixed = self.occurrence_query.fixed
-        return IdentitySet(
+        result = IdentitySet(
             members, bounded=roots.bounded or (fixed.bounded if fixed is not None else False),
         )
+        if self.projection == "owners" and fixed is None:
+            from .identity import identity_key
+            result = IdentitySet._from_entries(
+                {key: (value, evidence) for key, (value, evidence) in roots._entries.items()
+                 if identity_key(value) in result._entries}, bounded=result.bounded,
+            )
+        return result
 
 
 @dataclass(frozen=True, slots=True)

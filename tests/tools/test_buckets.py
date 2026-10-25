@@ -168,13 +168,20 @@ def select_files(baseline: dict[str, Any], tiers: set[str]) -> list[str]:
 def select_profile_files(
     baseline: dict[str, Any], tiers: set[str], profile: dict[str, Any]
 ) -> list[str]:
-    """Return tier-selected files after cheap profile-level exclusions."""
+    """Return tier-selected files without excluded categories or deferred paths.
+
+    ``baseline`` and ``tiers`` select maintained files. ``profile`` may exclude
+    categories and defer complete paths to explicit exhaustive runs. Returns
+    runner-relative paths without importing their test modules or changing tiers.
+    """
 
     excluded_categories = set(profile.get("excluded_categories", {}))
+    deferred_paths = set(profile.get("deferred_paths", {}))
     return [
         path
         for path in select_files(baseline, tiers)
         if category_for_path(path.removeprefix("./")) not in excluded_categories
+        and path.removeprefix("./") not in deferred_paths
     ]
 
 

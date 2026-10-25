@@ -193,7 +193,9 @@ def test_constructor_and_explicit_save_path_own_only_opened_handles(tmp_path, mo
     assert not Path(opened[0].base_dir).exists()
 
     repo = Repo()
-    repo.save(OwnedSaveValue(repo=repo), store=tmp_path / "explicit.zip")
+    from dryml.core.store.store import StoreCapabilityError
+    with pytest.raises(StoreCapabilityError, match="durable"):
+        repo.save(OwnedSaveValue(repo=repo), store=tmp_path / "explicit.zip")
     owned = repo.default_store
     assert owned in repo._owned_stores
     repo.close(flush=False)

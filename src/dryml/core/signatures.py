@@ -96,8 +96,14 @@ class AutoRef:
     """Annotation-only marker for automatic selection via ``Ref[AutoRef]``.
 
     Use the class itself, not an instance. At an activated Ref boundary, it
-    selects a CDef, ObjectRef, or StateRef from the supplied value without saving
-    or materializing it. Unsupported inputs raise ``SignatureError``.
+    preserves supplied resolved Node metadata. A live stateful graph yields its
+    complete last saved Node when its object projection matches, or an
+    identity-bound construction Node otherwise; an entirely stateless graph
+    yields its construction definition. Supplied legacy ObjectRef/StateRef values
+    retain their kind. Selection performs no Store IO, saving, or materialization.
+    Soft Definitions require an explicit Ref assertion; unresolved metadata and
+    unsupported inputs raise ``SignatureError``. Selection never manufactures a
+    saved refinement by capturing state.
     """
 
 
@@ -128,7 +134,8 @@ class ReferenceSelection:
     """Pin one signature slot to an exact ObjectRef and optional declaration Store.
 
     Args:
-        object_ref: Exact identity allowed for a CDef-to-ObjectRef strengthening.
+        object_ref: Exact identity allowed for a CDef-to-ObjectRef strengthening,
+            or an exact saved Node constraining the complete supplied graph.
         store: Optional connected Store required to carry that declaration.
 
     A selection is caller-owned control, not authority by itself. The ObjectRef
@@ -344,24 +351,33 @@ def _reject_object_subclass(annotation: Any, slot: str) -> None:
 def _validate_target(target: Any, role: str, slot: str) -> None:
     """Validate one supported role category without selection or realization."""
 
-    from .definition import ConcreteDefinition, Definition
+    from .definition import ConcreteDefinition, ConcreteNode, Definition, SavedNode
+    from .node import Node
     from .object import Object
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectRef, StateRef
     from .selector import Selector
     from .template import Template
+    from .state_values import IdentitySpec, StateSpec
 
     supported = (
         Definition, ConcreteDefinition, ObjectRef, StateRef, Object, AutoRef,
         QuotedDef, Selector, SelectorSpec, Template,
+        Node, ConcreteNode, SavedNode, IdentitySpec, StateSpec,
     )
     if target not in supported:
+        if role == "mat" and isinstance(target, type) and issubclass(target, Object):
+            return
         _reject_object_subclass(target, slot)
         raise SignatureError("role target is unsupported", slot)
     if target is Object and role != "mat":
         raise SignatureError("Object is only a materializing target", slot)
     if target is AutoRef and role != "ref":
         raise SignatureError("AutoRef is only a reference target", slot)
+    if target in (IdentitySpec, StateSpec) and role != "ref":
+        raise SignatureError("facet specifications are only reference data", slot)
+    if target in (Node, ConcreteNode, SavedNode) and role == "mat":
+        raise SignatureError("Mat requires an Object target, not Node metadata", slot)
     if target in (QuotedDef, Selector, SelectorSpec) and role != "ref":
         raise SignatureError("quotation targets are only reference data", slot)
     if target is Template:
@@ -371,10 +387,11 @@ def _validate_target(target: Any, role: str, slot: str) -> None:
 def _parse_slot(annotation: Any, slot: str) -> _Slot:
     """Parse a top-level role annotation into flat mode metadata."""
 
-    from .definition import Definition
+    from .definition import ConcreteNode, Definition, SavedNode
+    from .node import Node
     from .template import Template
 
-    template_annotation = Template[Definition]
+    template_annotation = Template[Node]
     template_role = get_args(template_annotation)[1]
 
     def template_branch(branch: Any) -> Any:
@@ -384,7 +401,7 @@ def _parse_slot(annotation: Any, slot: str) -> _Slot:
             mapping_args = get_args(branch)
             if len(mapping_args) == 2 and mapping_args[0] is str:
                 value = mapping_args[1]
-                if value is Template or value == template_annotation:
+                if value is Template or value in (template_annotation, Template[Definition]):
                     return Annotated[branch, template_role]
         return branch
 
@@ -411,16 +428,25 @@ def _parse_slot(annotation: Any, slot: str) -> _Slot:
             raise SignatureError("outer role union supports only role branches and None", slot)
         args = get_args(branch)
         metadata = [item for item in args[1:] if isinstance(item, _Role)]
-        if len(args) != 2 or len(metadata) != 1:
+        if len(metadata) != 1:
             raise SignatureError("role annotation metadata is invalid", slot)
         roles.add(metadata[0].name)
         target = args[0]
+        refinements = tuple(item for item in args[1:] if not isinstance(item, _Role))
+        if refinements:
+            # Annotated flattens Ref[SavedNode]; recognize exactly that public
+            # refinement rather than admitting arbitrary annotation metadata.
+            if Annotated[(target, *refinements)] != SavedNode:
+                raise SignatureError("role annotation metadata is invalid", slot)
+            target = SavedNode
+        if metadata[0].name == "template" and target is Definition:
+            target = Node
         if metadata[0].name == "template" and get_origin(target) is Mapping:
             mapping_args = get_args(target)
             value_annotation = template_branch(mapping_args[1]) if len(mapping_args) == 2 else None
             if (
                     len(mapping_args) != 2 or mapping_args[0] is not str
-                    or value_annotation != template_annotation):
+                    or value_annotation not in (template_annotation, Template[Definition])):
                 raise SignatureError("Template mapping must be Mapping[str, Template]", slot)
             template_mapping = True
             continue
@@ -437,13 +463,13 @@ def _parse_slot(annotation: Any, slot: str) -> _Slot:
     if template_mapping:
         if role != "template" or members:
             raise SignatureError("Template mapping must be Mapping[str, Template]", slot)
-        return _Slot("template", (Definition,), nullable, "mapping")
+        return _Slot("template", (Node,), nullable, "mapping")
     if not members:
         raise SignatureError("standalone None role target is unsupported", slot)
-    if role == "template" and members != [Definition]:
-        raise SignatureError("Template supports only the exact Definition target", slot)
+    if role == "template" and members not in ([Node], [Definition]):
+        raise SignatureError("Template supports only the exact Node target", slot)
     for member in members:
-        if get_origin(member) is not None:
+        if get_origin(member) is not None and member != SavedNode:
             raise SignatureError("container role target is unsupported", slot)
         _validate_target(member, role, slot)
     if AutoRef in members:
@@ -455,8 +481,10 @@ def _parse_slot(annotation: Any, slot: str) -> _Slot:
     else:
         from .definition import ConcreteDefinition, Definition
         from .reference_values import ObjectRef, StateRef
+        from .state_values import IdentitySpec, StateSpec
 
-        if not all(member in (Definition, ConcreteDefinition, ObjectRef, StateRef) for member in members):
+        if not all(member in (Node, ConcreteNode, SavedNode, Definition, ConcreteDefinition,
+                              ObjectRef, StateRef, IdentitySpec, StateSpec) for member in members):
             raise SignatureError("role union targets are incomparable", slot)
         mode = "union"
     return _Slot(role, tuple(members), nullable, mode)
@@ -923,7 +951,8 @@ class BoundaryPlan:
             slot = self.plan.return_slot if name == "return" else self.plan.slots[name]
             if slot.role != "mat":
                 continue
-            digest = selection.object_ref.digest()
+            from .node import Node
+            digest = selection.object_ref.exact_digest() if isinstance(selection.object_ref, Node) else selection.object_ref.digest()
             previous = declaration_stores.get(digest)
             if previous is not None and previous is not selection.store:
                 previous_key = previous.authority_fence_key()
@@ -1183,19 +1212,31 @@ def _normalize_value(value: Any, slot: _Slot, name: str, controls: _Controls,
             controls,
             selection_key=name if selection_key is None else selection_key,
         )
+    if slot.role == "ref" and slot.mode == "automatic":
+        from .template import _contains_expression
+        if _contains_expression(selected):
+            raise SignatureError("automatic Ref requires symbolically resolved metadata", name)
     if slot.role == "ref" and slot.mode == "exact":
         from .definition import Definition
 
         if slot.targets[0] is Definition and isinstance(selected, Definition) and not selected.is_resolved:
             raise SignatureError("Ref[Definition] requires a symbolically resolved Definition", name)
+    if slot.role == "ref" and slot.mode == "union":
+        from .node import Node
+        from .template import _contains_expression
+        if isinstance(selected, Node) and _contains_expression(selected):
+            raise SignatureError("Ref requires symbolically resolved metadata", name)
     if persist_role and slot.role in {"ref", "template"} and slot.mode == "exact":
         from .definition import Definition
+        from .node import Node
         from .quoted import QuotedDef, SelectorSpec
         from .selector import Selector
 
         # Definition and selector roles carry expression data, not graph edges.
         # Quoting happens here, after the one owning signature has selected it.
         if slot.targets[0] is Definition and isinstance(selected, Definition):
+            return selected, DefLink.finalized(EdgeKind.REF, QuotedDef(selected))
+        if slot.targets[0] is Node and isinstance(selected, Node):
             return selected, DefLink.finalized(EdgeKind.REF, QuotedDef(selected))
         if slot.targets[0] is Selector and isinstance(selected, Selector):
             return selected, DefLink.finalized(EdgeKind.REF, SelectorSpec(selected))
@@ -1226,6 +1267,14 @@ def _select_authority(value: Any, slot: _Slot, name: str,
         return value
     if value is None:
         return None
+    if slot.role == "template":
+        from .definition import ConcreteDefinition
+        from .node import Node, _as_node_view
+        if isinstance(value, QuotedDef):
+            value = value.value
+        if not isinstance(value, (Node, ConcreteDefinition)):
+            raise SignatureError("Template requires Node metadata", name)
+        return _as_node_view(value)
     if slot.mode == "automatic":
         try:
             return _select_automatic(value, name)
@@ -1244,32 +1293,47 @@ def _select_authority(value: Any, slot: _Slot, name: str,
             raise SignatureError("requested authority is unavailable", name) from error
         except _SelectionAmbiguous as error:
             raise SignatureError("requested authority is ambiguous", name) from error
-    definition, cdef, object_ref, state_ref = _authority_types()
-    ranks = {
-        state_ref: 3,
-        object_ref: 2,
-        cdef: 1,
-        definition: 0,
-    }
-    for target in sorted(slot.targets, key=lambda item: ranks[item], reverse=True):
+    capabilities = _target_capabilities()
+    candidates = []
+    for target in sorted(slot.targets, key=lambda item: len(capabilities[item]), reverse=True):
+        if any(capabilities[target] < capabilities[other] for other, _ in candidates):
+            continue
         try:
-            return _select_exact(
+            selected = _select_exact(
                 value, target, name, controls, selection_key=selection_key
             )
+            candidates.append((target, selected))
         except _SelectionUnavailable:
             continue
         except _SelectionAmbiguous as error:
             raise SignatureError("requested authority is ambiguous", name) from error
+    maximal = [(target, selected) for target, selected in candidates if not any(
+        capabilities[target] < capabilities[other] for other, _ in candidates
+    )]
+    if len(maximal) == 1:
+        return maximal[0][1]
+    if maximal:
+        raise SignatureError("role union has ambiguous incomparable capabilities", name)
     raise SignatureError("requested authority is unavailable", name)
 
 
-def _authority_types() -> tuple[Any, Any, Any, Any]:
-    """Return authority types in relaxation order without import-time cycles."""
+def _target_capabilities():
+    """Describe independent delivery guarantees, not a reference-strength ladder."""
 
-    from .definition import ConcreteDefinition, Definition
+    from .definition import ConcreteDefinition, ConcreteNode, Definition, SavedNode
+    from .node import Node
     from .reference_values import ObjectRef, StateRef
+    from .state_values import IdentitySpec, StateSpec
 
-    return Definition, ConcreteDefinition, ObjectRef, StateRef
+    return {
+        Definition: frozenset({"resolved"}), Node: frozenset({"resolved", "facets"}),
+        ConcreteDefinition: frozenset({"resolved", "normalized"}),
+        ConcreteNode: frozenset({"resolved", "normalized", "facets"}),
+        SavedNode: frozenset({"resolved", "normalized", "facets", "identity", "state", "complete"}),
+        ObjectRef: frozenset({"resolved", "normalized", "identity"}),
+        StateRef: frozenset({"resolved", "normalized", "identity", "state", "complete"}),
+        IdentitySpec: frozenset({"identity"}), StateSpec: frozenset({"state"}),
+    }
 
 
 def _select_automatic(value: Any, name: str) -> Any:
@@ -1279,7 +1343,13 @@ def _select_automatic(value: Any, name: str) -> Any:
     from .definition import ConcreteDefinition
     from .object import Object
     from .reference_values import ObjectRef, StateRef
+    from .node import Node, require_saved
 
+    if isinstance(value, Node):
+        from .template import _contains_expression
+        if _contains_expression(value):
+            raise _SelectionUnavailable()
+        return value
     if isinstance(value, (ConcreteDefinition, ObjectRef, StateRef)):
         return value
     if not isinstance(value, Object):
@@ -1288,7 +1358,19 @@ def _select_automatic(value: Any, name: str) -> Any:
     if not has_stateful_materialization(cdef):
         return cdef
     receipt = value.last_state_ref
-    if receipt is not None and receipt.object == value.object_ref:
+    if isinstance(cdef, Node):
+        construction = getattr(value, "_construction_node", cdef)
+        receiver = construction.with_realization(identities=value.object_ref.objects)
+        if isinstance(receipt, Node):
+            try:
+                require_saved(receipt)
+            except (TypeError, ValueError):
+                pass
+            else:
+                if receipt.object_projection_equal(receiver):
+                    return receipt
+        return receiver
+    if isinstance(receipt, StateRef) and receipt.object == value.object_ref:
         return receipt
     return value.object_ref
 
@@ -1297,11 +1379,46 @@ def _select_exact(value: Any, target: Any, name: str,
                   controls: _Controls, *, selection_key: Any) -> Any:
     """Apply one exact authority or quotation conversion under source guards."""
 
-    from .definition import ConcreteDefinition, Definition
+    from .definition import ConcreteDefinition, ConcreteNode, Definition, SavedNode
+    from .node import Node, _as_node_view, require_saved
     from .object import Object
     from .quoted import QuotedDef, SelectorSpec
     from .reference_values import ObjectRef, StateRef
     from .selector import Selector
+    from .state_values import IdentitySpec, StateSpec
+
+    selection = controls.selections.get(selection_key)
+    if selection is not None and isinstance(selection.object_ref, Node):
+        candidate = controls.repo.describe(value) if isinstance(value, Object) and controls.repo is not None else value
+        if not isinstance(candidate, Node) or not candidate.graph_equal(selection.object_ref):
+            raise _SelectionUnavailable()
+    if target in (IdentitySpec, StateSpec):
+        if isinstance(value, target):
+            return value
+        if isinstance(value, Node):
+            return target(value)
+        raise _SelectionUnavailable()
+    if target in (Node, ConcreteNode, SavedNode):
+        if isinstance(value, QuotedDef):
+            value = value.value
+        if isinstance(value, Object):
+            value = value.definition
+        if not isinstance(value, (Node, ConcreteDefinition)):
+            raise _SelectionUnavailable()
+        selected = _as_node_view(value)
+        from .template import _contains_expression
+        if _contains_expression(selected):
+            # Template alone admits unresolved metadata; the caller handles its
+            # separate inert rule before this Ref-only selection seam.
+            raise SignatureError("Ref[Node] requires symbolically resolved metadata", name)
+        if target in (ConcreteNode, SavedNode) and not isinstance(selected, ConcreteNode):
+            raise _SelectionUnavailable()
+        if target == SavedNode:
+            try:
+                require_saved(selected)
+            except (TypeError, ValueError) as error:
+                raise _SelectionUnavailable() from error
+        return selected
 
     if target is QuotedDef:
         return value if isinstance(value, QuotedDef) else QuotedDef(
@@ -1349,6 +1466,18 @@ def _select_exact(value: Any, target: Any, name: str,
         if isinstance(value, (Definition, ConcreteDefinition, Object, ObjectRef, StateRef)):
             return value
         raise _SelectionUnavailable()
+    if isinstance(target, type) and issubclass(target, Object):
+        if isinstance(value, Object):
+            if isinstance(value, target):
+                return value
+            raise _SelectionUnavailable()
+        selected = _select_exact(value, Object, name, controls, selection_key=selection_key)
+        from .symbol import resolve_symbol
+        description = selected.definition if isinstance(selected, (ObjectRef, StateRef)) else selected
+        cls = resolve_symbol(description.cls)
+        if not isinstance(cls, type) or not issubclass(cls, target):
+            raise _SelectionUnavailable()
+        return selected
     if target is ConcreteDefinition:
         return _as_cdef(value, name)
     if target is ObjectRef:
@@ -1393,18 +1522,19 @@ def _selection_value(selection: Any, name: str) -> ReferenceSelection | None:
     """Normalize one accepted slot selection shape before evidence reads."""
 
     from .reference_values import ObjectRef
+    from .node import Node
 
     if selection is None:
         return None
     if isinstance(selection, ReferenceSelection):
         result = selection
-    elif isinstance(selection, ObjectRef):
+    elif isinstance(selection, (Node, ObjectRef)):
         result = ReferenceSelection(selection)
     elif isinstance(selection, tuple) and len(selection) == 2:
         result = ReferenceSelection(selection[0], selection[1])
     else:
         raise SignatureError("selection control is invalid", name)
-    if not isinstance(result.object_ref, ObjectRef):
+    if not isinstance(result.object_ref, (Node, ObjectRef)):
         raise SignatureError("selection control is invalid", name)
     return result
 
@@ -1482,7 +1612,7 @@ def _as_state_ref(value: Any, name: str, controls: _Controls, *,
         if not has_stateful_materialization(value.definition):
             raise _SelectionUnavailable()
         receipt = value.last_state_ref
-        if receipt is None or receipt.object != value.object_ref:
+        if not isinstance(receipt, StateRef) or receipt.object != value.object_ref:
             raise _SelectionUnavailable()
         if selection is not None and selection.object_ref != receipt.object:
             raise SignatureError("selection topology does not match the slot", name)

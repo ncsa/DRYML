@@ -1,3 +1,4 @@
+import asyncio
 import gc
 import threading
 import weakref
@@ -28,6 +29,92 @@ def _config(path):
 def _assert_closed(con):
     with pytest.raises(connection_module.require_sqlite().ProgrammingError):
         con.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("outcome", ("return", "error", "cancel"))
+def test_completed_tasks_release_cached_connections(tmp_path, outcome):
+    """Task completion retires both access modes and releases task identity keys."""
+    manager = SQLiteConnectionManager(_config(tmp_path / "tasks.sqlite"))
+    manager.connection()
+    manager.close_current()
+    handles, references = [], []
+
+    async def use_connections():
+        handles.append(manager.connection())
+        handles.append(manager.connection(readonly=True))
+        if outcome == "error":
+            raise RuntimeError("task failed")
+        if outcome == "cancel":
+            raise asyncio.CancelledError()
+
+    async def run():
+        for _ in range(32):
+            task = asyncio.create_task(use_connections())
+            references.append(weakref.ref(task))
+            try:
+                await task
+            except (RuntimeError, asyncio.CancelledError):
+                pass
+            del task
+        await asyncio.sleep(0)
+
+    try:
+        asyncio.run(run())
+        gc.collect()
+        assert not manager._connections
+        assert not manager._file_identities
+        assert all(reference() is None for reference in references)
+        for con in handles:
+            _assert_closed(con)
+    finally:
+        manager.close_all_current_process()
+
+
+def test_completed_task_preserves_read_lease_until_exit(tmp_path):
+    """A lease outliving its task stays usable and is retired at lease exit."""
+    manager = SQLiteConnectionManager(_config(tmp_path / "leased-task.sqlite"))
+    manager.connection()
+    manager.close_current()
+
+    async def borrow():
+        lease = manager._read_lease()
+        con, _ = lease.__enter__()
+        con.execute("BEGIN")
+        return lease, con
+
+    async def run():
+        task = asyncio.create_task(borrow())
+        lease, con = await task
+        await asyncio.sleep(0)
+        assert task.done()
+        assert len(manager._leases) == len(manager._connections) == 1
+        assert con.in_transaction
+        assert con.execute("SELECT 1").fetchone() == (1,)
+        con.execute("ROLLBACK")
+        lease.__exit__(None, None, None)
+        _assert_closed(con)
+        assert not manager._connections
+        assert not manager._file_identities
+        assert not manager._leases
+
+    try:
+        asyncio.run(run())
+    finally:
+        manager.close_all_current_process()
+
+
+def test_task_cleanup_callback_does_not_retain_manager(tmp_path):
+    """A still-running task's cleanup callback must not keep its pool alive."""
+    async def run():
+        manager = SQLiteConnectionManager(_config(tmp_path / "weak-task.sqlite"))
+        con = manager.connection()
+        reference = weakref.ref(manager)
+        del manager
+        gc.collect()
+        assert reference() is None
+        _assert_closed(con)
+
+    asyncio.run(run())
 
 
 def test_discarded_manager_closes_owned_handles(tmp_path):

@@ -1,16 +1,189 @@
 # Objects and Definitions
 
-`Definition` is a soft declaration for construction, selection, and search. A
-finalized `ConcreteDefinition` (CDef) is a V2 fully bound semantic recipe. CDef
+`Definition(...)` authors an immutable `Node` for construction, selection, and
+search. `concretize()` returns a `ConcreteNode`, using the existing fully bound
+`ConcreteDefinition` (CDef) record representation. Concreteness does not imply
+identity or saved-state completeness. CDef
 exposes import-free `.cls` and `.parameters`; `.args` and `.kwargs` project the
 current class signature and may import the class. `Arg` and `Kwarg` represent soft
 Definition spelling only. CDef paths use `Parameter` segments.
 
-Two CDefs can compare structurally equal while describing different graph
-topology. Equality, `hash()`, and `stable_hash()` compare class and parameters.
-`graph_equal()` and `graph_hash()` additionally distinguish a shared child from
-two independent equal children. Private CDef node tokens are neither persisted
-nor public diagnostic identity.
+Node equality and `hash()` identify an immutable occurrence/view handle. Two
+independently authored equal recipes remain two set members; repeating one handle
+remains one. Use `recipe_equal(other)` for recipe comparison and
+`graph_equal(other)` for exact roles, facets and alias topology. The latter also
+matches unordered incidence without using `repr` as identity. Python pickle
+round trips preserve the alias partition and facets, with fresh process-local
+handles rather than handle equality with the source.
+
+Constructor values retain distinct list, tuple, set, frozenset and mapping tags.
+`Repo.materialize_boundary` also preserves runtime container families, including
+built-in `frozenset` versus tagged `FrozenSet`, while retaining reference aliases
+across containers and roots.
+Mappings admit exact string/integer keys (not bool-as-int keys). Mutable arrays
+are snapshotted with dtype, shape, byte order and logical contents retained,
+including across Python pickle; object-dtype arrays are rejected.
+
+The existing plain `ConcreteDefinition` construction-view API retains structural
+equality for existing consumers. Legacy `stable_hash()` and `graph_hash()` remain
+construction-view keys, not new facet-aware Node keys or saved-graph encodings.
+The versioned CDef construction codec likewise remains a construction-view codec.
+`Node.build(repo=..., identities=..., states=...)` composes optional constraints,
+concretizes once, and enters `Repo.build(ConcreteNode)`. Build allocates only missing
+ObjectIds, initializes unspecified stateful nodes, and restores selected compatible
+LocalStates once. Ref and quotation metadata are not materialized implicitly.
+
+## Node Constraints And Navigation
+
+Identity and state controls are Node methods, never special constructor keywords.
+For example, `Definition(Target, state=value)` still supplies an ordinary
+constructor parameter named `state`; `node.state` inspects the independent facet.
+
+```python
+from dryml.core import Definition, ObjectId
+
+child = Definition(Target, width=32)
+recipe = Definition(Parent, left=child, right=child)
+identified = recipe.bind(identities={"$.left": ObjectId()})
+assert identified.at("$.left") is identified.at("$.right")
+assert child.object_id is None
+```
+
+`bind(identities=..., states=...)` accepts rooted maps or extracted `IdentitySpec`
+and `StateSpec` mappings. State assignments must be exact `LocalState` values,
+not alternatives, alias selectors, bare hashes, or bare StateKeys. Repeated equal
+assignments are idempotent; complementary identity/state assignments compose.
+Different exact assignments to a shared occurrence raise `ValueError`, even when
+supplied through different paths. Independently authored equal nodes remain
+independent. Embedding complementary immutable views of one occurrence composes
+them at authoring; contradictory embedded views fail instead of taking precedence.
+
+`with_identity(id)` and `with_state(local_state)` constrain the root. Deliberate
+`replace_bindings(identities=..., states=...)` replaces existing facets and accepts
+`None` to remove them. `without_identity()` and `without_state()` remove the root
+facet. Bulk replacement rejects contradictions within the edit itself.
+`replace(path, replacement_node)` replaces every alias of the selected occurrence
+in the returned graph, leaving independent equal nodes and the original unchanged.
+A soft replacement weakens affected concrete ancestors to general Node views.
+
+The retained recipe editors `with_cls`, `with_args`, `with_arg`, `with_kwargs`,
+`with_kwarg`, and `without_kwarg` preserve the root occurrence and its exact
+ObjectId/LocalState facets. Nested facets, aliases, and quoted values survive;
+newly embedded complementary aliases compose and contradictory views fail.
+An actual recipe change invalidates the edited root's retained construction
+evidence; an unchanged recipe preserves that evidence. These metadata edits do
+not check state availability or compatibility. For example, changing width on a
+state-bound model retains that selection, and an incompatible build rejects it
+before constructors or restore hooks rather than initializing fresh state.
+Remove selections deliberately with the binding-removal APIs above.
+
+`node.at(path, traverse_refs=False, traverse_quoted=False)` returns **Node endpoints
+only**, for soft and concrete metadata. Ordinary materializing structure is
+traversable by default. A path can terminate at a Ref-held or quoted Node without
+either opt-in; further descent needs the corresponding independent flag. Neither
+flag changes the link's role or ownership. Scalar/container endpoints and blocked
+descent raise `GraphPathError`. Typed `Arg`/`Kwarg` address soft call spelling;
+`Parameter` addresses a concrete named record (or safely named soft parameters).
+Use `node.lens(path).set(value)` for the former structural-slot editing API,
+including scalar endpoints. A lens edits one slot; `replace` edits an occurrence.
+
+`identity_spec()` and `state_spec()` are read-only rooted map adapters over facets,
+not independently stored authority. They choose one primary path per owned
+occurrence, rebase at the selected root, and preserve sharing. References and
+quotations do not enlarge materializing ownership. `object_view()` retains
+identities and alias topology while removing graph-reference state facets;
+quoted configuration stays exact.
+
+`with_realization(identities=..., states=...)` records supplied realization facets
+as an immutable overlay. Its `construction_view` retains the prior immutable
+construction selections: recording a child capture S1 does not overwrite an
+explicit construction pin S0. This records metadata only; it does not capture,
+restore, allocate, read payloads, or publish. Navigation, binding, replacement and
+extraction likewise perform none of those effects or target resolution.
+Realization overlays do not enter quotations: when an owned Node is also held as
+quoted future-recipe data, only its unquoted aliases receive allocated identities,
+captured states, partial state application, or removed state pins. The quotation
+retains its exact original view and internal sharing, including when it holds a
+different facet view of that same occurrence. Explicit authoring edits through
+`bind` and `replace_bindings` retain their occurrence-wide alias semantics.
+Graph identity/declaration collection likewise stops at quotations. When a
+metadata transformation exactly removes an overlay, it reuses the retained
+original view to preserve any original alias to quoted data; distinct facet views
+are not merged merely because they share an occurrence.
+
+`require_saved(concrete_node)` validates that every owned stateful occurrence has
+an exact ObjectId and LocalState, with no independent identity collisions. It
+returns the **same handle**, typed as the named `SavedNode` completeness
+refinement. It adds no graph wrapper and asserts neither payload availability nor
+current restore compatibility. Ephemeral nodes need no own private-state facet.
+Mixed owned legacy ObjectRef/StateRef leaves are rejected by this new completeness
+validator, rather than treated as an empty owned closure. Existing reference
+consumers retain their separate APIs. `copy_graph()` preserves facets and the
+alias partition while creating fresh private Node handles, without ObjectId
+allocation or encoding.
+
+## Creation, Compatibility And Operation Views
+
+The metadata APIs distinguish three named transformations over the same immutable
+Node graph. They use `NodePreparation`'s topology-aware exact verifier; a digest
+or compatibility fingerprint is never sufficient equality evidence.
+
+| API | Identity/state handling | Domain |
+| --- | --- | --- |
+| `node.creation_view()` / `creation_digest()` | Use retained normalized construction authority; exclude only the captured root's own identity/state. Preserve explicit dependency selections. | `dryml-creation-cdef/v1` |
+| `node.compatibility_view()` / `compatibility_fingerprint()` | Remove realization identity/state recursively through graph links. Compare class, normalized configuration, sharing/topology and link roles. | `dryml-state-compatibility/v1` |
+| `node.object_view()` / `object_projection_digest()` | Keep identities; recursively remove graph-reference state selections. | `dryml-object-projection/v2` |
+
+All three preserve quoted constructor data exactly, including ordinary ObjectIds
+and checkpoint pins in future-model recipes. Query traversal options do not alter
+this rule. `object_projection_equal(original_candidate)` performs the necessary
+key check **and** exact normalized graph comparison, including unordered aliases.
+Creation and compatibility require concrete normalized roots. Object projection
+also accepts soft Nodes without resolving their targets.
+
+`dryml.core.node_views` exports `CREATION_VIEW`, `COMPATIBILITY_VIEW`, and
+`OBJECT_PROJECTION_VIEW` for explicit operation-owned preparation, for example
+`NodePreparation((node,), view=CREATION_VIEW)`. Requests use its transformed
+`prepared.roots`; eager and deferred preparation implement the same key contract.
+Ordinary named digest/equality calls also reuse bounded pure preparation owned by
+the immutable source handle, so resident repeated calls add no graph discovery,
+folds, or semantic hashes. Derived view tables and their reserved fact budgets
+share the owner's entry/byte limits. Eviction or clearing preparation changes
+work only; it never changes keys, quotation, roles, sharing, or facet semantics.
+These owners are transient: fresh graph copies and portable transport do not
+carry cache locks or external evidence, and unreachable source graphs can be
+collected.
+
+`local_state.validate_for(destination, codec="pkl")` validates the retained
+normalized origin evidence against its full StateKey, then verifies exact
+destination compatibility and the explicitly admitted codec. It returns the same
+LocalState or raises `TypeError`/`ValueError` before any payload hook. It does not
+resolve a class to guess codec support, invoke a custom compatibility callback,
+open payloads, or prove their availability. Applying compatible foreign-origin
+metadata preserves the donor's StateKey and creation evidence. A subsequent new
+capture's address must derive from the destination's retained construction view.
+Multiple LocalStates sharing immutable creation evidence reuse its preparation;
+each validation still checks the selected StateKey and admitted codec and compares
+exact destination evidence. Cached graph facts certify no alias, live Object,
+Store contents, or payload availability. Build/load/restore reacquire and validate
+their external evidence even after successful warm metadata validation.
+
+A parent constructed with child S0 retains S0 in its creation view after a
+realization overlay selects child S1. Automatically allocated identities are not
+retroactive construction pins, and the root's own captured StateKey does not
+recur in its creation digest. `receiver.adopt_saved_view(original_saved_node)` is
+the metadata adoption step: it first matches the **original supplied graph's**
+object projection, then returns supplied saved facets and construction pins over
+the receiver's occurrence identities and sharing. Later creation inspection uses
+that adopted construction authority; authenticated Node transport retains it.
+The receiver and supplied graph are immutable and remain unchanged on failure.
+
+The Node view APIs above are metadata-only. Repo build/load/apply/restore consume
+these views with fresh state validation as described below. Managed-operation
+integration remains a separate consumer boundary. The V2 `object_projection()`
+query adapter and legacy call-surface
+thaw/export refuse identity-3 facets or retained construction evidence rather
+than silently dropping them. Use the Node APIs above for the new views.
 
 ## Live Objects And Exact State
 
@@ -35,37 +208,67 @@ class Counter(Serializable):
 Hooks receive only a framework-provided payload directory and validated opaque
 codec. They must write and restore a complete semantic checkpoint; DRYML cannot
 detect arbitrary mutation outside that contract. `Object.save()` delegates to the
-Repo save contract and returns one immutable root `StateRef`, or `(StateRef,
+Repo save contract and returns one immutable root `SavedNode`, or `(SavedNode,
 StoreReport)` when `report_stores=True`. Its `store=` override selects one
 whole-graph closure; routing otherwise determines per-object or closure placement.
 See [Repos and Stores](repos.md) for mode precedence, replication, and partial
 publication evidence.
 
-`Object.last_state_ref` is a read-only runtime receipt for the last complete
-top-level StateRef publication, or `None`. It advances only after immutable root
-authority is complete and before a derived index, main reference, alias, or
-archive commit can fail. Thus a later failure can preserve a valid inspectable
-receipt without reporting overall save success. A successful exact top-level load
-also installs its requested receipt. Embedded descendants never receive projected
-or synthetic receipts, and later ordinary mutation does not change the receipt.
-For a managed declaration using `return_state_ref=True`, the call result is the
-exact final StateRef captured for that invocation after association; callers must
-not substitute a later mutable `last_state_ref` receipt. Interruption, warning
-failure, or late publication/association failure returns no successful reference.
+`Object.last_state_ref` is a read-only historical SavedNode receipt, or `None`.
+Complete protected save publication and successful top-level exact loading/full
+restoration install receipts. An incomplete save preserves the previous receipt.
+Ordinary mutation does not update it. It proves neither current live state nor
+current payload availability and never authorizes skipping a required restore.
 
 ## Restore And References
 
-`Repo.load(cdef)` and `load_object(cdef)` are structural operations; they do not
-infer a snapshot. `Repo.load_state_ref(state_ref)` restores the requested exact
-authority through connected Stores. `Repo.restore_state_ref_into()` restores only
-the supplied exact live graph after preflight and never searches for a substitute
-Object. A restore hook failure invalidates that supplied graph for later framework
-state IO. Load a fresh graph with `reuse_live="never"` from the preserved
-StateRef before continuing.
+`Repo.load(saved_node)` and `Repo.load_state_ref(saved_node)` require complete
+SavedNode metadata. Every required stateful materializing occurrence needs its
+identity and selected state. Missing, reclaimed, corrupt or incompatible selected
+state fails explicitly before constructors/hooks where possible; no sibling state,
+historical receipt or default initialization substitutes for it. Entirely stateless
+concrete graphs are saved-complete without fabricated captures or identities.
 
-Query V3 returns immutable identity values rather than live Objects. Select a CDef
-with `repo.query().sel(...).cdefs()` and pass the selected value to an explicit Repo
-load method when construction is intended.
+`Repo.apply_state(obj, states)` accepts a rooted StateSpec or typed path/LocalState
+map. It restores only selected destinations and leaves unspecified state untouched.
+It neither assigns donor identities nor captures or publishes a complete checkpoint.
+Compatible foreign-origin state retains its original full StateKey. A later fresh
+capture uses the destination's retained construction view.
+
+`Repo.restore(obj, saved_node)` (also `restore_state_ref_into`) checks the live
+receiver's canonical object projection against the **original supplied graph**,
+before adopting its construction pins. Successful restoration preserves Python
+identities, ObjectIds and sharing. `Repo.describe(obj)` exposes adopted construction
+and realization metadata. A parent constructed with child S0 and saved with child
+S1 therefore retains S0 in its creation authority after load or full restore.
+
+Selected sources are opened by full StateKey, grouped once per distinct key/Store
+and once per creation bucket. Each destination independently validates creation
+compatibility and codec admission. Native shared key leases span validation and
+dependency-first constructors/hooks; hooks execute outside Store writer fences.
+Every independent use revalidates availability, including live-cache reuse.
+`reuse_live="matching"` and `"greedy"` retain unique-candidate identity rules;
+eligible reused nodes still run their selected restore hook. `"never"` builds fresh.
+
+For a handoff to another Core caller, `repo.prepare_restore(obj, saved_node)` returns
+an owner-thread, one-shot `PreparedRestoration`. Use it as a context manager and call
+`prepared.apply()` once, or close it without hooks. It retains the live reservation
+and current source leases until consumption/close; neither a detached plan nor a
+last-save receipt is a reusable authorization to skip restoration.
+
+Validation failure before any hook leaves a previously usable live graph usable.
+Failure after hook entry invalidates the affected retained live graph, evicts it
+from framework caches, and rejects later state IO. There is no automatic rollback.
+Recover with `repo.load_state_ref(saved_node, reuse_live="never")` from a valid
+available saved graph; its ObjectIds are preserved.
+
+Queries return immutable Nodes rather than live Objects. Select a concrete recipe
+with `repo.query().sel(...).cdefs()` and pass the selected value to
+`repo.build(concrete_recipe_node)` when construction is intended. Build allocates
+missing identities and initializes unspecified state. For exact restoration,
+select a complete SavedNode with `saved()` / `state_refs()` and use
+`repo.load(saved_node)` or `repo.load_state_ref(saved_node)`; a stateful recipe
+without the required identity/state facets is not loadable as a saved graph.
 
 Default `Pickleable` restoration replaces ordinary payload fields rather than
 merging them. It removes fields absent from the checkpoint while preserving graph
@@ -73,12 +276,10 @@ bindings and framework runtime metadata. A stateless Object root can own statefu
 descendants; its checkpoint state comes from those descendants, not unsaved
 root-only attributes.
 
-ObjectRef identifies the exact Object graph and ObjectIds but not a snapshot.
-StateRef identifies the corresponding immutable local-state hashes. Alias lookup
-therefore resolves an Object alias to ObjectRef authority and a state selector to
-StateRef authority; there is no generic object-returning alias load. Exact state
-identity, graph sharing, and reference-as-value semantics remain independent of
-Store placement or replication.
+ObjectRef/StateRef are legacy in-memory annotation/reference adapters. New public
+materialization and capture use Node-local facets; persisted V2 snapshots are not
+revived by format-4 loading. Exact state identity, sharing and reference-as-value
+semantics remain independent of Store placement or replication.
 
 Pre-V2 CDef records, raw tuple/dict records, missing identity versions, and mixed
 graphs are rejected before construction. There is no migration, converter, or dual

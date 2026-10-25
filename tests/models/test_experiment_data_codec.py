@@ -1,15 +1,18 @@
-"""Closed ExperimentData legacy readers and v3 writer contracts."""
+"""Closed run-aware ExperimentData v4 codec and incompatible-input refusal."""
 
 import json
 from pathlib import Path
 
 import pytest
 
-from dryml.core import Repo, Serializable, StateRef
+from dryml.core import Node, Repo, Serializable
+from dryml.core.store.dir import DirStore
 from dryml.core.cardinality import Cardinality
 from dryml.core.dtype import DType
 from dryml.data import GeneratorDataset
 from dryml.models import ExperimentData, ExperimentDataError
+
+pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 
 
 class CodecSubject(Serializable):
@@ -29,9 +32,9 @@ def _empty_values():
 
 
 def _row(tmp_path):
-    repo = Repo(tmp_path / "store")
+    repo = Repo(DirStore(tmp_path / "store"))
     checkpoint = repo.save_object(CodecSubject(repo=repo), deep_capture=True)
-    history = ExperimentData.get_or_create(checkpoint.object_projection(), repo=repo)
+    history = ExperimentData.get_or_create(checkpoint.object_view(), repo=repo)
     history.add_row(
         expected_artifacts=("one", "two"), state_ref=checkpoint,
         prev_state_ref=None, time=0, examples_seen=0, scalar_values={"value": True},
@@ -46,17 +49,19 @@ def test_codec_round_trip_and_rejected_decode_leave_rows_unchanged(tmp_path):
     payload = tmp_path / "payload"
     payload.mkdir()
     history.save_state_to_dir_imp(payload, codec="pkl")
-    assert json.loads(Path(payload, "experiment_data.json").read_text())["version"] == 3
-    restored = ExperimentData(checkpoint.object_projection().reference)
+    assert json.loads(Path(payload, "experiment_data.json").read_text())["version"] == 4
+    restored = ExperimentData(checkpoint.object_view())
     restored.restore_state_from_dir_imp(payload, codec="pkl")
-    assert restored.data.to_dict("records") == history.data.to_dict("records")
+    assert restored.data.iloc[0].state_ref.graph_equal(checkpoint)
+    assert tuple(restored.data.columns) == tuple(history.data.columns)
 
-    Path(payload, "experiment_data.json").write_text(
-        json.dumps(history._payload(version=2)), encoding="utf-8",
-    )
-    legacy = ExperimentData(checkpoint.object_projection().reference)
-    legacy.restore_state_from_dir_imp(payload, codec="pkl")
-    assert legacy.data.to_dict("records") == history.data.to_dict("records")
+    incompatible = history._payload()
+    incompatible["version"] = 3
+    original = json.dumps(incompatible)
+    Path(payload, "experiment_data.json").write_text(original, encoding="utf-8")
+    with pytest.raises(ExperimentDataError, match="version"):
+        restored.restore_state_from_dir_imp(payload, codec="pkl")
+    assert Path(payload, "experiment_data.json").read_text() == original
 
     before = restored.data.to_dict("records")
     Path(payload, "experiment_data.json").write_text(
@@ -73,12 +78,12 @@ def test_codec_round_trip_and_rejected_decode_leave_rows_unchanged(tmp_path):
 def test_history_round_trips_state_ref_with_semantic_definition_values(tmp_path):
     """History persists checkpoints with Dataset cardinality and canonical dtype."""
 
-    repo = Repo(tmp_path / "store")
+    repo = Repo(DirStore(tmp_path / "store"))
     checkpoint = repo.save_object(
         SemanticCodecSubject(Cardinality.INFINITE, DType("float", 32)),
         deep_capture=True,
     )
-    history = ExperimentData.get_or_create(checkpoint.object_projection(), repo=repo)
+    history = ExperimentData.get_or_create(checkpoint.object_view(), repo=repo)
     history.add_row(
         expected_artifacts=(), state_ref=checkpoint, prev_state_ref=None,
         time=0, examples_seen=0,
@@ -87,11 +92,11 @@ def test_history_round_trips_state_ref_with_semantic_definition_values(tmp_path)
     payload.mkdir()
 
     history.save_state_to_dir_imp(payload, codec="pkl")
-    restored = ExperimentData(checkpoint.object_projection().reference)
+    restored = ExperimentData(checkpoint.object_view())
     restored.restore_state_from_dir_imp(payload, codec="pkl")
 
-    assert isinstance(restored.data.iloc[0].state_ref, StateRef)
-    assert restored.data.iloc[0].state_ref == checkpoint
+    assert isinstance(restored.data.iloc[0].state_ref, Node)
+    assert restored.data.iloc[0].state_ref.graph_equal(checkpoint)
     repo.close(flush=False)
 
 
@@ -106,5 +111,5 @@ def test_codec_rejects_unknown_status_and_incomplete_completed_row(tmp_path):
     raw = raw.replace('"evaluation_status":"pending"', '"evaluation_status":"completed"')
     Path(payload, "experiment_data.json").write_text(raw, encoding="utf-8")
     with pytest.raises(ExperimentDataError, match="Completed rows"):
-        ExperimentData(checkpoint.object_projection().reference).restore_state_from_dir_imp(payload, codec="pkl")
+        ExperimentData(checkpoint.object_view()).restore_state_from_dir_imp(payload, codec="pkl")
     repo.close(flush=False)

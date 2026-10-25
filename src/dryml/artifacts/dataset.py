@@ -1,21 +1,27 @@
-"""Concrete resumable Dataset Artifact backed by logical cache codecs."""
+"""Resumable Dataset caches with lazy codecs and native Store reader lifetimes."""
 
 from __future__ import annotations
 
 import json
+import functools
 import os
 import shutil
 import stat
+import sys
 import threading
 from collections.abc import Iterator
+from concurrent.futures import Future
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeAlias, TypeVar
+from weakref import finalize
 
-from dryml.core import AutoRef, ConcreteDefinition, Definition, ObjectRef, Ref, StateRef
+from dryml.core import AutoRef, Node, Ref
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import SpecTree
 from dryml.core.utils.graph.path import GraphPath
+from dryml.core.store.store import StoreAuthorityError
 from dryml.data import Dataset, DatasetCursor
 from dryml.locking import FileLock, LockError
 from dryml.managed import ManagedContext, managed_operation
@@ -39,6 +45,35 @@ _WORK_MARKER = "cache-work.json"
 _WORK_FORMAT = "dryml.cached-dataset-work"
 
 
+def _cache_work_lifetime(target):
+    """Hold borrowed work leases only during authored execution, including failure.
+
+    Final publication reads immutable completed chunks while operation ownership
+    still fences this run. Retained markers, not an expired allocator handle,
+    authorize later recovery; replay never enters this wrapper.
+    """
+    @functools.wraps(target)
+    def wrapped(self, *args, **kwargs):
+        with ExitStack() as work:
+            self._cache_work_scope = work
+            try:
+                return target(self, *args, **kwargs)
+            finally:
+                del self._cache_work_scope
+    return wrapped
+
+
+def _release_cache_work(store, workdir):
+    """Release allocation without replacing an already escaping workload failure."""
+    primary = sys.exc_info()[1]
+    try:
+        store.release_local_state_staging(workdir)
+    except BaseException:
+        if primary is None:
+            raise
+        primary.add_note("CachedDataset allocator lease cleanup failed; retained work is preserved.")
+
+
 @dataclass(slots=True)
 class _CacheGeneration:
     """One private immutable completed payload and its active iterator leases."""
@@ -46,6 +81,75 @@ class _CacheGeneration:
     payload: dict[str, Any]
     leases: int = 0
     retired: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _CacheSource:
+    """Detached Store-domain/full-key selection, never an expired borrowed path."""
+
+    store: Any
+    domain: str
+    key: Any
+
+    @contextmanager
+    def read(self):
+        with ExitStack() as lifetime:
+            try:
+                if self.store.retention_domain != self.domain:
+                    raise CacheIntegrityError("CachedDataset source Store domain changed.")
+                source = lifetime.enter_context(self.store.read_state(self.key))
+                source.data_directory
+                if source.store.retention_domain != self.domain or source.state.key != self.key:
+                    raise CacheIntegrityError("CachedDataset source selection changed.")
+            except CacheIntegrityError:
+                raise
+            except Exception as error:
+                raise CacheIntegrityError("CachedDataset completed snapshot payload is unavailable.") from error
+            yield source
+
+
+class _CacheReadLease:
+    """Keep a native Core reader on its owner thread until any cursor thread closes.
+
+    Core leases are thread-affine and nested readers may reuse an outer lease.
+    Each traversal therefore needs an isolated owner, including when two cursors
+    are opened on the same caller thread and closed in either order.
+    """
+
+    def __init__(self, selection):
+        ready, self._finished = Future(), Future()
+        self._release = threading.Event()
+        self._thread = threading.Thread(
+            target=self._hold, args=(selection, ready, self._release, self._finished),
+            name="dryml-cache-reader", daemon=True,
+        )
+        self._thread.start()
+        try:
+            self.source = ready.result()
+        except BaseException:
+            self.close()
+            raise
+
+    @staticmethod
+    def _hold(selection, ready, release, finished):
+        try:
+            with selection.read() as source:
+                ready.set_result(source)
+                release.wait()
+        except BaseException as error:
+            if not ready.done():
+                ready.set_exception(error)
+            else:
+                finished.set_exception(error)
+                return
+        finished.set_result(None)
+
+    def close(self):
+        self._release.set()
+        try:
+            self._finished.result()
+        finally:
+            self._thread.join()
 
 
 class CachedDataset(Artifact, Dataset[T], Generic[T]):
@@ -58,6 +162,9 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
     ``compute`` admits only finite sources and writes self-contained completed
     state. Intermediate checkpoints contain only progress metadata and a private
     Store work token; completed reads validate metadata eagerly and chunks lazily.
+    Store-backed cursors and captures freshly validate their exact full-StateKey
+    source and hold native active-use protection while accessing deferred chunks.
+    Source unavailability raises CacheIntegrityError rather than trusting paths.
     """
 
     state_codec = "cachedataset1"
@@ -66,7 +173,7 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
         """Retain one non-materializing Dataset source reference.
 
         Args:
-            src: Existing CDef, ObjectRef, StateRef, or live Dataset accepted by
+            src: Existing Node, concrete definition, or live Dataset accepted by
                 DRYML's ``Ref[AutoRef]`` binding rules.
 
         Raises:
@@ -110,21 +217,45 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
 
         Raises:
             ArtifactNotReadyError: If no complete payload is installed.
-            CacheIntegrityError: If a chunk fails validation before it yields.
+            CacheIntegrityError: If the exact source is unavailable/replaced or a
+                chunk fails validation before it yields.
         """
 
         return self.iterator()
 
     def iterator(self) -> DatasetCursor[T]:
-        """Create an independent cursor that owns one cache-content traversal."""
+        """Create an independent lazy chunk traversal with native Store protection.
+
+        Returns a DatasetCursor holding fresh full-StateKey active-use protection
+        until exhaustion, close (including from another thread), or read failure.
+        Store-backed generations are revalidated on acquisition; unavailable,
+        replaced, or closed sources raise CacheIntegrityError. No durable root is
+        added. Close unused cursors explicitly, including before their first pull.
+        """
 
         if not self.ready:
             raise ArtifactNotReadyError("CachedDataset is not ready.")
-        generation = self._read_generation()
-        assert generation is not None
         with self._generation_guard():
+            generation = self._read_generation()
+            assert generation is not None
             generation.leases += 1
-        return DatasetCursor(self._iter_generation(generation))
+        lifetime = ExitStack()
+        lifetime.callback(self._release_generation, generation)
+        try:
+            selection = generation.payload.get("_source")
+            source = None
+            if selection is not None:
+                lease = _CacheReadLease(selection)
+                lifetime.callback(lease.close)
+                source = lease.source
+            cursor = DatasetCursor(iter(()))
+            cursor._own(lifetime)
+            cursor._iterator = cursor._own(self._iter_generation(generation, source))
+            finalize(cursor, lifetime.close)
+            return cursor
+        except BaseException:
+            lifetime.close()
+            raise
 
     def peek(self) -> T:
         """Return one cached yield and always close the temporary reader."""
@@ -137,7 +268,8 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
         finally:
             iterator.close()
 
-    @managed_operation(resumable=True, return_state_ref=True, store_parameter="store")
+    @managed_operation(resumable=True, store_parameter="store")
+    @_cache_work_lifetime
     def compute(
             self, *, codec: CacheCodec, store=None, target_chunk_bytes: int | None = None,
             managed: ManagedContext) -> None:
@@ -151,9 +283,9 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
             managed: Runtime-created lifecycle authority.
 
         Returns:
-            The managed boundary returns this invocation's exact completed
-            ``StateRef`` after publication and association. The authored body
-            itself returns ``None``.
+            InvocationResult with ``value is None`` and the completed SavedNode
+            in ``final_state_ref``. The authored body returns None. Replay does
+            not traverse the source or reinstall a live cache generation.
 
         Raises:
             ValueError: If arguments, source cardinality, source values, or source
@@ -297,14 +429,8 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
 
         reference = self.src
         repo = managed.state_repo
-        if isinstance(reference, StateRef):
-            source = repo.load_state_ref(reference)
-        elif isinstance(reference, ObjectRef):
-            source = repo.build_object_ref(reference)
-        elif isinstance(reference, ConcreteDefinition):
-            source = repo._load_structural(reference, require_store=False)
-        elif isinstance(reference, Definition):
-            source = repo._load_structural(reference.concretize(repo=repo), require_store=False)
+        if isinstance(reference, Node):
+            source = repo.build(reference)
         else:
             raise TypeError("CachedDataset source reference is not a supported DRYML reference.")
         if not isinstance(source, Dataset):
@@ -319,7 +445,12 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
             if payload.get("codec") != codec or payload.get("expected") != expected:
                 raise ValueError("CachedDataset checkpoint is incompatible with this invocation.")
             workdir = _work_directory(managed.state_repo, payload.get("work_token"))
-            _validate_work_marker(workdir, payload, managed, self.object_ref.digest())
+            token, owner = _owned_work_store(managed.state_repo, workdir)
+            try:
+                self._cache_work_scope.enter_context(owner._replay_staging(({"staging": ".staging/" + token},)))
+            except StoreAuthorityError as error:
+                raise CacheIntegrityError("CachedDataset retained work allocator is unavailable or in use.") from error
+            _validate_work_marker(workdir, payload, managed, managed.state_repo.describe(self).object_projection_digest())
             chunks = payload.get("chunks")
             if not isinstance(chunks, list):
                 raise CacheIntegrityError("CachedDataset working chunk inventory is malformed.")
@@ -331,14 +462,16 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
             _discard_unassociated_tail(workdir, chunks, codec)
             return workdir, chunks, payload["count"]
         if payload is not None and payload.get("mode") == "working":
-            # Managed has already fenced this fresh rerun with a new attempt.  Do
+            # Managed has already fenced this fresh rerun with a new run. Do
             # not reuse or delete the old prefix, but make the now-superseded
             # allocation eligible for a later bounded Store-local sweep.
             old_workdir = _work_directory(managed.state_repo, payload.get("work_token"))
             _validate_stored_work_marker(old_workdir, payload)
             _mark_work_reclaimable(managed.state_repo, old_workdir)
         workdir = _create_work_directory(managed.state_repo, self)
-        _write_work_marker(workdir, managed, self.object_ref.digest())
+        _, owner = _owned_work_store(managed.state_repo, workdir)
+        self._cache_work_scope.callback(_release_cache_work, owner, workdir)
+        _write_work_marker(workdir, managed, managed.state_repo.describe(self).object_projection_digest())
         return workdir, [], 0
 
     def _install_working(self, codec, spec, expected, count, workdir, chunks, managed) -> None:
@@ -350,14 +483,14 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
             prior_ready_state_digest = current.get("prior_ready_state_digest")
             if current.get("mode") == "completed":
                 prior = self.last_state_ref
-                prior_ready_state_digest = None if prior is None else prior.digest()
+                prior_ready_state_digest = None if prior is None else _saved_digest(prior)
         if prior_ready_state_digest is not None and not _is_digest(prior_ready_state_digest):
             raise CacheIntegrityError("CachedDataset prior ready reference is invalid.")
         self._cache_payload = {
             "mode": "working", "codec": codec, "spec": spec, "expected": expected,
             "count": count, "work_token": _work_token(managed.state_repo, workdir), "chunks": list(chunks),
-            "object_ref_digest": self.object_ref.digest(), "operation_id": managed.operation_id,
-            "attempt_id": managed.attempt_id,
+            "object_ref_digest": managed.state_repo.describe(self).object_projection_digest(), "operation_id": managed.operation_id,
+            "run_id": managed.run_id,
         }
         if prior_ready_state_digest is not None:
             # StateRef digests name complete immutable StateRef authority through
@@ -388,6 +521,12 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
             raise CacheIntegrityError("CachedDataset completed payload has no local source directory.")
         leaves = flatten_spec(payload["spec"])
         for descriptor in payload["chunks"]:
+            active = payload.get("_active_source")
+            if active is not None:
+                try:
+                    source_dir = active.data_directory
+                except Exception as error:
+                    raise CacheIntegrityError("CachedDataset active source is unavailable.") from error
             path = os.path.join(source_dir, "chunks", descriptor["file"])
             for values in _read_chunk(payload["codec"], path, descriptor, leaves):
                 yield rebuild_value(payload["spec"], values)
@@ -419,26 +558,35 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
             self._cache_generation = generation
             return generation
 
-    def _iter_generation(self, generation: _CacheGeneration):
-        """Traverse one leased generation and reclaim it after its last reader closes."""
+    def _iter_generation(self, generation: _CacheGeneration, source=None):
+        """Traverse one generation while its cursor owns independent source use."""
 
         try:
-            yield from self._iter_payload(generation.payload)
+            payload = generation.payload
+            if source is not None:
+                try:
+                    directory = source.data_directory
+                except Exception as error:
+                    raise CacheIntegrityError("CachedDataset active source is unavailable.") from error
+                payload = {**payload, "source_dir": directory, "_active_source": source}
+            yield from self._iter_payload(payload)
         except CacheIntegrityError:
             with self._generation_guard():
                 if getattr(self, "_cache_generation", None) is generation:
                     self._cache_generation = None
                     self._cache_payload = {"mode": "uncomputed"}
             raise
-        finally:
-            with self._generation_guard():
-                generation.leases -= 1
-                if generation.retired and generation.leases == 0:
-                    generation.payload.clear()
-                    retired = getattr(self, "_retired_cache_generations", ())
-                    self._retired_cache_generations = tuple(
-                        item for item in retired if item is not generation
-                    )
+
+    def _release_generation(self, generation):
+        """Retire local metadata only after the last independently owned cursor closes."""
+        with self._generation_guard():
+            generation.leases -= 1
+            if generation.retired and generation.leases == 0:
+                generation.payload.clear()
+                retired = getattr(self, "_retired_cache_generations", ())
+                self._retired_cache_generations = tuple(
+                    item for item in retired if item is not generation
+                )
 
     def _managed_post_publication(self, final_state, state_repo, report) -> None:
         """Bind this invocation's completed cache to its exact immutable snapshot.
@@ -479,20 +627,29 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
             _reclaim_work(state_repo, old_workdir)
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
-        """Write cache metadata eagerly and copy completed chunks for deferred hashing."""
+        """Write metadata and completed chunks into private state staging.
+
+        dest_dir is the framework-owned directory and codec the admitted state
+        codec. Copy IO failures raise OSError without installing a new generation.
+        Store-backed chunks are copied under a freshly validated native
+        full-key reader; unavailable sources raise CacheIntegrityError. Current
+        Store reads authenticate all inventoried bytes; decoding remains deferred.
+        """
 
         payload = getattr(self, "_cache_payload", None)
         record = _payload_record(payload)
         Path(dest_dir, _MANIFEST_FILENAME).write_text(json.dumps(record, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         if payload is not None and payload.get("mode") == "completed":
-            source_dir = payload.get("source_dir")
-            if not isinstance(source_dir, str):
-                raise CacheIntegrityError("CachedDataset completed payload has no source directory.")
-            for descriptor in payload["chunks"]:
-                name = descriptor["file"]
-                target = Path(dest_dir, "chunks", name)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(Path(source_dir, "chunks", name), target)
+            selection = payload.get("_source")
+            with selection.read() if selection is not None else nullcontext(None) as source:
+                source_dir = source.data_directory if source is not None else payload.get("source_dir")
+                if not isinstance(source_dir, str):
+                    raise CacheIntegrityError("CachedDataset completed payload has no source directory.")
+                for descriptor in payload["chunks"]:
+                    name = descriptor["file"]
+                    target = Path(dest_dir, "chunks", name)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(Path(source_dir, "chunks", name), target)
 
     def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
         """Restore and validate only eager cache metadata, leaving chunks deferred."""
@@ -510,8 +667,21 @@ class CachedDataset(Artifact, Dataset[T], Generic[T]):
                 _CacheGeneration(payload) if payload.get("mode") == "completed" else None
             )
 
+    def _bind_restored_state_source(self, source):
+        """Detach exact selection evidence while Core still owns the restore reader."""
+        with self._generation_guard():
+            payload = self._cache_payload
+            if payload.get("mode") == "completed":
+                payload["_source"] = _CacheSource(source.store, source.store.retention_domain, source.state.key)
+
     def deferred_state_payload_paths(self, data_dir: str, *, codec: str) -> tuple[str, ...]:
-        """Declare complete cache chunks for lazy Store validation and iteration."""
+        """Describe logically deferred codec files, not a Store validity exemption.
+
+        data_dir is the staged payload directory and codec the state codec. Returns
+        relative chunk names for completed content, or an empty tuple for working
+        state. Performs no IO; current full-key validation still authenticates all
+        bytes before restoration and iteration decodes chunks on demand.
+        """
 
         payload = getattr(self, "_cache_payload", None)
         if payload is None or payload.get("mode") != "completed":
@@ -626,13 +796,13 @@ def _work_directory(repo, token: object) -> str:
 
 
 def _write_work_marker(workdir: str, managed: ManagedContext, object_ref_digest: str) -> None:
-    """Bind a new Store-owned work directory to this cache operation and attempt."""
+    """Bind a new Store-owned work directory to this operation and stable run."""
 
     marker = {
         "format": _WORK_FORMAT, "version": _VERSION,
         "token": _work_token(managed.state_repo, workdir), "object_ref_digest": object_ref_digest,
         "operation_id": managed.operation_id,
-        "attempt_id": managed.attempt_id, "state": "retained",
+        "run_id": managed.run_id, "state": "retained",
     }
     path = Path(workdir, _WORK_MARKER)
     temporary = path.with_name(f".{_WORK_MARKER}.tmp")
@@ -652,27 +822,18 @@ def _validate_work_marker(
 ) -> None:
     """Require the exact retained work marker before reading a saved prefix."""
 
-    try:
-        marker = json.loads(Path(workdir, _WORK_MARKER).read_text(encoding="utf-8"))
-    except Exception as error:
-        raise CacheIntegrityError("CachedDataset work marker is missing or malformed.") from error
-    expected = {
-        "format": _WORK_FORMAT, "version": _VERSION,
-        "token": payload.get("work_token"), "object_ref_digest": payload.get("object_ref_digest"),
-        "operation_id": payload.get("operation_id"),
-        "attempt_id": payload.get("attempt_id"), "state": "retained",
-    }
-    if (marker != expected or marker["object_ref_digest"] != object_ref_digest
-            or marker["operation_id"] != managed.operation_id
-            or marker["attempt_id"] != managed.attempt_id):
-        raise CacheIntegrityError("CachedDataset work marker belongs to another cache attempt.")
+    _validate_stored_work_marker(workdir, payload)
+    if (payload["object_ref_digest"] != object_ref_digest
+            or payload["operation_id"] != managed.operation_id
+            or payload["run_id"] != managed.run_id):
+        raise CacheIntegrityError("CachedDataset work marker belongs to another cache run.")
 
 
 def _validate_stored_work_marker(workdir: str, payload: dict[str, Any]) -> None:
     """Validate persisted marker identity without accepting a live invocation.
 
-    A rerun uses this narrower check only after managed has replaced the attempt
-    authority.  The old marker is deliberately not compared with the new attempt.
+    A rerun uses this narrower check only after managed has replaced the run
+    authority. The old marker is deliberately not compared with the new run.
     """
 
     try:
@@ -682,11 +843,11 @@ def _validate_stored_work_marker(workdir: str, payload: dict[str, Any]) -> None:
     expected = {
         "format": _WORK_FORMAT, "version": _VERSION,
         "token": payload.get("work_token"), "object_ref_digest": payload.get("object_ref_digest"),
-        "operation_id": payload.get("operation_id"), "attempt_id": payload.get("attempt_id"),
+        "operation_id": payload.get("operation_id"), "run_id": payload.get("run_id"),
         "state": "retained",
     }
-    if marker != expected:
-        raise CacheIntegrityError("CachedDataset work marker belongs to another cache attempt.")
+    if not _is_work_marker(marker, payload.get("work_token"), "retained") or marker != expected:
+        raise CacheIntegrityError("CachedDataset work marker belongs to another cache run.")
 
 
 def _discard_unassociated_tail(workdir: str, chunks: list[dict[str, Any]], codec: str) -> None:
@@ -735,14 +896,16 @@ def _snapshot_payload(final_state, state_repo, report) -> dict[str, Any]:
     for store in stores:
         if id(store) not in connected:
             continue
-        open_local = getattr(store, "_open_local_state_for_exact_load", None)
+        open_local = getattr(store, "read_state", None)
         if open_local is None:
             continue
         try:
-            source = open_local(final_state, GraphPath())
-            data_dir = os.path.join(os.fspath(source.handle), "data")
-            record = json.loads(Path(data_dir, _MANIFEST_FILENAME).read_text(encoding="utf-8"))
-            return _payload_from_record(record, data_dir)
+            with open_local(final_state.state.key) as source:
+                data_dir = source.data_directory
+                record = json.loads(Path(data_dir, _MANIFEST_FILENAME).read_text(encoding="utf-8"))
+                payload = _payload_from_record(record, data_dir)
+                payload["_source"] = _CacheSource(store, store.retention_domain, final_state.state.key)
+                return payload
         except CacheIntegrityError:
             raise
         except Exception as error:
@@ -771,7 +934,7 @@ def _mark_work_reclaimable(repo, workdir: str) -> None:
         os.replace(temporary, path)
     except CacheIntegrityError:
         raise
-    except (LockError, OSError, ValueError, TypeError) as error:
+    except (LockError, OSError, ValueError, TypeError, StoreAuthorityError) as error:
         raise CacheIntegrityError("CachedDataset work marker could not be marked reclaimable.") from error
     finally:
         try:
@@ -796,10 +959,10 @@ def _reclaim_work(repo, workdir: str) -> None:
         marker = json.loads(Path(workdir, _WORK_MARKER).read_text(encoding="utf-8"))
         if not _is_work_marker(marker, token, "reclaimable"):
             raise CacheIntegrityError("CachedDataset work marker cannot be reclaimed safely.")
-        store.discard_local_state_staging(workdir)
+        _discard_reclaimable_work(store, token, workdir)
     except CacheIntegrityError:
         raise
-    except (LockError, OSError, ValueError, TypeError) as error:
+    except (LockError, OSError, ValueError, TypeError, StoreAuthorityError) as error:
         raise CacheIntegrityError("CachedDataset retained work cleanup failed safely.") from error
     finally:
         # Closing the caller-owned descriptor after removal is supported; FileLock
@@ -834,12 +997,14 @@ def _sweep_reclaimable_work(repo) -> None:
                 if not entry.is_dir(follow_symlinks=False):
                     continue
                 token = entry.name
+                if len(token) != 32 or any(char not in "0123456789abcdef" for char in token):
+                    continue
                 if resolve(token) != entry.path:
                     continue
                 lock = FileLock(_work_lock_path(entry.path))
                 if not lock.acquire(blocking=False):
                     continue
-            except (LockError, OSError, ValueError, TypeError):
+            except (LockError, OSError, ValueError, TypeError, StoreAuthorityError):
                 continue
             try:
                 try:
@@ -848,8 +1013,8 @@ def _sweep_reclaimable_work(repo) -> None:
                     continue
                 if not _is_reclaimable_marker(marker, token):
                     continue
-                discard(entry.path)
-            except (LockError, OSError, ValueError, TypeError):
+                _discard_reclaimable_work(store, token, entry.path)
+            except (LockError, OSError, ValueError, TypeError, StoreAuthorityError):
                 continue
             finally:
                 try:
@@ -868,20 +1033,30 @@ def _is_reclaimable_marker(marker: object, token: str) -> bool:
     return _is_work_marker(marker, token, "reclaimable")
 
 
+def _discard_reclaimable_work(store, token, workdir):
+    """Use Core's owner/allocator lease checks for current or abandoned work."""
+    if token in store._staging_leases:
+        store.discard_local_state_staging(workdir)
+    else:
+        if not store._discard_abandoned_staging(token, store._staging_owner(token)):
+            raise CacheIntegrityError("CachedDataset work is still in use by its allocator.")
+
+
 def _is_work_marker(marker: object, token: str, state: str) -> bool:
     """Return whether a closed marker names one Store-owned work lifecycle state."""
 
     return (
         isinstance(marker, dict)
         and set(marker) == {
-            "format", "version", "token", "object_ref_digest", "operation_id", "attempt_id", "state",
+            "format", "version", "token", "object_ref_digest", "operation_id", "run_id", "state",
         }
         and marker.get("format") == _WORK_FORMAT
+        and type(marker.get("version")) is int
         and marker.get("version") == _VERSION
         and marker.get("token") == token
         and marker.get("state") == state
         and all(type(marker.get(key)) is str and marker[key] for key in (
-            "object_ref_digest", "operation_id", "attempt_id",
+            "object_ref_digest", "operation_id", "run_id",
         ))
     )
 
@@ -967,7 +1142,7 @@ def _payload_record(payload: dict[str, Any] | None) -> dict[str, object]:
             "spec": spec_to_data(payload["spec"]), "expected": payload["expected"],
             "count": payload["count"], "work_token": payload["work_token"], "chunks": payload["chunks"],
             "object_ref_digest": payload["object_ref_digest"], "operation_id": payload["operation_id"],
-            "attempt_id": payload["attempt_id"],
+            "run_id": payload["run_id"],
             **({"prior_ready_state_digest": prior_ready_state_digest} if prior_ready_state_digest is not None else {}),
         }
     if mode == "completed":
@@ -981,14 +1156,14 @@ def _payload_record(payload: dict[str, Any] | None) -> dict[str, object]:
 def _payload_from_record(record: object, src_dir: str) -> dict[str, Any]:
     """Validate a persisted cache manifest without reading deferred chunk bytes."""
 
-    if not isinstance(record, dict) or record.get("format") != _FORMAT or record.get("version") != _VERSION:
+    if not isinstance(record, dict) or record.get("format") != _FORMAT or type(record.get("version")) is not int or record.get("version") != _VERSION:
         raise CacheIntegrityError("CachedDataset manifest format is unsupported.")
     mode = record.get("mode")
     if mode == "uncomputed" and set(record) == {"format", "version", "mode"}:
         return {"mode": "uncomputed"}
     common = {"format", "version", "mode", "codec", "spec", "count", "chunks"}
     if mode == "working":
-        common |= {"expected", "work_token", "object_ref_digest", "operation_id", "attempt_id"}
+        common |= {"expected", "work_token", "object_ref_digest", "operation_id", "run_id"}
         if "prior_ready_state_digest" in record:
             common |= {"prior_ready_state_digest"}
     if mode not in {"working", "completed"} or set(record) != common or record["codec"] not in {"numpy", "parquet", "netcdf"}:
@@ -1013,9 +1188,9 @@ def _payload_from_record(record: object, src_dir: str) -> dict[str, Any]:
     if mode == "working":
         if (type(record["expected"]) is not int or record["expected"] < record["count"]
                 or type(record["work_token"]) is not str
-                or not all(type(record[key]) is str and record[key] for key in ("object_ref_digest", "operation_id", "attempt_id"))):
+                or not all(type(record[key]) is str and record[key] for key in ("object_ref_digest", "operation_id", "run_id"))):
             raise CacheIntegrityError("CachedDataset working manifest is invalid.")
-        result = {"mode": mode, "codec": record["codec"], "spec": spec, "expected": record["expected"], "count": record["count"], "work_token": record["work_token"], "object_ref_digest": record["object_ref_digest"], "operation_id": record["operation_id"], "attempt_id": record["attempt_id"], "chunks": chunks}
+        result = {"mode": mode, "codec": record["codec"], "spec": spec, "expected": record["expected"], "count": record["count"], "work_token": record["work_token"], "object_ref_digest": record["object_ref_digest"], "operation_id": record["operation_id"], "run_id": record["run_id"], "chunks": chunks}
         if "prior_ready_state_digest" in record:
             if not _is_digest(record["prior_ready_state_digest"]):
                 raise CacheIntegrityError("CachedDataset prior ready reference is invalid.")
@@ -1033,7 +1208,7 @@ def _is_digest(value: object) -> bool:
     return type(value) is str and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
-def _prior_ready_state_ref(repo, payload: dict[str, Any]) -> StateRef:
+def _prior_ready_state_ref(repo, payload: dict[str, Any]) -> Node:
     """Resolve a working replacement's exact prior completed StateRef on demand.
 
     Working metadata is intentionally inspectable without this lookup.  Consumers
@@ -1042,17 +1217,27 @@ def _prior_ready_state_ref(repo, payload: dict[str, Any]) -> StateRef:
     are errors and never turn the partial working prefix into ready content.
     """
 
-    from dryml.managed.storage import state_ref_for_digest, validate_state_ref
+    from dryml.core.materialization import build_exact_state_load_plan
 
     digest = payload.get("prior_ready_state_digest")
     if not _is_digest(digest):
         raise CacheIntegrityError("CachedDataset working state has no prior ready reference.")
     try:
-        reference = state_ref_for_digest(repo, digest)
-        validate_state_ref(repo, reference)
+        references = [store.read_node(digest, kind="saved") for store in repo.stores]
+        reference = next((item for item in references if item is not None), None)
+        if reference is None:
+            raise KeyError(digest)
+        if any(item is not None and not item.graph_equal(reference) for item in references):
+            raise CacheIntegrityError("CachedDataset prior ready metadata conflicts.")
+        build_exact_state_load_plan(repo, reference)
     except Exception as error:
         raise CacheIntegrityError("CachedDataset prior ready state is unavailable.") from error
     return reference
+
+
+def _saved_digest(node):
+    from dryml.core.node_prepare import NodePreparation
+    return NodePreparation((node,)).digest(node, domain="dryml-saved-root/v1")
 
 
 CachedDataset.__module__ = "dryml.artifacts"

@@ -23,7 +23,7 @@ import numpy as np
 
 from dryml.artifacts import Value
 from dryml.artifacts.value import _VALUE_FORMAT, _VALUE_VERSION
-from dryml.core import AutoRef, ConcreteDefinition, Definition, ObjectRef, Ref, StateRef
+from dryml.core import AutoRef, Definition, Node, Ref, SavedNode, require_saved, Parameter
 from dryml.data import ArgMax, ArrayDataset, Batch, Cast, Dataset, Flatten, Map, Pipe, Project, Select, as_supervised
 from dryml.data.image import ImageNormalize
 from dryml.managed import ManagedConfig, ManagedContext, managed_operation
@@ -71,7 +71,7 @@ class _QualificationMetric(Value[float]):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True, store_parameter="store")
+    @managed_operation(resumable=True, store_parameter="store")
     def compute(self, *, store=None, managed: ManagedContext) -> None:
         """Evaluate the exact saved model over the exact saved test Dataset."""
 
@@ -129,21 +129,8 @@ class _QualificationMetric(Value[float]):
     def _load(reference, repo):
         """Materialize one retained reference through the selected state Repo."""
 
-        if isinstance(reference, StateRef):
-            return repo.load_state_ref(
-                reference,
-                reuse_live="never",
-                cache="none",
-                source_store=repo.stores[0],
-            )
-        if isinstance(reference, ObjectRef):
-            return repo.build_object_ref(reference)
-        if isinstance(reference, ConcreteDefinition):
-            return repo._load_structural(reference, require_store=False, cache="none")
-        if isinstance(reference, Definition):
-            return repo._load_structural(
-                reference.concretize(repo=repo), require_store=False, cache="none",
-            )
+        if isinstance(reference, Node):
+            return repo.build(reference.concretize(repo=repo), cache="none")
         raise TypeError("Qualification metric reference is unsupported.")
 
     @staticmethod
@@ -172,6 +159,23 @@ def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
     """Copy one closed flat mapping into an immutable request/evidence field."""
 
     return MappingProxyType(dict(value))
+
+
+def _history_rows_equal(left, right):
+    """Compare final-row facts with exact graphs across independent decoders."""
+    if len(left) != len(right):
+        return False
+    for a, b in zip(left, right):
+        if (set(a) != {"state_ref", "evaluation_status", "eval_artifacts"} or set(b) != set(a)
+                or a["evaluation_status"] != b["evaluation_status"]
+                or not isinstance(a["state_ref"], Node) or not isinstance(b["state_ref"], Node)
+                or not a["state_ref"].graph_equal(b["state_ref"])
+                or not isinstance(a["eval_artifacts"], Mapping) or not isinstance(b["eval_artifacts"], Mapping)
+                or set(a["eval_artifacts"]) != set(b["eval_artifacts"])
+                or any(not isinstance(ref, Node) or not isinstance(b["eval_artifacts"][key], Node)
+                       or not ref.graph_equal(b["eval_artifacts"][key]) for key, ref in a["eval_artifacts"].items())):
+            return False
+    return True
 
 
 def _case_seed(manifest: FixtureManifest, framework: str) -> dict[str, int]:
@@ -619,22 +623,22 @@ def prepare_exact_model_for_formula(model, case: "QualificationCase") -> None:
         raise FixtureManifestError("Accelerated formula model selects an unsupported backend.")
 
 
-def _ref_to_json(reference: StateRef) -> dict[str, object]:
-    """Encode one exact StateRef using the shared closed JSON grammar."""
+def _ref_to_json(reference: SavedNode) -> dict[str, object]:
+    """Encode one exact SavedNode using Core's current shared graph codec."""
 
-    return _reference_to_json(reference.to_data())
+    return _reference_to_json(reference)
 
 
-def _ref_from_json(value: object) -> StateRef:
-    """Decode one exact StateRef without opening its Store."""
+def _ref_from_json(value: object) -> SavedNode:
+    """Decode one exact SavedNode without opening its Store."""
 
     try:
-        return StateRef.from_data(_reference_from_json(value))
+        return _reference_from_json(value)
     except (TypeError, ValueError) as error:
         raise FixtureManifestError("Qualification record lacks an exact StateRef.") from error
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class QualificationCase:
     """Immutable manifest-derived request for one fixed qualification cell.
 
@@ -651,7 +655,7 @@ class QualificationCase:
     config_digest: str
     environment: Mapping[str, str]
     seed: Mapping[str, int]
-    w3_test_ref: StateRef | None = None
+    w3_test_ref: SavedNode | None = None
     case_kind: str = "matrix"
     tensorflow_mode: bool = False
     accelerator: str = "cpu"
@@ -685,8 +689,10 @@ class QualificationCase:
         if not isinstance(self.seed, Mapping) or set(self.seed) != {"framework", "train", "test"} or any(type(value) is not int for value in self.seed.values()):
             raise FixtureManifestError("Qualification case seed evidence is malformed.")
         if self.workload == "W3":
-            if type(self.w3_test_ref) is not StateRef:
-                raise FixtureManifestError("W3 case lacks an exact retained test StateRef.")
+            try:
+                require_saved(self.w3_test_ref)
+            except (ValueError, TypeError) as error:
+                raise FixtureManifestError("W3 case lacks an exact retained test SavedNode.") from error
         elif self.w3_test_ref is not None:
             raise FixtureManifestError("Only W3 cases may carry a W3 test StateRef.")
         object.__setattr__(self, "environment", _freeze_mapping(self.environment))
@@ -696,7 +702,18 @@ class QualificationCase:
     def case_id(self) -> str:
         """Return stable case identity bound to all request authority fields."""
 
-        return hashlib.sha256(json.dumps(self.to_data(), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")).hexdigest()
+        data = self.to_data()
+        data["w3_test_ref"] = None if self.w3_test_ref is None else self.w3_test_ref.exact_digest()
+        return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")).hexdigest()
+
+    def __eq__(self, other):
+        """Compare detached case facts and exact graphs, not process-local handles."""
+        if type(other) is not QualificationCase or self.case_id != other.case_id:
+            return False
+        return (self.w3_test_ref is other.w3_test_ref or self.w3_test_ref is not None
+                and other.w3_test_ref is not None and self.w3_test_ref.graph_equal(other.w3_test_ref))
+
+    __hash__ = None
 
     def to_data(self) -> dict[str, object]:
         """Encode the closed fresh-process-safe case request."""
@@ -735,7 +752,7 @@ def case_from_manifest(manifest: FixtureManifest, *, workload: str, framework: s
         config_digest(manifest.baseline), dict(manifest.environment), _case_seed(manifest, framework),
         manifest.references.numpy if workload == "W3" else None,
     )
-    if case.workload == "W3" and case.w3_test_ref != manifest.references.numpy:
+    if case.workload == "W3" and not case.w3_test_ref.graph_equal(manifest.references.numpy):
         raise FixtureManifestError("W3 case changed the retained NumPy fixture StateRef.")
     return case
 
@@ -926,8 +943,8 @@ def build_w3_fixtures(store, baseline: Mapping[str, object]):
     source = repo.save_object(polynomial_samples(seed=w3["test_seed"], count=w3["test_count"]))
     config = ManagedConfig(state_repo=repo)
     return FixtureReferences(
-        CachedDataset(source).compute(codec="numpy", managed=config),
-        CachedDataset(source).compute(codec="parquet", managed=config),
+        CachedDataset(source).compute(codec="numpy", managed=config).final_state_ref,
+        CachedDataset(source).compute(codec="parquet", managed=config).final_state_ref,
     )
 
 
@@ -952,7 +969,7 @@ def mse_formula(predictions, observations) -> float:
     return result
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class QualificationEvidence:
     """Closed KTD11 result record bound to one manifest-derived request.
 
@@ -963,12 +980,12 @@ class QualificationEvidence:
     """
 
     case: QualificationCase
-    final_experiment_ref: StateRef
-    model_ref: StateRef
-    test_ref: StateRef
-    history_ref: StateRef
+    final_experiment_ref: SavedNode
+    model_ref: SavedNode
+    test_ref: SavedNode
+    history_ref: SavedNode
     history_rows: tuple[Mapping[str, object], ...]
-    artifact_ref: StateRef
+    artifact_ref: SavedNode
     artifact_value: float
     formula: Mapping[str, object]
     environment: Mapping[str, str]
@@ -980,13 +997,31 @@ class QualificationEvidence:
     recovery: Mapping[str, object] | None = None
     device_evidence: Mapping[str, object] | None = None
 
+    def __eq__(self, other):
+        """Compare detached evidence facts and exact graphs across fresh decoding."""
+        if type(other) is not QualificationEvidence or self.case != other.case:
+            return False
+        left, right = self.to_data(), other.to_data()
+        left.pop("case"); right.pop("case")
+        for name in ("final_experiment_ref", "model_ref", "test_ref", "history_ref", "artifact_ref"):
+            if not getattr(self, name).graph_equal(getattr(other, name)):
+                return False
+            left.pop(name); right.pop(name)
+        left.pop("history_rows"); right.pop("history_rows")
+        return left == right and _history_rows_equal(self.history_rows, other.history_rows)
+
+    __hash__ = None
+
     def __post_init__(self) -> None:
         """Validate closed field types before any result can be serialized."""
 
         if not isinstance(self.case, QualificationCase):
             raise FixtureManifestError("Qualification evidence lacks a case identity.")
-        if any(type(reference) is not StateRef for reference in (self.final_experiment_ref, self.model_ref, self.test_ref, self.history_ref, self.artifact_ref)):
-            raise FixtureManifestError("Qualification evidence requires exact StateRefs.")
+        try:
+            for reference in (self.final_experiment_ref, self.model_ref, self.test_ref, self.history_ref, self.artifact_ref):
+                require_saved(reference)
+        except (ValueError, TypeError) as error:
+            raise FixtureManifestError("Qualification evidence requires exact SavedNodes.") from error
         if not self.history_rows or any(not isinstance(row, Mapping) for row in self.history_rows):
             raise FixtureManifestError("Qualification evidence requires nonempty history rows.")
         if not all(type(value) in (int, float) and math.isfinite(float(value)) for value in (self.artifact_value, self.elapsed_seconds)):
@@ -1008,10 +1043,10 @@ class QualificationEvidence:
         self._validate_recovery_evidence()
         expected_metric = _METRIC_NAMES[self.case.workload]
         for row in self.history_rows:
-            if set(row) != {"state_ref", "evaluation_status", "eval_artifacts"} or row["state_ref"] != self.final_experiment_ref or row["evaluation_status"] != "completed":
+            if set(row) != {"state_ref", "evaluation_status", "eval_artifacts"} or not row["state_ref"].graph_equal(self.final_experiment_ref) or row["evaluation_status"] != "completed":
                 raise FixtureManifestError("Qualification history evidence is incomplete or misassociated.")
             artifacts = row["eval_artifacts"]
-            if not isinstance(artifacts, Mapping) or artifacts != {expected_metric: self.artifact_ref}:
+            if not isinstance(artifacts, Mapping) or set(artifacts) != {expected_metric} or not artifacts[expected_metric].graph_equal(self.artifact_ref):
                 raise FixtureManifestError("Qualification history Artifact evidence is incomplete or misassociated.")
         object.__setattr__(
             self,
@@ -1117,16 +1152,16 @@ class QualificationEvidence:
         if not isinstance(authority, Mapping) or set(authority) != {"fixture_store", "control_store"} or not all(isinstance(value, str) and value for value in authority.values()):
             raise FixtureManifestError("Qualification worker shared authority evidence is malformed.")
         submitted = self.worker["submitted"]
-        if not isinstance(submitted, Mapping) or set(submitted) != {"request_digest", "submission_id", "result_ref"} or not all(isinstance(submitted[name], str) and submitted[name] for name in submitted) or submitted["result_ref"] != self.final_experiment_ref.digest():
+        if not isinstance(submitted, Mapping) or set(submitted) != {"request_digest", "submission_id", "result_ref"} or not all(isinstance(submitted[name], str) and submitted[name] for name in submitted) or submitted["result_ref"] != self.final_experiment_ref.exact_digest():
             raise FixtureManifestError("Qualification worker submission receipts are inconsistent.")
         outcome = self.worker["core_outcome"]
         if not isinstance(outcome, Mapping) or set(outcome) != {"kind", "publication_refs", "update_refs"} or not isinstance(outcome["kind"], str) or not outcome["kind"] or not isinstance(outcome["publication_refs"], (tuple, list)) or not isinstance(outcome["update_refs"], (tuple, list)) or not all(isinstance(reference, str) and reference for reference in outcome["publication_refs"]) or not all(isinstance(reference, str) and reference for reference in outcome["update_refs"]):
             raise FixtureManifestError("Qualification Core outcome evidence is malformed.")
         final_refs = self.worker["final_refs"]
         expected_refs = {
-            "experiment": self.final_experiment_ref.digest(), "model": self.model_ref.digest(),
-            "test": self.test_ref.digest(), "history": self.history_ref.digest(),
-            "artifact": self.artifact_ref.digest(),
+            "experiment": self.final_experiment_ref.exact_digest(), "model": self.model_ref.exact_digest(),
+            "test": self.test_ref.exact_digest(), "history": self.history_ref.exact_digest(),
+            "artifact": self.artifact_ref.exact_digest(),
         }
         if not isinstance(final_refs, Mapping) or dict(final_refs) != expected_refs:
             raise FixtureManifestError("Qualification worker final reference evidence is inconsistent.")
@@ -1244,18 +1279,18 @@ def validate_evidence(
     case = evidence.case
     if case.fixture_store != str(manifest.fixture_store) or case.manifest_digest != manifest.digest or case.config_digest != config_digest(manifest.baseline):
         raise FixtureManifestError("Qualification evidence is not bound to manifest authority.")
-    if case.workload == "W3" and case.w3_test_ref != manifest.references.numpy:
+    if case.workload == "W3" and not case.w3_test_ref.graph_equal(manifest.references.numpy):
         raise FixtureManifestError("W3 evidence changed the retained fixture StateRef.")
     try:
-        expected_model = evidence.final_experiment_ref.at("model")
-        expected_test = evidence.final_experiment_ref.at("test_data")
+        expected_model = evidence.final_experiment_ref.at((Parameter("model"),))
+        expected_test = evidence.final_experiment_ref.at((Parameter("test_data"),))
     except ValueError as error:
         raise FixtureManifestError("Final Experiment StateRef lacks exact model/test bindings.") from error
-    if expected_model != evidence.model_ref or expected_test != evidence.test_ref:
+    if not expected_model.graph_equal(evidence.model_ref) or not expected_test.graph_equal(evidence.test_ref):
         raise FixtureManifestError("Evidence model/test bindings disagree with final Experiment StateRef.")
     if (
             case.workload == "W3"
-            and evidence.test_ref.object != manifest.references.numpy.object):
+            and not evidence.test_ref.object_projection_equal(manifest.references.numpy)):
         raise FixtureManifestError(
             "W3 Experiment did not retain the manifest NumPy cache object identity."
         )
@@ -1266,9 +1301,9 @@ def validate_evidence(
         raise FixtureManifestError("Coordinator final-reference authority names another output Store.")
     metric_name = _METRIC_NAMES[case.workload]
     for row in evidence.history_rows:
-        if set(row) != {"state_ref", "evaluation_status", "eval_artifacts"} or row["state_ref"] != evidence.final_experiment_ref or row["evaluation_status"] != "completed":
+        if set(row) != {"state_ref", "evaluation_status", "eval_artifacts"} or not row["state_ref"].graph_equal(evidence.final_experiment_ref) or row["evaluation_status"] != "completed":
             raise FixtureManifestError("Qualification history row is incomplete or bound to another checkpoint.")
-        if row["eval_artifacts"] != {metric_name: evidence.artifact_ref}:
+        if set(row["eval_artifacts"]) != {metric_name} or not row["eval_artifacts"][metric_name].graph_equal(evidence.artifact_ref):
             raise FixtureManifestError("Qualification history Artifact receipt is incomplete or inconsistent.")
     if not math.isclose(float(evidence.artifact_value), float(evidence.formula["value"]), rel_tol=1e-6, abs_tol=1e-7):
         raise FixtureManifestError("Artifact value does not match the independent formula.")
@@ -1305,15 +1340,15 @@ def validate_evidence(
         if not isinstance(history, ExperimentData) or not isinstance(artifact, Value) or not artifact.ready:
             raise FixtureManifestError("Qualification history or Artifact completion evidence is invalid.")
         if (
-                final_experiment.last_state_ref != evidence.final_experiment_ref
-                or model.last_state_ref != evidence.model_ref
-                or test_data.last_state_ref != evidence.test_ref
-                or history.last_state_ref != evidence.history_ref
-                or artifact.last_state_ref != evidence.artifact_ref):
+                not final_experiment.last_state_ref.graph_equal(evidence.final_experiment_ref)
+                or not model.last_state_ref.graph_equal(evidence.model_ref)
+                or not test_data.last_state_ref.graph_equal(evidence.test_ref)
+                or not history.last_state_ref.graph_equal(evidence.history_ref)
+                or not artifact.last_state_ref.graph_equal(evidence.artifact_ref)):
             raise FixtureManifestError("Qualification receipt does not equal exact selected Store authority.")
         if (
-                final_experiment.last_state_ref.at("model") != evidence.model_ref
-                or final_experiment.last_state_ref.at("test_data") != evidence.test_ref):
+                not final_experiment.last_state_ref.at((Parameter("model"),)).graph_equal(evidence.model_ref)
+                or not final_experiment.last_state_ref.at((Parameter("test_data"),)).graph_equal(evidence.test_ref)):
             raise FixtureManifestError("Loaded final Experiment bindings disagree with evidence authority.")
         observed_parameters = _native_parameter_values(model)
         observed_devices = {
@@ -1341,9 +1376,9 @@ def validate_evidence(
             "eval_artifacts": record.get("eval_artifacts"),
         }
         for record in stored_rows
-        if record.get("state_ref") == evidence.final_experiment_ref
+        if isinstance(record.get("state_ref"), Node) and record["state_ref"].graph_equal(evidence.final_experiment_ref)
     ]
-    if observed_rows != expected_rows:
+    if not _history_rows_equal(observed_rows, expected_rows):
         raise FixtureManifestError("Persisted history rows do not exactly equal the evidenced final receipts.")
     try:
         stored_value = float(artifact.value())
@@ -1607,7 +1642,7 @@ def build_workload(
             codec="numpy",
             store=repo.stores[0],
             managed=managed,
-        )
+        ).final_state_ref
         test_data = None if test_ref is None else test_cache
     else:
         train = Batch(

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from pathlib import Path
 
 from dryml.artifacts import Artifact, ArtifactRecoveryError, CachedDataset, Value
-from dryml.core import AutoRef, Definition, Par, Ref, Repo, StateRef, definition_mode, selector_mode
+from dryml.core import AutoRef, Definition, Node, Par, Ref, Repo, definition_mode, selector_mode
 from dryml.data import ArrayDataset, Map, as_supervised
 from dryml.core.object import Pickleable
 from dryml.core.repo import RepoLoadError
@@ -60,7 +61,7 @@ class SavedTestDataValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Retain the bound test reference without materializing its payload."""
 
@@ -82,7 +83,7 @@ class ConstantValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Install one constant scalar result."""
 
@@ -104,7 +105,7 @@ class InitiallyReadyArtifact(Artifact):
 
         return True
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Record the one authored invocation required to establish authority."""
 
@@ -122,7 +123,7 @@ class NeverReadyArtifact(Artifact):
 
         return False
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Complete without installing a ready result, which U9 must reject."""
 
@@ -138,7 +139,7 @@ class RequiredComputeValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, required, *, managed) -> None:
         """Declare the preflight-rejected ordinary argument."""
 
@@ -154,7 +155,7 @@ class NoReceiptValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True)
+    @managed_operation(resumable=False)
     def compute(self, *, managed):
         """Remain intentionally incompatible with Experiment Artifact evaluation."""
 
@@ -166,7 +167,7 @@ class SavedModelValue(Value):
 
     calls = []
 
-    def __init__(self, model: Ref[StateRef]):
+    def __init__(self, model: Ref[Node]):
         self.model = model
 
     @property
@@ -175,7 +176,7 @@ class SavedModelValue(Value):
 
         return self._value_is_present()
 
-    @managed_operation(resumable=True, return_state_ref=True)
+    @managed_operation(resumable=True)
     def compute(self, *, managed) -> None:
         """Install the exact model reference as an inspectable scalar surrogate."""
 
@@ -198,17 +199,17 @@ def test_terminal_checkpoint_binds_artifact_to_exact_experiment_state(tmp_path):
         repo=repo, checkpoint_every_steps=1,
     )
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    history = ExperimentData.find(final.object_projection(), repo=repo)
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    history = ExperimentData.find(final.object_view(), repo=repo)
     row = history.data.iloc[-1]
 
-    assert final == exp.train.status(state_repo=repo).final_state_ref
+    assert final.graph_equal(exp.train.status(state_repo=repo).final)
     assert len(history.data) == 2
-    assert row.state_ref == final
+    assert row.state_ref.graph_equal(final)
     assert row.evaluation_status == "completed"
-    assert SavedModelValue.calls == [final.at(GraphPath((Parameter("model"),)))]
-    assert history.data.iloc[0].eval_artifacts == row.eval_artifacts
-    assert SavedModelValue.calls[-1] == final.at(GraphPath((Parameter("model"),)))
+    assert len(SavedModelValue.calls) == 1
+    assert SavedModelValue.calls[0].graph_equal(final.at(GraphPath((Parameter("model"),))))
+    assert history.data.iloc[0].eval_artifacts["score"].graph_equal(row.eval_artifacts["score"])
 
 
 def test_symbolic_metric_recipe_binds_through_ref_during_evaluation(
@@ -240,10 +241,7 @@ def test_symbolic_metric_recipe_binds_through_ref_during_evaluation(
         raise RuntimeError("stop after runtime binding")
 
     monkeypatch.setattr(Definition, "concretize", inspect_bound)
-    checkpoint = StateRef(
-        exp.object_ref,
-        {path: "dryml-" + "0" * 64 for path in exp.object_ref.objects},
-    )
+    checkpoint = repo.describe(exp)
     with pytest.raises(RuntimeError, match="stop after runtime binding"):
         exp._evaluate_artifact(
             "score", recipe, checkpoint, None, None,
@@ -272,8 +270,8 @@ def test_experiment_checkpoint_cadence_filters_intermediates_but_keeps_terminal(
     repo = Repo(DirStore(tmp_path / "store"))
     exp = Experiment(CounterModel(), FiveUpdates(), checkpoint_every_steps=cadence, repo=repo)
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    history = ExperimentData.find(final.object_projection(), repo=repo).data
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    history = ExperimentData.find(final.object_view(), repo=repo).data
 
     assert len(history) == expected_rows
     assert list(history.examples_seen) == ([5] if cadence is None else [2, 4, 5])
@@ -297,19 +295,19 @@ def test_empty_artifacts_still_publish_one_terminal_facts_only_row(tmp_path):
     repo = Repo(store)
     exp = Experiment(CounterModel(), TerminalOnly(), repo=repo)
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    history = ExperimentData.find(final.object_projection(), repo=repo)
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    history = ExperimentData.find(final.object_view(), repo=repo)
     row = history.data.iloc[0]
 
     assert len(history.data) == 1
-    assert row.state_ref == final
+    assert row.state_ref.graph_equal(final)
     assert row.expected_artifacts == []
     assert row.eval_artifacts == {}
     assert row.evaluation_status == "completed"
     status = exp.train.status(state_repo=repo)
-    assert (final, status.checkpoint_state_ref, status.final_state_ref) == (
-        row.state_ref, row.state_ref, row.state_ref,
-    )
+    assert final.graph_equal(row.state_ref)
+    assert status.checkpoint.graph_equal(row.state_ref)
+    assert status.final.graph_equal(row.state_ref)
 
 
 @pytest.mark.parametrize("artifacts", (
@@ -334,16 +332,16 @@ def test_resolved_artifact_recipe_is_unchanged_and_receipt_is_terminal(tmp_path)
     recipe = Definition(ConstantValue)
     exp = Experiment(CounterModel(), TerminalOnly(), artifacts={"constant": recipe}, repo=repo)
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    row = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    row = ExperimentData.find(final.object_view(), repo=repo).data.iloc[0]
 
     assert recipe.is_resolved
     assert ConstantValue.calls == 1
-    assert row.state_ref == final
+    assert row.state_ref.graph_equal(final)
     restored = repo.load_state_ref(row.eval_artifacts["constant"], reuse_live="never", cache="none")
-    assert row.eval_artifacts["constant"] == restored.compute.status(
+    assert row.eval_artifacts["constant"].graph_equal(restored.compute.status(
         state_repo=repo,
-    ).final_state_ref
+    ).final)
     assert restored.ready
     assert row.evaluation_status == "completed"
 
@@ -357,14 +355,14 @@ def test_initially_ready_artifact_still_completes_its_retained_managed_receiver(
         CounterModel(), TerminalOnly(), artifacts={"initial": Definition(InitiallyReadyArtifact)}, repo=repo,
     )
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    row = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
+    row = ExperimentData.find(final.object_view(), repo=repo).data.iloc[0]
     initial = row.artifact_inputs["initial"]
     recovered = Artifact.recover(initial, repo=repo, reuse_live="never")
 
     assert InitiallyReadyArtifact.calls == 1
-    assert row.eval_artifacts["initial"] == recovered.last_state_ref
-    assert recovered.compute.status(state_repo=repo).final_state_ref == recovered.last_state_ref
+    assert row.eval_artifacts["initial"].graph_equal(recovered.last_state_ref)
+    assert recovered.compute.status(state_repo=repo).final.graph_equal(recovered.last_state_ref)
     assert row.evaluation_status == "completed"
 
 
@@ -379,8 +377,8 @@ def test_completed_but_not_ready_artifact_is_never_published_as_an_evaluation(tm
 
     with pytest.raises(ArtifactRecoveryError, match="not ready"):
         exp.train(managed=ManagedConfig(state_repo=repo))
-    checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
-    row = ExperimentData.find(checkpoint.object_projection(), repo=repo).data.iloc[0]
+    checkpoint = exp.train.status(state_repo=repo).checkpoint
+    row = ExperimentData.find(checkpoint.object_view(), repo=repo).data.iloc[0]
     initial = row.artifact_inputs["never"]
     receiver = repo.load_state_ref(initial, reuse_live="never", cache="none")
 
@@ -397,16 +395,16 @@ def test_history_remains_readable_when_its_checkpoint_payload_is_unavailable(tmp
     repo = Repo(store)
     final = Experiment(CounterModel(), TerminalOnly(), repo=repo).train(
         managed=ManagedConfig(state_repo=repo),
-    )
-    history = ExperimentData.find(final.object_projection(), repo=repo)
+    ).final_state_ref
+    history = ExperimentData.find(final.object_view(), repo=repo)
     history_state = history.last_state_ref
     unavailable = tmp_path / "unavailable-checkpoint"
-    store.get_snapshot_directory(final).rename(unavailable)
+    Path(store.state_data_path(final.state.key)).rename(unavailable)
 
-    recovered = ExperimentData.find(final.object_projection(), repo=repo)
+    recovered = ExperimentData.find(final.object_view(), repo=repo)
 
-    assert recovered.data.iloc[0].state_ref == final
-    assert store.get_snapshot_directory(history_state).exists()
+    assert recovered.data.iloc[0].state_ref.graph_equal(final)
+    assert Path(store.state_data_path(history_state.state.key)).exists()
     with pytest.raises(RepoLoadError):
         repo.load_state_ref(final, reuse_live="never", cache="none")
 
@@ -422,11 +420,14 @@ def test_test_data_recipe_binds_the_materialized_checkpoint_dataset_state(tmp_pa
         artifacts={"test-data": Definition(SavedTestDataValue, Par("this.test_data"))}, repo=repo,
     )
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
     projected = final.at(GraphPath((Parameter("test_data"),)))
 
-    assert projected.object == test_data.object
-    assert SavedTestDataValue.calls == [projected]
+    assert projected.object_projection_equal(test_data)
+    assert len(SavedTestDataValue.calls) == 1 and SavedTestDataValue.calls[0].graph_equal(projected)
+    row = ExperimentData.find(final.object_view(), repo=repo).data.iloc[0]
+    recovered = Artifact.recover(row.artifact_inputs["test-data"], repo=repo, reuse_live="never")
+    assert recovered.compute.status(state_repo=repo).state == "completed"
 
 
 def test_test_data_materializes_a_stateless_definition_for_artifact_binding(tmp_path):
@@ -446,11 +447,11 @@ def test_test_data_materializes_a_stateless_definition_for_artifact_binding(tmp_
     )
 
     assert isinstance(exp.test_data, Map)
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
     projected = final.at(GraphPath((Parameter("test_data"),)))
 
-    assert projected.states == {}
-    assert SavedTestDataValue.calls == [projected]
+    assert not projected.state_spec()
+    assert len(SavedTestDataValue.calls) == 1 and SavedTestDataValue.calls[0].graph_equal(projected)
 
 
 def test_test_data_rebases_nested_stateful_runtime_projection(tmp_path):
@@ -462,7 +463,7 @@ def test_test_data_rebases_nested_stateful_runtime_projection(tmp_path):
     }, repo=repo))
     source = cached.compute(
         codec="numpy", managed=ManagedConfig(state_repo=repo),
-    )
+    ).final_state_ref
     test_data = as_supervised(source, "cart", input_as_target=True)
     exp = Experiment(
         CounterModel(), TerminalOnly(), test_data=test_data, repo=repo,
@@ -475,9 +476,9 @@ def test_test_data_rebases_nested_stateful_runtime_projection(tmp_path):
         Parameter("test_data"), Parameter("src"),
     ))) is exp.test_data.src
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    final = exp.train(managed=ManagedConfig(state_repo=repo)).final_state_ref
 
-    assert final.at(GraphPath((Parameter("test_data"), Parameter("src")))) == source
+    assert final.at(GraphPath((Parameter("test_data"), Parameter("src")))).graph_equal(source)
 
 
 def test_missing_test_data_recipe_fails_before_training_or_checkpoint_mutation(tmp_path):
@@ -570,7 +571,7 @@ def test_artifact_scalars_accept_installed_native_zero_dimensional_values():
 @pytest.mark.parametrize("recipe, error", (
     ({"invalid": Definition(CounterModel)}, "Artifact definition"),
     ({"required": Definition(RequiredComputeValue)}, "ordinary arguments"),
-    ({"no-receipt": Definition(NoReceiptValue)}, "resumable and return"),
+    ({"no-receipt": Definition(NoReceiptValue)}, "resumable"),
 ))
 def test_artifact_preflight_rejects_invalid_contracts_before_trainer_mutation(
         tmp_path, recipe, error):
@@ -585,4 +586,4 @@ def test_artifact_preflight_rejects_invalid_contracts_before_trainer_mutation(
 
     assert model.value == 0
     assert exp.state.phase is None
-    assert exp.train.status(state_repo=repo).checkpoint_state_ref is None
+    assert exp.train.status(state_repo=repo).checkpoint is None

@@ -8,7 +8,7 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import Repo, Serializable, StateRef
+from dryml.core import Repo, Serializable, StateRef, Node, require_saved
 from dryml.core.execute import CoreExecutionError, SharedDirStoreStrategy
 from dryml.core.execute_codec import decode_outcome
 from dryml.core.signatures import Ref
@@ -54,7 +54,7 @@ def _mutate_pair(first, second):
     return None
 
 
-def _mutate_child(root) -> Ref[StateRef]:
+def _mutate_child(root) -> Ref[Node]:
     """Mutate and return a descendant shared with its selected update root."""
     child = root.child
     child.value += 1
@@ -78,9 +78,9 @@ def test_update_args_publishes_once_and_restores_the_original_argument(tmp_path,
         return_objects=False, update_args=True,
     )
 
-    assert isinstance(result, StateRef)
+    assert require_saved(result) is result
     assert original.value == 3
-    assert original.last_state_ref == result
+    assert original.last_state_ref.graph_equal(result)
     assert len(saves) == 1
     assert saves[0] is not original
 
@@ -157,9 +157,9 @@ def test_result_descendant_reuses_the_coalesced_update_snapshot_once(tmp_path, m
     outcome = decode_outcome(output, repo=repo)
     assert outcome["success"], outcome["reason"]
     result = outcome["result"]
-    update = StateRef.from_data(outcome["updates"][0]["state"])
+    update = outcome["updates"][0]["state"]
 
-    assert result == update.at(next(path for path, value in root._runtime_projection.items() if value is child))
+    assert result.graph_equal(update.at(next(path for path, value in root._runtime_projection.items() if value is child)))
     strategy.recover(
         output, prepared, repo=repo, args=(root,), kwargs={},
         return_objects=False, update_args=True,

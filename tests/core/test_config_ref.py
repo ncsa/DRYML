@@ -49,14 +49,21 @@ def test_config_ref_keeps_identity_stable_across_runtime_config(primary_store_se
     if not repo.default_store.publication_capabilities.writable:
         pytest.skip("ObjectRef alias publication requires a writable Store")
     obj = objects.ConfigConsumer(ConfigRef("data.root"), repo=repo)
+    if repo.default_store.publication_capabilities.durability != "durable":
+        from dryml.core.store.store import StoreCapabilityError
+        with pytest.raises(StoreCapabilityError, match="durable"):
+            repo.save_object(obj, alias="configured")
+        assert repo.default_store.read_node_name("configured") is None
+        return
     repo.save_object(obj, alias="configured")
     repo.close(flush=True)
 
     repo2 = Repo(stores=primary_store_set.fresh_stores(), config={"data.root": "/cloud/data"})
-    reference = repo2.resolve_object_alias("configured")
-    loaded = repo2.load_object(reference.definition)
+    record = repo2.default_store.read_node_name("configured")
+    reference = repo2.default_store.read_node(record.root_digest, kind=record.root_kind)
+    loaded = repo2.build(reference.creation_view(), cache="none")
 
-    assert loaded.definition == obj.definition
+    assert loaded.definition.graph_equal(obj.definition)
     assert loaded.value == "/cloud/data"
 
 
@@ -64,6 +71,6 @@ def test_config_ref_hash_uses_reference_not_resolved_value():
     left = objects.ConfigConsumer(ConfigRef("path"), repo=Repo(config={"path": "a"}))
     right = objects.ConfigConsumer(ConfigRef("path"), repo=Repo(config={"path": "b"}))
 
-    assert left.definition == right.definition
+    assert left.definition.graph_equal(right.definition)
     assert left.value == "a"
     assert right.value == "b"

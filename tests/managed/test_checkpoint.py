@@ -1,398 +1,313 @@
-"""U7 checkpoint safe-point publication coverage."""
-
-from __future__ import annotations
+"""Current SavedNode checkpoint/selection/protection qualification (U16)."""
 
 import os
-import sys
-from threading import Event, Thread
+from threading import Thread
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-
-from dryml.core import Repo
-from dryml.core.object import Pickleable
-from dryml.core.reference_values import StateRef
-from dryml.core.signatures import Ref
-from dryml.core.store.dir import DirStore
-from dryml.managed import ManagedConfig, ManagedConflictError, ManagedContextError, managed_operation
-from dryml.managed.errors import ManagedRecoveryError
-
-
-class CheckpointValue(Pickleable):
-    """Stateful receiver whose checkpoints capture an intermediate value."""
-
-    seen_context = None
-    entered = Event()
-    release = Event()
-
-    def __init__(self, value=0):
-        self.value = value
-
-    @managed_operation(resumable=True)
-    def save_then_change(self, *, managed) -> Ref[StateRef]:
-        """Publish value one before mutating the final state to value two."""
-
-        self.value = 1
-        checkpoint = managed.checkpoint()
-        self.value = 2
-        return checkpoint
-
-    @managed_operation()
-    def capture_context(self, *, managed):
-        """Expose the active context to a coordinating test thread."""
-
-        type(self).seen_context = managed
-        type(self).entered.set()
-        assert type(self).release.wait(10)
-
-    @managed_operation()
-    def recursive(self, *, managed):
-        """Attempt a recursive checkpoint through an observer callback."""
-
-        managed.checkpoint()
-
-    @managed_operation()
-    def fork_context(self, *, managed):
-        """Prove an inherited child cannot use the parent's active context."""
-
-        child = os.fork()
-        if child == 0:  # pragma: no cover - result is asserted by the parent process.
-            try:
-                managed.checkpoint()
-            except ManagedContextError:
-                os._exit(0)
-            os._exit(1)
-        _, status = os.waitpid(child, 0)
-        assert os.waitstatus_to_exitcode(status) == 0
+from dryml.core import Definition
+from dryml.core.object import Object
+from dryml.core.node import require_saved
+from dryml.core.node_codec import encode_node_graph, decode_node_graph
+from dryml.core.node_prepare import NodePreparation
+from dryml.core.store.retention import grants
+from dryml.managed import ManagedConfig, ManagedConflictError, ManagedContextError
+from dryml.managed.context import _selection_equal
+from tests.managed.u16_fixtures import Value, enter, setup
 
 
 def test_checkpoint_saves_exact_intermediate_state_and_associates_it(tmp_path):
-    """A checkpoint remains recoverable after later ordinary mutation and final save."""
-
-    store = DirStore(tmp_path / "store")
-    repo = Repo((store,))
-    value = CheckpointValue(repo=repo)
-
-    checkpoint = value.save_then_change(managed=ManagedConfig(state_repo=store))
-
-    status = value.save_then_change.status(state_repo=store)
-    assert value.value == 2
-    assert status.checkpoint_state_ref == checkpoint
-    assert status.final_state_ref != checkpoint
-
-    loaded = Repo._for_state_io((store,))
-    try:
-        assert loaded.load_state_ref(checkpoint, reuse_live="never").value == 1
-    finally:
-        loaded.close()
+    control, live = setup(tmp_path)
+    def body(obj, ctx):
+        obj.value = 1
+        first = ctx.checkpoint(durable=True)
+        obj.value = 2
+        ctx.final_state(first)
+        return first
+    Value.action = body
+    first, final = enter(control, live)
+    assert first is final and live.value == 2 and Value.captures == 1
+    assert control.state_repo.load(first, cache="none").value == 1
 
 
-@pytest.mark.parametrize("immediate_recheck, share_direct, share_control, extra_store, expected", [
-    (True, False, False, False, 11),
-    (False, False, False, False, 9),
-    (False, True, False, False, 7),
-    (False, True, True, False, 6),
-    (False, False, True, False, 8),
-    (False, True, True, True, 8),
-])
-def test_checkpoint_changed_final_semantic_validation_budget(tmp_path, monkeypatch, immediate_recheck, share_direct, share_control, extra_store, expected):
-    """Count complete closure work without replacing guarded Store readers."""
-
-    from dryml.core.materialization import _build_exact_state_load_plan
-    from dryml.managed import storage
-    from dryml.managed.control import ManagedControlStore, _OwnerFields
-
-    if immediate_recheck:
-        consume = storage._PublicationEvent.consume
-
-        def consume_then_recheck(self, repo, state_ref, report, invocation):
-            consume(self, repo, state_ref, report, invocation)
-            storage.validate_state_ref(repo, state_ref)
-
-        monkeypatch.setattr(storage._PublicationEvent, "consume", consume_then_recheck)
-    if not share_control:
-        def separate_fields(self, operation_id, *, attempt_id, owner_id, kind, digest=None, force_interrupt=False):
-            fields = _OwnerFields(kind, digest, force_interrupt)
-            return self.transition_running_owner(
-                operation_id, attempt_id=attempt_id, owner_id=owner_id, build=fields.apply,
-            )
-
-        monkeypatch.setattr(ManagedControlStore, "_transition_running_fields", separate_fields)
-
-    if not share_direct:
-        monkeypatch.setattr(storage, "_matching_direct_publication_coverage", lambda *args: False)
-
-    store = DirStore(tmp_path / "store")
-    repo = Repo((store, DirStore(tmp_path / "unselected")) if extra_store else (store,))
-    value = CheckpointValue(repo=repo)
-    calls = []
-    accelerated = []
-    readers = (DirStore.read_state_ref_record, DirStore.read_snapshot_metadata,
-               DirStore.open_local_state, DirStore._read_snapshot)
-    previous = sys.getprofile()
-
-    def observe(frame, event, arg):
-        if event == "call" and frame.f_code is _build_exact_state_load_plan.__code__:
-            calls.append(frame.f_locals["state_ref"])
-        if event == "return" and frame.f_code is DirStore._can_reuse_exact_validation.__code__:
-            accelerated.append(arg)
-
-    sys.setprofile(observe)
-    try:
-        checkpoint = value.save_then_change(managed=ManagedConfig(state_repo=repo))
-    finally:
-        sys.setprofile(previous)
-    assert len(calls) == expected
-    assert accelerated and all(accelerated)
-    assert readers == (DirStore.read_state_ref_record, DirStore.read_snapshot_metadata,
-                       DirStore.open_local_state, DirStore._read_snapshot)
-    assert value.value == 2
-    status = value.save_then_change.status(state_repo=repo)
-    assert status.checkpoint_state_ref == checkpoint
-    assert status.final_state_ref != checkpoint
-    if expected == 6:
-        assert calls == [checkpoint, checkpoint, checkpoint,
-                         status.final_state_ref, checkpoint, status.final_state_ref]
-
-
-def test_context_rejects_cross_thread_and_inactive_checkpoint_use(tmp_path):
-    """Only the creating active invocation thread may publish a checkpoint."""
-
-    CheckpointValue.seen_context = None
-    CheckpointValue.entered, CheckpointValue.release = Event(), Event()
-    store = DirStore(tmp_path / "store")
-    value = CheckpointValue(repo=Repo((store,)))
-    outcome = []
-    worker = Thread(target=lambda: outcome.append(value.capture_context(managed=ManagedConfig(state_repo=store))))
-    worker.start()
-    assert CheckpointValue.entered.wait(10)
-    try:
-        errors = []
-        foreign = Thread(target=lambda: errors.append(pytest.raises(ManagedContextError, CheckpointValue.seen_context.checkpoint).value.reason))
-        foreign.start()
-        foreign.join(10)
-        assert not foreign.is_alive()
-        assert errors == ["inactive_context"]
-    finally:
-        CheckpointValue.release.set()
-        worker.join(10)
-    assert outcome == [None]
-    with pytest.raises(ManagedContextError, match="inactive_context"):
-        CheckpointValue.seen_context.checkpoint()
-
-
-def test_recursive_checkpoint_is_rejected_and_the_saved_checkpoint_is_retained(tmp_path):
-    """Observers cannot recursively enter the same context safe-point protocol."""
-
-    store = DirStore(tmp_path / "store")
-    value = CheckpointValue(repo=Repo((store,)))
-
-    with pytest.raises(ManagedContextError, match="recursive_checkpoint"):
-        value.recursive(managed=ManagedConfig(state_repo=store, callbacks=[lambda obj, context: context.checkpoint()]))
-    status = value.recursive.status(state_repo=store)
-    assert status.state == "failed"
-    assert status.checkpoint_state_ref is not None
-
-
-@pytest.mark.skipif(os.name == "nt" or not hasattr(os, "fork"), reason="fork context invalidation requires POSIX fork")
-def test_forked_child_cannot_use_parent_context(tmp_path):
-    """PID validation fails before an inherited child can touch parent ownership."""
-
-    store = DirStore(tmp_path / "store")
-    value = CheckpointValue(repo=Repo((store,)))
-    assert value.fork_context(managed=ManagedConfig(state_repo=store)) is None
-
-
-@pytest.fixture
-def publication_handoff(tmp_path, fixed_managed_snapshot_environment):
-    """Produce a real event under real invocation graph ownership, without control."""
-
-    from dryml.managed.context import _create_context
-    from dryml.managed import storage
-
-    repo = Repo(DirStore(tmp_path / "state"))
-    value = CheckpointValue(repo=repo)
-    with storage._acquire_state_ownership(repo, value) as ownership:
-        context = _create_context(
-            control_store=repo.default_store, operation_id="operation",
-            attempt_id="attempt", owner_id="owner", is_resuming=False,
-            checkpoint_state_ref=None, obj=value, state_repo=repo,
-            ownership=ownership, control=None, callbacks=(),
-            snapshot_observer=lambda: fixed_managed_snapshot_environment,
-        )
-        try:
-            result = storage._publish_managed_state_result(
-                repo, value, reservation=ownership.reservation,
-                snapshot_observer=context._snapshot_observer, invocation=context,
-            )
-            yield repo, context, result
-        finally:
-            context._deactivate()
-    repo.close(flush=False)
-
-
-@pytest.mark.parametrize("mismatch", ["target", "collision", "report", "repo", "invocation", "coverage", "graph", "ownership", "expired", "exit", "reuse"])
-def test_publication_event_requires_exact_completed_event(publication_handoff, monkeypatch, mismatch):
-    """Reports, digests, or surviving handles alone cannot authorize event reuse."""
-
-    from dataclasses import replace
-
-    repo, context, result = publication_handoff
-    event = result.event
-    target, report, caller = result.state_ref, result.report, context
-    selected_repo = repo
-    if mismatch in {"target", "collision"}:
-        target = StateRef(target.object, {
-            path: state_hash.rsplit("-", 1)[0] + "-" + "0" * 64
-            for path, state_hash in target.states.items()
-        })
-        if mismatch == "collision":
-            digest = result.state_ref.digest()
-            monkeypatch.setattr(StateRef, "digest", lambda self: digest)
-            assert target.digest() == result.state_ref.digest()
-        assert target != result.state_ref
-    elif mismatch == "report":
-        report = replace(report)
-        assert report == result.report and report is not result.report
-    elif mismatch == "repo":
-        selected_repo = Repo._for_state_io(repo.stores)
-    elif mismatch == "invocation":
-        caller = object()
-    elif mismatch == "coverage":
-        event._coverage = replace(event._coverage, required=())
-    elif mismatch == "graph":
-        monkeypatch.setattr(context, "_obj", object())
-    elif mismatch == "ownership":
-        monkeypatch.setattr(context._ownership, "_active", False)
-    elif mismatch == "expired":
-        context._expire_publication_event()
-    elif mismatch == "exit":
-        context._deactivate()
-    else:
-        event.consume(repo, target, report, context)
-    try:
-        with pytest.raises((ManagedRecoveryError, ManagedConflictError), match="invalid_publication_event|invalid_state_owner"):
-            event.consume(selected_repo, target, report, caller)
-        assert not event._active
-        assert context._publication_event is None
-    finally:
-        if mismatch == "ownership":
-            context._ownership._active = True
-        if selected_repo is not repo:
-            selected_repo.close(flush=False)
-
-
-@pytest.mark.parametrize("foreign", ["thread", "pid"])
-def test_publication_event_rejects_foreign_caller_without_retiring_owner(publication_handoff, monkeypatch, foreign):
-    """Ownership is checked before a foreign caller can consume or expire evidence."""
-
-    from dryml.managed import storage
-
-    repo, context, result = publication_handoff
-    errors = []
-
-    def attempt():
-        with pytest.raises(ManagedRecoveryError, match="invalid_publication_event"):
-            result.event.consume(repo, result.state_ref, result.report, context)
-        errors.append(True)
-
-    if foreign == "thread":
-        worker = Thread(target=attempt)
-        worker.start()
-        worker.join(10)
-        assert not worker.is_alive()
-    else:
-        pid = os.getpid()
-        with monkeypatch.context() as patch:
-            patch.setattr(storage.os, "getpid", lambda: pid + 1)
-            attempt()
-    assert errors == [True]
-    assert result.event._active
-    result.event.consume(repo, result.state_ref, result.report, context)
-    assert not result.event._active
-
-
-def test_public_publisher_keeps_tuple_and_does_not_mint_event(publication_handoff):
-    """The public projection remains a two-item tuple from the same implementation."""
-
-    from dryml.managed.storage import publish_managed_state
-
-    repo, context, result = publication_handoff
-    result.event.consume(repo, result.state_ref, result.report, context)
-    published = publish_managed_state(
-        repo, context._obj, reservation=context._ownership.reservation,
-        snapshot_observer=context._snapshot_observer,
-    )
-    assert type(published) is tuple and len(published) == 2
-    assert published[0].object == result.state_ref.object
-    assert published[0] == context._obj.last_state_ref
-    assert published[1].snapshots
-    assert context._publication_event is None
-
-
-def test_publication_event_cannot_be_serialized(publication_handoff):
-    """Completed-event reuse creates no transferable or persistent authority."""
-
-    import pickle
-
-    _, _, result = publication_handoff
-    with pytest.raises(TypeError, match="cannot be serialized"):
-        pickle.dumps(result.event)
-
-
-@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit, GeneratorExit])
-def test_cut_joined_publication_preserves_exact_validation_exception_chain(publication_handoff, monkeypatch, error_type):
-    """Joining a cut retains the validator's existing BaseException classification."""
-
-    from dryml.core import materialization
-    from dryml.managed import storage
-
-    repo, _, result = publication_handoff
-    original = error_type("exact preflight stopped")
-
-    def fail_preflight(*args, **kwargs):
-        raise original
-
-    monkeypatch.setattr(materialization, "build_exact_state_load_plan", fail_preflight)
-    with repo._read_cut() as cut:
-        with pytest.raises(ManagedRecoveryError) as caught:
-            storage._validate_publication_closure(repo, result.state_ref, cut)
-    assert caught.value.__cause__ is original
-    assert not cut.active
-
-
-def test_event_expires_before_boundaries_and_callbacks_without_immediate_validation(tmp_path, monkeypatch):
-    """Publisher cuts close and handoffs retire before control or callback hooks."""
-
-    from dryml.managed import context as context_module, runtime, storage
-
-    repo = Repo(DirStore(tmp_path / "state"))
-    value = CheckpointValue(repo=repo)
-    events = []
-    original = storage._publish_managed_state_result
-
-    def publish(*args, **kwargs):
-        result = original(*args, **kwargs)
-        assert repo._topology_leases == 1
-        events.append(result.event)
+def test_partial_explicit_state_reuse_captures_remaining_nodes_once(tmp_path):
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+    class Pair(Value):
+        def __init__(self, left, right):
+            self.left, self.right = left, right
+    store = DirStore(tmp_path / "state", query_index="none")
+    repo = Repo(store)
+    child = Value(repo=repo)
+    live = Pair(child, child, repo=repo)
+    from dryml.managed.control import ManagedControlStore
+    control = ManagedControlStore(store, repo)
+    saved = repo.save(live)
+    states = {path: state for path, state in saved.state_spec().items() if path.segments}
+    assert len(states) == 1
+    Pair.captures = Value.captures = 0
+    def body(obj, ctx):
+        obj.left.value = 7
+        result = ctx.checkpoint(states=states)
+        ctx.final_state(result)
         return result
+    Pair.action = body
+    result, final = enter(control, live)
+    assert final is result and Pair.captures == 1 and Value.captures == 0
+    assert result.state_spec().values() and live.left is live.right
 
-    def boundary(stage):
-        if stage in {"state_published", "final_state_published", "callbacks_started"}:
-            assert events and all(not event._active for event in events)
-            assert repo._topology_leases == 1
 
-    def no_immediate(*args, **kwargs):
-        raise AssertionError("immediate caller validation must not run")
+def test_initial_may_first_be_designated_during_resume(tmp_path):
+    control, live = setup(tmp_path)
+    seen = []
+    def body(obj, ctx):
+        seen.append((ctx.run_id, ctx.invocation_id, ctx.is_resuming))
+        if not ctx.is_resuming:
+            obj.value = 3
+            ctx.checkpoint()
+            raise ValueError("resume me")
+        assert ctx.initial_state_ref is None and obj.value == 3
+        ctx.initial_state(ctx.latest_checkpoint)
+        ctx.initial_state(ctx.initial_state_ref)
+        ctx.final_state(ctx.initial_state_ref)
+    Value.action = body
+    with pytest.raises(ValueError, match="resume me"):
+        enter(control, live)
+    live.value = 9
+    enter(control, live)
+    assert seen[0][0] == seen[1][0] and seen[0][1] != seen[1][1]
+    assert seen[1][2] and Value.restores == 1 and Value.captures == 1
 
-    monkeypatch.setattr(storage, "_publish_managed_state_result", publish)
-    monkeypatch.setattr(runtime, "_publish_managed_state_result", publish)
-    monkeypatch.setattr(runtime, "validate_state_ref", no_immediate)
-    monkeypatch.setattr(context_module, "_checkpoint_boundary", boundary)
-    monkeypatch.setattr(runtime, "_completion_boundary", boundary)
-    value.save_then_change(managed=ManagedConfig(
-        state_repo=repo, callbacks=[lambda *args: boundary("callbacks_started")],
-    ))
-    assert len(events) == 2
-    assert repo._topology_leases == 0
+
+def test_initial_durable_latest_and_user_grants_are_independent(tmp_path):
+    control, live = setup(tmp_path)
+    user = control.state_repo.save(live)
+    user_tokens = {g.token for g in grants(control.control_store, user.state.key)}
+    evidence = []
+    def body(obj, ctx):
+        first = ctx.checkpoint(initial=True, durable=True)
+        before = ctx._snapshot
+        obj.value = 5
+        ctx.checkpoint()
+        after = ctx._snapshot
+        evidence.extend((first, before, after))
+        ctx.final_state(first)
+    Value.action = body
+    enter(control, live)
+    first, before, after = evidence
+    assert {v.kind for v in before.intents} == {"latest", "initial", "durable"}
+    assert len({v.token for v in before.intents}) == 3
+    assert user_tokens <= {g.token for g in grants(control.control_store, user.state.key)}
+    assert next(v for v in before.intents if v.kind == "latest").token not in {v.token for v in after.intents}
+    assert {v.token for v in before.intents if v.kind != "latest"} <= {v.token for v in after.intents}
+    assert control.control_store.retention.read(next(g.token for g in grants(control.control_store, first.state.key))).disposition == "adopted"
+
+
+@pytest.mark.parametrize("selection", ["initial", "final"])
+def test_wrong_original_projection_is_rejected_before_hooks(tmp_path, monkeypatch, selection):
+    control, live = setup(tmp_path)
+    foreign = control.state_repo.save(Value(repo=control.state_repo))
+    Value.captures = Value.restores = 0
+    monkeypatch.setattr(control.control_store, "read_states", lambda *args, **kwargs:
+        pytest.fail("wrong projection reached a state reader"))
+    def body(obj, ctx):
+        with pytest.raises(ManagedConflictError, match="incompatible_selection"):
+            getattr(ctx, selection + "_state")(foreign)
+        assert ctx.initial_state_ref is None and ctx.final_state_ref is None
+        raise ValueError("stop")
+    Value.action = body
+    with pytest.raises(ValueError):
+        enter(control, live)
+    assert Value.captures == Value.restores == 0
+
+
+@pytest.mark.parametrize("reason", ["initial", "final"])
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_selection_reader_cancellation_preserves_exact_exception_before_hooks(tmp_path, monkeypatch, reason, error_type):
+    control, live = setup(tmp_path)
+    saved = control.state_repo.save(live)
+    Value.captures = Value.restores = 0
+    original = control.control_store.read_states
+    error = error_type("cancelled selection reader")
+    def body(obj, ctx):
+        def refuse(*args, **kwargs):
+            raise error
+        monkeypatch.setattr(control.control_store, "read_states", refuse)
+        with pytest.raises(error_type) as raised:
+            getattr(ctx, reason + "_state")(saved)
+        assert raised.value is error
+        assert Value.captures == Value.restores == 0
+        monkeypatch.setattr(control.control_store, "read_states", original)
+        ctx.final_state(saved)
+    Value.action = body
+    enter(control, live)
+
+
+def test_context_rejects_foreign_and_retired_use_without_retiring_owner(tmp_path):
+    control, live = setup(tmp_path)
+    captured = []
+    def body(obj, ctx):
+        import pickle
+        with pytest.raises(TypeError, match="cannot be serialized"):
+            pickle.dumps(ctx)
+        captured.append(ctx)
+        errors = []
+        def foreign():
+            for call in (ctx.checkpoint, lambda: ctx.initial_state(None), lambda: ctx.final_state(None)):
+                with pytest.raises(ManagedContextError, match="inactive_context"):
+                    call()
+            errors.append(True)
+        worker = Thread(target=foreign)
+        worker.start(); worker.join(10)
+        assert not worker.is_alive() and errors == [True] and ctx.active
+        ctx.final_state(ctx.checkpoint())
+    Value.action = body
+    enter(control, live)
+    with pytest.raises(ManagedContextError, match="inactive_context"):
+        captured[0].checkpoint()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+def test_forked_child_cannot_use_parent_context(tmp_path):
+    control, live = setup(tmp_path)
+    def body(obj, ctx):
+        child = os.fork()
+        if child == 0:
+            try:
+                ctx.checkpoint()
+            except ManagedContextError:
+                os._exit(0)
+            os._exit(1)
+        assert os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]) == 0
+        ctx.final_state(ctx.checkpoint())
+    Value.action = body
+    enter(control, live)
+
+
+def test_selection_equality_preserves_retained_construction_not_packet_order(tmp_path):
+    control, live = setup(tmp_path)
+    saved = control.state_repo.save(live)
+    assert _selection_equal(saved, decode_node_graph(encode_node_graph(NodePreparation((saved,)))))
+    # Retained construction is independently observable even if realization and
+    # all exact Node facets are otherwise identical.
+    changed = saved.copy_graph()
+    from dryml.core.state_values import LocalState, StateKey
+    pin = LocalState(StateKey(saved.state.key.cdef_digest, "pkl-" + "f" * 64), saved.state.creation_cdef)
+    object.__setattr__(changed, "_construction", saved.construction_view.with_state(pin))
+    require_saved(changed)
+    assert saved.graph_equal(changed) and not _selection_equal(saved, changed)
+    from dryml.managed.control import ControlIntent
+    from dataclasses import replace
+    from uuid import uuid4
+    intent = ControlIntent(uuid4().hex, uuid4().hex, uuid4().hex, 1,
+        "adopted", kind="initial", selection=saved)
+    assert intent != replace(intent, selection=changed)
+
+
+def test_empty_stateless_graph_is_a_valid_checkpoint_and_final(tmp_path):
+    from dryml.managed import managed_operation
+    class Stateless(Object):
+        @managed_operation()
+        def run(self, *, managed):
+            saved = managed.checkpoint(initial=True)
+            assert not saved.state_spec()
+            managed.final_state(saved)
+            return saved
+    control, live = setup(tmp_path, cls=Stateless)
+    raw, final = enter(control, live)
+    assert require_saved(raw) is raw and final is raw
+
+
+@pytest.mark.parametrize("reason", ["latest", "initial", "final"])
+def test_fresh_reader_override_errors_are_preserved(tmp_path, monkeypatch, reason):
+    control, live = setup(tmp_path)
+    original = control.control_store.read_states
+    failure = ValueError("fresh external reader refusal")
+    def body(obj, ctx):
+        saved = ctx.checkpoint()
+        def refuse(*args, **kwargs):
+            raise failure
+        monkeypatch.setattr(control.control_store, "read_states", refuse)
+        from dryml.core.repo import RepoLoadError
+        with pytest.raises((ValueError, RepoLoadError)) as caught:
+            if reason == "latest":
+                ctx.checkpoint(states=saved.state_spec())
+            else:
+                getattr(ctx, reason + "_state")(saved)
+        assert caught.value is failure or caught.value.__cause__ is failure
+        monkeypatch.setattr(control.control_store, "read_states", original)
+        ctx.final_state(saved)
+    Value.action = body
+    enter(control, live)
+
+
+def test_selected_final_survives_later_nondurable_latest_replacement(tmp_path):
+    control, live = setup(tmp_path)
+    def body(obj, ctx):
+        first = ctx.checkpoint()
+        ctx.final_state(first)
+        obj.value = 12
+        ctx.checkpoint()
+        return first
+    Value.action = body
+    first, final = enter(control, live)
+    assert first is final and Value.captures == 2 and Value.restores == 0
+    assert control.state_repo.load(final, cache="none").value == 0
+
+
+def test_mixed_earlier_child_and_later_progress_final_preserved_without_IO(tmp_path):
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+    from dryml.managed.control import ManagedControlStore
+    class Pair(Value):
+        def __init__(self, left, right):
+            self.left, self.right, self.value = left, right, 0
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    live = Pair(Value(1, repo=repo), Value(2, repo=repo), repo=repo)
+    earlier = repo.save(live)
+    live.value, live.left.value, live.right.value = 5, 11, 12
+    later = repo.save(live)
+    from dryml.core import Parameter
+    left = (Parameter("left"),)
+    mixed = later.replace_bindings(states={left: earlier.at(left).state})
+    Pair.captures = Value.captures = Pair.restores = Value.restores = 0
+    def body(obj, ctx):
+        ctx.final_state(mixed)
+        assert ctx.final_state_ref is mixed
+        return mixed
+    Pair.action = body
+    raw, final = enter(ManagedControlStore(repo.default_store, repo), live)
+    assert raw is final is mixed and _selection_equal(final, mixed)
+    assert (Pair.captures, Value.captures, Pair.restores, Value.restores) == (0, 0, 0, 0)
+    assert (live.value, live.left.value, live.right.value) == (5, 11, 12)
+
+
+def test_unordered_initial_and_final_accept_independent_decodes_and_keep_wire_evidence(tmp_path, monkeypatch):
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+    from dryml.managed.control import ManagedControlStore
+    from tests.managed.test_control_codec import force_fresh_handle_order
+    class Unordered(Value):
+        def __init__(self, children):
+            self.children = children
+    flip = force_fresh_handle_order(monkeypatch)
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    live = Unordered({Value(i, repo=repo) for i in range(5)}, repo=repo)
+    saved = repo.save(live)
+    packet = encode_node_graph(NodePreparation((saved,)))
+    flip()
+    independent = decode_node_graph(packet)
+    def body(obj, ctx):
+        ctx.initial_state(saved)
+        ctx.initial_state(independent)
+        ctx.final_state(independent)
+        return independent
+    Unordered.action = body
+    Unordered.captures = Value.captures = Unordered.restores = Value.restores = 0
+    control = ManagedControlStore(repo.default_store, repo)
+    raw, final = enter(control, live)
+    assert raw is final is independent
+    current = control.inspect(live.run.status(state_repo=repo).operation_id)
+    assert _selection_equal(current.initial, saved)
+    assert _selection_equal(next(v.selection for v in current.intents if v.kind == "final"), independent)
+    assert (Unordered.captures, Value.captures, Unordered.restores, Value.restores) == (0, 0, 0, 0)

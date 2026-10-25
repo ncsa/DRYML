@@ -18,7 +18,7 @@ from ..utils.graph.path import GraphPath, graph_path_sort_key, normalize_path
 from .model import QueryCardinalityError, QueryDiagnostic
 
 
-IdentityKind = Literal["cdef", "object_ref", "state_ref"]
+IdentityKind = Literal["cdef", "object_ref", "state_ref", "local_state"]
 
 
 def _digest_source(value: object) -> str:
@@ -86,6 +86,16 @@ class IdentityEvidence:
 
 
 def _identity_kind(value: object) -> IdentityKind:
+    from ..node import Node
+    from ..state_values import LocalState
+    if isinstance(value, LocalState):
+        return "local_state"
+    if isinstance(value, Node):
+        if value.state_spec():
+            return "state_ref"
+        if value.identity_spec():
+            return "object_ref"
+        return "cdef"
     if isinstance(value, ConcreteDefinition):
         return "cdef"
     if isinstance(value, ObjectRef):
@@ -98,12 +108,28 @@ def _identity_kind(value: object) -> IdentityKind:
 
 
 def _identity_digest(value: ConcreteDefinition | ObjectRef | StateRef) -> str:
-    return value.graph_hash() if isinstance(value, ConcreteDefinition) else value.digest()
+    from ..state_values import LocalState, StateKey
+    if isinstance(value, (LocalState, StateKey)):
+        key = value.key if isinstance(value, LocalState) else value
+        return key.cdef_digest + ":" + key.codec_hash
+    from ..node import Node
+    if isinstance(value, Node):
+        return value.exact_digest()
+    if isinstance(value, ConcreteDefinition):
+        from ..node import _as_node_view
+        return _as_node_view(value).exact_digest()
+    return value.digest()
 
 
 def _canonical_tie(value: ConcreteDefinition | ObjectRef | StateRef) -> str:
     """Return a token-free stable tie-breaker independent of the fast digest."""
 
+    from ..node import Node
+    from ..state_values import LocalState
+    if isinstance(value, LocalState):
+        return _identity_digest(value)
+    if isinstance(value, Node):
+        return value.exact_key().decode("ascii")
     if isinstance(value, ConcreteDefinition):
         from ..cdef_codec import cdef_graph_hash
 
@@ -145,7 +171,12 @@ class IdentityKey:
             return NotImplemented
         if self.kind != other.kind or self.digest != other.digest:
             return False
-        if self.kind == "cdef":
+        if self._value is other._value:
+            return True
+        if self.kind == "local_state":
+            return getattr(self._value, "key", self._value) == getattr(other._value, "key", other._value)
+        from ..node import Node
+        if isinstance(self._value, (ConcreteDefinition, Node)):
             return self._value.graph_equal(other._value)
         return self._value == other._value
 
@@ -368,8 +399,9 @@ class IdentitySet:
 
     def __contains__(self, member: object) -> bool:
         try:
-            return identity_key(member) in self._entries
-        except TypeError:
+            self.evidence_for(member)
+            return True
+        except (TypeError, KeyError):
             return False
 
     def count(self) -> int:
@@ -417,7 +449,19 @@ class IdentitySet:
             None. No authority source is consulted.
         """
 
-        return self._entries[identity_key(member)][1]
+        key = identity_key(member)
+        entry = self._entries.get(key)
+        if entry is not None:
+            return entry[1]
+        from ..node import Node
+        if isinstance(member, Node):
+            evidence = None
+            for candidate, (_, supplied) in self._entries.items():
+                if candidate.digest == key.digest and candidate._value.graph_equal(member):
+                    evidence = supplied if evidence is None else evidence.merged_with(supplied)
+            if evidence is not None:
+                return evidence
+        raise KeyError(key)
 
     def sources(self, member) -> frozenset[SourceEvidence]:
         """Return captured contributors without consulting current Store authority.
@@ -457,18 +501,31 @@ class IdentitySet:
         return IdentityQuery.from_set(self)
 
     def object_projection(self) -> "ObjectSelectorSet":
-        """Project captured references to distinct recursive ObjectSelectors.
+        """Project captured graph identities without reading external authority.
 
         Returns:
-            A fixed ObjectSelectorSet. ConcreteDefinition members are omitted
-            because they carry no realized ObjectIds to project. Evidence from
-            references that collapse to one selector is merged.
+            Node members produce a fixed IdentitySet of state-weakened Node
+            object projections. Retained fixed ObjectRef/StateRef adapters produce
+            ObjectSelectorSet. Recipe-only members are omitted; evidence from
+            projections that collapse to one identity is merged.
 
         Side Effects:
             None. Projection reads no source and does not mutate authority.
         """
 
         from ..reference_values import ObjectRef, StateRef
+        from ..node import Node
+
+        if any(isinstance(value, Node) for value, _ in self._entries.values()):
+            members = {}
+            for source_key, (value, evidence) in self._entries.items():
+                if isinstance(value, Node) and source_key.kind in {"object_ref", "state_ref"}:
+                    projection = value.object_view()
+                    key = IdentityKey("object_ref", projection.exact_digest(), projection)
+                    old = members.get(key)
+                    members[key] = (projection, evidence) if old is None else (old[0], old[1].merged_with(evidence))
+            return IdentitySet._from_entries(members, bounded=self.bounded, requested_limit=self.requested_limit,
+                                             query_work=self._query_work)
 
         entries = {}
         for value, evidence in self._entries.values():

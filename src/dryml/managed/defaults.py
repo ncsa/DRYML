@@ -94,6 +94,9 @@ def _current_control_store_default() -> DirStore | None:
 
     lease = _control_store_default_lease.get()
     if lease is None:
+        from dryml.core.execute import _current_context, current_context
+        if _current_context.get() is not None:
+            return current_context().control_store
         return None
     if not lease.active:
         raise RuntimeError("managed worker control default is inactive")

@@ -70,6 +70,20 @@ def capture_lineages(plan: "SavePlan") -> Mapping[GraphPath, LineageMetadata]:
         None. This reads framework runtime evidence only.
     """
 
+    from .node import Node, _owned_nodes
+    node = getattr(plan, "node", None)
+    if isinstance(node, Node):
+        from .metadata import NodeLineageMetadata
+        root_object = plan.binding.roots[0].obj
+        result = {}
+        for path, child in _owned_nodes(node):
+            if child.object_id is None:
+                continue
+            bound = root_object.graph_at(path)
+            instant = (getattr(bound, "_lineage_created_at", None)
+                       if getattr(bound, "_lineage_fact_object_id", None) == child.object_id else None)
+            result[path] = NodeLineageMetadata(child.object_view(), "known" if instant is not None else "unknown", instant)
+        return result
     reference = getattr(plan, "object_ref", None)
     root = getattr(getattr(plan, "binding", None), "roots", (None,))[0]
     root_object = getattr(root, "obj", None)

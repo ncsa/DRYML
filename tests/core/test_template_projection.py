@@ -73,7 +73,7 @@ def test_loose_projection_keeps_partial_factory_call_shape_without_building():
 
 
 @pytest.mark.parametrize("query_index", ("memory", "sqlite"))
-def test_loose_projection_preserves_fixed_cdef_anchors_in_queries(tmp_path, query_index):
+def test_loose_projection_preserves_fixed_cdef_anchors_in_queries(tmp_path, query_index, monkeypatch):
     """Mapping-like CDefs stay exact in loose selectors and Generator prefilters."""
 
     child = Definition(ProjectionChild, value=7).concretize()
@@ -92,9 +92,41 @@ def test_loose_projection_preserves_fixed_cdef_anchors_in_queries(tmp_path, quer
     assert not loose.matches(other)
     assert not support.matches(other)
 
-    repo = Repo(DirStore(tmp_path / "store", query_index=query_index))
-    repo.declare_object(candidate)
-    repo.declare_object(other)
+    store = DirStore(tmp_path / "store", query_index=query_index)
+    repo = Repo(store)
+    store.publish_node(candidate)
+    store.publish_node(other)
 
-    assert repo.query().sel(loose).cdefs().one() == candidate
-    assert repo.query().sel(support).cdefs().one() == candidate
+    assert repo.query().sel(loose).cdefs().one().graph_equal(candidate)
+    assert repo.query().sel(support).cdefs().one().graph_equal(candidate)
+
+    if query_index == "sqlite":
+        from dryml.core.store import authority
+        monkeypatch.setattr(authority._DetachedRead, "directory", lambda *args: pytest.fail("fixed anchor inventoried the Store"))
+    selected = tuple(repo.query().refresh(False).sel(loose).cdefs().collect())
+    assert len(selected) == 1
+    assert selected[0].graph_equal(candidate)
+    from dryml.core import DefinitionPath, Parameter
+    assert selected[0].at(DefinitionPath((Parameter("child"),))).graph_equal(child)
+
+
+@pytest.mark.parametrize("query_index", ("memory", "sqlite"))
+def test_fixed_cdef_query_anchor_keeps_exact_topology_after_decode(tmp_path, query_index):
+    """A structural index hit cannot admit a different fixed-anchor alias graph."""
+    leaf = Definition(ProjectionChild, value=7).concretize()
+    child = Definition(ProjectionChild, value=(leaf, leaf)).concretize()
+    different_topology = Definition(ProjectionChild, value=(leaf, leaf.copy_graph())).concretize()
+    assert child.stable_hash() == different_topology.stable_hash()
+    assert not child.graph_equal(different_topology)
+
+    authored = Definition(ProjectionOwner, child=child, width=Par("width"))
+    candidate = authored.sub(width=32).concretize()
+    other = Definition(ProjectionOwner, child=different_topology, width=32).concretize()
+    repo = Repo(DirStore(tmp_path / "store", query_index=query_index))
+    repo.default_store.publish_node(candidate)
+    repo.default_store.publish_node(other)
+
+    support = Generator(authored, {"width": UniformFromSet((32, 64))}).support_selector()
+    for selector in (authored.loose_selector(), support):
+        assert not selector.matches(other)
+        assert repo.query().sel(selector).cdefs().one().graph_equal(candidate)

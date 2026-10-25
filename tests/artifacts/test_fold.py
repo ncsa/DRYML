@@ -15,7 +15,7 @@ from dryml.core import Repo
 from dryml.core.store.dir import DirStore
 from dryml.core.tensor_spec import Dynamic, TensorSpec
 from dryml.data import Dataset, StreamDataset
-from dryml.managed import ManagedConfig, ManagedConflictError, ManagedInterrupted
+from dryml.managed import ManagedConfig, ManagedConflictError, ManagedInterrupted, ManagedRerunRequiredError
 from dryml.methods import Accumulator, AccumulatorGroup, ImplementationSelectionError, IteratorPort, Method, StreamNode, traits
 
 
@@ -170,7 +170,8 @@ def _run_native_fold_test_in_subprocess(request, backend):
     env = os.environ.copy()
     env["DRYML_FOLD_NATIVE_SUBPROCESS"] = "1"
     completed = subprocess.run(
-        [sys.executable, "-m", "pytest", "--no-cov", request.node.nodeid],
+        ["./tests.sh", request.node.nodeid, "--no-cov", "-o", "tmp_path_retention_policy=failed",
+         "-o", "cache_dir=/tmp/dryml/u21-artifact-pytest-cache"],
         cwd=Path(__file__).resolve().parents[2],
         env=env,
         text=True,
@@ -218,7 +219,9 @@ def test_fold_consumes_one_iterator_once_and_reuses_selected_dynamic_batch_carri
     fold = _fold(source, accumulator=accumulator)
     store = DirStore(tmp_path / "store")
 
-    assert fold.compute(managed=ManagedConfig(state_repo=store)) == fold.last_state_ref
+    result = fold.compute(managed=ManagedConfig(state_repo=store))
+    assert result.value is None
+    assert result.final_state_ref.graph_equal(fold.last_state_ref)
     assert fold.value() == 12.0
     assert (CountingDataset.iterations, CountingDataset.yields, CountingDataset.closed) == (1, 2, 1)
     assert accumulator.calls == 2
@@ -321,14 +324,14 @@ def test_fold_rejects_empty_and_source_failures_without_replacing_old_result(tmp
         with pytest.raises(ValueError, match="finalizer failure"):
             fold.compute(managed=ManagedConfig(state_repo=store, rerun=True))
         assert fold.value() == 1.0
-        checkpoint = fold.compute.status(state_repo=store).checkpoint_state_ref
+        checkpoint = fold.compute.status(state_repo=store).checkpoint
         saved = Repo(store).load_state_ref(checkpoint, reuse_live="never")
-        assert saved._fold_progress_version == 2
+        assert saved._fold_progress_version == 3
         assert saved._fold_progress["eof"] == "root-output-eof"
     finally:
         FinishTotal.fail_globally = False
 
-    assert fold.compute(managed=ManagedConfig(state_repo=store)) == fold.last_state_ref
+    assert fold.compute(managed=ManagedConfig(state_repo=store)).final_state_ref.graph_equal(fold.last_state_ref)
     assert fold.value() == 1.0
     assert CountingDataset.iterations == 2
 
@@ -350,31 +353,34 @@ def test_fold_keeps_complete_live_result_when_final_managed_publication_fails(tm
     source = CountingDataset([np.ones((1, 2), dtype=np.float32)])
     fold = _fold(source)
     store = DirStore(tmp_path / "store")
-    save_object = Repo.save_object
+    from dryml.managed import storage
+    publish = storage._publish_checkpoint
 
     def fail_final_save(repo, obj, *args, **kwargs):
         if obj.ready:
             raise OSError("state publication failed")
-        return save_object(repo, obj, *args, **kwargs)
+        return publish(repo, obj, *args, **kwargs)
 
-    monkeypatch.setattr(Repo, "save_object", fail_final_save)
+    monkeypatch.setattr(storage, "_publish_checkpoint", fail_final_save)
     with pytest.raises(OSError, match="state publication failed"):
         fold.compute(managed=ManagedConfig(state_repo=store))
     assert fold.ready is True
     assert fold.value() == 2.0
     status = fold.compute.status(state_repo=store)
-    assert (status.state, status.failure_code, status.final_state_ref) == (
+    assert (status.state, status.failure_code, status.final) == (
         "failed", "publication_error", None,
     )
-    checkpoint = status.checkpoint_state_ref
+    checkpoint = status.checkpoint
     saved = Repo(store).load_state_ref(checkpoint, reuse_live="never")
-    assert saved._fold_progress_version == 2
+    assert saved._fold_progress_version == 3
     assert saved._fold_progress["eof"] == "root-output-eof"
-    monkeypatch.setattr(Repo, "save_object", save_object)
+    monkeypatch.setattr(storage, "_publish_checkpoint", publish)
     from dryml.artifacts import Fold
     monkeypatch.setattr(Fold, "_load_source", lambda *_: pytest.fail("publication retry reopened source"))
     receipt = fold.compute(managed=ManagedConfig(state_repo=store))
-    assert receipt == fold.last_state_ref == fold.compute.status(state_repo=store).final_state_ref
+    assert receipt.value is None
+    assert receipt.final_state_ref.graph_equal(fold.last_state_ref)
+    assert receipt.final_state_ref.graph_equal(fold.compute.status(state_repo=store).final)
     assert fold.value() == 2.0
 
 
@@ -427,7 +433,7 @@ def test_fold_rejects_mixed_initializer_carry_before_the_first_transition(tmp_pa
     if _run_native_fold_test_in_subprocess(request, "torch"):
         return
 
-    import dryml.torch
+    import dryml.torch  # noqa: F401
     import torch
     from dryml.artifacts import Fold
 
@@ -578,105 +584,87 @@ def test_fold_named_mean_program_keeps_the_first_batch_and_uneven_weighting(tmp_
 
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-def test_mean_fold_definition_read_characterization(tmp_path, record_testsuite_property):
-    """Ordinary exact Fold validation reaches independent simple Method records."""
+def test_mean_fold_definition_read_characterization(tmp_path, monkeypatch, record_testsuite_property):
+    """Cold, warm and cleared preflights authenticate one shared creation/full key."""
     from collections import Counter
+    from contextlib import contextmanager
     from dryml.artifacts import mean
     from dryml.core.materialization import build_exact_state_load_plan
     from dryml.core.symbol import ImportRef
-    from dryml.core.cdef_codec import _eligible_graph_size
-    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
+    from dryml.core.utils.graph.path import GraphPath, Parameter
 
     store = DirStore(tmp_path / "mean", query_index="none")
     writer = Repo(store)
     fold = mean(CountingDataset([np.ones((1, 2), dtype=np.float32)]), mode="coordinate")
     state = writer.save_object(fold)
     reader = Repo(store)
+    CountingDataset.reset()
     ledgers = []
     for phase in ("cold", "warm", "cleared"):
         if phase == "cleared":
             reader.clear_cache(strong=False, weak=False)
-        records = []
-        method_counts = Counter()
-        def observe(frame, event, arg):
-            if event == "call":
-                name = frame.f_code.co_name
-                if name == "decode" and getattr(frame.f_locals.get("record_type"), "__name__", None) == "DefinitionRecord":
-                    records.append(frame.f_locals["payload"]["definition"])
-                if name in {"_graph_and_labels", "_role_paths", "_build_graph_nodes", "_realize_prepared_graph"}:
-                    owner = frame.f_back
-                    while owner is not None:
-                        if owner.f_code.co_name == "decode" and "record_type" in owner.f_locals:
-                            payload = owner.f_locals["payload"]
-                            if payload.get("schema") == "definition":
-                                label = payload["definition"]["nodes"][0]["cls"].qualname
-                                if label in {"MeanInitial", "MeanUpdate", "MeanFinalize"}:
-                                    method_counts[name] += 1
-                            break
-                        owner = owner.f_back
-            if previous is not None:
-                previous(frame, event, arg)
-        with exact_work_counts() as counts:
-            previous = sys.getprofile()
-            sys.setprofile(observe)
-            try:
-                plan = build_exact_state_load_plan(reader, state)
-            finally:
-                sys.setprofile(previous)
-        assert store._can_reuse_exact_validation()
-        names = [graph["nodes"][0]["cls"].qualname for graph in records]
-        for name in ("MeanInitial", "MeanUpdate", "MeanFinalize"):
-            graph = next(graph for graph in records if graph["nodes"][0]["cls"].qualname == name)
-            assert len(graph["nodes"]) == 1
-            assert type(graph["nodes"][0]["cls"]) is ImportRef
-            assert graph["nodes"][0]["parameters"]["kind"] == "dict"
-            assert _eligible_graph_size(graph) > 0
-        assert "Fold" in names
-        fold_graph = next(graph for graph in records if graph["nodes"][0]["cls"].qualname == "Fold")
-        source = dict(fold_graph["nodes"][0]["parameters"]["items"])["src"]
-        assert source["kind"] == "link" and source["edge_kind"] == "ref"
-        with pytest.raises(TypeError):
-            _eligible_graph_size(fold_graph)
-        assert counts["dill_load"] == 14
-        assert method_counts["_build_graph_nodes"] == 3
-        if phase == "warm":
-            assert method_counts["_graph_and_labels"] == method_counts["_role_paths"] == 0
-            assert method_counts["_realize_prepared_graph"] == 3
-        else:
-            assert method_counts["_graph_and_labels"] > 0
-            assert method_counts["_role_paths"] > 0
-        assert plan.state_ref == state
+        counts, creations = Counter(), []
+        read, creation, authenticate = store.read_states, store.read_creation, store._authenticate_state_data
+
+        @contextmanager
+        def states(keys):
+            keys = tuple(keys)
+            counts["keys"] += len(keys)
+            with read(keys) as sources:
+                yield sources
+
+        def header(digest):
+            counts["headers"] += 1
+            node = creation(digest)
+            creations.append(node)
+            return node
+
+        def payload(manifest, data):
+            counts["payloads"] += 1
+            return authenticate(manifest, data)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "read_states", states)
+            patch.setattr(store, "read_creation", header)
+            patch.setattr(store, "_authenticate_state_data", payload)
+            plan = build_exact_state_load_plan(reader, state)
+        assert counts == {"keys": 1, "headers": 1, "payloads": 1}
+        assert len(creations) == 1 and creations[0].cls.qualname == "Fold"
+        for parameter, name in (("initial_state", "MeanInitial"), ("accumulator", "MeanUpdate"), ("finalize", "MeanFinalize")):
+            method = creations[0].at(GraphPath((Parameter(parameter),)))
+            assert type(method.cls) is ImportRef and method.cls.qualname == name
+            assert method.state is method.object_id is None
+        assert creations[0].at(GraphPath((Parameter("src"),))).graph_equal(fold.src)
+        assert plan.state_ref is state
+        assert len(plan.actions) == 1 and plan.actions[0].state.key == state.state.key
+        assert CountingDataset.iterations == CountingDataset.yields == 0
         ledgers.append(dict(counts))
     record_testsuite_property("u6_mean_ledgers", repr(ledgers))
-    assert ledgers[1]["_graph_and_labels"] < ledgers[0]["_graph_and_labels"]
-    assert ledgers[1]["decode_cdef_graph"] == ledgers[0]["decode_cdef_graph"] - 3
-    assert ledgers[2] == ledgers[0]
+    assert ledgers[0] == ledgers[1] == ledgers[2]
 
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-def test_mean_fold_embedded_source_reference_uses_full_graph_fallback(tmp_path):
-    """An exact saved source remains inert, excluded data in the Fold root."""
+def test_mean_fold_embedded_source_reference_uses_full_graph_fallback(tmp_path, monkeypatch):
+    """A saved Ref source stays exact metadata outside the owned restore closure."""
     from dryml.artifacts import mean
     from dryml.core.materialization import build_exact_state_load_plan
-    from dryml.core.cdef_codec import _eligible_graph_size, encode_cdef_graph
-    from tests.core.test_exact_load_metadata_evidence import exact_work_counts
+    from dryml.core.utils.graph.path import GraphPath, Parameter
     store = DirStore(tmp_path / "store", query_index="none")
     writer = Repo(store)
     source = writer.save_object(CountingDataset([np.ones((1, 2), dtype=np.float32)]))
     fold = mean(source, mode="coordinate")
     state = writer.save_object(fold)
-    graph = encode_cdef_graph(state.definition)
-    src = dict(graph["nodes"][0]["parameters"]["items"])["src"]
-    assert src["kind"] == "link" and src["target"]["kind"] == "state_ref"
-    with pytest.raises(TypeError):
-        _eligible_graph_size(graph)
+    source_path = GraphPath((Parameter("src"),))
+    assert state.at(source_path).graph_equal(source)
+    assert store.read_creation(state.state.key.cdef_digest).at(source_path).graph_equal(source)
+    monkeypatch.setattr(CountingDataset, "__iter__", lambda *_: pytest.fail("preflight iterated source"))
     reader = Repo(store)
     build_exact_state_load_plan(reader, state)
-    with exact_work_counts() as counts:
-        plan = build_exact_state_load_plan(reader, state)
-    assert counts["decode_cdef_graph"] > 0
-    assert counts["_realize_prepared_graph"] == 3
+    plan = build_exact_state_load_plan(reader, state)
+    assert plan.state_ref.at(source_path).graph_equal(source)
     assert len(plan.actions) == 1
+    assert plan.actions[0].path == GraphPath()
+    assert plan.actions[0].state.key == state.state.key
 
 
 @pytest.mark.parametrize("backend", ("torch", "tf"))
@@ -731,15 +719,17 @@ def test_fold_iterator_close_failure_is_not_completed(tmp_path, monkeypatch):
     assert fold.ready is True
     assert fold.compute.status(state_repo=store).state == "failed"
     status = fold.compute.status(state_repo=store)
-    assert status.final_state_ref is None
-    saved = Repo(store).load_state_ref(status.checkpoint_state_ref, reuse_live="never")
-    assert saved._fold_progress_version == 2
+    assert status.final is None
+    saved = Repo(store).load_state_ref(status.checkpoint, reuse_live="never")
+    assert saved._fold_progress_version == 3
     assert saved._fold_progress["eof"] == "root-output-eof"
     assert not saved.ready
     from dryml.artifacts import Fold
     monkeypatch.setattr(Fold, "_load_source", lambda *_: pytest.fail("EOF cleanup retry reopened source"))
     receipt = fold.compute(managed=ManagedConfig(state_repo=store))
-    assert receipt == fold.last_state_ref == fold.compute.status(state_repo=store).final_state_ref
+    assert receipt.value is None
+    assert receipt.final_state_ref.graph_equal(fold.last_state_ref)
+    assert receipt.final_state_ref.graph_equal(fold.compute.status(state_repo=store).final)
     assert fold.value() == 1.0
 
 
@@ -816,9 +806,9 @@ def test_fold_consumer_failure_survives_cleanup_without_replacing_value(tmp_path
     assert any("iterator close failure" in note for note in getattr(primary, "__notes__", ()))
     status = fold.compute.status(state_repo=store)
     assert status.state in {"failed", "interrupted"}
-    assert status.final_state_ref is None
+    assert status.final is None
     if failure not in {"initializer", "acquisition"}:
-        saved = Repo(store).load_state_ref(status.checkpoint_state_ref, reuse_live="never")
+        saved = Repo(store).load_state_ref(status.checkpoint, reuse_live="never")
         assert saved._fold_progress["state"] == "active"
         assert saved.processed_count == 1
         assert saved.ready == prior_value
@@ -865,52 +855,67 @@ class FailingStream(StreamDataset):
 
 
 @pytest.mark.usefixtures("fixed_managed_snapshot_environment")
-def test_fold_uses_one_managed_owner_and_services_interrupt_at_checkpoint(tmp_path):
-    """A concurrent owner conflicts and a request stops at Fold's next safe point."""
+@pytest.mark.parametrize("boundary", ("transition", "checkpoint"))
+def test_fold_uses_one_managed_owner_and_services_interrupt_at_checkpoint(tmp_path, boundary):
+    """Interrupt fences capture, while an associated EOF checkpoint resumes source-free."""
 
     CountingDataset.reset()
     BlockingAccumulator.entered, BlockingAccumulator.release = Event(), Event()
     fold = _fold(
         CountingDataset([np.ones((1, 1), dtype=np.float32)]),
-        accumulator=BlockingAccumulator(),
+        accumulator=BlockingAccumulator() if boundary == "transition" else Adding(),
     )
     store = DirStore(tmp_path / "store")
     outcome = []
+
+    def pause_checkpoint(_obj, _context):
+        BlockingAccumulator.entered.set()
+        assert BlockingAccumulator.release.wait(60)
 
     def invoke():
         """Run the only active Fold attempt until the test deliberately releases it."""
 
         try:
-            outcome.append(fold.compute(managed=ManagedConfig(state_repo=store)))
+            outcome.append(fold.compute(managed=ManagedConfig(
+                state_repo=store,
+                callbacks=[pause_checkpoint] if boundary == "checkpoint" else None,
+            )))
         except BaseException as error:  # pragma: no cover - asserted below.
             outcome.append(error)
 
     worker = Thread(target=invoke)
     worker.start()
     try:
-        assert BlockingAccumulator.entered.wait(10)
+        assert BlockingAccumulator.entered.wait(60), outcome
         with pytest.raises(ManagedConflictError):
             fold.compute(managed=ManagedConfig(state_repo=store))
         assert fold.compute.request_interrupt(state_repo=store).outcome == "requested"
         assert worker.is_alive()
         BlockingAccumulator.release.set()
-        worker.join(10)
+        worker.join(60)
         assert not worker.is_alive()
     finally:
         BlockingAccumulator.release.set()
-        worker.join(10)
+        worker.join(60)
 
     assert len(outcome) == 1
     assert isinstance(outcome[0], ManagedInterrupted)
     status = fold.compute.status(state_repo=store)
     assert status.state == "interrupted"
-    assert status.attempt_id is not None
-    assert status.checkpoint_state_ref is not None
+    assert status.run_id is not None and status.invocation_id is not None
+    assert (status.checkpoint is not None) == (boundary == "checkpoint")
     assert fold.ready is False
 
-    assert fold.compute(managed=ManagedConfig(state_repo=store)) == fold.last_state_ref
+    if boundary == "transition":
+        with pytest.raises(ManagedRerunRequiredError):
+            fold.compute(managed=ManagedConfig(state_repo=store))
+        assert CountingDataset.iterations == 1
+    result = fold.compute(managed=ManagedConfig(state_repo=store, rerun=boundary == "transition"))
+    assert result.final_state_ref.graph_equal(fold.last_state_ref)
+    assert (result.execution.run_id == status.run_id) == (boundary == "checkpoint")
+    assert result.execution.invocation_id != status.invocation_id
     assert fold.value() == 1.0
-    assert CountingDataset.iterations == 1
+    assert CountingDataset.iterations == (1 if boundary == "checkpoint" else 2)
 
 
 class MethodGroupInitializer(Method):
@@ -972,7 +977,7 @@ class BlockingAccumulator(Adding):
         """Wait without a managed checkpoint, then return one valid next carry."""
 
         type(self).entered.set()
-        assert type(self).release.wait(10)
+        assert type(self).release.wait(60)
         return state + observation.sum(dtype=np.float64)
 
 
@@ -1098,7 +1103,7 @@ def _native_tensor(backend, shape, *, fill=0):
 
         return torch.full(shape, fill, dtype=torch.float32)
     if backend == "tf":
-        import dryml.tf
+        import dryml.tf  # noqa: F401
         import tensorflow as tf
 
         with tf.device("/CPU:0"):

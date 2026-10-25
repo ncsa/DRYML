@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import subprocess
 import sys
@@ -16,6 +15,7 @@ from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import Dynamic, TensorSpec
 from dryml.data import Dataset
 from dryml.managed import ManagedConfig
+from tests.cached_dataset_corruption import capture_cache_payload, publish_cache_payload
 
 
 class ArrayDataset(Dataset):
@@ -122,7 +122,7 @@ def test_netcdf_cache_round_trips_nested_dynamic_typed_values(tmp_path):
         target_chunk_bytes=1,
         managed=ManagedConfig(state_repo=repo),
     )
-    restored = next(iter(repo.load_state_ref(state, reuse_live="never")))
+    restored = next(iter(repo.load_state_ref(state.final_state_ref, reuse_live="never")))
 
     np.testing.assert_equal(restored["unsigned"], value["unsigned"])
     np.testing.assert_equal(restored["nested"][0], value["nested"][0])
@@ -223,7 +223,7 @@ def test_netcdf_zero_sized_tensor_dimensions_are_metadata(tmp_path):
     assert next(iter(cache)).shape == (0, 3)
 
 
-def test_netcdf_schema_corruption_fails_before_first_chunk_yield(tmp_path):
+def test_netcdf_schema_corruption_fails_before_first_chunk_yield(tmp_path, monkeypatch):
     """An authenticated impossible stream length exposes no chunk values."""
 
     netcdf4 = _require_supported_netcdf4()
@@ -233,15 +233,30 @@ def test_netcdf_schema_corruption_fails_before_first_chunk_yield(tmp_path):
             TensorSpec("int32", shape=(1,), backend="numpy"),
         )
     )
-    cache.compute(codec="netcdf", managed=ManagedConfig(state_repo=_repo(tmp_path)))
-    path = _chunk_path(cache)
+    repo = _repo(tmp_path)
+    cache.compute(codec="netcdf", managed=ManagedConfig(state_repo=repo))
+    directory = tmp_path / "codec-payload"
+    capture_cache_payload(cache, directory)
+    path = directory / "chunks" / "chunk-00000000.nc"
     with netcdf4.Dataset(path, "r+") as dataset:
         name = next(name for name in dataset.variables if "shape_offsets" in name)
         dataset.variables[name][-1] = np.iinfo(np.uint64).max
-    _refresh_descriptor(cache, path)
+    from dryml.artifacts import _cache_netcdf
+
+    original = _cache_netcdf.read_chunk
+    decoded = []
+
+    def observed_read(*args, **kwargs):
+        decoded.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(_cache_netcdf, "read_chunk", observed_read)
+    restored = publish_cache_payload(cache, repo, directory)
+    assert len(restored) == 2 and decoded == []
 
     with pytest.raises(CacheIntegrityError, match="length|offset"):
-        next(iter(cache))
+        next(iter(restored))
+    assert len(decoded) == 1
 
 
 def test_netcdf_resume_tail_cleanup_uses_nc_chunk_sequence(tmp_path):
@@ -438,8 +453,11 @@ def test_netcdf_exhaustive_malformed_physical_layouts_fail_before_yield(
     cache = CachedDataset(
         ArrayDataset([value], TensorSpec(dtype, shape=(1,), backend="numpy"))
     )
-    cache.compute(codec="netcdf", managed=ManagedConfig(state_repo=_repo(tmp_path)))
-    path = _chunk_path(cache)
+    repo = _repo(tmp_path)
+    cache.compute(codec="netcdf", managed=ManagedConfig(state_repo=repo))
+    directory = tmp_path / "codec-payload"
+    capture_cache_payload(cache, directory)
+    path = directory / "chunks" / "chunk-00000000.nc"
     with netcdf4.Dataset(path, "r+") as dataset:
         component = next(
             name
@@ -478,25 +496,7 @@ def test_netcdf_exhaustive_malformed_physical_layouts_fail_before_yield(
             dataset.setncattr("yield_count", np.int64(2))
         else:  # pragma: no cover - the parameter set above is closed.
             raise AssertionError(mutation)
-    _refresh_descriptor(cache, path)
+    restored = publish_cache_payload(cache, repo, directory)
 
     with pytest.raises(CacheIntegrityError):
-        next(iter(cache))
-
-
-def _refresh_descriptor(cache, path):
-    """Update test manifest integrity after a controlled physical rewrite."""
-
-    descriptor = cache._cache_payload["chunks"][0]
-    descriptor["size"] = os.path.getsize(path)
-    descriptor["sha256"] = _sha256(path)
-
-
-def _sha256(path):
-    """Return one test chunk digest after a controlled physical rewrite."""
-
-    digest = hashlib.sha256()
-    with open(path, "rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+        next(iter(restored))

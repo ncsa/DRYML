@@ -7,7 +7,7 @@ import pytest
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 from dryml.artifacts import CachedDataset
-from dryml.core import Definition, EdgePolicy, Object, Par, QueryDomainError, Repo, Serializable, StateRef, Template
+from dryml.core import Definition, EdgePolicy, Object, Par, Repo, Serializable, StateRef, Template
 from dryml.core.query import RelationshipKind
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import EdgeKind
@@ -95,10 +95,10 @@ def test_cached_dataset_definition_only_reference_containment(tmp_path):
 
     repo.save_object(cached)
 
-    assert source.definition not in tuple(repo.query().cdefs().stored().collect())
+    assert not any(node.graph_equal(source.definition) for node in repo.query().cdefs().stored().collect())
     assert repo.query().cdefs().stored().nested(
         source.definition, edges=EdgePolicy(frozenset((RelationshipKind.REFERENCE,)))
-    ).owners().cdefs().one() == cached.definition
+    ).owners().cdefs().one().graph_equal(cached.definition)
 
 
 def test_save_records_definition_closure_for_ephemeral_child(tmp_path):

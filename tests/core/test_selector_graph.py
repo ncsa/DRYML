@@ -1,7 +1,7 @@
 import pytest
 
-from dryml.core import Definition, Object, Repo, SKIP_ARGS
-from dryml.core.query.path import DefinitionPath, Kwarg
+from dryml.core import Definition, Object, QuotedDef, Ref, Repo, SKIP_ARGS
+from dryml.core.query.path import DefinitionPath, Index, Kwarg
 from dryml.core.query.fingerprint import selector_local_requirements
 from dryml.core.query.selector_graph import (
     SelectorGraph,
@@ -24,6 +24,14 @@ class SelectorParent(Object):
         super().__init__()
         self.child = child
         self.name = name
+
+
+class SelectorQuotedParent(Object):
+    """Hold owned children alongside explicitly inert constructor metadata."""
+
+    def __init__(self, child, *, recipe: Ref[QuotedDef]):
+        self.child = child
+        self.recipe = recipe
 
 
 def test_selector_without_nested_definitions_has_one_node():
@@ -76,15 +84,66 @@ def test_nested_exact_cdef_creates_exact_node():
     assert child_node.exact_definition == child.definition
 
 
-def test_two_equal_selector_occurrences_remain_distinct_nodes():
+def test_selector_occurrence_handles_preserve_shared_and_independent_nodes():
     child_selector = Definition(SelectorLeaf, SKIP_ARGS)
     selector = Definition(SelectorParent, [child_selector, child_selector])
 
     graph = compile_selector_graph(selector)
 
     assert graph is not None
-    assert len(graph.nodes) == 3
+    assert len(graph.nodes) == 2
+    assert len({edge.child for edge in graph.edges}) == 1
     assert {str(edge.path) for edge in graph.edges} == {"$.args[0][0]", "$.args[0][1]"}
+    independent = compile_selector_graph(Definition(SelectorParent, [
+        Definition(SelectorLeaf, SKIP_ARGS), Definition(SelectorLeaf, SKIP_ARGS)]))
+    assert len(independent.nodes) == 3
+    assert len({edge.child for edge in independent.edges}) == 2
+
+
+@pytest.mark.parametrize("edit", ("categorical", "exact", "restore"))
+@pytest.mark.parametrize("shared", (False, True))
+def test_selector_edits_preserve_occurrence_aliases_and_independent_equal_nodes(edit, shared):
+    """Named selector edits change every alias without splitting or merging occurrences."""
+    from dryml.core import Parameter, Selector
+
+    child = Definition(SelectorLeaf, "chosen")
+    peer = child if shared else Definition(SelectorLeaf, "chosen")
+    exact = Definition(SelectorParent, [child, peer]).concretize()
+    left_path = DefinitionPath((Kwarg("child"), Index(0)))
+    right_path = DefinitionPath((Kwarg("child"), Index(1)))
+    exact_left = DefinitionPath((Parameter("child"), Index(0)))
+    exact_right = DefinitionPath((Parameter("child"), Index(1)))
+    selector = Selector(exact)
+    if edit == "categorical":
+        edited = selector.categorical(path=exact_left, drop=("name",)).root
+    else:
+        selector = selector.categorical(drop=("name",), recursive=True)
+        edited = getattr(selector, edit)(path=left_path).root
+    left, right = edited.at(left_path), edited.at(right_path)
+    assert left.graph_equal(exact.at(exact_left)) is (edit != "categorical")
+    if shared:
+        assert left is right
+    else:
+        assert left is not right
+        assert right.graph_equal(exact.at(exact_right)) is (edit == "categorical")
+    assert exact.at(exact_left).parameters["name"] == "chosen"
+
+
+def test_selector_occurrence_edit_keeps_quoted_configuration_exact():
+    """Weakening an owned alias never weakens the same recipe held as quoted data."""
+    from dryml.core import Parameter, Selector
+
+    child = Definition(SelectorLeaf, "chosen")
+    exact = Definition(SelectorQuotedParent, [child, child], recipe=child.quote()).concretize()
+    quoted = exact.parameters["recipe"]
+    path = DefinitionPath((Parameter("child"), Index(0)))
+    projected = Selector(exact).categorical(path=path, drop=("name",))
+    assert projected.root.kwargs["recipe"] is quoted
+    restored = projected.exact(path=DefinitionPath((Kwarg("child"), Index(0))))
+    assert restored.root.kwargs["recipe"] is quoted
+    children = restored.root.kwargs["child"]
+    assert children[0] is children[1]
+    assert children[0].graph_equal(exact.at(path))
 
 
 def test_nested_exact_cdef_inside_set_has_path_edge():

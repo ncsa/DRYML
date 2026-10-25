@@ -1,13 +1,14 @@
 import numpy as np
 import pytest
 
-from dryml.core import Repo, StateRef
+from dryml.core import Repo, require_saved
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import NodeNameRecord
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArrayDataset, Batch, as_supervised
 from dryml.models import Experiment
 from dryml.models.sklearn import BasicTraining, ClassifierModel, Model, RegressionModel
-from dryml.managed import ManagedConfig
+from dryml.managed import InvocationResult, ManagedConfig
 
 
 linear_model = pytest.importorskip("sklearn.linear_model")
@@ -56,8 +57,9 @@ def test_basic_sklearn_training_updates_model_and_experiment_state(tmp_path):
     result = exp.train(managed=ManagedConfig(state_repo=repo))
 
     assert model.obj is model.estimator
-    assert isinstance(result, StateRef)
-    assert result == exp.train.status(state_repo=repo).final_state_ref
+    assert isinstance(result, InvocationResult)
+    final = require_saved(result.final_state_ref)
+    assert final.graph_equal(exp.train.status(state_repo=repo).final)
     assert exp.state.epoch == 1
     assert exp.state.step == 1
     assert exp.state.phase == "trained"
@@ -82,13 +84,17 @@ def test_experiment_save_load_restores_train_state_and_model(tmp_path):
     exp = Experiment(model, BasicTraining(), train_data=_train_data(), repo=repo)
     exp.train(managed=ManagedConfig(state_repo=repo))
     state = repo.save_object(exp, alias="exp")
-    repo.set_state_alias("checkpoint", state)
+    store = repo.default_store
+    named = store.read_node_name("exp")
+    store.compare_and_set_node_name(
+        NodeNameRecord("checkpoint", named.root_kind, named.root_digest), expected=None,
+    )
     repo.close(flush=True)
 
     reopened = Repo(stores=tmp_path)
-    assert reopened.resolve_object_alias("exp") == state.object
+    assert reopened.query().saved().alias("exp").one().graph_equal(state)
     loaded = reopened.load_state_ref(
-        reopened.resolve_state_alias(state.object, "checkpoint"), reuse_live="never"
+        reopened.query().saved().alias("checkpoint").one(), reuse_live="never"
     )
 
     assert loaded.state.epoch == 1

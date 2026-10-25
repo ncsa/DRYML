@@ -16,6 +16,7 @@ from .errors import ParameterizationError, ParameterizationLimitError
 
 TEMPLATE_CODEC_SCHEMA = "dryml-template"
 TEMPLATE_CODEC_VERSION = 1
+NODE_TEMPLATE_SCHEMA = "dryml-node-template"
 _MAX_BYTES = 16 * 1024 * 1024
 _MAX_DEPTH = 128
 _MAX_NODES = 65_536
@@ -38,7 +39,10 @@ def selector_to_data(selector: Any) -> dict[str, object]:
         selector: Exact selector produced by ``Generator``.
 
     Returns:
-        A canonical v1 data mapping.
+        A canonical legacy ``dryml-template`` v1 mapping for compatible values,
+        otherwise a ``dryml-node-template`` v1 mapping embedding one authenticated
+        Node table shared by the description and domain choices. Facets, aliases,
+        link roles and retained construction evidence are not discarded.
 
     Raises:
         TemplateCodecError: If the selector uses a custom runtime provider.
@@ -50,6 +54,21 @@ def selector_to_data(selector: Any) -> dict[str, object]:
     if not isinstance(selector, GeneratorSelector):
         raise TypeError("selector_to_data requires a GeneratorSelector")
     generator = selector._generator
+    if _needs_node_codec(generator.definition) or any(
+            isinstance(domain, UniformFromSet) and any(_needs_node_codec(item) for item in domain.values)
+            for domain in generator.distributions.values()):
+        domains = {}
+        for name, domain in generator.distributions.items():
+            if isinstance(domain, UniformIntRange):
+                domains[name] = {"kind": "int-range", "lo": domain.lo, "hi": domain.hi}
+            elif isinstance(domain, UniformFromSet):
+                domains[name] = {"kind": "set", "values": tuple(domain.values)}
+            else:
+                raise TemplateCodecError("template selector has a nonportable domain")
+        return _encode_node_value("template-selector", {
+            "definition": generator.definition, "domains": domains,
+            "traverse_refs": generator._traverse_refs, "max_assignments": selector._max_assignments,
+        })
     domains = []
     encoder = _Encoder()
     for name, domain in generator.distributions.items():
@@ -72,10 +91,12 @@ def selector_from_data(data: Mapping[str, object]) -> Any:
     """Decode a built-in-domain GeneratorSelector without runtime providers.
 
     Args:
-        data: Canonical mapping produced by :func:`selector_to_data`.
+        data: Canonical legacy or Node-family v1 mapping produced by
+            :func:`selector_to_data`.
 
     Returns:
-        A GeneratorSelector reconstructed from inert Definition and domain data.
+        A GeneratorSelector reconstructed from inert Node and domain data, with
+        fresh local handles and the original graph's alias partition and facets.
 
     Raises:
         TemplateCodecError: If policies, domains, or graph data are invalid.
@@ -85,6 +106,26 @@ def selector_from_data(data: Mapping[str, object]) -> Any:
     from .definition import Definition
     from .generator import Generator, GeneratorSelector
 
+    if isinstance(data, Mapping) and data.get("schema") == NODE_TEMPLATE_SCHEMA:
+        payload = _decode_node_value(data, "template-selector")
+        try:
+            if set(payload) != {"definition", "domains", "traverse_refs", "max_assignments"}:
+                raise TemplateCodecError("Node selector fields are invalid")
+            domains = {}
+            for name, record in payload["domains"].items():
+                if record["kind"] == "int-range" and set(record) == {"kind", "lo", "hi"}:
+                    domains[name] = UniformIntRange(record["lo"], record["hi"])
+                elif record["kind"] == "set" and set(record) == {"kind", "values"}:
+                    domains[name] = UniformFromSet(record["values"])
+                else:
+                    raise TemplateCodecError("Node selector domain is invalid")
+            result = Generator(payload["definition"], domains, traverse_refs=payload["traverse_refs"]).support_selector(
+                max_assignments=payload["max_assignments"])
+            if selector_to_data(result) != dict(data):
+                raise TemplateCodecError("Node selector is not canonical")
+            return result
+        except (KeyError, TypeError, ValueError) as error:
+            raise TemplateCodecError("Node selector payload is invalid") from error
     kind, root, extra, state = _decode(data, extra={"domains", "traverse_refs", "max_assignments"})
     if kind != "template-selector":
         raise TemplateCodecError("template selector payload kind is invalid")
@@ -223,6 +264,9 @@ class _Encoder:
                 raise TemplateCodecError("unresolved link assertion is not portable")
             return {"tag": "link", "edge": value.kind.value, "target": self.value(value.target, depth)}
         if isinstance(value, (Definition, ConcreteDefinition)):
+            from .node import Node
+            if isinstance(value, Node) and (value.object_id is not None or value.state is not None or value._construction is not None):
+                raise TemplateCodecError("Node facets require the Node v1 codec family")
             return {"tag": "cdef" if isinstance(value, ConcreteDefinition) else "definition",
                     "cls": self.value(value.cls, depth),
                     "args": None if isinstance(value, ConcreteDefinition) or value.args is None else self.value(value.args, depth),
@@ -470,6 +514,133 @@ def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
 
 def _canonical_bytes(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def _needs_node_codec(value):
+    """Select the Node family explicitly; the legacy reader stays closed."""
+    from .definition import ConcreteNode
+    from .node import Node
+    from .template import _template_children
+    from .links import DefLink
+    from .quoted import QuotedDef
+    from .state_values import LocalState, StateKey
+    from .reference_values import ObjectId, StateSelectorRef
+    from .config import ConfigRef
+    from .dtype import DType
+    from .tensor_spec import TensorSpec
+    from .cardinality import Cardinality
+    from .params import Match
+    import numpy as np
+
+    seen = set()
+    def visit(current):
+        if id(current) in seen:
+            return False
+        seen.add(id(current))
+        if isinstance(current, (ConcreteNode, LocalState, StateKey, frozenset, np.ndarray, np.generic)):
+            return True
+        if isinstance(current, (ObjectId, StateSelectorRef, ConfigRef, DType, TensorSpec, Cardinality, Match)):
+            return True
+        if isinstance(current, Node) and (current.object_id is not None or current.state is not None or current._construction is not None):
+            return True
+        if isinstance(current, DefLink):
+            return not current.is_finalized or visit(current.target)
+        if isinstance(current, QuotedDef):
+            return visit(current.value)
+        return any(visit(child) for child in _template_children(current))
+    return visit(value)
+
+
+def _encode_node_value(kind, value):
+    """Use an ordinary classless Node envelope and the shared authenticated table."""
+    from .definition import Definition
+    from .freeze import FrozenDict
+    from .node_prepare import NodePreparation
+    from .node_codec import encode_node_graph
+
+    root = Definition._from_symbolic_parts(None, None, FrozenDict({"payload": value}))
+    try:
+        prepared = NodePreparation((root,))
+    except (TypeError, ValueError, RecursionError) as error:
+        raise TemplateCodecError("Node expression value is not portable") from error
+    if len(prepared.nodes) > _MAX_NODES:
+        raise ParameterizationLimitError("template codec node limit exceeded")
+    _check_node_values(prepared)
+    result = {"schema": NODE_TEMPLATE_SCHEMA, "version": 1, "kind": kind,
+              "graph": encode_node_graph(prepared)}
+    _check_bytes(result)
+    return result
+
+
+def _decode_node_value(data, kind):
+    from .definition import Definition
+    from .node_codec import decode_node_graph
+    from .node_prepare import NodePreparation
+
+    if (not isinstance(data, Mapping) or set(data) != {"schema", "version", "kind", "graph"}
+            or data["schema"] != NODE_TEMPLATE_SCHEMA or type(data["version"]) is not int
+            or data["version"] != 1 or data["kind"] != kind):
+        raise TemplateCodecError("Node template schema or version is invalid")
+    _check_bytes(data)
+    try:
+        root = decode_node_graph(data["graph"])
+        if not isinstance(root, Definition) or root.cls is not None or root.args is not None or set(root.kwargs) != {"payload"}:
+            raise TemplateCodecError("Node expression envelope is invalid")
+        prepared = NodePreparation((root,))
+        if len(prepared.nodes) > _MAX_NODES:
+            raise ParameterizationLimitError("template codec node limit exceeded")
+        _check_node_values(prepared)
+        payload = root.kwargs["payload"]
+        if _encode_node_value(kind, payload) != dict(data):
+            raise TemplateCodecError("Node template payload is not canonical")
+        return payload
+    except (TypeError, ValueError, RecursionError) as error:
+        if isinstance(error, ParameterizationError):
+            raise
+        raise TemplateCodecError("Node template graph is invalid") from error
+
+
+def _check_node_values(prepared):
+    """Keep expression bounds cumulative over the shared Node/value table."""
+    entries, seen, heights = 0, set(), {}
+    def visit(value, depth=0):
+        nonlocal entries
+        if depth > _MAX_DEPTH:
+            raise ParameterizationLimitError("template codec depth limit exceeded")
+        if not isinstance(value, (dict, list, tuple)) or id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, dict):
+            if value.get("type") == "int" and int(value["value"]).bit_length() > _MAX_INT_BITS:
+                raise ParameterizationLimitError("template integer bit-length limit exceeded")
+            if value.get("tag") in {"map", "list", "tuple", "set", "frozenset"}:
+                entries += len(value["items"])
+            children = value.values()
+        else:
+            children = value
+        if entries > _MAX_ENTRIES:
+            raise ParameterizationLimitError("template aggregate entry limit exceeded")
+        for child in children:
+            visit(child, depth + 1)
+    for row in prepared._rows:
+        visit(row)
+    for slot in prepared._postorder:
+        memo = {}
+        def height(value):
+            if not isinstance(value, (dict, list, tuple)):
+                return 0
+            if id(value) in memo:
+                return memo[id(value)]
+            if isinstance(value, dict) and value.get("tag") == "node":
+                result = 1 + heights[value["slot"]]
+            else:
+                children = value.values() if isinstance(value, dict) else value
+                result = 1 + max((height(child) for child in children), default=0)
+            memo[id(value)] = result
+            return result
+        heights[slot] = height(prepared._rows[slot])
+        if heights[slot] > _MAX_DEPTH:
+            raise ParameterizationLimitError("template codec depth limit exceeded")
 
 
 def _portable_set_member(value: object) -> bool:

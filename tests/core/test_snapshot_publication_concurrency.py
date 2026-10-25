@@ -1,296 +1,136 @@
-"""U7 barrier-controlled overlap coverage for snapshot metadata authority."""
+"""Format-4 publication/name CAS overlap and detached metadata read cuts.
 
-from __future__ import annotations
+V3 snapshot capture/current-annotation consumers remain explicitly refused;
+these cases exercise their replacement Store-owned authority boundaries.
+"""
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
-import hashlib
 from pathlib import Path
 from threading import Barrier, Event, Thread
 
-import dryml.environments as envs
 import pytest
 
-pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
-
-from dryml.core import Repo, SaveAnnotations, Serializable
-from dryml.core.query import QueryError, field
+from dryml.core import Definition, Object, ObjectId
+from dryml.core.store.authority import StoreCutChanged
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord, LocalStateManifest
-from dryml.core.metadata import LineageMetadata, SnapshotCapture
-from dryml.core.reference_values import StateRef
-from dryml.core.store.zip import ZipStore
-from dryml.core.utils.graph.path import GraphPath
+from dryml.core.store.records import NodeNameRecord
+from dryml.core.store.store import StoreAliasConflictError
+from dryml.core.store.zip import ZipStore, ZipStoreConflictError
 
 
-class ConcurrentPayload(Serializable):
-    """Stateful fixture whose equal payloads produce one exact StateRef."""
-
-    def __init__(self, value="same"):
+class ConcurrentPayload(Object):
+    def __init__(self, value=1):
         self.value = value
 
-    def save_state_to_dir_imp(self, directory, *, codec):
-        Path(directory, "value").write_text(self.value, encoding="ascii")
+
+def creation(value=1):
+    return Definition(ConcurrentPayload, value=value).concretize()
 
 
-def test_concurrent_first_publications_select_one_complete_capture_for_replicas(tmp_path):
-    """Two candidate captures cannot create a mixed or discarded replica record."""
-
-    first = DirStore(tmp_path / "first")
-    second = DirStore(tmp_path / "second")
-    value = ConcurrentPayload("same")
-    record = DefinitionRecord(value.definition)
-    definition_bytes = record.to_bytes()
-    payload = b"same"
-    manifest = LocalStateManifest(
-        value.state_codec, record.graph_hash, record.digest,
-        hashlib.sha256(definition_bytes).hexdigest(),
-        (("value", len(payload), hashlib.sha256(payload).hexdigest()),),
-    )
-    reference = StateRef(value.object_ref, {GraphPath(): manifest.state_hash})
-    barrier = Barrier(2)
-    candidates = [
-        SnapshotCapture(
-            {GraphPath(): LineageMetadata(reference.object, "unknown", None)},
-            datetime(2020, 1, day, tzinfo=timezone.utc),
-            envs.EnvironmentRecord(
-                python=envs.PythonRecord(f"3.12.{day}", "CPython"),
-                platform=envs.PlatformRecord("Linux", "1", "v", "x86_64", "Linux-x86_64"),
-                distributions={},
-                dryml=envs.DrymlRuntimeRecord(),
-            ),
-            "known", None, "unavailable", "incomplete", (),
-        )
-        for day in (1, 2)
-    ]
-    metadata = []
-    errors = []
-
-    def publish(candidate):
-        stage = first.create_local_state_staging()
+def test_concurrent_publications_preserve_all_declaration_contributions(tmp_path, monkeypatch):
+    stores = [DirStore(tmp_path / "store", query_index="none") for _ in range(2)]
+    identity = ObjectId()
+    start = Barrier(2)
+    records, errors = [], []
+    # Recipe and saved membership contribute independently for the same identity.
+    root = creation().with_identity(identity)
+    for store in stores:
+        original = store._prepare_node_publication
+        def prepared(*args, original=original, **kwargs):
+            result = original(*args, **kwargs)
+            start.wait(10)
+            return result
+        monkeypatch.setattr(store, "_prepare_node_publication", prepared)
+    def publish(store, kind):
         try:
-            Path(stage, "data", "value").write_bytes(payload)
-            Path(stage, "def.pkl").write_bytes(definition_bytes)
-            Path(stage, "manifest.record").write_bytes(manifest.to_bytes())
-            source = first.prepare_local_state(stage, manifest)
-            barrier.wait(timeout=10)
-            metadata.append(first.publish_snapshot(
-                reference, evidence=candidate, local_states={GraphPath(): source},
-            ))
+            records.append((kind, store.publish_node(root, kind=kind)))
         except BaseException as error:
             errors.append(error)
-        finally:
-            first.discard_local_state_staging(stage)
-
-    threads = [
-        Thread(target=publish, args=(candidate,)) for candidate in candidates
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=20)
-        assert not thread.is_alive()
-    assert errors == []
-    assert len(metadata) == 2 and metadata[0] == metadata[1]
-    winner = first.read_snapshot_metadata(reference.digest())
-    assert winner == metadata[0]
-    selected = next(candidate for candidate in candidates if candidate.saved_at == winner.saved_at)
-    assert winner.environment == selected.environment
-
-    stage = second.create_local_state_staging()
-    try:
-        Path(stage, "data", "value").write_bytes(payload)
-        Path(stage, "def.pkl").write_bytes(definition_bytes)
-        Path(stage, "manifest.record").write_bytes(manifest.to_bytes())
-        source = second.prepare_local_state(stage, manifest)
-        assert second.publish_snapshot(
-            reference, evidence=winner, local_states={GraphPath(): source},
-        ) == winner
-    finally:
-        second.discard_local_state_staging(stage)
-    assert second.read_snapshot_metadata(reference.digest()) == winner
-
-
-def test_concurrent_lww_replace_and_delete_recreate_expose_complete_mappings_only(tmp_path):
-    """Concurrent current-map operations retain whole mappings and frozen captures."""
-
-    store = DirStore(tmp_path / "store")
-    repo = Repo(store)
-    state = repo.save_object(
-        ConcurrentPayload(repo=repo), annotations=SaveAnnotations(object={"captured": True}),
-    )
-    captured = repo.get_snapshot_metadata(state)
-    start = Barrier(3)
-    values = ({"writer": "left", "nested": [1]}, {"writer": "right", "nested": [2]})
-    errors = []
-
-    def replace_value(value):
-        try:
-            start.wait(timeout=10)
-            repo.set_metadata(state.object, value)
-        except BaseException as error:
-            errors.append(error)
-
-    writers = [Thread(target=replace_value, args=(value,)) for value in values]
-    for writer in writers:
-        writer.start()
-    start.wait(timeout=10)
-    for writer in writers:
-        writer.join(timeout=10)
-        assert not writer.is_alive()
-    assert errors == []
-    assert repo.get_metadata(state.object) in values
-    assert repo.get_snapshot_metadata(state) == captured
-
-    delete_start = Barrier(3)
-
-    def delete():
-        delete_start.wait(timeout=10)
-        repo.delete_metadata(state.object)
-
-    def recreate():
-        delete_start.wait(timeout=10)
-        repo.set_metadata(state.object, {"recreated": True})
-
-    removers = [Thread(target=delete), Thread(target=recreate)]
-    for worker in removers:
+    workers = [Thread(target=publish, args=(store, kind)) for store, kind in zip(stores, ("recipe", "saved"))]
+    for worker in workers:
         worker.start()
-    delete_start.wait(timeout=10)
-    for worker in removers:
-        worker.join(timeout=10)
+    for worker in workers:
+        worker.join(10)
         assert not worker.is_alive()
-    assert repo.get_metadata(state.object) in (None, {"recreated": True})
-    assert repo.get_snapshot_metadata(state) == captured
+    assert not errors and len(records) == 2
+    assert set(stores[0].read_declaration_anchor(identity).sources) == {(k, r.digest) for k, r in records}
+    for kind, record in records:
+        assert stores[0].read_node(record.digest, kind=kind).object_id == identity
 
 
-def test_distinct_zip_transactions_are_all_fenced_for_query_source_and_fork_reads(
-        tmp_path, monkeypatch):
-    """One archive path does not collapse independent buffered authority cuts."""
-
-    archive = tmp_path / "store.zip"
-    writer = ZipStore(archive)
-    state = Repo(writer).save_object(
-        ConcurrentPayload(repo=Repo(writer)),
-        annotations=SaveAnnotations(object={"view": "initial"}, state={"view": "initial"}),
-    )
-    writer.commit()
-    writer.close()
-    first = ZipStore.open_existing(archive)
-    second = ZipStore.open_existing(archive)
-    target = DirStore(tmp_path / "target")
-    first.write_metadata(state.object, {"view": "first"})
-    second.write_metadata(state.object, {"view": "second"})
-    active = {}
-    maximum = [0]
-    entered = set()
-
-    for store in (first, second):
-        original = store.authority_read_fence
-
-        @contextmanager
-        def tracked(original=original, store=store):
-            with original():
-                key = id(store)
-                entered.add(key)
-                active[key] = active.get(key, 0) + 1
-                maximum[0] = max(maximum[0], len(active))
-                try:
-                    yield
-                finally:
-                    active[key] -= 1
-                    if not active[key]:
-                        del active[key]
-
-        monkeypatch.setattr(store, "authority_read_fence", tracked)
-
-    repo = Repo([first, second])
-    with pytest.raises(QueryError, match="metadata authority conflicts"):
-        repo.query().sel(state.object).where(
-            field("object", "view").eq("first")
-        ).object_refs().collect()
-    assert entered == {id(first), id(second)}
-    assert maximum[0] == 1
-
-    maximum[0] = 0
-    entered.clear()
-    repo.add_store(target)
-    evidence = repo.reference_evidence(state.definition)
-    assert evidence.states[0].state_ref == state
-    assert entered == {id(first), id(second)}
-    assert maximum[0] == 2
-
-    maximum[0] = 0
-    entered.clear()
-    fork = repo.fork_state_ref(
-        state, store=target, source_store=first,
-        copy_annotations=("object", "state"),
-    )
-    assert target.read_state_ref_record(fork.digest()).state_ref == fork
-    assert id(first) in entered
-    assert maximum[0] == 2
-
-    first.close()
-    second.close()
-
-
-def test_distinct_zip_transaction_query_cut_blocks_overlapping_mapping_write(
-        tmp_path, monkeypatch):
-    """A writer cannot interleave one mapping into a multi-transaction read cut."""
-
-    archive = tmp_path / "store.zip"
-    writer = ZipStore(archive)
-    writer_repo = Repo(writer)
-    state = writer_repo.save_object(
-        ConcurrentPayload(repo=writer_repo),
-        annotations=SaveAnnotations(object={"view": "initial"}),
-    )
-    writer.commit()
-    writer.close()
-    first = ZipStore.open_existing(archive)
-    second = ZipStore.open_existing(archive)
-    repo = Repo([first, second])
-    entered = Event()
-    release = Event()
-    write_started = Event()
-    write_completed = Event()
-    results = []
-    errors = []
-    original_read = first.read_metadata
-
-    def pause_read(target):
-        if target == state.object and not entered.is_set():
-            entered.set()
-            assert release.wait(timeout=10)
-        return original_read(target)
-
-    def query():
+def test_two_name_cas_writers_cannot_lose_an_update(tmp_path):
+    stores = [DirStore(tmp_path / "store", query_index="none") for _ in range(2)]
+    roots = [stores[0].publish_node(creation(i)) for i in (1, 2)]
+    names = [NodeNameRecord("latest", "recipe", r.digest) for r in roots]
+    start = Barrier(3)
+    completed, conflicts, errors = [], [], []
+    def write(index):
+        start.wait(10)
         try:
-            results.extend(repo.query().sel(state.object).where(
-                field("object", "view").eq("initial")
-            ).object_refs().collect())
+            completed.append(stores[index].compare_and_set_node_name(names[index], expected=None))
+        except StoreAliasConflictError as error:
+            conflicts.append(error)
         except BaseException as error:
             errors.append(error)
+    workers = [Thread(target=write, args=(i,)) for i in range(2)]
+    for worker in workers:
+        worker.start()
+    start.wait(10)
+    for worker in workers:
+        worker.join(10)
+        assert not worker.is_alive()
+    assert not errors and len(completed) == len(conflicts) == 1
+    assert stores[0].read_node_name("latest") == completed[0]
 
-    def mutate():
-        write_started.set()
-        first.write_metadata(state.object, {"view": "updated"})
-        write_completed.set()
 
-    monkeypatch.setattr(first, "read_metadata", pause_read)
-    reader = Thread(target=query)
+def test_detached_expansion_does_not_block_writer_and_refuses_changed_cut(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="none")
+    other = DirStore(store.base_dir, query_index="none")
+    root = store.publish_node(creation())
+    entered, release = Event(), Event()
+    original = store._expand_node_root
+    def expand(record):
+        entered.set()
+        assert release.wait(10)
+        return original(record)
+    monkeypatch.setattr(store, "_expand_node_root", expand)
+    values, errors = [], []
+    def read():
+        try:
+            values.append(store.read_node(root.digest))
+        except BaseException as error:
+            errors.append(error)
+    reader = Thread(target=read)
     reader.start()
-    assert entered.wait(timeout=10)
-    updater = Thread(target=mutate)
-    updater.start()
-    assert write_started.wait(timeout=10)
-    assert not write_completed.is_set()
+    assert entered.wait(10)
+    # This completes before releasing graph expansion; no timing race is needed.
+    other.install_creation(creation(2))
     release.set()
-    reader.join(timeout=10)
-    updater.join(timeout=10)
+    reader.join(10)
+    assert not reader.is_alive() and not values
+    assert len(errors) == 1 and isinstance(errors[0], StoreCutChanged)
 
-    assert not reader.is_alive() and not updater.is_alive()
-    assert errors == []
-    assert results == [state.object]
-    assert first.read_metadata(state.object) == {"view": "updated"}
-    first.close()
-    second.close()
+
+def test_distinct_zip_handles_keep_distinct_buffered_cuts_and_conflict_at_commit(tmp_path):
+    archive = tmp_path / "store.zip"
+    writer = ZipStore(archive)
+    try:
+        root = writer.publish_node(creation())
+        writer.commit()
+    finally:
+        writer.close()
+    first, second = ZipStore(archive), ZipStore(archive)
+    try:
+        assert first.authority_fence_key() != second.authority_fence_key()
+        first.compare_and_set_node_name(NodeNameRecord("first", "recipe", root.digest), expected=None)
+        second.compare_and_set_node_name(NodeNameRecord("second", "recipe", root.digest), expected=None)
+        assert first.read_node_name("second") is None
+        assert second.read_node_name("first") is None
+        first.commit()
+        with pytest.raises(ZipStoreConflictError, match="changed since open"):
+            second.commit()
+        assert second._archive_dirty
+        assert second.read_node_name("second") is not None
+    finally:
+        first.close()
+        second.close()

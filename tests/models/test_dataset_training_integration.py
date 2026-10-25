@@ -9,7 +9,8 @@ import numpy as np
 import pytest
 
 from dryml import F
-from dryml.core import Mat, Object, Repo, StateRef, TensorSpec
+from dryml.core import Mat, Node, Object, Repo, TensorSpec
+from dryml.core.node import require_saved
 from dryml.core.repo import default_repo
 from dryml.core.store.dir import DirStore
 from dryml.core.utils.graph.path import GraphPath, Parameter
@@ -185,9 +186,9 @@ def _jax_experiment(*, repo=None):
 
 
 def _run_jax_train(experiment: Mat[Object]):
-    """Invoke managed JAX training inside a Core worker."""
+    """Invoke managed JAX training and return its exact final Node from a worker."""
 
-    return experiment.train()
+    return experiment.train().final_state_ref
 
 
 def test_generic_trainer_and_empty_artifacts_use_final_dataset_cardinality(tmp_path):
@@ -200,8 +201,10 @@ def test_generic_trainer_and_empty_artifacts_use_final_dataset_cardinality(tmp_p
         artifacts={}, repo=repo,
     )
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
-    row = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[0]
+    result = exp.train(managed=ManagedConfig(state_repo=repo))
+    assert result.value is None
+    final = result.final_state_ref
+    row = ExperimentData.find(final.object_view(), repo=repo).data.iloc[0]
 
     assert (trainer.yields, trainer.examples) == (3, 5)
     assert (row.dataset_size_kind, row.dataset_size) == ("finite", 5)
@@ -408,18 +411,22 @@ def test_jax_managed_local_publishes_exact_history_and_independent_owner_state(t
     repo = Repo(DirStore(tmp_path / "state"))
     exp = _jax_experiment(repo=repo)
 
-    final = exp.train(managed=ManagedConfig(state_repo=repo))
+    result = exp.train(managed=ManagedConfig(state_repo=repo))
+    assert result.value is None
+    final = require_saved(result.final_state_ref)
     status = exp.train.status(state_repo=repo)
     restored = repo.load_state_ref(final, reuse_live="never")
-    history = ExperimentData.find(final.object_projection(), repo=repo)
+    history = ExperimentData.find(final.object_view(), repo=repo)
     row = history.data.iloc[-1]
 
-    assert status.final_state_ref == final == row.state_ref
+    assert final.graph_equal(status.final)
+    assert final.graph_equal(row.state_ref)
     assert (restored.state.step, restored.state.examples_seen) == (3, 5)
     model_ref = final.at(GraphPath((Parameter("model"),)))
     optimizer_ref = final.at(GraphPath((Parameter("train_fn"), Parameter("optimizer"))))
-    assert model_ref.object != optimizer_ref.object
-    assert model_ref.states != optimizer_ref.states
+    assert model_ref.object_id != optimizer_ref.object_id
+    assert model_ref.state is not None and optimizer_ref.state is not None
+    assert model_ref.state != optimizer_ref.state
     assert row.dataset_size == 5
     assert row.eval_artifacts == {}
 
@@ -453,14 +460,17 @@ def test_jax_managed_subprocess_restores_exact_graph(tmp_path):
     )
     final = view.run(_run_jax_train, initial)
 
-    assert isinstance(final, StateRef)
+    assert isinstance(final, Node)
+    require_saved(final)
     status = exp.train.status(state_repo=repo)
     restored = repo.load_state_ref(final, reuse_live="never")
-    row = ExperimentData.find(final.object_projection(), repo=repo).data.iloc[-1]
-    assert status.final_state_ref == final == row.state_ref
+    row = ExperimentData.find(final.object_view(), repo=repo).data.iloc[-1]
+    assert final.graph_equal(status.final)
+    assert final.graph_equal(row.state_ref)
     assert (restored.state.step, restored.state.examples_seen) == (3, 5)
     model_ref = final.at(GraphPath((Parameter("model"),)))
     optimizer_ref = final.at(GraphPath((Parameter("train_fn"), Parameter("optimizer"))))
-    assert model_ref.object != optimizer_ref.object
-    assert model_ref.states != optimizer_ref.states
+    assert model_ref.object_id != optimizer_ref.object_id
+    assert model_ref.state is not None and optimizer_ref.state is not None
+    assert model_ref.state != optimizer_ref.state
     assert row.dataset_size == 5

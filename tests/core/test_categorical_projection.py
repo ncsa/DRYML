@@ -51,7 +51,7 @@ def test_classless_skipped_definition_and_prepared_projection_preserve_named_fie
     assert repeated.cls == prepared.cls
     assert repeated.args is None
     assert repeated.parameters == FrozenDict({"width": 4})
-    assert pickle.loads(pickle.dumps(repeated)) == repeated
+    assert pickle.loads(pickle.dumps(repeated)).graph_equal(repeated)
 
 
 def test_prepared_selector_round_trips_through_the_supported_repo_codec(tmp_path):
@@ -90,10 +90,10 @@ def test_authored_calls_become_named_without_defaults_or_positional_shifts():
     assert "seed" not in positional_projection.parameters
     assert "seed" not in keyword_projection.parameters
     assert "first" not in _project(positional, drop=("first",)).parameters
-    assert _project(keyword, drop=("seed", "seed")) == keyword_projection
-    assert _project(Definition(ProjectionFixture, 1, 4, seed=9), drop=("seed",)) == _project(
+    assert _project(keyword, drop=("seed", "seed")).graph_equal(keyword_projection)
+    assert _project(Definition(ProjectionFixture, 1, 4, seed=9), drop=("seed",)).graph_equal(_project(
         Definition(ProjectionFixture, 1, width=4, seed=9), drop=("seed",)
-    )
+    ))
 
 
 def test_cdef_projection_reads_named_records_without_class_resolution(monkeypatch):
@@ -253,8 +253,12 @@ def test_projection_rejects_set_collapse_and_cdef_cycles_without_mutating_source
     source = Definition(ProjectionContainer, left, values={left, right})
     source_hash = source.stable_hash()
 
-    with pytest.raises(ValueError, match="set cardinality"):
-        _project(source, recursive=True, drop=("seed",))
+    projected = _project(source, recursive=True, drop=("seed",))
+    members = projected.parameters["values"]
+    assert len(members) == 2
+    assert len(set(members)) == 2
+    assert all(member.graph_equal(projected.parameters["child"]) for member in members)
+    assert sum(member is projected.parameters["child"] for member in members) == 1
     assert source.stable_hash() == source_hash
 
     cyclic = ConcreteDefinition._from_persisted_record(

@@ -910,7 +910,7 @@ def test_as_supervised_parameter_sources_bind_inside_modular_experiments(tmp_pat
         test_data=as_supervised(test_source, "cart", input_as_target=True),
         artifacts=template.artifacts,
     )
-    assert bound.concretize(repo=repo) == direct.concretize(repo=repo)
+    assert bound.concretize(repo=repo).graph_equal(direct.concretize(repo=repo))
     inputs, targets = next(iter(bound.train_data.build()))
     assert inputs is targets
     assert inputs.tolist() == [1, 2]
@@ -956,7 +956,7 @@ def test_as_supervised_rejects_empty_or_ambiguous_selection_trees():
 
 
 def test_as_supervised_authors_graph_from_persisted_dataset_references(tmp_path):
-    """ObjectRef and StateRef inputs stay inert until the authored graph is built."""
+    """Object-projected and saved Nodes stay inert until the authored graph is built."""
 
     from dryml.core import Repo
     from dryml.core.store.dir import DirStore
@@ -971,7 +971,7 @@ def test_as_supervised_authors_graph_from_persisted_dataset_references(tmp_path)
     )
     state_ref = repo.save_object(source, deep_capture=True)
 
-    for reference in (state_ref.object, state_ref):
+    for reference in (state_ref.object_view(), state_ref):
         projected = as_supervised(reference, "x", "y")
 
         assert isinstance(projected, Definition)

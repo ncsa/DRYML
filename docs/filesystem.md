@@ -17,6 +17,13 @@ creates missing components and persists each new parent entry. Like
 `os.makedirs(..., exist_ok=True)`, it follows existing directory symlinks,
 including the final component. Publication staging sources and removal cleanup
 directories retain their stricter non-symlink shape checks.
+`sync_directory(path)` flushes the entries of one existing non-symlink directory
+without renaming entries or traversing payloads. It supports Store-owned recovery
+after interrupted publication; the caller validates entries and selects affected
+ancestor/rename-parent barriers. Missing/invalid paths and native IO errors
+propagate. A backend without standalone directory barriers, including Windows'
+write-through-only publication adapter, raises `FilesystemCapabilityError` rather
+than treating visible entries as durable.
 `publish_file(staged_path, destination, replace=False)` flushes and atomically
 renames one staged file. `publish_directory(staged_path, destination)` flushes a
 complete staged tree and atomically installs it only when the destination is

@@ -24,7 +24,7 @@ from tests.qualification.ml_workflow_fixtures import (
     REQUIRED_ENVIRONMENT_KEYS, TFDSAuthority, load_baseline,
 )
 from tests.qualification.ml_workflow_workloads import (
-    QualificationEvidence, accelerated_cases, cpu_matrix, initialize_gpu_framework, mnist_pipeline,
+    QualificationEvidence, accelerated_cases, cpu_matrix, initialize_gpu_framework,
     native_device_observations, preflight_gpu_framework, qualification_case_paths, selected_gpu_device,
 )
 from tests.qualification.ml_workflow_workers import (
@@ -69,8 +69,8 @@ def _gpu_evidence(manifest, case, control):
 
     final, model = manifest.references.numpy, manifest.references.parquet
     refs = {
-        "experiment": final.digest(), "model": model.digest(), "test": final.digest(),
-        "history": model.digest(), "artifact": model.digest(),
+        "experiment": final.exact_digest(), "model": model.exact_digest(), "test": final.exact_digest(),
+        "history": model.exact_digest(), "artifact": model.exact_digest(),
     }
     return QualificationEvidence(
         case=case, final_experiment_ref=final, model_ref=model, test_ref=final,
@@ -87,7 +87,7 @@ def _gpu_evidence(manifest, case, control):
             "worker_pid": 1, "worker_identity": "test",
             "runtime_allocation": {"resource_mode": "worker", "allocation": "worker-local", "admission": "worker"},
             "shared_authority": {"fixture_store": os.fspath(manifest.fixture_store), "control_store": os.fspath(control)},
-            "submitted": {"request_digest": "test", "submission_id": "test", "result_ref": final.digest()},
+            "submitted": {"request_digest": "test", "submission_id": "test", "result_ref": final.exact_digest()},
             "core_outcome": {"kind": "worker", "publication_refs": (), "update_refs": ()},
             "final_refs": refs, "coordinator_validated_refs": None,
         },
@@ -211,7 +211,7 @@ def test_accelerated_request_evidence_rejects_selector_identity_pid_and_allocati
         "shared_authority": {
             "fixture_store": os.fspath(manifest.fixture_store), "control_store": os.fspath(roots["control"].resolve()),
         },
-        "submitted": {"request_digest": request.request_id, "submission_id": "submission", "result_ref": evidence.final_experiment_ref.digest()},
+        "submitted": {"request_digest": request.request_id, "submission_id": "submission", "result_ref": evidence.final_experiment_ref.exact_digest()},
     })
     runtime = {**evidence.runtime, "process_id": 17, "worker_id": "subprocess:17"}
     accepted = replace(evidence, worker=worker, runtime=runtime)
@@ -276,9 +276,9 @@ def test_torch_exact_loaded_formula_model_uses_public_gpu_preparation_before_inf
 
 def test_tensorflow_to_torch_handoff_runs_through_training_preparation_and_is_graph_visible():
     """Actual TF values reach the real Torch training boundary without caller glue."""
-    tf = pytest.importorskip("tensorflow")
+    pytest.importorskip("tensorflow")
     torch = pytest.importorskip("torch")
-    import dryml.tf
+    import dryml.tf  # noqa: F401 -- register the selected backend's adapters.
     from dryml.models import Experiment
     from dryml.models.torch import Model, Optimizer, Training
 
