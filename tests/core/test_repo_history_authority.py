@@ -1,6 +1,7 @@
 """Current history uses published Node membership and exact Node-name CAS."""
 
 import multiprocessing
+import os
 from pathlib import Path
 
 import pytest
@@ -123,8 +124,12 @@ def test_stale_history_writer_conflicts_and_retains_immutable_orphan(tmp_path):
 
 
 @pytest.mark.parametrize("boundary", ("before", "after"))
-def test_current_save_does_not_mask_interruption(tmp_path, monkeypatch, boundary):
-    """Cancellation exposes exact pending authority; repair never captures again."""
+@pytest.mark.parametrize("persistence", ("native", "unavailable"))
+def test_current_save_does_not_mask_interruption(tmp_path, monkeypatch, boundary, persistence):
+    """Cancellation preserves authority; unsupported persistence never claims repair."""
+    from dryml.core.store.authority import StoreMutationError
+    from dryml.core.store.store import StoreCapabilityError
+
     store = DirStore(tmp_path / "store", query_index="sqlite")
     repo = Repo(store)
     saved = repo.save_object(HistoryValue(1))
@@ -144,8 +149,28 @@ def test_current_save_does_not_mask_interruption(tmp_path, monkeypatch, boundary
     with pytest.raises(KeyboardInterrupt):
         store.compare_and_set_node_name(record, expected=None)
     monkeypatch.setattr(store, "_atomic_write", original)
-    for mutation in store.authority_cut().pending:
-        store.replay_mutation(mutation)
+    if persistence == "unavailable":
+        def unavailable(_record):
+            raise StoreCapabilityError("Standalone directory persistence requires a native directory barrier.")
+        monkeypatch.setattr(store, "_persist_authority_projection", unavailable)
+    pending = store.authority_cut().pending
+    assert pending
+    for mutation in pending:
+        if os.name == "nt" or persistence == "unavailable":
+            with pytest.raises(StoreMutationError, match="directory barrier") as raised:
+                store.replay_mutation(mutation)
+            assert raised.value.mutation_id == mutation
+            assert raised.value.recovery_attempt == "authority-persistence"
+            assert raised.value.index_disposition == "repair_pending"
+            assert mutation in store.authority_cut().pending
+            unresolved = next(item for item in store.pending_mutations()
+                              if item.intent["mutation_id"] == mutation)
+            assert not unresolved.intent["persistence_confirmed"]
+            assert store.read_node_name("history") == (None if boundary == "before" else record)
+        else:
+            store.replay_mutation(mutation)
+            assert mutation not in store.authority_cut().pending
+            assert store.read_node_name("history") == record
     assert store.read_node(_name(saved).root_digest, kind="saved").graph_equal(saved)
 
 
