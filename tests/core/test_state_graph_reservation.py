@@ -40,7 +40,7 @@ def test_graph_reservation_covers_stateful_descendants_and_rejects_nested_owner(
 
     with repo.reserve_state_graph(root) as reservation:
         assert reservation.active
-        assert reservation.object_ref == root.object_ref
+        assert reservation.object_ref.object_projection_equal(repo.describe(root))
         assert reservation.object_ids == (child.object_id,)
         with pytest.raises(RepoSaveError, match="reserved"):
             repo.reserve_state_graph(root)

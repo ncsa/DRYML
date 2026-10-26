@@ -88,7 +88,7 @@ observation is incidental, but retain real observation tests at their boundaries
 boundaries for the CDef V2 parity end state, not claims that every roadmap stage
 is already implemented:
 
-- `core` owns CDef, Object, ObjectRef, StateRef, Repo, Store, and query
+- `core` owns CDef, Node, Object, ObjectId, LocalState, Repo, Store, and query
   authority; `core/utils/graph` contains supported generic graph algorithms.
 - `formats` owns dependency-light canonical encoding primitives.
 - `locking` owns dependency-light native advisory-lock mechanics; Store and
@@ -105,7 +105,7 @@ is already implemented:
 - `records` provides general sidecar-record utilities rather than domain schemas
   or a second Object model.
 - `managed` owns the lifecycle of operations that mutate stateful Objects,
-  including interruption, checkpoint association, resume, and StateRef
+  including interruption, checkpoint association, resume, and saved Node
   publication.
 - `execute` owns execution-backend contracts and exact resolved-work transport;
   `dispatch` owns requirement coordination, candidate selection, and submission.

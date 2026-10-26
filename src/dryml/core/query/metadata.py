@@ -474,7 +474,7 @@ def evaluate_metadata_predicate(predicate: MetadataPredicate, reference, repo, *
 
     Args:
         predicate: A bounded immutable MetadataPredicate.
-        reference: An exact ObjectRef or StateRef selected structurally.
+        reference: A Node selected structurally; saved completeness for state scope.
         repo: The managing Repo that resolves Store authority.
         store: Optional connected Store restricting both candidate and metadata
             authority.
@@ -483,7 +483,7 @@ def evaluate_metadata_predicate(predicate: MetadataPredicate, reference, repo, *
         Whether the expression matches after every populated leaf is validated.
 
     Raises:
-        QueryDomainError: If state-only scope is evaluated for an ObjectRef.
+        QueryDomainError: If state-only scope lacks saved-complete Node metadata.
         QueryError: If a populated field has an incompatible ordering or
             containment type.
         MetadataConflictError: If connected authority disagrees.
@@ -506,7 +506,7 @@ def evaluate_captured_metadata_predicate(
 
     Args:
         predicate: A bounded immutable metadata predicate.
-        reference: The eligible exact ObjectRef or StateRef candidate.
+        reference: The eligible Node candidate.
         projections: Captured scope roots keyed by ``object``, ``state``,
             ``lineage``, and ``snapshot``. A missing key denotes unavailable
             authority, while a present ``_MISSING`` value denotes an absent field.
@@ -515,7 +515,7 @@ def evaluate_captured_metadata_predicate(
         Whether the predicate matches after validating every populated leaf.
 
     Raises:
-        QueryDomainError: If a state-only scope is applied to an ObjectRef.
+        QueryDomainError: If a state-only scope lacks saved-complete metadata.
         QueryError: If a required authority fact is unavailable or a populated
             value is incompatible with its requested operator.
 
@@ -532,10 +532,10 @@ def evaluate_captured_metadata_predicate(
 
 class _MetadataContext:
     def __init__(self, reference, repo, store):
-        from ..reference_values import ObjectRef, StateRef
+        from ..node import Node
 
-        if not isinstance(reference, (ObjectRef, StateRef)):
-            raise TypeError("Metadata query candidates must be ObjectRef or StateRef values.")
+        if not isinstance(reference, Node):
+            raise TypeError("Metadata query candidates must be Nodes.")
         self.reference = reference
         self.repo = repo
         self.store = store
@@ -545,18 +545,14 @@ class _MetadataContext:
         self._snapshot = _MISSING
 
     def value(self, selector: MetadataField):
-        from ..reference_values import StateRef
-
         if selector.scope == "object":
-            target = self.reference.object if isinstance(self.reference, StateRef) else self.reference
-            return _traverse(self._current(target, "_object"), selector.path)
+            return _traverse(self._current(self.reference, "_object"), selector.path)
         if selector.scope == "state":
             self._require_state(selector.scope)
             return _traverse(self._current(self.reference, "_state"), selector.path)
         if selector.scope == "lineage":
-            target = self.reference.object if isinstance(self.reference, StateRef) else self.reference
             if self._lineage is _MISSING:
-                self._lineage = _lineage_projection(self.repo.get_lineage_metadata(target, store=self.store))
+                self._lineage = _lineage_projection(self.repo.get_lineage_metadata(self.reference, store=self.store))
             return _traverse(self._lineage, selector.path)
         self._require_state(selector.scope)
         if self._snapshot is _MISSING:
@@ -566,44 +562,36 @@ class _MetadataContext:
     def _current(self, target, cache_name):
         value = getattr(self, cache_name)
         if value is _MISSING:
-            value = self.repo.get_metadata(target, store=self.store)
+            value = self.repo.get_metadata(target, store=self.store, scope=cache_name[1:])
             if value is None:
                 value = _MISSING
             setattr(self, cache_name, value)
         return value
 
     def _require_state(self, scope: str) -> None:
-        from ..reference_values import StateRef
+        from ..node import require_saved
         from .model import QueryDomainError
 
-        if not isinstance(self.reference, StateRef):
-            raise QueryDomainError(f"Metadata scope {scope!r} requires StateRef candidates.")
+        try:
+            require_saved(self.reference)
+        except (TypeError, ValueError) as error:
+            raise QueryDomainError(f"Metadata scope {scope!r} requires saved Node candidates.") from error
 
 
 class _CapturedMetadataContext:
     """Metadata context that cannot escape a Query V3 captured authority cut."""
 
     def __init__(self, reference, projections: Mapping[str, Any]) -> None:
-        from ..reference_values import ObjectRef, StateRef
         from ..node import Node
 
-        if not isinstance(reference, (ObjectRef, StateRef, Node)):
-            raise TypeError("Metadata query candidates must be ObjectRef or StateRef values.")
+        if not isinstance(reference, Node):
+            raise TypeError("Metadata query candidates must be Nodes.")
         self.reference = reference
         self.projections = projections
 
     def value(self, selector: MetadataField):
-        from ..reference_values import StateRef
-        from ..node import Node
-
-        if selector.scope in {"state", "snapshot"} and not isinstance(
-            self.reference, (StateRef, Node)
-        ):
-            from .model import QueryDomainError
-
-            raise QueryDomainError(
-                f"Metadata scope {selector.scope!r} requires StateRef candidates."
-            )
+        if selector.scope in {"state", "snapshot"}:
+            _MetadataContext._require_state(self, selector.scope)
         if selector.scope not in self.projections:
             raise QueryError("Query V3 metadata authority is unavailable.")
         return _traverse(self.projections[selector.scope], selector.path)

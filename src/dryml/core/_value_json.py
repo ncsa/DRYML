@@ -1,9 +1,8 @@
-"""Portable JSON encoding for exact ObjectRef and StateRef authority.
+"""Private closed semantic-leaf codecs shared by Node and expression transport.
 
-The ordinary ``to_data`` reference codecs preserve canonical Definition atoms
-as Python values because Store records use a trusted dill frame.  This module
-adds the separate, closed JSON representation needed by durable text formats
-without resolving an Object, loading state, or importing optional backends.
+These codecs carry values, not legacy graph-reference envelopes. They never
+construct Objects, read state, or open Stores; explicit type tags may resolve
+their importable value types during decoding.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ import math
 import sys
 from collections.abc import Mapping
 from enum import Enum
-from typing import Literal
 
 import numpy as np
 
@@ -24,141 +22,16 @@ from .config import ConfigRef
 from .dtype import DType
 from .factory import FactorySpec
 from .freeze import FrozenDict, FrozenList, FrozenNDArray, FrozenSet, FrozenTuple
-from .reference_values import ObjectId, ObjectRef, StateRef
+from .reference_values import ObjectId
 from .symbol import ImportRef, SourceSpec, resolve_symbol
 from .tensor_spec import Dim, Dynamic, TensorSpec
 
 
-REFERENCE_JSON_SCHEMA = "dryml-reference-json"
-REFERENCE_JSON_VERSION = 1
 _VALUE_GRAMMAR_VERSION = 3
-_LEGACY_GRAMMAR_VERSIONS = frozenset((1, 2))
 
 
 class ReferenceJSONCodecError(ValueError):
-    """Raised when a portable reference JSON record is unsupported or malformed."""
-
-
-def encode_reference_json(reference: ObjectRef | StateRef) -> dict[str, object]:
-    """Encode one exact reference as a closed JSON-compatible record.
-
-    Args:
-        reference: Exact ObjectRef or StateRef authority to encode.
-
-    Returns:
-        A versioned mapping composed only of JSON-compatible values.
-
-    Raises:
-        TypeError: If ``reference`` is not an ObjectRef or StateRef.
-        ReferenceJSONCodecError: If its Definition contains a canonical value
-            outside the portable JSON grammar.
-
-    Side Effects:
-        None. Encoding does not resolve symbols, load Objects, or read Stores.
-    """
-
-    if isinstance(reference, StateRef):
-        kind = "state_ref"
-    elif isinstance(reference, ObjectRef):
-        kind = "object_ref"
-    else:
-        raise TypeError(
-            f"Reference JSON encoding requires ObjectRef or StateRef, got {type(reference).__name__}."
-        )
-    return {
-        "schema": REFERENCE_JSON_SCHEMA,
-        "version": REFERENCE_JSON_VERSION,
-        "kind": kind,
-        "value": _value_to_json(reference.to_data(), grammar=_VALUE_GRAMMAR_VERSION),
-    }
-
-
-def decode_reference_json(data: object) -> ObjectRef | StateRef:
-    """Decode one closed portable reference JSON record.
-
-    Args:
-        data: Mapping produced by :func:`encode_reference_json`.
-
-    Returns:
-        The exact decoded ObjectRef or StateRef selected by the record kind.
-
-    Raises:
-        ReferenceJSONCodecError: If the envelope, value tree, or reconstructed
-            reference is malformed or unsupported.
-
-    Side Effects:
-        May import an explicitly encoded Enum class or naked ``dryml.core`` type.
-        It never constructs an Object, loads state, or reads a Store.
-    """
-
-    if not isinstance(data, Mapping) or set(data) != {
-            "schema", "version", "kind", "value"}:
-        raise ReferenceJSONCodecError(
-            "Reference JSON records require exactly schema, version, kind, and value."
-        )
-    if (
-            type(data["schema"]) is not str
-            or data["schema"] != REFERENCE_JSON_SCHEMA
-            or type(data["version"]) is not int
-            or data["version"] != REFERENCE_JSON_VERSION
-            or type(data["kind"]) is not str
-            or data["kind"] not in {"object_ref", "state_ref"}):
-        raise ReferenceJSONCodecError("Unsupported reference JSON schema, version, or kind.")
-    try:
-        value = _value_from_json(data["value"], grammar=_VALUE_GRAMMAR_VERSION)
-        if data["kind"] == "state_ref":
-            return StateRef.from_data(value)
-        return ObjectRef.from_data(value)
-    except ReferenceJSONCodecError:
-        raise
-    except (TypeError, ValueError) as error:
-        raise ReferenceJSONCodecError("Reference JSON authority is malformed.") from error
-
-
-def _encode_legacy_reference_json(
-        reference: ObjectRef | StateRef, *, version: Literal[1, 2],
-) -> dict[str, object]:
-    """Encode a reference using the pre-envelope ExperimentData value grammar.
-
-    This compatibility API exists only for reproducible v1/v2 fixtures and
-    migrations. New persistent formats must use :func:`encode_reference_json`.
-    """
-
-    if not isinstance(reference, (ObjectRef, StateRef)):
-        raise TypeError("Legacy reference JSON encoding requires ObjectRef or StateRef.")
-    if type(version) is not int or version not in _LEGACY_GRAMMAR_VERSIONS:
-        raise ReferenceJSONCodecError("Unsupported legacy reference JSON version.")
-    return _value_to_json(reference.to_data(), grammar=version)
-
-
-def _decode_legacy_reference_json(
-        data: object, *, kind: Literal["object_ref", "state_ref"], version: Literal[1, 2],
-) -> ObjectRef | StateRef:
-    """Decode a pre-envelope ExperimentData reference value tree.
-
-    Args:
-        data: Legacy tagged JSON value tree.
-        kind: Exact reference authority expected from the decoded tree.
-        version: Legacy ExperimentData grammar version, either 1 or 2.
-
-    Returns:
-        The decoded exact reference.
-
-    Raises:
-        ReferenceJSONCodecError: If the legacy version or record is invalid.
-    """
-
-    if type(version) is not int or version not in _LEGACY_GRAMMAR_VERSIONS:
-        raise ReferenceJSONCodecError("Unsupported legacy reference JSON version.")
-    if type(kind) is not str or kind not in {"object_ref", "state_ref"}:
-        raise ReferenceJSONCodecError("Unsupported legacy reference JSON kind.")
-    try:
-        value = _value_from_json(data, grammar=version)
-        return StateRef.from_data(value) if kind == "state_ref" else ObjectRef.from_data(value)
-    except ReferenceJSONCodecError:
-        raise
-    except (TypeError, ValueError) as error:
-        raise ReferenceJSONCodecError("Legacy reference JSON authority is malformed.") from error
+    """Unsupported or malformed semantic value in a private transport codec."""
 
 
 def _encoded_type(value: type, tag: str) -> dict[str, object]:
@@ -181,6 +54,8 @@ def _encoded_type(value: type, tag: str) -> dict[str, object]:
 
 
 def _value_to_json(value: object, *, grammar: int) -> dict[str, object]:
+    if grammar != _VALUE_GRAMMAR_VERSION:
+        raise ReferenceJSONCodecError("Unsupported semantic value grammar.")
     if isinstance(value, ImportRef):
         return {"type": "import_ref", "module": value.module, "qualname": value.qualname}
     if isinstance(value, SourceSpec):
@@ -252,16 +127,6 @@ def _value_to_json(value: object, *, grammar: int) -> dict[str, object]:
     if grammar >= 3 and isinstance(value, ObjectId):
         return {
             "type": "object_id",
-            "value": _value_to_json(value.to_data(), grammar=grammar),
-        }
-    if grammar >= 3 and isinstance(value, StateRef):
-        return {
-            "type": "state_ref",
-            "value": _value_to_json(value.to_data(), grammar=grammar),
-        }
-    if grammar >= 3 and isinstance(value, ObjectRef):
-        return {
-            "type": "object_ref",
             "value": _value_to_json(value.to_data(), grammar=grammar),
         }
     if grammar >= 3 and isinstance(value, Enum):
@@ -428,7 +293,7 @@ def _decode_mapping_items(value: object, *, grammar: int, frozen: bool) -> objec
 
 
 def _value_from_json(value: object, *, grammar: int) -> object:
-    if grammar not in {*_LEGACY_GRAMMAR_VERSIONS, _VALUE_GRAMMAR_VERSION}:
+    if grammar != _VALUE_GRAMMAR_VERSION:
         raise ReferenceJSONCodecError("Unsupported reference JSON value grammar.")
     if not isinstance(value, Mapping) or not isinstance(value.get("type"), str):
         raise ReferenceJSONCodecError("Reference JSON value is not a closed tagged tree.")
@@ -591,14 +456,10 @@ def _value_from_json(value: object, *, grammar: int) -> object:
             return ConfigRef(value["key"])
         except (TypeError, ValueError) as error:
             raise ReferenceJSONCodecError("Reference JSON ConfigRef is invalid.") from error
-    if tag in {"object_id", "object_ref", "state_ref"} and set(value) == {"type", "value"}:
+    if tag == "object_id" and set(value) == {"type", "value"}:
         decoded = _value_from_json(value["value"], grammar=grammar)
         try:
-            if tag == "object_id":
-                return ObjectId.from_data(decoded)
-            if tag == "object_ref":
-                return ObjectRef.from_data(decoded)
-            return StateRef.from_data(decoded)
+            return ObjectId.from_data(decoded)
         except (TypeError, ValueError) as error:
             raise ReferenceJSONCodecError(f"Reference JSON {tag} is invalid.") from error
     if tag == "core_type":
@@ -649,12 +510,3 @@ def _value_from_json(value: object, *, grammar: int) -> object:
         except (binascii.Error, TypeError, ValueError) as error:
             raise ReferenceJSONCodecError("Reference JSON frozen array is malformed.") from error
     raise ReferenceJSONCodecError(f"Reference JSON value tag {tag!r} is unknown or malformed.")
-
-
-__all__ = [
-    "REFERENCE_JSON_SCHEMA",
-    "REFERENCE_JSON_VERSION",
-    "ReferenceJSONCodecError",
-    "decode_reference_json",
-    "encode_reference_json",
-]

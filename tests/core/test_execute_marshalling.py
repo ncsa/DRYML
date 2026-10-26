@@ -13,7 +13,7 @@ import pytest
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 from dryml.core import (
-    SKIP_ARGS, Definition, Node, Object, ObjectRef, Repo, Serializable,
+    SKIP_ARGS, Definition, Node, Object, Repo, Serializable,
 )
 from dryml.core.execute import CoreOptions, SharedDirStoreStrategy, prepare_shared_storage
 from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_invocation, invoke_invocation
@@ -349,8 +349,8 @@ def test_prepare_freezes_storage_once_without_activating_future_annotations(tmp_
     exports = []
     original = repo.to_definition
     monkeypatch.setattr(repo, "to_definition", lambda: exports.append(True) or original())
-    namespace = {"Ref": Ref, "ObjectRef": ObjectRef}
-    exec("def target(value: 'Ref[ObjectRef]'): return value", namespace)
+    namespace = {"Ref": Ref, "Node": Node}
+    exec("def target(value: 'Ref[Node]'): return value", namespace)
 
     prepared = SharedDirStoreStrategy().prepare(
         namespace["target"], (1,), {},

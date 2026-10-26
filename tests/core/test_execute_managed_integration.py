@@ -11,7 +11,7 @@ import pytest
 from dryml import F
 from dryml.artifacts import CachedDataset
 from dryml.core import Definition, Executor as CoreExecutor
-from dryml.core import Mat, Object, Repo, StateRef, function, signatures
+from dryml.core import Mat, Object, Repo, function, signatures
 from dryml.core.execute import CoreExecutionError, CoreOptions
 from dryml.core.execute_codec import CoreCallCodecError, decode_outcome, encode_invocation, invoke_invocation
 from dryml.core.object import Pickleable
@@ -30,10 +30,8 @@ from tests.managed.execution_fixtures import (
     ManagedMatrixValue,
     MatrixArgument,
     ORDERS,
-    OuterWrappedManagedValue,
     matrix_config,
     nested_managed_call,
-    nested_managed_advance,
     nested_unrelated_function,
 )
 

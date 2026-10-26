@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from dryml.core import Definition, ObjectId, ObjectRef, Serializable, StateRef, Ref, QuotedDef
+from dryml.core import Definition, ObjectId, Serializable, Ref, QuotedDef
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
 from dryml.core.node_codec import decode_node_graph, encode_node_graph
@@ -245,22 +245,6 @@ def test_restore_adoption_checks_original_projection_then_recapture_uses_adopted
     assert receiver.at(CHILD).state == child0.state
 
 
-def test_legacy_reference_states_weaken_recursively_but_quotes_and_ids_stay_exact():
-    child = model()
-    reference = ObjectRef(child, {GraphPath(): ObjectId()})
-    first = StateRef(reference, {GraphPath(): "pkl-" + "a" * 64})
-    second = StateRef(reference, {GraphPath(): "pkl-" + "b" * 64})
-    a = model(child=DefLink.finalized(EdgeKind.REF, first))
-    b = model(child=DefLink.finalized(EdgeKind.REF, second))
-    assert a.object_projection_equal(b)
-    assert a.creation_digest() != b.creation_digest()
-    assert selection(a).validate_for(b, codec="pkl")
-    assert not model(initializer=Definition(ViewModel, child=first).quote()).object_projection_equal(
-        model(initializer=Definition(ViewModel, child=second).quote()))
-    other = ObjectRef(child, {GraphPath(): ObjectId()})
-    assert not a.object_projection_equal(model(child=DefLink.finalized(EdgeKind.REF, other)))
-
-
 def test_named_views_and_admission_are_pure_and_quote_preserves_ordinary_ids(monkeypatch):
     from dryml.core.symbol import ImportRef
 
@@ -331,9 +315,9 @@ def test_nested_factory_reference_states_weaken_but_ordinary_identity_data_does_
     from dryml.core.factory import FactorySpec
     from dryml.core.config import ConfigRef
 
-    reference = ObjectRef(model(), {GraphPath(): ObjectId()})
-    first = StateRef(reference, {GraphPath(): "pkl-" + "a" * 64})
-    second = StateRef(reference, {GraphPath(): "pkl-" + "b" * 64})
+    reference = model().with_identity(ObjectId())
+    first = reference.with_state(selection(reference))
+    second = reference.with_state(selection(reference, "b"))
     a = model(child=FactorySpec("builtins:tuple", ConfigRef("state", first)))
     b = model(child=FactorySpec("builtins:tuple", ConfigRef("state", second)))
     assert a.object_projection_equal(b)

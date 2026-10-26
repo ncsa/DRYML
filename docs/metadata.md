@@ -87,7 +87,7 @@ example. Move descriptive labels from construction to `SaveAnnotations` or the
 reference-targeted CRUD methods above. Use `get_lineage_metadata()` for known
 creation evidence and `get_snapshot_metadata()` for immutable save evidence.
 
-Use `Serializable` and ObjectRef/StateRef facilities when an application needs
+Use `Serializable` and Node identity/LocalState facets when an application needs
 framework identity or exact-state identity. When a class needs a distinct
 structural definition, declare an explicit ordinary constructor discriminator.
 `uid` and `metadata` are no longer reserved names: a class may use them as normal
@@ -223,7 +223,9 @@ stability or migration of arbitrary author-owned payload codecs. The closed
 `metadata/{current_object,current_state,lineage,capture}/<shard>/<digest>.record`.
 The same Store journal feeds `requested_metadata` index coverage. Managed lifecycle
 associations remain separately unavailable. Store 2/3 inputs are rejected intact;
-standalone legacy reference codecs are not a persistent-format fallback.
+legacy reference classes/codecs are removed, including standalone transport.
+Use `NodeLineageMetadata`, `NodeSnapshotMetadata`, and Repo metadata methods;
+see [API retirement](repo_store_v3_retirement.md).
 
 Sharing, copying, or replicating a real DirStore or ZipStore also shares retained
 environment fields. These can include interpreter executable/prefix paths,

@@ -132,7 +132,7 @@ def test_sidecar_policy_and_derived_only_recovery(tmp_path, monkeypatch, damage)
     elif damage == "corrupt":
         index.path.write_bytes(b"broken SQLite sidecar")
     elif damage == "dirty":
-        store.mark_query_index_dirty()
+        store.open_query_index()._mark_dirty()
     else:
         with closing(sqlite3.connect(index.path)) as con, con:
             if damage in {"schema7", "schema9"}:
@@ -244,7 +244,6 @@ def test_clean_incremental_save_and_metadata_do_not_inventory_history(tmp_path, 
         assert not kwargs.get("rebuild"), "clean mutation inventoried history"
         return original(*args, **kwargs)
     monkeypatch.setattr(authority, "capture_store_projection", capture)
-    monkeypatch.setattr(store, "iter_state_ref_records", lambda: pytest.fail("legacy snapshots enumerated"))
     saved = repo.save(ProjectionStateful("new", repo=repo), alias="latest", main=True,
                       annotations=SaveAnnotations(state={"visible": True}))
     assert repo.query().saved().alias("latest").where(field("state", "visible").eq(True)).refresh(False).require_indexed().one().graph_equal(saved)

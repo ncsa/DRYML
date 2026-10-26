@@ -343,15 +343,9 @@ def test_zip_buffered_receipt_commit_failure_and_source_lifetime(tmp_path, monke
         store.close()
 
 
-def test_legacy_nested_store_writers_and_query_coverage_refuse_before_effects(tmp_path):
-    from dryml.core.store.records import DefinitionRecord
-    from dryml.core.store.store import StoreCapabilityError
+def test_binding_query_index_does_not_certify_coverage_or_publish_authority(tmp_path):
     store = DirStore(tmp_path / "store", query_index="sqlite")
     before = authority_files(store)
-    for action in [lambda: store.write_definition_record(DefinitionRecord(creation()))]:
-        with pytest.raises(StoreCapabilityError):
-            action()
-    assert authority_files(store) == before
     index = store.open_query_index()
     assert index.status().state == "missing"  # Binding alone is not coverage.
     assert {path: data for path, data in authority_files(store).items()

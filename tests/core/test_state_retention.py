@@ -708,8 +708,12 @@ def test_repo_saved_root_retain_release_and_inventory_without_reserialization(tm
     publication, = report.publications
     def forbidden(*args, **kwargs):
         pytest.fail("retain/release serialized or scanned historical inventory")
-    monkeypatch.setattr(store, "iter_state_ref_records", forbidden)
-    monkeypatch.setattr(store, "iter_stored_root_records", forbidden)
+    from dryml.core.query import authority
+    original = authority.capture_store_projection
+    def capture(*args, **kwargs):
+        assert not kwargs.get("rebuild"), "retain/release inventoried history"
+        return original(*args, **kwargs)
+    monkeypatch.setattr(authority, "capture_store_projection", capture)
     monkeypatch.setattr(Value, "save_state_to_dir_imp", forbidden)
     root = repo.retain(saved)
     assert [item.status for item in repo.release(publication.retention_token, owner_store=store)] == ["retained"]

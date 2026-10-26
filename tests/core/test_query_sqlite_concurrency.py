@@ -308,7 +308,7 @@ def test_u2_old_waiter_observes_failed_attempt_after_fast_retry(tmp_path, monkey
     generation = _generation(index.path)
     for name, store in zip(("a", "b"), stores):
         _publish_without_projection(store, _cdef(name), monkeypatch)
-        store.mark_query_index_dirty()
+        store.open_query_index()._mark_dirty()
     tokens = tuple(store.authority_cut().pending for store in stores)
     primary = KeyboardInterrupt("owner interrupted") if interrupted else PermissionError("owner failed")
     entered, fail, joined, observe = (threading.Event() for _ in range(4))
@@ -417,7 +417,7 @@ def test_u2_waiter_interruption_detaches_and_self_reentry_refuses(tmp_path, monk
     store = _request_store(tmp_path / "store")
     query = store.query().refresh(True)
     index = store.open_query_index()
-    store.mark_query_index_dirty()
+    store.open_query_index()._mark_dirty()
     import dryml.core.query.authority as authority
     original = authority.capture_store_projection
     identity = index._connections._path_identity()
@@ -849,7 +849,7 @@ def test_explicit_cycle_declined_live_claim_validates_actual_candidate(tmp_path,
     root = _cdef("root")
     store.publish_node(root)
     store.rebuild_query_index()
-    store.mark_query_index_dirty()
+    store.open_query_index()._mark_dirty()
     index = store.open_query_index()
     claimed, release = threading.Event(), threading.Event()
     errors = []
@@ -1158,7 +1158,12 @@ def test_overlapping_foreign_destination_owner_is_refused_after_claim(tmp_path, 
             contender._connections.close_current()
 
     monkeypatch.setattr(contender, "_build_claim", claim)
-    monkeypatch.setattr(contender, "_capture_authority_cut", lambda: pytest.fail("foreign owner scanned"))
+    from dryml.core.query import authority
+    original_capture = authority.capture_store_projection
+    def capture(store, **kwargs):
+        assert store is not second, "foreign owner scanned"
+        return original_capture(store, **kwargs)
+    monkeypatch.setattr(authority, "capture_store_projection", capture)
     worker = threading.Thread(target=refresh, daemon=True)
     worker.start()
     try:
@@ -1169,8 +1174,8 @@ def test_overlapping_foreign_destination_owner_is_refused_after_claim(tmp_path, 
         with closing(require_sqlite().connect(path)) as con, con:
             con.execute(f"PRAGMA user_version = {schema_version}")
             assert con.execute("SELECT store_key FROM catalog_state WHERE singleton = 1").fetchone() == (owner.source_key,)
-        first.mark_query_index_dirty()
-        second.mark_query_index_dirty()
+        owner._mark_dirty()
+        contender._mark_dirty()
         identity = (path.stat().st_dev, path.stat().st_ino)
         contents = path.read_bytes()
         tokens = tuple(backend._dirty_markers() for backend in (owner, contender))
@@ -1262,7 +1267,7 @@ def test_u7_readiness_waits_for_build_claim_before_authority_fence(tmp_path, mon
     _save_root_definition(store, root)
     store.rebuild_query_index()
     index = store.open_query_index()
-    store.mark_query_index_dirty()
+    store.open_query_index()._mark_dirty()
     claimed, preflight = threading.Event(), threading.Event()
     held = threading.local()
     errors = []
@@ -1893,15 +1898,14 @@ emit({{"released": True}})
 
 
 @pytest.mark.parametrize("captured_token", (False, True))
-def test_rebuild_preserves_same_root_token_published_after_capture(tmp_path, monkeypatch, captured_token):
+def test_rebuild_preserves_dirty_token_published_after_capture(tmp_path, monkeypatch, captured_token):
     """A later publication survives both empty and nonempty acknowledgement cuts."""
     from dryml.core.query.model import QueryStats
 
     store = _request_store(tmp_path / "store")
     index = store.open_query_index()
-    root = _cdef("request-root")
     if captured_token:
-        store.mark_query_index_dirty(root)
+        index._mark_dirty()
     captured = set(index._dirty_markers())
     assert bool(captured) is captured_token
     original_activate = index._activate_replacement
@@ -1909,7 +1913,8 @@ def test_rebuild_preserves_same_root_token_published_after_capture(tmp_path, mon
 
     def publish():
         try:
-            later.append(Path(store.mark_query_index_dirty(root)))
+            index._mark_dirty()
+            later.extend(set(index._dirty_markers()) - captured)
         except BaseException as error:
             errors.append(error)
 
@@ -2096,7 +2101,7 @@ def test_wal_rebuild_waits_for_reader_before_replacing_canonical_sidecar(tmp_pat
         index.initialize_empty()
     except QueryIndexError as exc:
         pytest.skip(f"WAL mode unavailable in this environment: {exc}")
-    store.mark_query_index_dirty()
+    store.open_query_index()._mark_dirty()
     sqlite3 = require_sqlite()
     reader = sqlite3.connect(store.query_index_path, isolation_level=None)
     try:
@@ -2256,7 +2261,7 @@ def test_dirty_marker_recovers_object_committed_without_index_in_separate_proces
     _save_root_definition(store, root)
     idx = store.open_query_index()
     idx.initialize_empty()
-    store.mark_query_index_dirty()
+    store.open_query_index()._mark_dirty()
     idx.close()
 
     result = _run_worker(f'''
@@ -2282,7 +2287,7 @@ if {managed_in_builder!r}:
 assert ("dryml.managed" in sys.modules) is {managed_in_builder!r}
 idx = store_index({str(tmp_path)!r})
 idx.store.publish_node(cdef("cross-process"))
-idx.store.mark_query_index_dirty()
+idx._mark_dirty()
 idx.refresh("auto")
 emit({{"generation": idx.status().generation, "identity": list(idx._connections._path_identity())}})
 ''')

@@ -99,8 +99,8 @@ class AutoRef:
     preserves supplied resolved Node metadata. A live stateful graph yields its
     complete last saved Node when its object projection matches, or an
     identity-bound construction Node otherwise; an entirely stateless graph
-    yields its construction definition. Supplied legacy ObjectRef/StateRef values
-    retain their kind. Selection performs no Store IO, saving, or materialization.
+    yields its construction definition. Selection performs no Store IO, saving,
+    or materialization.
     Soft Definitions require an explicit Ref assertion; unresolved metadata and
     unsupported inputs raise ``SignatureError``. Selection never manufactures a
     saved refinement by capturing state.
@@ -131,17 +131,15 @@ class _Slot:
 
 @dataclass(frozen=True, slots=True)
 class ReferenceSelection:
-    """Pin one signature slot to an exact ObjectRef and optional declaration Store.
+    """Pin one signature slot to exact Node metadata and an optional source Store.
 
     Args:
-        object_ref: Exact identity allowed for a CDef-to-ObjectRef strengthening,
-            or an exact saved Node constraining the complete supplied graph.
-        store: Optional connected Store required to carry that declaration.
+        object_ref: Exact Node constraining the complete supplied graph.
+        store: Optional connected Store required to carry the selected authority.
 
-    A selection is caller-owned control, not authority by itself. The ObjectRef
-    must match the slot's complete CDef topology and occur in valid declaration
-    authority during the Repo evidence cut. Materializing delivery revalidates a
-    selected Store's connection, declaration, and ClaimRecord before effects.
+    A selection is caller-owned control, not authority by itself. The supplied
+    graph must match it exactly. Materializing delivery freshly validates the
+    selected Store and payloads before effects; no discovery or declaration occurs.
     """
 
     object_ref: Any
@@ -355,13 +353,12 @@ def _validate_target(target: Any, role: str, slot: str) -> None:
     from .node import Node
     from .object import Object
     from .quoted import QuotedDef, SelectorSpec
-    from .reference_values import ObjectRef, StateRef
     from .selector import Selector
     from .template import Template
     from .state_values import IdentitySpec, StateSpec
 
     supported = (
-        Definition, ConcreteDefinition, ObjectRef, StateRef, Object, AutoRef,
+        Definition, ConcreteDefinition, Object, AutoRef,
         QuotedDef, Selector, SelectorSpec, Template,
         Node, ConcreteNode, SavedNode, IdentitySpec, StateSpec,
     )
@@ -480,11 +477,10 @@ def _parse_slot(annotation: Any, slot: str) -> _Slot:
         mode = "exact"
     else:
         from .definition import ConcreteDefinition, Definition
-        from .reference_values import ObjectRef, StateRef
         from .state_values import IdentitySpec, StateSpec
 
         if not all(member in (Node, ConcreteNode, SavedNode, Definition, ConcreteDefinition,
-                              ObjectRef, StateRef, IdentitySpec, StateSpec) for member in members):
+                              IdentitySpec, StateSpec) for member in members):
             raise SignatureError("role union targets are incomparable", slot)
         mode = "union"
     return _Slot(role, tuple(members), nullable, mode)
@@ -787,9 +783,7 @@ class BoundaryPlan:
         return self.controls.selections
 
     def deliver_args(self, *, extra_mat_roots: tuple[Any, ...] = (),
-                     on_extra_materialized: Callable[[tuple[Any, ...]], None] | None = None,
-                     reservation: Any = None,
-                     reserved_live: Mapping[str, Any] | None = None) -> tuple[tuple[Any, ...], dict[str, Any]]:
+                     on_extra_materialized: Callable[[tuple[Any, ...]], None] | None = None) -> tuple[tuple[Any, ...], dict[str, Any]]:
         """Deliver normalized arguments once through the original signature shape.
 
         Returns:
@@ -803,10 +797,6 @@ class BoundaryPlan:
                 extra roots after the same aggregate admission as arguments. It is
                 invoked before target invocation and is intended for a receiver or
                 capture that must be installed after materialization.
-            reservation: Optional active Repo state-graph reservation retained by
-                a higher-level lifecycle owner.
-            reserved_live: Optional exact-reference digest to live-object mapping
-                admitted through ``reservation`` for overlap reuse.
 
         Raises:
             SignatureError: If mode, ownership, or one-shot state is invalid.
@@ -814,7 +804,7 @@ class BoundaryPlan:
                 restoration, and cache failures without changing their type.
 
         Side Effects:
-            Materializing slots may cause Repo to claim, reserve, construct,
+            Materializing slots may cause Repo to reserve, construct,
             restore, reuse, or cache Objects. Ref slots have no realization
             effects, and delivery never saves automatically.
         """
@@ -823,7 +813,6 @@ class BoundaryPlan:
         values = self._deliver_materializing_values(
             dict(self.authority.items()), extra_mat_roots=extra_mat_roots,
             on_extra_materialized=on_extra_materialized,
-            reservation=reservation, reserved_live=reserved_live,
         )
         args, kwargs = [], {}
         for parameter in self.plan.signature.parameters.values():
@@ -838,9 +827,7 @@ class BoundaryPlan:
                 kwargs.update(value)
         return tuple(args), kwargs
 
-    def deliver_return(self, *, reservation: Any = None,
-                       reserved_live: Mapping[str, Any] | None = None,
-                       preserve_reference_data: bool = False) -> Any:
+    def deliver_return(self, *, preserve_reference_data: bool = False) -> Any:
         """Deliver one normalized result exactly once.
 
         Returns:
@@ -852,16 +839,12 @@ class BoundaryPlan:
                 restoration, and cache failures without changing their type.
 
         Args:
-            reservation: Optional active Repo state-graph reservation retained by
-                a higher-level lifecycle owner.
-            reserved_live: Optional exact-reference digest to live-object mapping
-                admitted through ``reservation`` for overlap reuse.
             preserve_reference_data: Keep already-normalized reference leaves as
                 data instead of recursively materializing them. This is reserved
                 for an owner that published a raw return before this boundary.
 
         Side Effects:
-            A materializing return may cause Repo to claim, reserve, construct,
+            A materializing return may cause Repo to reserve, construct,
             restore, reuse, or cache Objects. Delivery never saves automatically.
         """
 
@@ -869,15 +852,12 @@ class BoundaryPlan:
         if preserve_reference_data:
             return self.authority
         return self._deliver_materializing_values(
-            {"return": self.authority}, reservation=reservation,
-            reserved_live=reserved_live,
+            {"return": self.authority},
         )["return"]
 
     def _deliver_materializing_values(self, values: dict[str, Any], *,
                                        extra_mat_roots: tuple[Any, ...] = (),
-                                       on_extra_materialized: Callable[[tuple[Any, ...]], None] | None = None,
-                                       reservation: Any = None,
-                                       reserved_live: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                                       on_extra_materialized: Callable[[tuple[Any, ...]], None] | None = None) -> dict[str, Any]:
         """Delegate every Mat slot to one Repo-owned aggregate admission.
 
         Args:
@@ -886,9 +866,6 @@ class BoundaryPlan:
                 delivered through this boundary.
             on_extra_materialized: Optional callback receiving realized extra
                 roots before the caller invokes its target.
-            reservation: Optional active state-graph reservation for reuse.
-            reserved_live: Optional exact-reference digest to retained live-object
-                mapping used only with ``reservation``.
 
         Returns:
             The same mapping with only materializing slots realized.
@@ -898,7 +875,7 @@ class BoundaryPlan:
                 authority.
 
         Side Effects:
-            Repo may construct, restore, reserve, claim, or cache selected roots.
+            Repo may construct, restore, reserve, or cache selected roots.
             Ref slots remain metadata-only and never enter this method's Repo call.
         """
 
@@ -911,7 +888,6 @@ class BoundaryPlan:
         from .definition import ConcreteDefinition, Definition
         from .links import DefLink
         from .object import Object
-        from .reference_values import ObjectRef, StateRef
 
         def requires_repo(value: Any, seen: set[int]) -> bool:
             """Return whether a value can trigger Repo-owned realization."""
@@ -921,7 +897,7 @@ class BoundaryPlan:
             seen.add(id(value))
             if isinstance(value, Object):
                 return False
-            if isinstance(value, (Definition, ConcreteDefinition, ObjectRef, StateRef)):
+            if isinstance(value, (Definition, ConcreteDefinition)):
                 return True
             if isinstance(value, DefLink):
                 return value.kind is EdgeKind.MATERIALIZE and requires_repo(value.target, seen)
@@ -951,8 +927,7 @@ class BoundaryPlan:
             slot = self.plan.return_slot if name == "return" else self.plan.slots[name]
             if slot.role != "mat":
                 continue
-            from .node import Node
-            digest = selection.object_ref.exact_digest() if isinstance(selection.object_ref, Node) else selection.object_ref.digest()
+            digest = selection.object_ref.exact_digest()
             previous = declaration_stores.get(digest)
             if previous is not None and previous is not selection.store:
                 previous_key = previous.authority_fence_key()
@@ -968,8 +943,6 @@ class BoundaryPlan:
             roots,
             cache=self.controls.cache,
             reuse_live=self.controls.reuse_live,
-            reservation=reservation,
-            reserved_live=reserved_live,
             declaration_stores=MappingProxyType(declaration_stores),
         )
         if len(realized) != len(roots):
@@ -1322,7 +1295,6 @@ def _target_capabilities():
 
     from .definition import ConcreteDefinition, ConcreteNode, Definition, SavedNode
     from .node import Node
-    from .reference_values import ObjectRef, StateRef
     from .state_values import IdentitySpec, StateSpec
 
     return {
@@ -1330,8 +1302,6 @@ def _target_capabilities():
         ConcreteDefinition: frozenset({"resolved", "normalized"}),
         ConcreteNode: frozenset({"resolved", "normalized", "facets"}),
         SavedNode: frozenset({"resolved", "normalized", "facets", "identity", "state", "complete"}),
-        ObjectRef: frozenset({"resolved", "normalized", "identity"}),
-        StateRef: frozenset({"resolved", "normalized", "identity", "state", "complete"}),
         IdentitySpec: frozenset({"identity"}), StateSpec: frozenset({"state"}),
     }
 
@@ -1342,15 +1312,14 @@ def _select_automatic(value: Any, name: str) -> Any:
     from .cdef_graph import has_stateful_materialization
     from .definition import ConcreteDefinition
     from .object import Object
-    from .reference_values import ObjectRef, StateRef
-    from .node import Node, require_saved
+    from .node import Node, _as_node_view, require_saved
 
     if isinstance(value, Node):
         from .template import _contains_expression
         if _contains_expression(value):
             raise _SelectionUnavailable()
         return value
-    if isinstance(value, (ConcreteDefinition, ObjectRef, StateRef)):
+    if isinstance(value, ConcreteDefinition):
         return value
     if not isinstance(value, Object):
         raise _SelectionUnavailable()
@@ -1358,21 +1327,17 @@ def _select_automatic(value: Any, name: str) -> Any:
     if not has_stateful_materialization(cdef):
         return cdef
     receipt = value.last_state_ref
-    if isinstance(cdef, Node):
-        construction = getattr(value, "_construction_node", cdef)
-        receiver = construction.with_realization(identities=value.object_ref.objects)
-        if isinstance(receipt, Node):
-            try:
-                require_saved(receipt)
-            except (TypeError, ValueError):
-                pass
-            else:
-                if receipt.object_projection_equal(receiver):
-                    return receipt
-        return receiver
-    if isinstance(receipt, StateRef) and receipt.object == value.object_ref:
-        return receipt
-    return value.object_ref
+    construction = _as_node_view(getattr(value, "_construction_node", cdef))
+    receiver = construction.with_realization(identities=value._identity_node.identity_spec())
+    if isinstance(receipt, Node):
+        try:
+            require_saved(receipt)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if receipt.object_projection_equal(receiver):
+                return receipt
+    return receiver
 
 
 def _select_exact(value: Any, target: Any, name: str,
@@ -1383,7 +1348,6 @@ def _select_exact(value: Any, target: Any, name: str,
     from .node import Node, _as_node_view, require_saved
     from .object import Object
     from .quoted import QuotedDef, SelectorSpec
-    from .reference_values import ObjectRef, StateRef
     from .selector import Selector
     from .state_values import IdentitySpec, StateSpec
 
@@ -1454,8 +1418,8 @@ def _select_exact(value: Any, target: Any, name: str,
     if target is Definition:
         if isinstance(value, Definition):
             return value
-        if isinstance(value, (ConcreteDefinition, ObjectRef, StateRef)):
-            return value.definition.thaw()
+        if isinstance(value, ConcreteDefinition):
+            return value.thaw()
         if isinstance(value, Object):
             return value.definition.thaw()
         raise _SelectionUnavailable()
@@ -1463,7 +1427,7 @@ def _select_exact(value: Any, target: Any, name: str,
         # Object is a delivery category, not an authority rung.  Preserve the
         # selected value for Repo's aggregate admission, which owns any required
         # realization while direct live Objects retain their unsaved payload.
-        if isinstance(value, (Definition, ConcreteDefinition, Object, ObjectRef, StateRef)):
+        if isinstance(value, (Definition, ConcreteDefinition, Object)):
             return value
         raise _SelectionUnavailable()
     if isinstance(target, type) and issubclass(target, Object):
@@ -1473,21 +1437,12 @@ def _select_exact(value: Any, target: Any, name: str,
             raise _SelectionUnavailable()
         selected = _select_exact(value, Object, name, controls, selection_key=selection_key)
         from .symbol import resolve_symbol
-        description = selected.definition if isinstance(selected, (ObjectRef, StateRef)) else selected
-        cls = resolve_symbol(description.cls)
+        cls = resolve_symbol(selected.cls)
         if not isinstance(cls, type) or not issubclass(cls, target):
             raise _SelectionUnavailable()
         return selected
     if target is ConcreteDefinition:
         return _as_cdef(value, name)
-    if target is ObjectRef:
-        return _as_object_ref(
-            value, name, controls, selection_key=selection_key
-        )
-    if target is StateRef:
-        return _as_state_ref(
-            value, name, controls, selection_key=selection_key
-        )
     raise _SelectionUnavailable()
 
 
@@ -1496,12 +1451,9 @@ def _as_cdef(value: Any, name: str) -> Any:
 
     from .definition import ConcreteDefinition, Definition
     from .object import Object
-    from .reference_values import ObjectRef, StateRef
 
     if isinstance(value, ConcreteDefinition):
         return value
-    if isinstance(value, (ObjectRef, StateRef)):
-        return value.definition
     if isinstance(value, Object):
         return value.definition
     if not isinstance(value, Definition):
@@ -1521,128 +1473,21 @@ def _as_cdef(value: Any, name: str) -> Any:
 def _selection_value(selection: Any, name: str) -> ReferenceSelection | None:
     """Normalize one accepted slot selection shape before evidence reads."""
 
-    from .reference_values import ObjectRef
     from .node import Node
 
     if selection is None:
         return None
     if isinstance(selection, ReferenceSelection):
         result = selection
-    elif isinstance(selection, (Node, ObjectRef)):
+    elif isinstance(selection, Node):
         result = ReferenceSelection(selection)
     elif isinstance(selection, tuple) and len(selection) == 2:
         result = ReferenceSelection(selection[0], selection[1])
     else:
         raise SignatureError("selection control is invalid", name)
-    if not isinstance(result.object_ref, (Node, ObjectRef)):
+    if not isinstance(result.object_ref, Node):
         raise SignatureError("selection control is invalid", name)
     return result
-
-
-def _evidence_for(cdef: Any, name: str, controls: _Controls):
-    """Read one required Repo authority cut without opening or modifying a Repo."""
-
-    if controls.repo is None:
-        raise _SelectionUnavailable()
-    evidence = getattr(controls.repo, "reference_evidence", None)
-    if not callable(evidence):
-        raise SignatureError("repo does not support reference evidence", name)
-    return evidence(cdef)
-
-
-def _as_object_ref(value: Any, name: str, controls: _Controls, *,
-                   selection_key: Any, evidence: Any = None) -> Any:
-    """Relax or select a declared exact ObjectRef without acquiring a claim."""
-
-    from .definition import ConcreteDefinition
-    from .object import Object
-    from .reference_values import ObjectRef, StateRef
-
-    selection = controls.selections.get(selection_key)
-    if isinstance(value, StateRef):
-        result = value.object
-        if selection is not None and selection.object_ref != result:
-            raise SignatureError("selection topology does not match the slot", name)
-        return result
-    if isinstance(value, ObjectRef):
-        if selection is not None and selection.object_ref != value:
-            raise SignatureError("selection topology does not match the slot", name)
-        return value
-    if isinstance(value, Object):
-        result = value.object_ref
-        if selection is not None and selection.object_ref != result:
-            raise SignatureError("selection topology does not match the slot", name)
-        return result
-    cdef = _as_cdef(value, name)
-    if not isinstance(cdef, ConcreteDefinition):
-        raise _SelectionUnavailable()
-    if selection is not None and not selection.object_ref.definition.graph_equal(cdef):
-        raise SignatureError("selection topology does not match the slot", name)
-    evidence = _evidence_for(cdef, name, controls) if evidence is None else evidence
-    candidates = list(evidence.declarations)
-    if selection is not None:
-        candidates = [
-            candidate for candidate in candidates
-            if candidate.object_ref == selection.object_ref
-            and (selection.store is None or selection.store in candidate.stores)
-        ]
-    if not candidates:
-        raise _SelectionUnavailable()
-    if len(candidates) != 1:
-        raise _SelectionAmbiguous()
-    return candidates[0].object_ref
-
-
-def _as_state_ref(value: Any, name: str, controls: _Controls, *,
-                  selection_key: Any) -> Any:
-    """Select existing exact StateRef authority without snapshot publication."""
-
-    from .cdef_graph import has_stateful_materialization
-    from .object import Object
-    from .reference_values import ObjectRef, StateRef
-
-    selection = controls.selections.get(selection_key)
-    if isinstance(value, StateRef):
-        if not has_stateful_materialization(value.definition):
-            raise _SelectionUnavailable()
-        if selection is not None and selection.object_ref != value.object:
-            raise SignatureError("selection topology does not match the slot", name)
-        return value
-    if isinstance(value, Object):
-        if not has_stateful_materialization(value.definition):
-            raise _SelectionUnavailable()
-        receipt = value.last_state_ref
-        if not isinstance(receipt, StateRef) or receipt.object != value.object_ref:
-            raise _SelectionUnavailable()
-        if selection is not None and selection.object_ref != receipt.object:
-            raise SignatureError("selection topology does not match the slot", name)
-        return receipt
-    if isinstance(value, ObjectRef):
-        reference = _as_object_ref(
-            value, name, controls, selection_key=selection_key
-        )
-        evidence = _evidence_for(reference.definition, name, controls)
-    else:
-        cdef = _as_cdef(value, name)
-        evidence = _evidence_for(cdef, name, controls)
-        reference = _as_object_ref(
-            value,
-            name,
-            controls,
-            selection_key=selection_key,
-            evidence=evidence,
-        )
-    if not isinstance(reference, ObjectRef) or not has_stateful_materialization(reference.definition):
-        raise _SelectionUnavailable()
-    candidates = [
-        candidate.state_ref for candidate in evidence.states
-        if candidate.state_ref.object == reference
-    ]
-    if not candidates:
-        raise _SelectionUnavailable()
-    if len(candidates) != 1:
-        raise _SelectionAmbiguous()
-    return candidates[0]
 
 
 def _annotation_target(target: Callable[..., Any], constructor: bool) -> Callable[..., Any]:

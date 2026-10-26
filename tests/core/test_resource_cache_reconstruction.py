@@ -9,7 +9,6 @@ import dryml
 from dryml import session
 from dryml.core import Repo, RepoReconstructionError
 from dryml.core import repo_definition
-from dryml.core.repo_plan import SaveRouting
 from dryml.core.store.dir import DirStore
 from dryml.core.store.store import Store
 from dryml.core.store.zip import ZipStore
@@ -120,7 +119,6 @@ def test_distinct_repo_settings_share_stores_but_not_repo_identity(tmp_path):
     source, handles, definition = _definition(tmp_path, "source", config={"mode": "one"}, stores=2)
     changed = deepcopy(definition.to_data())
     changed["settings"]["config"] = {"mode": "two"}
-    changed["settings"]["lease_duration"] = 12.0
     changed["settings"]["save_objs_on_deletion"] = True
     changed["stores"] = list(reversed(changed["stores"]))
     changed_definition = type(definition).from_data(changed)
@@ -132,7 +130,6 @@ def test_distinct_repo_settings_share_stores_but_not_repo_identity(tmp_path):
             assert first is not second
             assert set(first.stores) == set(second.stores)
             assert second.config == {"mode": "two"}
-            assert second._lease_duration == 12.0
             assert second.save_objs_on_deletion
     finally:
         source.close(flush=False)

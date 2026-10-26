@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from dryml.core import ConcreteDefinition, Executor as CoreExecutor
-from dryml.core import Object, ObjectRef, Repo, Serializable, function
+from dryml.core import Node, Object, Repo, Serializable, function
 from dryml.core.execute import CoreExecutionError, CoreOptions, PreparedCoreCall
 from dryml.core.store.dir import DirStore
 from dryml.execute import Executor, ExecutionOutput, WorkerSetup
@@ -147,8 +147,10 @@ class TrainingRoot(Serializable):
 
 def _train_and_report(value):
     """Update a transported value and return stateful, stateless, and raw results."""
+    from dryml.core.execute import current_context
+
     value.value += 4
-    return TrainingValue(value.value), StatelessResult(), value.object_ref, value.value / 2
+    return TrainingValue(value.value), StatelessResult(), current_context().repo.describe(value).object_view(), value.value / 2
 
 
 def _update_child_and_return_it(root):
@@ -412,7 +414,7 @@ def test_real_subprocess_core_publishes_results_refreshes_nested_updates_and_kee
         assert isinstance(stateful, ConcreteNode)
         assert require_saved(stateful) is stateful
         assert isinstance(stateless, ConcreteDefinition)
-        assert isinstance(existing, ObjectRef)
+        assert isinstance(existing, Node)
         assert existing.object_id == value.object_id
         assert metric == 3.0
         assert value.value == 6

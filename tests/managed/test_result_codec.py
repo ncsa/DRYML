@@ -151,24 +151,29 @@ def test_related_metadata_roots_share_occurrences_and_recompose_exactly(monkeypa
 
 
 def test_metadata_is_encoded_and_decoded_once_for_all_result_views(monkeypatch):
+    """Result transport owns one table; quotation hashes are a separate codec use."""
+    import sys
     from dryml.core import node_codec
+    value = related_metadata_result()
     calls = []
     original_encode, original_decode = node_codec.encode_node_graph, node_codec._decode_node_graph_views
     def encode(prepared, *args, **kwargs):
-        calls.append(("encode", len(prepared.roots)))
+        if sys._getframe(1).f_globals["__name__"] == "dryml.managed.result_codec":
+            calls.append(("encode", len(prepared.roots)))
         return original_encode(prepared, *args, **kwargs)
     def decode(graph, *args, **kwargs):
         calls.append(("decode", len(graph["views"])))
         return original_decode(graph, *args, **kwargs)
     monkeypatch.setattr(node_codec, "encode_node_graph", encode)
     monkeypatch.setattr(node_codec, "_decode_node_graph_views", decode)
-    payload = encode_result(related_metadata_result())
+    payload = encode_result(value)
     packet = json.loads(payload)
     rows = [row for row in packet["nodes"] if row[0] == "metadata"]
     assert rows == [["metadata", index] for index in range(len(rows))]
     assert len(packet["metadata"]["tables"]) == 1
-    assert_related_metadata_result(decode_result(payload))
+    restored = decode_result(payload)
     assert calls == [("encode", len(rows)), ("decode", len(rows))]
+    assert_related_metadata_result(restored)
 
 
 @pytest.mark.parametrize("change", ["old_result", "old_graph", "missing_graph", "shared_blocks",

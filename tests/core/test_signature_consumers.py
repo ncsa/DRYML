@@ -382,7 +382,7 @@ def test_signature_documentation_centralizes_contract_and_migration() -> None:
     signatures = (docs / "signatures.md").read_text(encoding="utf-8")
     required = (
         "AutoRef", "Same-role unions", "Nullable forms", "QuotedDef",
-        "already fully bound", "available", "Mat[StateRef]", "reuse_live",
+        "already fully bound", "available", "Mat[Object]", "Ref[SavedNode]", "reuse_live",
         "normalize_args", "signature_context", "Managed", "no aliases",
         "RefCDef", "RefCDefArg", "SelectorArg", "MaterializeArg", "ValueArg",
         "ArgRole", "__dryml_arg_roles__",

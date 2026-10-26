@@ -7,7 +7,7 @@ import sys
 import pytest
 
 import dryml.dispatch as dispatch
-from dryml.core import Repo, StateRef
+from dryml.core import Repo
 from dryml.core.execute import CoreOptions
 from dryml.core.object import Pickleable
 from dryml.core.session import config as core_config

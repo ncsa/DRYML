@@ -1,19 +1,13 @@
-"""DefinitionRecord closure coverage for graphs with ephemeral nodes."""
-
-import sys
+"""Node closure and containment coverage for graphs with ephemeral nodes."""
 
 import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 from dryml.artifacts import CachedDataset
-from dryml.core import Definition, EdgePolicy, Object, Par, Repo, Serializable, StateRef, Template
+from dryml.core import Definition, EdgePolicy, Object, Par, Repo, Serializable, Template
 from dryml.core.query import RelationshipKind
-from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import EdgeKind
-from dryml.core.cdef_identity import V2_IDENTITY_VERSION
-from dryml.core.definition import ConcreteDefinition
-from dryml.core.freeze import FrozenDict
 from dryml.core.links import DefLink
 from dryml.core.query.containment import (
     iter_containment_occurrences,
@@ -23,7 +17,7 @@ from dryml.core.query.containment import (
 from dryml.core.query.model import ContainmentHop, DefinitionOccurrence, containment_witness_key
 from dryml.core.quoted import QuotedDef
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
+from dryml.core.node_prepare import NodePreparation
 from dryml.core.utils.graph.path import GraphPath
 from dryml.data import Dataset
 
@@ -107,10 +101,12 @@ def test_save_records_definition_closure_for_ephemeral_child(tmp_path):
     child = QueryLeaf("child", repo=repo)
     parent = QueryParent(child, repo=repo)
 
-    repo.save_object(parent)
+    saved = repo.save_object(parent)
+    digest = NodePreparation((saved,)).digest(saved, domain="dryml-saved-root/v1")
+    stored = store.read_node(digest, kind="saved")
 
-    assert store.read_definition_record(DefinitionRecord(parent.definition).digest)
-    assert store.read_definition_record(DefinitionRecord(child.definition).digest)
+    assert stored.construction_view.graph_equal(parent.definition)
+    assert stored.parameters["child"].construction_view.graph_equal(child.definition)
 
 
 def test_repeated_ephemeral_child_has_one_definition_record(tmp_path):
@@ -119,10 +115,12 @@ def test_repeated_ephemeral_child_has_one_definition_record(tmp_path):
     child = QueryLeaf("shared", repo=repo)
     parent = QueryParent([child, child], repo=repo)
 
-    repo.save_object(parent)
-
-    records = tuple(store.iter_definition_records())
-    assert {record.definition for record in records} == {parent.definition, child.definition}
+    saved = repo.save_object(parent)
+    digest = NodePreparation((saved,)).digest(saved, domain="dryml-saved-root/v1")
+    stored = store.read_node(digest, kind="saved")
+    first, second = stored.parameters["child"]
+    assert first is second
+    assert first.construction_view.graph_equal(child.definition)
 
 
 @pytest.mark.parametrize(
@@ -271,50 +269,3 @@ def test_containment_hop_evidence_preserves_legacy_definition_occurrence_identit
     assert hash(enriched) == hash(original)
     assert enriched.target == definition
     assert containment_witness_key(enriched) != containment_witness_key(original)
-
-
-def test_containment_walker_matches_terminal_exact_references_without_imports(
-    tmp_path, monkeypatch,
-):
-    repo = Repo(DirStore(tmp_path / "store"))
-    state = repo.save_object(QueryReferenceLeaf("target", repo=repo))
-    other_state = StateRef(
-        state.object,
-        {path: "pkl-" + "0" * 64 for path in state.states},
-    )
-    root = ConcreteDefinition._from_persisted_record(
-        QueryParent,
-        identity_version=V2_IDENTITY_VERSION,
-        parameters=BoundArguments(((
-            "child",
-            FrozenDict({
-                "bare": state.object,
-                "ref": DefLink.finalized(EdgeKind.REF, state),
-            }),
-        ),)),
-    )
-    def fail_resolution(*args, **kwargs):
-        raise AssertionError("containment traversal resolved a retained reference")
-
-    monkeypatch.setattr(repo, "build_object_ref", fail_resolution)
-    monkeypatch.setattr(repo, "load_state_ref", fail_resolution)
-    before = set(sys.modules)
-
-    object_occurrences = tuple(
-        iter_containment_occurrences((root,), state.object, edges="materialize")
-    )
-    state_occurrences = tuple(
-        iter_containment_occurrences((root,), state, edges="ref", contains_ref=True)
-    )
-    mismatched_states = tuple(
-        iter_containment_occurrences((root,), other_state, edges="ref")
-    )
-
-    assert len(object_occurrences) == 1
-    assert object_occurrences[0].target == state.object
-    assert tuple(hop.kind for hop in object_occurrences[0].hops) == (EdgeKind.MATERIALIZE,)
-    assert len(state_occurrences) == 1
-    assert state_occurrences[0].target == state
-    assert tuple(hop.kind for hop in state_occurrences[0].hops) == (EdgeKind.REF,)
-    assert mismatched_states == ()
-    assert set(sys.modules) == before

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from dryml.core import Definition, Object, ObjectId, Repo, Serializable
-from dryml.core.repo_plan import apply_exact_reference_identity, build_save_plan
+from dryml.core.repo_plan import apply_node_identities, build_save_plan
 from dryml.core.snapshot_capture import capture_lineages
 from dryml.core.store.dir import DirStore
 from dryml.core.utils.graph.path import GraphPath, Index, Parameter
@@ -45,11 +45,11 @@ def test_runtime_allocation_records_lineages_at_primary_object_id_paths(tmp_path
 def test_exact_identity_replaces_provisional_lineage_facts_before_capture(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     source = LineageLeaf("value", repo=repo)
-    expected = source.object_ref
+    expected = repo.describe(source)
     restored = LineageLeaf("value", repo=repo)
     known = datetime(2024, 1, 2, tzinfo=timezone.utc)
 
-    apply_exact_reference_identity(
+    apply_node_identities(
         restored,
         expected,
         lineage_facts={GraphPath(): known},
@@ -59,7 +59,7 @@ def test_exact_identity_replaces_provisional_lineage_facts_before_capture(tmp_pa
     assert restored.object_id == expected.object_id
     assert lineages[GraphPath()].created_at == known
 
-    apply_exact_reference_identity(restored, expected)
+    apply_node_identities(restored, expected)
     assert capture_lineages(build_save_plan(repo, restored))[GraphPath()].creation_status == "unknown"
 
 

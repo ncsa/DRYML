@@ -31,7 +31,7 @@ def _publish_checkpoint(repo, obj, *, states=None, store=None):
     from dryml.core.repo_plan import build_routed_save_plan, execute_routed_save_plan
     store = repo._ensure_store(store)
     plan, nodes, object_ids = repo._state_graph_evidence(obj)
-    with reserve(obj.object_ref, nodes, object_ids), repo._retain_save_context() as context:
+    with reserve(obj._identity_node, nodes, object_ids), repo._retain_save_context() as context:
         routed = build_routed_save_plan(repo, plan, context, store=store)
         return execute_routed_save_plan(repo, routed, states=states,
             provisional=True, report_stores=True)

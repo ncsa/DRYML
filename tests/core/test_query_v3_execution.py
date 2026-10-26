@@ -121,8 +121,8 @@ def test_v3_top_level_algebra_keeps_fixed_inputs_source_free(tmp_path, monkeypat
     left, right = IdentitySet((first,)), IdentitySet((second,))
     store = DirStore(tmp_path / "store")
     monkeypatch.setattr(
-        store, "iter_definition_records",
-        lambda: pytest.fail("fixed-only algebra read Store authority"),
+        "dryml.core.query.authority.capture_store_projection",
+        lambda *a, **kw: pytest.fail("fixed-only algebra read Store authority"),
     )
 
     assert isinstance(union(left, right), IdentitySet)
@@ -288,8 +288,8 @@ def test_u5_fixed_prefix_does_not_reencode_unique_graph_digests(monkeypatch):
 def test_u5_zero_prefix_validates_without_opening_source_inventory(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store")
     monkeypatch.setattr(
-        store, "iter_definition_records",
-        lambda: pytest.fail("take(0) opened source inventory"),
+        "dryml.core.query.authority.capture_store_projection",
+        lambda *a, **kw: pytest.fail("take(0) opened source inventory"),
     )
 
     result = IdentityQuery.from_store(store).take(0).collect()
@@ -437,7 +437,7 @@ def test_v3_exact_stored_cdef_positive_does_not_enumerate_definitions(tmp_path, 
 
     store = original
     store.publish_node(saved.creation_view())
-    monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("exact lookup inventoried definitions"))
+    monkeypatch.setattr("dryml.core.query.authority.capture_store_projection", lambda *a, **kw: pytest.fail("exact lookup inventoried definitions"))
     assert IdentityQuery.from_store(store).sel(saved.creation_view()).cdefs().stored().one().graph_equal(saved.creation_view())
     assert IdentityQuery.from_store(store).sel(saved.creation_view()).cdefs().stored().scan_policy("forbid").one().graph_equal(saved.creation_view())
 
@@ -450,7 +450,7 @@ def test_v3_repo_exact_stored_cdef_positive_does_not_enumerate_definitions(tmp_p
     store = original
     reader = Repo(store)
     store.publish_node(saved.creation_view())
-    monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("exact lookup inventoried definitions"))
+    monkeypatch.setattr("dryml.core.query.authority.capture_store_projection", lambda *a, **kw: pytest.fail("exact lookup inventoried definitions"))
     query = IdentityQuery.from_repo(reader).sel(saved.creation_view()).cdefs().stored()
 
     assert query.one().graph_equal(saved.creation_view())
@@ -585,9 +585,8 @@ def test_bounded_inventory_combines_external_stored_authority(tmp_path, monkeypa
     query = first.query().sel(target).object_refs().stored(scope=second)
     with pytest.raises(QueryError, match="object-reference authority conflicts"):
         query.take(1)
-    for store in (first, second):
-        monkeypatch.setattr(store, "_validated_definition_root_inventory",
-                            lambda: pytest.fail("take(0) acquired scoped inventory"))
+    monkeypatch.setattr("dryml.core.query.authority.capture_store_projection",
+                        lambda *a, **kw: pytest.fail("take(0) acquired scoped inventory"))
     assert query.max_verify(0).take(0).count() == 0
 
 
@@ -651,7 +650,7 @@ def test_u6_fixed_repeated_stages_share_admissions_and_outer_controls(monkeypatc
 
 
 def test_u6_exact_paths_reserve_before_direct_verification(tmp_path, monkeypatch):
-    """Exact StateRef and stored-CDef positives cannot bypass zero budgets."""
+    """Exact saved/recipe positives cannot bypass zero verification budgets."""
 
     from dryml.core.query.model import QueryVerifyBudgetExceeded
 
@@ -659,21 +658,18 @@ def test_u6_exact_paths_reserve_before_direct_verification(tmp_path, monkeypatch
     state = Repo(store).save_object(ExecutionLeaf("member"))
     store.publish_node(state.creation_view())
     queries = (store.query().sel(state), store.query().sel(state.creation_view()).cdefs().stored())
-    reads = []
-    for name in ("read_state_ref_record", "read_stored_root_record"):
-        original = getattr(store, name)
-
-        def read(*args, _original=original, **kwargs):
-            reads.append(1)
-            return _original(*args, **kwargs)
-
-        monkeypatch.setattr(store, name, read)
+    matches = []
+    original = IdentityQuery._matches
+    def match(*args, **kwargs):
+        matches.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(IdentityQuery, "_matches", match)
     for query in queries:
         with pytest.raises(QueryVerifyBudgetExceeded):
             query.max_verify(0).exists()
-        assert reads == []
+        assert matches == []
         assert query.max_verify(3).exists()
-        reads.clear()
+        matches.clear()
 
 
 @pytest.mark.parametrize("unstable", (False, True))
@@ -736,13 +732,14 @@ def test_u6_operand_policy_conflicts_and_outer_overrides(tmp_path, monkeypatch):
     assert outer.count() == 3
     assert refreshes == []
     scans = []
-    original = store._validated_definition_root_inventory
+    from dryml.core.query import authority
+    original = authority.capture_store_projection
 
-    def inventory():
+    def inventory(*args, **kwargs):
         scans.append(1)
-        return original()
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(store, "_validated_definition_root_inventory", inventory)
+    monkeypatch.setattr(authority, "capture_store_projection", inventory)
     from dryml.core.query.model import QueryWouldScanError
 
     with pytest.raises(QueryWouldScanError):

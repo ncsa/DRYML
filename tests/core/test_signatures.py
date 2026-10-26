@@ -18,7 +18,7 @@ from dryml.core.cdef_graph import EdgeKind
 from dryml.core.freeze import FrozenDict
 from dryml.core.links import DefLink
 from dryml.core.quoted import QuotedDef
-from dryml.core.reference_values import ObjectRef
+from dryml.core import Node
 from dryml.core.signatures import (
     AutoRef,
     Mat,
@@ -323,7 +323,7 @@ def test_outer_nullable_and_distributed_same_role_unions_are_flat(role) -> None:
     inner = _plan(role[ConcreteDefinition | None]).slots["value"]
     outer = _plan(role[ConcreteDefinition] | None).slots["value"]
     distributed = _plan(
-        role[ConcreteDefinition] | role[ObjectRef] | None
+        role[Definition] | role[ConcreteDefinition] | None
     ).slots["value"]
     return_plan = _plan(
         object, returns=role[ConcreteDefinition] | None
@@ -331,7 +331,7 @@ def test_outer_nullable_and_distributed_same_role_unions_are_flat(role) -> None:
 
     assert inner == outer
     assert distributed.role == ("ref" if role is Ref else "mat")
-    assert distributed.targets == (ConcreteDefinition, ObjectRef)
+    assert distributed.targets == (Definition, ConcreteDefinition)
     assert distributed.nullable
     assert _plan(role[ConcreteDefinition] | None).prepare_args(
         (None,), {}
@@ -399,22 +399,17 @@ def test_variadic_selections_use_exact_occurrence_keys_and_validate_before_reads
     """Selections use ``(name, index-or-key)`` and invalid paths fail preflight."""
 
     cdef = _cdef()
-    reference = ObjectRef(cdef, {})
+    reference = cdef
     store = object()
-    reads = 0
+    def forbidden(*args, **kwargs):
+        pytest.fail("metadata selection attempted live description")
 
-    def evidence(_cdef):
-        nonlocal reads
-        reads += 1
-        candidate = SimpleNamespace(object_ref=reference, stores=(store,))
-        return SimpleNamespace(declarations=(candidate,), states=())
-
-    repo = SimpleNamespace(reference_evidence=evidence)
+    repo = SimpleNamespace(describe=forbidden)
 
     def target(*values):
         return values
 
-    target.__annotations__["values"] = Ref[ObjectRef]
+    target.__annotations__["values"] = Ref[Node]
     plan = compile_signature(target)
     boundary = plan.prepare_args(
         (cdef,), {}, repo=repo,
@@ -426,20 +421,17 @@ def test_variadic_selections_use_exact_occurrence_keys_and_validate_before_reads
     with pytest.raises(TypeError):
         boundary.selections[("values", 0)] = reference
 
-    reads = 0
     with pytest.raises(SignatureError, match="selection controls are invalid"):
         plan.prepare_args(
             (cdef,), {}, repo=repo, selections={("values", 1): reference}
         )
-    assert reads == 0
     with pytest.raises(SignatureError, match="selection controls are invalid"):
         plan.prepare_args((cdef,), {}, repo=repo, selections={"values": reference})
-    assert reads == 0
 
     def keyword_target(**values):
         return values
 
-    keyword_target.__annotations__["values"] = Ref[ObjectRef]
+    keyword_target.__annotations__["values"] = Ref[Node]
     keyword_boundary = compile_signature(keyword_target).prepare_args(
         (), {"item": cdef}, repo=repo,
         selections={("values", "item"): ReferenceSelection(reference, store)},

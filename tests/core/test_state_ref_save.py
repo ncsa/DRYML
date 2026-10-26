@@ -6,7 +6,6 @@ pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
 from dryml.core import Object, Repo, Serializable, require_saved
 from dryml.core.node_prepare import NodePreparation
-from dryml.core.repo import RepoLoadError
 from dryml.core.utils.graph.path import GraphPath, Parameter
 from dryml.core.store.dir import DirStore
 from dryml.core.store.zip import ZipStore
@@ -32,16 +31,6 @@ class EphemeralRoot(Object):
 class ImportedWrapper(Object):
     def __init__(self, child):
         self.child = child
-
-
-def test_unpublished_object_ref_rejects_import_into_a_new_exact_graph(tmp_path):
-    store = DirStore(tmp_path / "store")
-    repo = Repo(store)
-    leaf = CountingState("nested", repo=repo)
-    imported = ImportedWrapper(EphemeralRoot(leaf, repo=repo), repo=repo)
-
-    with pytest.raises(RepoLoadError, match="declaration Store"):
-        ImportedWrapper(imported.object_ref, repo=repo)
 
 
 def test_imported_state_ref_rebases_live_nested_bindings_without_owning_ref_edges(tmp_path):

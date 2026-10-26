@@ -29,5 +29,3 @@ def test_saved_state_is_complete_snapshot_local_authority(tmp_path):
     assert not Path(store.base_dir, "snapshots").exists()
     assert not Path(store.base_dir, "state-refs").exists()
     assert not Path(store.base_dir, "local-state").exists()
-    with pytest.raises(TypeError, match="StateRef"):
-        store.get_snapshot_directory(state_ref)

@@ -5,7 +5,6 @@ import pytest
 
 from dryml.core import ConcreteDefinition, Definition, Object, Repo, TensorSpec
 from dryml.core.links import DefLink
-from dryml.core.reference_values import ObjectRef
 from dryml.core.signatures import Mat, Ref, SignatureError, signature_context
 from dryml.methods import Method, PreparedCallMismatchError, traits
 
@@ -149,10 +148,10 @@ def test_tensor_selection_precedes_selected_annotation_normalization_without_mat
             return value
 
     definition = _definition()
-    reference = ObjectRef(definition, {})
+    reference = definition.copy_graph()
 
     assert object.__new__(Variants)(np.ones((2,), dtype=np.float32), definition) == definition
-    assert object.__new__(ReferenceOnly)(reference) == definition
+    assert object.__new__(ReferenceOnly)(reference) is reference
 
 
 def test_learning_publishes_only_after_input_normalization_but_before_target_or_return_failure():

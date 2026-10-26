@@ -15,9 +15,7 @@ from dryml.core import (
     SaveAnnotations,
     Selector,
     Serializable,
-    StateRef,
     Template,
-    selector,
 )
 from dryml.core.domains import UniformFromSet
 from dryml.core.errors import ParameterizationLimitError
@@ -164,7 +162,8 @@ def test_v3_exact_state_exists_uses_the_digest_addressed_positive_authority_path
     repo = Repo(store)
     state = _saved(repo, "value")
     monkeypatch.setattr(
-        store, "iter_state_ref_records", lambda: pytest.fail("exact StateRef performed an inventory scan")
+        "dryml.core.query.authority.capture_store_projection",
+        lambda *args, **kwargs: pytest.fail("exact saved Node query performed an inventory scan")
     )
 
     assert IdentityQuery.from_store(store).sel(state).state_refs().exists()
@@ -435,7 +434,7 @@ def test_v3_metadata_capture_reads_each_holder_fact_once_per_cut(tmp_path, monke
 
 def test_v3_metadata_lineage_and_snapshot_scopes_use_the_captured_store_cut(tmp_path):
     store = DirStore(tmp_path / "store")
-    repo = Repo(store, clock=lambda: 0)
+    repo = Repo(store)
     state = _saved(repo, "value")
     lineage = repo.get_lineage_metadata(state.object_view())
     snapshot = repo.get_snapshot_metadata(state)
@@ -494,7 +493,7 @@ def test_v3_unknown_and_epoch_lineage_times_remain_distinct(tmp_path, monkeypatc
         lambda: datetime(1970, 1, 1, tzinfo=timezone.utc),
     )
     store = DirStore(tmp_path / "store")
-    repo = Repo(store, clock=lambda: 0)
+    repo = Repo(store)
     unknown = repo.save_object(V3Parent(V3Leaf("child", repo=repo), repo=repo))
     known = _saved(repo, "known")
 
@@ -645,60 +644,6 @@ def test_v3_selector_exact_retains_complete_variadic_semantic_paths():
 
     assert selected.exact(path=GraphPath((Arg(0),))).root.args[0] == positional
     assert selected.exact(path=GraphPath((Kwarg("named"),))).root.kwargs["named"] == keyword
-
-
-def test_v3_soft_state_selector_requires_explicit_scoped_preparation(tmp_path, monkeypatch):
-    """Prepared soft aliases pin their named Repo authority before V3 composition."""
-
-    repo = Repo(DirStore(tmp_path / "store"))
-    from dryml.core import ObjectId, ObjectRef
-    ref = ObjectRef(Definition(V3Leaf, "first").concretize(), {GraphPath(): ObjectId()})
-    first = StateRef(ref, {GraphPath(): "pkl-" + "1" * 64})
-    monkeypatch.setattr(repo, "resolve_state_selector", lambda _: first)
-    source = Definition(V3StateConsumer, first.object.state("chosen"))
-
-    with pytest.raises(TypeError, match=r"selector\(value, scope"):
-        IdentityQuery.from_set(IdentitySet(())).sel(source)
-
-    prepared = selector(source, scope=repo)
-    assert prepared.root.parameters["selected"] == first
-    monkeypatch.setattr(
-        repo,
-        "resolve_state_selector",
-        lambda value: pytest.fail("prepared selector performed a hidden alias lookup"),
-    )
-    candidate = Definition(V3StateConsumer, first).concretize()
-
-    assert IdentityQuery.from_set(IdentitySet((candidate,))).sel(prepared).one() == candidate
-
-
-def test_v3_scoped_selector_failure_does_not_disclose_alias_or_upstream_error(tmp_path, monkeypatch):
-    repo = Repo(DirStore(tmp_path / "store"))
-    from dryml.core import ObjectId, ObjectRef
-    state = StateRef(ObjectRef(Definition(V3Leaf, "candidate").concretize(), {GraphPath(): ObjectId()}), {GraphPath(): "pkl-" + "1" * 64})
-    secret = "query-v3-private-alias-sentinel"
-    source = Definition(V3StateConsumer, state.object.state(secret))
-    monkeypatch.setattr(
-        repo, "resolve_state_selector",
-        lambda value: (_ for _ in ()).throw(KeyError(secret)),
-    )
-
-    with pytest.raises(KeyError) as error:
-        selector(source, scope=repo)
-    assert secret not in str(error.value)
-    assert error.value.__context__ is None
-
-
-def test_v3_soft_alias_validation_does_not_skip_invalid_sibling(tmp_path):
-    from dryml.core.selector import _contains_state_selector
-
-    from dryml.core import ObjectId, ObjectRef
-    state = StateRef(ObjectRef(Definition(V3Leaf, "candidate").concretize(), {GraphPath(): ObjectId()}), {GraphPath(): "pkl-" + "1" * 64})
-    cyclic = {}
-    cyclic["self"] = cyclic
-
-    with pytest.raises(ValueError, match="Cycle"):
-        _contains_state_selector({"soft": state.object.state("missing"), "later": cyclic})
 
 
 def test_v3_selection_rejects_live_objects_and_never_constructs_them():
@@ -898,7 +843,7 @@ def test_u6_external_metadata_and_recovery_io_do_not_charge_holder_identities(tm
 
     store = DirStore(tmp_path / "scope", query_index="sqlite")
     state = _saved(Repo(store), "member")
-    store.mark_query_index_dirty()
+    store.open_query_index()._mark_dirty()
     reads = []
     scans = []
     rebuilds = []

@@ -6,7 +6,7 @@ import hashlib
 import math
 from dataclasses import dataclass, field
 
-from dryml.core.reference_values import ObjectId, ObjectRef, StateRef
+from dryml.core.reference_values import ObjectId
 from dryml.core.node import Node
 
 from .errors import ManagedConfigError
@@ -61,7 +61,7 @@ def _receiver(receiver):
     if not isinstance(receiver, ConcreteNode):
         raise ManagedConfigError(message="managed receiver must be detached concrete Node metadata")
     identities = set()
-    for _, node in _owned_nodes(receiver, strict=True):
+    for _, node in _owned_nodes(receiver):
         if node._stateful_role and node.object_id is None:
             raise ManagedConfigError(message="managed receiver requires bound stateful ObjectIds")
         if node.object_id is not None:
@@ -256,17 +256,13 @@ class _ArgumentEncoder:
             return self._leaf_size(b"bytes", len(value), budget)
         if value_type is ObjectId:
             return self._leaf_size(b"object-id", len(value.__stable_leaf_bytes__()), budget)
-        if value_type is ObjectRef:
-            return self._leaf_size(b"object-ref", len(value.digest().encode("ascii")), budget)
-        if value_type is StateRef:
-            return self._leaf_size(b"state-ref", len(value.digest().encode("ascii")), budget)
         if isinstance(value, Node):
             return self._leaf_size(b"node-exact/v1", len(value.exact_digest().encode("ascii")), budget)
         if value_type in (list, tuple, dict):
             return self._measure_container(value, path, depth, budget)
-        object_ref = _live_object_ref(value)
-        if object_ref is not None:
-            return self._leaf_size(b"live-object", len(object_ref.digest().encode("ascii")), budget)
+        node = _live_identity_node(value)
+        if node is not None:
+            return self._leaf_size(b"live-node-object/v1", len(node.object_projection_digest().encode("ascii")), budget)
         raise ManagedConfigError(message=f"{path}: unsupported argument type")
 
     def _measure_container(
@@ -328,19 +324,15 @@ class _ArgumentEncoder:
             self._emit_atom(b"bytes", value)
         elif value_type is ObjectId:
             self._emit_atom(b"object-id", value.__stable_leaf_bytes__())
-        elif value_type is ObjectRef:
-            self._emit_atom(b"object-ref", value.digest().encode("ascii"))
-        elif value_type is StateRef:
-            self._emit_atom(b"state-ref", value.digest().encode("ascii"))
         elif isinstance(value, Node):
             self._emit_atom(b"node-exact/v1", value.exact_digest().encode("ascii"))
         elif value_type in (list, tuple, dict):
             self._emit_container(value, size)
         else:
-            object_ref = _live_object_ref(value)
-            if object_ref is None:
+            node = _live_identity_node(value)
+            if node is None:
                 raise ManagedConfigError(message="managed arguments changed while encoding")
-            self._emit_atom(b"live-object", object_ref.digest().encode("ascii"))
+            self._emit_atom(b"live-node-object/v1", node.object_projection_digest().encode("ascii"))
 
     def _emit_container(self, value: list[object] | tuple[object, ...] | dict[object, object], size: int) -> None:
         """Write a measured container without constructing a joined child payload."""
@@ -384,17 +376,17 @@ class _ArgumentEncoder:
             raise ManagedConfigError(message=f"{path}: maximum aggregate values is {_MAX_VALUES}")
 
 
-def _live_object_ref(value: object) -> ObjectRef | None:
-    """Return an exact live ObjectRef without accepting arbitrary lookalikes."""
+def _live_identity_node(value: object) -> Node | None:
+    """Return retained live identity metadata without accepting arbitrary lookalikes."""
 
     from dryml.core.object import Object
 
     if not isinstance(value, Object):
         return None
-    object_ref = Object.object_ref.__get__(value, type(value))
-    if type(object_ref) is not ObjectRef:
-        raise ManagedConfigError(message="live Object does not carry an exact ObjectRef")
-    return object_ref
+    node = object.__getattribute__(value, "_identity_node")
+    if not isinstance(node, Node):
+        raise ManagedConfigError(message="live Object does not carry a runtime identity Node")
+    return node
 
 
 def _validate_member(member: str) -> None:

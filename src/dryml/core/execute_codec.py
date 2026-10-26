@@ -27,7 +27,6 @@ from .definition import ConcreteDefinition, Definition
 from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from .links import DefLink
 from .object import Object, _AbstractObjectAdmissionError
-from .reference_values import ObjectRef, StateRef
 from .repo import Repo
 from .node import Node, require_saved
 from .node_codec import encode_node_graph, _decode_node_graph_views
@@ -108,8 +107,6 @@ class _DillLeafPickler(dill.Pickler):
                 ConcreteDefinition,
                 DefLink,
                 Object,
-                ObjectRef,
-                StateRef,
             ),
         ):
             raise _DillLeafError("DRYML semantic value inside ordinary value")
@@ -476,10 +473,6 @@ class _Encoder:
                     _fail("unsaved live Object", path)
                 return self._node(state, path, depth)
             return self._node(value.definition, path, depth)
-        if isinstance(value, StateRef):
-            return {"tag": "auto_state" if automatic else "state", "value": value.to_data()}
-        if isinstance(value, ObjectRef):
-            return {"tag": "auto_object_ref" if automatic else "object_ref", "value": value.to_data()}
         if isinstance(value, DefLink):
             if not value.is_finalized:
                 if not self.allow_assertions:
@@ -841,13 +834,6 @@ class _Decoder:
             return Definition._from_symbolic_parts(cls, args, kwargs)
         if tag in {"cdef", "auto_cdef"}:
             value = decode_cdef_graph(node.get("value"))
-        elif tag in {"state", "auto_state"}:
-            value = StateRef.from_data(node.get("value"))
-        elif tag in {"object_ref", "auto_object_ref"}:
-            value = ObjectRef.from_data(node.get("value"))
-        else:
-            value = None
-        if tag in {"cdef", "auto_cdef", "state", "auto_state", "object_ref", "auto_object_ref"}:
             if tag.startswith("auto_"):
                 self.automatic_references.add(id(value))
             return value
@@ -986,41 +972,24 @@ def _selection_data(
         if selection is None:
             result[key] = None
             continue
-        if isinstance(selection, (Node, ObjectRef)):
+        if isinstance(selection, Node):
             selection = ReferenceSelection(selection)
         elif isinstance(selection, tuple) and len(selection) == 2:
             selection = ReferenceSelection(selection[0], selection[1])
-        if not isinstance(selection, ReferenceSelection) or not isinstance(selection.object_ref, (Node, ObjectRef)):
+        if not isinstance(selection, ReferenceSelection) or not isinstance(selection.object_ref, Node):
             _fail("malformed selection", "$.selections")
         store = selection.store
         table = tuple(repo.stores) if store_table is None else store_table
         if store is not None and not any(store is candidate for candidate in table):
             _fail("unsupported selected Store", "$.selections")
-        if isinstance(selection.object_ref, Node):
-            node = selection.object_ref
-            require_saved(node)
-            digest = NodePreparation((node,)).digest(node, domain="dryml-saved-root/v1")
-            candidates = table if store is None else (store,)
-            if not any((saved := candidate.read_node(digest, kind="saved")) is not None
-                       and saved.graph_equal(node) for candidate in candidates):
-                _fail("selected authority is unavailable", "$.selections")
-            result[key] = {"object_ref": node, "store": None if store is None else table.index(store)}
-            continue
-        evidence = repo.reference_evidence(selection.object_ref.definition)
-        if not any(
-            item.object_ref == selection.object_ref and (store is None or store in item.stores)
-            for item in evidence.declarations
-        ) and not any(
-            item.state_ref.object == selection.object_ref and (store is None or store in item.stores)
-            for item in evidence.states
-        ):
+        node = selection.object_ref
+        require_saved(node)
+        digest = NodePreparation((node,)).digest(node, domain="dryml-saved-root/v1")
+        candidates = table if store is None else (store,)
+        if not any((saved := candidate.read_node(digest, kind="saved")) is not None
+                   and saved.graph_equal(node) for candidate in candidates):
             _fail("selected authority is unavailable", "$.selections")
-        result[key] = {
-            "object_ref": selection.object_ref,
-            "store": None if store is None else next(
-                index for index, candidate in enumerate(table) if candidate is store
-            ),
-        }
+        result[key] = {"object_ref": node, "store": None if store is None else table.index(store)}
     return result
 
 
@@ -1031,18 +1000,17 @@ def _selection_controls(data: Mapping[Any, Any], repo: Repo) -> Mapping[Any, Any
         if value is None:
             result[key] = None
             continue
-        if not isinstance(value, Mapping) or set(value) != {"object_ref", "store"} or not isinstance(value["object_ref"], (Node, ObjectRef)):
+        if not isinstance(value, Mapping) or set(value) != {"object_ref", "store"} or not isinstance(value["object_ref"], Node):
             _fail("malformed selection", "$.selections")
         index = value["store"]
         if index is not None and (isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(repo.stores)):
             _fail("malformed selected Store", "$.selections")
         store = None if index is None else repo.stores[index]
-        if isinstance(value["object_ref"], Node):
-            node = value["object_ref"]
-            digest = NodePreparation((node,)).digest(node, domain="dryml-saved-root/v1")
-            if not any((saved := candidate.read_node(digest, kind="saved")) is not None and saved.graph_equal(node)
-                       for candidate in (repo.stores if store is None else (store,))):
-                _fail("selected authority is unavailable", "$.selections")
+        node = require_saved(value["object_ref"])
+        digest = NodePreparation((node,)).digest(node, domain="dryml-saved-root/v1")
+        if not any((saved := candidate.read_node(digest, kind="saved")) is not None and saved.graph_equal(node)
+                   for candidate in (repo.stores if store is None else (store,))):
+            _fail("selected authority is unavailable", "$.selections")
         result[key] = ReferenceSelection(value["object_ref"], store)
     return result
 
@@ -1115,7 +1083,7 @@ def decode_invocation(data: bytes, *, repo: Repo, limit_bytes: int = _DEFAULT_LI
         raise CoreCallCodecError("core execution transport rejected malformed call descriptor")
     from .definition import ConcreteDefinition, Definition
     if decoded["owner"] in {"method", "managed"} and isinstance(
-            decoded["target"], (ConcreteDefinition, Definition, ObjectRef, StateRef)):
+            decoded["target"], (ConcreteDefinition, Definition)):
         decoded["target"] = repo.materialize_boundary((decoded["target"],), reuse_live="never")[0]
     targets = []
     for item in decoded["updates"]:
@@ -1190,7 +1158,7 @@ def _walk_live_objects(value: Any, found: list[Object], seen: set[int], active: 
             found.append(value)
             seen.add(id(value))
         return
-    if isinstance(value, (ObjectRef, StateRef)):
+    if isinstance(value, ConcreteDefinition):
         return
     if isinstance(value, (tuple, list)):
         identity = id(value)
@@ -1244,7 +1212,7 @@ def _maximal_roots(values: list[Object]) -> list[Object]:
     return roots
 
 
-def _report_data(report: Any, repo: Repo, state_ref: StateRef | None) -> list[dict[str, Any]]:
+def _report_data(report: Any, repo: Repo, state_ref: Node | None) -> list[dict[str, Any]]:
     """Project ephemeral StoreReport facts into Store-table-relative evidence."""
     if report is None:
         return []
@@ -1271,14 +1239,14 @@ class _ResultPublisher:
         self.repo = repo
         self._result_limit_bytes = result_limit_bytes
         self.updates = self._maximal_updates(updates)
-        self.references: dict[int, StateRef] = {}
+        self.references: dict[int, Node] = {}
         self.publications: list[dict[str, Any]] = []
         self.update_states: list[dict[str, Any]] = []
         self._published_updates = False
         self._memo: dict[int, Any] = {}
         self._active: set[int] = set()
         self.automatic_references: set[int] = set()
-        self._prospective_states: dict[int, StateRef] = {}
+        self._prospective_states: dict[int, Node] = {}
 
     @staticmethod
     def _maximal_updates(values: list[tuple[str, Object]]) -> list[tuple[str, Object]]:
@@ -1295,7 +1263,7 @@ class _ResultPublisher:
             roots.append((target, value))
         return roots
 
-    def _remember_graph(self, root: Object, state: StateRef) -> None:
+    def _remember_graph(self, root: Object, state: Node) -> None:
         self.references[id(root)] = state
         for path, bound in getattr(root, "_runtime_projection", {}).items():
             if isinstance(bound, Object):
@@ -1304,17 +1272,17 @@ class _ResultPublisher:
                 try:
                     self.references[id(bound)] = state.at(path)
                 except ValueError:
-                    # Non-materializing runtime values never carry StateRef state.
+                    # Ref-only runtime values are outside the saved ownership scope.
                     continue
 
-    def _save(self, root: Object, *, update: bool, target: str | None = None) -> StateRef:
+    def _save(self, root: Object, *, update: bool, target: str | None = None) -> Node:
         try:
             state, report = self.repo.save(root, deep_capture=True, report_stores=True)
         except BaseException as error:
             report = getattr(error, "report", None)
             state = getattr(root, "last_state_ref", None)
             self.publications.extend(_report_data(
-                report, self.repo, state if isinstance(state, StateRef) else None,
+                report, self.repo, state if isinstance(state, Node) else None,
             ))
             raise
         self.publications.extend(_report_data(report, self.repo, state))
@@ -1358,7 +1326,7 @@ class _ResultPublisher:
         if isinstance(value, Object):
             return self._prospective_state(value)
         if isinstance(
-            value, (ObjectRef, StateRef, ConcreteDefinition, Definition)
+            value, (ConcreteDefinition, Definition)
         ):
             return value
         identity = id(value)
@@ -1491,7 +1459,7 @@ class _ResultPublisher:
         self._reserve_evidence(value)
         self.publish_updates()
         if isinstance(
-            value, (ObjectRef, StateRef, ConcreteDefinition, Definition)
+            value, (ConcreteDefinition, Definition)
         ):
             return value
         return self.value(value)
@@ -1499,7 +1467,7 @@ class _ResultPublisher:
     def value(self, value: Any) -> Any:
         """Replace supported nested live Object leaves with automatic references."""
         if isinstance(
-            value, (ObjectRef, StateRef, ConcreteDefinition, Definition)
+            value, (ConcreteDefinition, Definition)
         ):
             return value
         if isinstance(value, Object):
@@ -1602,7 +1570,7 @@ def _invoke_invocation(data, *, repo, invocation_limit_bytes, result_limit_bytes
         unmatched = list(update_targets)
         for value in delivered:
             for index, item in enumerate(unmatched):
-                if value.object_ref.digest() == item["object_digest"]:
+                if value._identity_node.object_projection_digest() == item["object_digest"]:
                     selected.append((item["target"], value))
                     unmatched.pop(index)
                     break

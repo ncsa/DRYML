@@ -15,20 +15,18 @@ from ..cdef_graph import EdgeKind
 from ..cdef_identity import cdef_node_key, same_cdef
 from ..definition import ConcreteDefinition
 from ..links import DefLink
-from ..reference_values import ObjectRef, StateRef
 from ..utils.graph.path import GraphPath, graph_path_sort_key
 from ..utils.graph.value import iter_value_edges
 from .model import (
     ContainmentHop,
     DefinitionOccurrence,
-    ReferenceOccurrence,
     validate_containment_policy,
     validate_containment_target,
 )
 
 
-ContainmentTarget = ConcreteDefinition | ObjectRef | StateRef
-ContainmentOccurrence = DefinitionOccurrence | ReferenceOccurrence
+ContainmentTarget = ConcreteDefinition
+ContainmentOccurrence = DefinitionOccurrence
 ContainmentMatcher = Callable[[ContainmentTarget], bool]
 
 
@@ -52,13 +50,13 @@ def iter_containment_occurrences(
 
     Args:
         roots: Detached authoritative CDef roots selected by the caller.
-        target: Concrete CDef, ObjectRef, or StateRef to match exactly.
+        target: Concrete definition to match exactly.
         edges: Edge kinds permitted at every hop: ``"materialize"``,
             ``"ref"``, or ``"all"``.
         contains_ref: Whether a witness must contain at least one ``REF`` hop.
 
     Yields:
-        DefinitionOccurrence or ReferenceOccurrence values retaining the full
+        DefinitionOccurrence values retaining the full
         typed path and ordered, literal hop evidence.
 
     Raises:
@@ -95,7 +93,7 @@ def iter_containment_occurrences_matching(
 
     Args:
         roots: Detached authoritative CDef roots selected by the caller.
-        matches: Predicate applied to each retained CDef, ObjectRef, or StateRef
+        matches: Predicate applied to each retained concrete definition
             terminal after its selected path has been established.
         edges: Edge kinds permitted at every containment traversal hop.
         contains_ref: Whether a witness must contain at least one ``REF`` hop.
@@ -135,7 +133,7 @@ def iter_containment_owners(
 
     Args:
         roots: Detached authoritative CDef roots selected by the caller.
-        target: Concrete CDef, ObjectRef, or StateRef to match exactly.
+        target: Concrete definition to match exactly.
         edges: Edge kinds permitted at every hop.
         contains_ref: Whether a qualifying path must contain a ``REF`` hop.
 
@@ -206,7 +204,7 @@ def iter_containment_targets_matching(
         contains_ref: Whether a matching terminal needs a ``REF`` hop.
 
     Yields:
-        Retained CDef, ObjectRef, or StateRef terminals reached by at least one
+        Retained concrete terminals reached by at least one
         qualifying non-empty path. Equal terminals may be emitted by different
         roots; callers own public result deduplication.
 
@@ -296,7 +294,7 @@ def visit_containment_occurrences(
 
     Args:
         roots: Detached authoritative CDef roots selected by the caller.
-        target: Concrete CDef, ObjectRef, or StateRef to match exactly.
+        target: Concrete definition to match exactly.
         visit: Consumer invoked in iterator order for each qualified witness.
         edges: Edge kinds permitted at every hop.
         contains_ref: Whether a qualifying path must contain a ``REF`` hop.
@@ -354,10 +352,6 @@ def _iter_root_occurrences(
                         next_has_ref,
                         active_nodes | frozenset((child_key,)),
                     )
-            elif matches(edge.target) and (
-                not contains_ref or next_has_ref
-            ):
-                yield ReferenceOccurrence(root, next_path, edge.target, next_hops)
 
     root_key = cdef_node_key(root)
     yield from visit(root, GraphPath(), (), False, frozenset((root_key,)))
@@ -436,10 +430,7 @@ def _iter_root_projection_occurrences(
                 target_key = _projection_target_key(edge.target)
                 if target_key not in seen_targets:
                     seen_targets.add(target_key)
-                    if isinstance(edge.target, ConcreteDefinition):
-                        yield DefinitionOccurrence(root, next_path, edge.target, next_hops)
-                    else:
-                        yield ReferenceOccurrence(root, next_path, edge.target, next_hops)
+                    yield DefinitionOccurrence(root, next_path, edge.target, next_hops)
             if isinstance(edge.target, ConcreteDefinition):
                 stack.append((edge.target, next_path, next_hops, next_has_ref))
 
@@ -472,10 +463,10 @@ def _iter_edges_from_value(
 ) -> Iterator[_DirectContainmentEdge]:
     if isinstance(value, DefLink):
         target = value.target
-        if isinstance(target, (ConcreteDefinition, ObjectRef, StateRef)):
+        if isinstance(target, ConcreteDefinition):
             yield _DirectContainmentEdge(path, target, value.kind)
         return
-    if isinstance(value, (ConcreteDefinition, ObjectRef, StateRef)):
+    if isinstance(value, ConcreteDefinition):
         yield _DirectContainmentEdge(path, value, EdgeKind.MATERIALIZE)
         return
     for value_edge in iter_value_edges(value):

@@ -9,8 +9,6 @@ from enum import Enum
 
 import numpy as np
 
-from .types import is_dictlike, is_collection
-from .recurse import cycle_detect
 from .graph import GraphHasher, GraphCtx
 
 def stable_int_hash(s: str, *, bits: int = 64) -> int:
@@ -161,13 +159,10 @@ class StableHashGraphHasher(GraphHasher):
             NodeKind.POD,
             NodeKind.TYPE,
             NodeKind.IDENTITY_VALUE,
-            NodeKind.REFERENCE_VALUE,
             NodeKind.NDARRAY,
             NodeKind.FROZEN_NDARRAY,
             NodeKind.IMPORT_REF,
             NodeKind.SOURCE_SPEC,
-            NodeKind.STATE_SELECTOR_REF,
-            NodeKind.OBJECT_SELECTOR,
             NodeKind.EXPR,
         }
 
@@ -207,9 +202,7 @@ class StableHashGraphHasher(GraphHasher):
     def dispatch(self, obj, ctx: GraphCtx) -> str:
         from ..canonical import node_kind, NodeKind
         from ..definition import Definition, ConcreteDefinition, ConcreteNode
-        from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
         from ..links import DefLink
-        from ..object import Object
         from ..params import Match
         from ..quoted import QuotedDef, SelectorSpec
         from ..selector import Selector

@@ -18,8 +18,8 @@ from dryml.core.query.sqlite.schema import STORE_PROJECTION_FAMILIES, SQLITE_QUE
 from dryml.core.store import authority
 from dryml.core.store.authority import StoreMutationError, PreparedChange
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import NodeNameRecord, DefinitionRecord, MutationIntentRecord
-from dryml.core.store.store import StoreAuthorityError, StoreCapabilityError
+from dryml.core.store.records import NodeNameRecord, MutationIntentRecord
+from dryml.core.store.store import StoreAuthorityError
 from dryml.core.store.zip import ZipStore
 
 
@@ -362,12 +362,10 @@ def test_graph_work_never_runs_under_store_fence(tmp_path, monkeypatch):
     store.open_query_index().rebuild()
 
 
-def test_legacy_writers_refuse_and_current_query_construction_is_inert(tmp_path):
+def test_current_query_construction_is_inert_and_saved_publication_updates_index(tmp_path):
     store = indexed_store(tmp_path / "store")
     before = store.authority_cut()
     assert store.query().refresh(True).take(0).count() == 0
-    with pytest.raises(StoreCapabilityError, match="legacy Store consumer"):
-        store.write_definition_record(DefinitionRecord(creation()))
     assert store.authority_cut() == before and not Path(store.base_dir, "mutations").exists()
     saved = Repo(store).save_object(IndexedObject())
     assert saved.state is None

@@ -27,12 +27,11 @@ def test_node_roots_use_direct_digest_paths_without_object_generations(tmp_path)
 
 
 @pytest.mark.parametrize("consumer", ("query", "rebuild"))
-def test_old_query_consumers_refuse_new_authority_without_inventory(tmp_path, monkeypatch, consumer):
+def test_query_consumers_rebuild_current_authority(tmp_path, consumer):
     writer = DirStore(tmp_path / "store", query_index="none")
     root = Definition(DirectLayoutObject).concretize()
     writer.publish_node(root)
     store = DirStore(writer.base_dir, query_index="sqlite")
-    monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("legacy inventory"))
     if consumer == "rebuild":
         store.rebuild_query_index()
     assert store.query().cdefs().stored().one().graph_equal(root)
@@ -41,7 +40,6 @@ def test_old_query_consumers_refuse_new_authority_without_inventory(tmp_path, mo
 
 @pytest.mark.parametrize("damage", ("definition", "marker", "marker-path", "target", "kind", "legacy"))
 def test_direct_reader_preserves_malformed_authority_diagnostics(tmp_path, monkeypatch, damage):
-    from dryml.core.store.records import DefinitionRecord
     store = DirStore(tmp_path / "store", query_index="none")
     definition = Definition(DirectLayoutObject).concretize()
     record = store.publish_node(definition)
@@ -58,7 +56,8 @@ def test_direct_reader_preserves_malformed_authority_diagnostics(tmp_path, monke
     elif damage == "kind":
         marker_path.write_bytes(NodeMembershipRecord("saved", record.digest).to_bytes())
     else:
-        definition_path.write_bytes(DefinitionRecord(definition).to_bytes())
+        import dill
+        definition_path.write_bytes(b"DRYML-STORE-RECORD/definition/1\n" + dill.dumps({"definition": {}}))
     files = {path: path.read_bytes() for path in Path(store.base_dir).rglob("*.record")}
     monkeypatch.setattr(store, "read_state", lambda *_a, **_kw: pytest.fail("reader opened payloads"))
     with pytest.raises(StoreAuthorityError):

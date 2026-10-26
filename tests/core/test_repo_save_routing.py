@@ -16,7 +16,6 @@ from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
 from dryml.core.repo import RepoSaveError
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import StoredRootRecord
 from dryml.core.node_prepare import NodePreparation
 from dryml.core.utils.graph.path import GraphPath, Parameter
 
@@ -106,23 +105,10 @@ class MembershipCountingStore(DirStore):
         self.membership_reads = 0
         self.stored_root_paths = []
 
-    def _read_file(self, path, record_type):
-        if record_type is StoredRootRecord:
-            self.stored_root_paths.append(path)
-        return super()._read_file(path, record_type)
-
-    def read_stored_root_record(self, digest):
-        self.membership_reads += 1
-        return super().read_stored_root_record(digest)
-
     def _read_membership(self, digest, kind):
         self.membership_reads += 1
         self.stored_root_paths.append((kind, digest))
         return super()._read_membership(digest, kind)
-
-    def iter_stored_root_records(self):
-        raise AssertionError("routed membership readback must not scan stored roots")
-
 
 def test_save_routing_normalizes_rules_and_placement_shorthands(tmp_path):
     """Placement shorthands retain the installed ordered all-match policy."""
@@ -306,7 +292,7 @@ def test_per_object_routing_projects_a_child_state_ref_without_copying_its_paylo
     root = RoutedRoot(RoutedLeaf(3, repo=repo), repo=repo)
 
     state, report = repo.save_object(root, deep_capture=True, report_stores=True)
-    child_path = next(iter(root.object_ref.objects))
+    child_path = next(iter(repo.describe(root).identity_spec()))
     child_state = state.at(child_path)
 
     assert payload_value(child_store, child_state) == "3"
@@ -362,7 +348,7 @@ def test_all_matching_routing_captures_once_and_replicates_exact_projections(tmp
     root = RoutedRoot(RoutedLeaf(4, repo=repo), repo=repo)
 
     state = repo.save_object(root, deep_capture=True)
-    child_path = next(iter(root.object_ref.objects))
+    child_path = next(iter(repo.describe(root).identity_spec()))
     child_state = state.at(child_path)
 
     assert RoutedLeaf.captures == 1
@@ -458,7 +444,7 @@ def test_save_mode_overrides_validate_before_explicit_store_routing(tmp_path, ke
     with pytest.raises(error):
         repo.save_object(RoutedLeaf(14, repo=repo), store=explicit, **{keyword: value})
 
-    assert not tuple(explicit.iter_state_ref_records())
+    assert not explicit.query().saved().exists()
 
 
 def test_per_save_modes_do_not_mutate_policy_and_explicit_store_bypasses_routes(tmp_path):
@@ -561,7 +547,7 @@ def test_save_uses_the_disabled_routing_context_retained_for_its_work(tmp_path, 
 
     state = repo.save_object(obj, deep_capture=True)
 
-    assert dict(state.identity_spec()) == dict(obj.object_ref.objects)
+    assert dict(state.identity_spec()) == dict(repo.describe(obj).identity_spec())
     assert_published(first, state)
     assert repo.save_routing is None
 

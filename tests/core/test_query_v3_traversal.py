@@ -9,10 +9,10 @@ from dryml.core import (
     Generator,
     Object,
     ObjectId,
-    ObjectRef,
+    LocalState,
     Repo,
     Serializable,
-    StateRef,
+    StateKey,
 )
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.domains import UniformFromSet
@@ -69,13 +69,14 @@ class V3DiamondNode(Object):
 
 
 def _references():
-    """Build a parent StateRef and its direct owned child projections."""
+    """Build a saved Node and its direct owned child projections."""
 
     child = Definition(V3TraversalLeaf, "child").concretize()
     root = Definition(V3TraversalParent, child).concretize()
     child_path = GraphPath((Parameter("child"),))
-    object_ref = ObjectRef(root, {child_path: ObjectId(("root", "child"))})
-    state = StateRef(object_ref, {child_path: "pkl-" + "1" * 64})
+    object_ref = root.with_realization(identities={child_path: ObjectId(("root", "child"))})
+    state = object_ref.with_realization(states={child_path: LocalState(
+        StateKey(child.creation_digest(), "pkl-" + "1" * 64), child.creation_view())})
     return root, child, state, object_ref, state.at(child_path), object_ref.at(child_path), child_path
 
 
@@ -115,19 +116,6 @@ def test_u2_occurrences_projections_closure_share_and_fixed_results_detach(tmp_p
     assert calls == [producer, scope]
     assert scoped.targets().refresh(True).count() == 0
     assert calls == [producer, scope, producer, scope]
-
-
-def test_v3_closure_uses_typed_associations_and_owned_state_adjacency():
-    root, child, state, object_ref, child_state, child_object, _ = _references()
-    query = IdentityQuery.from_set(IdentitySet((state,)))
-
-    assert set(query.closure().collect()) == {
-        state, object_ref, root, child, child_state, child_object,
-    }
-    assert set(query.closure(EdgePolicy.ASSOCIATIONS).collect()) == {
-        state, object_ref, root,
-    }
-    assert set(query.closure(EdgePolicy.STATE_OBJECT).collect()) == {state, object_ref}
 
 
 def test_v3_nested_requires_a_non_empty_typed_path_and_keeps_association_hops():
@@ -484,7 +472,7 @@ def test_u6_projection_disabled_refresh_survives_every_terminal(tmp_path, monkey
         index.close()
         index.path.unlink()
     else:
-        store.mark_query_index_dirty()
+        index._mark_dirty()
     calls = []
     monkeypatch.setattr(SQLiteStoreQueryIndex, "rebuild", lambda *a, **kw: calls.append("rebuild"))
     monkeypatch.setattr(SQLiteStoreQueryIndex, "initialize_empty", lambda *a: calls.append("initialize"))
@@ -529,7 +517,7 @@ def test_u6_occurrence_external_target_scope_cannot_escape_controls(tmp_path, mo
     root, child, *_ = _references()
     store = DirStore(tmp_path / "scope", query_index="memory")
     scans = []
-    monkeypatch.setattr(store, "_validated_definition_root_inventory", lambda: scans.append(1) or ((), ()))
+    monkeypatch.setattr("dryml.core.query.authority.capture_store_projection", lambda *args, **kwargs: scans.append(1))
     roots = IdentitySet((root,)).query().scan_policy("forbid")
     occurrence = roots.nested(child).where(field("object").missing(), scope=store)
     for terminal in (occurrence.exists, occurrence.owners().exists, occurrence.targets().exists):

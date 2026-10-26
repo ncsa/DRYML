@@ -374,10 +374,9 @@ def _is_definition_value(value: object, *, include_authority: bool = False) -> b
     """
 
     from .definition import ConcreteDefinition, Definition
-    from .reference_values import ObjectRef, StateRef
 
     return isinstance(value, (Definition, Expr)) or (
-        include_authority and isinstance(value, (ConcreteDefinition, ObjectRef, StateRef))
+        include_authority and isinstance(value, ConcreteDefinition)
     )
 
 
@@ -646,23 +645,12 @@ def _project_binding(value: object, path: GraphPath, root: str) -> object:
 
     from .definition import ConcreteDefinition, Definition
     from .object import Object
-    from .reference_values import ObjectRef, StateRef
     from .utils.graph.value import get_subtree
 
     try:
         if path:
             if isinstance(value, Object):
                 value = value.graph_at(path)
-            elif isinstance(value, StateRef):
-                try:
-                    value = value.at(path)
-                except ValueError as materializing_error:
-                    try:
-                        value = value.reference_value_at(path)
-                    except ValueError:
-                        raise materializing_error
-            elif isinstance(value, ObjectRef):
-                value = value.at(path)
             elif isinstance(value, ConcreteDefinition):
                 value = value.graph_path(path)
             elif isinstance(value, Definition) and any(isinstance(segment, Parameter) for segment in path):
@@ -694,7 +682,7 @@ def _freeze_binding_value(value: object) -> object:
 
     def lower(current: object) -> object:
         if isinstance(current, Object):
-            return current.object_ref
+            return current._identity_node
         if isinstance(current, (Definition, ConcreteDefinition)):
             return current
         if isinstance(current, Mapping):

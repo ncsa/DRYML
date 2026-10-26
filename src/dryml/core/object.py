@@ -13,7 +13,8 @@ from .utils.general import pickle_save, pickle_load
 from .definition import Definition
 
 if TYPE_CHECKING:
-    from .repo import RevisionType
+    from .definition import ConcreteDefinition
+    from .workspaces import WorkspaceHandle
 
 
 def in_definition_mode() -> bool:
@@ -467,12 +468,6 @@ class Object(metaclass=Dryml):
         return getattr(self, "_object_id", None)
 
     @property
-    def object_ref(self):
-        """Return the completed immutable exact identity for this live graph."""
-
-        return self._object_ref
-
-    @property
     def last_state_ref(self):
         """Return this object's last confirmed saved-graph receipt, without IO.
 
@@ -683,7 +678,7 @@ class Pickleable(Serializable):
         "definition",
         "_runtime_bindings",
         "_runtime_projection",
-        "_object_ref",
+        "_identity_node",
         "_object_id",
         "_last_state_hash",
         "_last_state_ref",

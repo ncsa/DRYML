@@ -166,15 +166,15 @@ def test_foreign_destination_owner_is_refused_before_scan(tmp_path, monkeypatch,
     with closing(require_sqlite().connect(path)) as con, con:
         con.execute(f"PRAGMA user_version = {schema_version}")
         assert con.execute("SELECT store_key FROM catalog_state WHERE singleton = 1").fetchone() == (owner.source_key,)
-    first.mark_query_index_dirty()
-    second.mark_query_index_dirty()
     index = SQLiteStoreQueryIndex(source_key=second.catalog_key(), path=path, config=config,
                                   store=second, dirty_path=second.query_index_dirty_path)
+    owner._mark_dirty()
+    index._mark_dirty()
     identity = (path.stat().st_dev, path.stat().st_ino)
     contents = path.read_bytes()
     tokens = tuple(backend._dirty_markers() for backend in (owner, index))
     assert all(tokens)
-    monkeypatch.setattr(index, "_capture_authority_cut", lambda: pytest.fail("foreign owner scanned"))
+    monkeypatch.setattr("dryml.core.query.authority.capture_store_projection", lambda *a, **kw: pytest.fail("foreign owner scanned"))
     stats = QueryStats()
     with pytest.raises(QueryIndexIncompatible) as error:
         if operation == "rebuild":
@@ -495,18 +495,6 @@ def test_activate_and_deactivate_stored_root(tmp_path):
     assert removed.roots_removed == 1
     assert removed.generation == 3
     assert sqlite_rows(index.path, "SELECT COUNT(*) FROM stored_roots") == [(0,)]
-
-
-def test_register_saved_graph_activates_stored_root(tmp_path):
-    index = sqlite_index(tmp_path)
-    obj = SQLiteLeaf("saved")
-    graph = ConcreteDefinitionGraph.from_root(obj.definition)
-
-    result = index.register_saved_graph(graph, [obj.definition])
-
-    assert result.changed
-    assert result.roots_added == 1
-    assert sqlite_rows(index.path, "SELECT COUNT(*) FROM stored_roots") == [(1,)]
 
 
 def test_hash_colliding_definitions_get_distinct_ordinals(monkeypatch, tmp_path):

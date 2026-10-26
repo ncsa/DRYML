@@ -91,8 +91,8 @@ def exact_work_counts():
             counts["complete_bundles"] += 1
         if event == "call":
             name = frame.f_code.co_name
-            if name in {"_read_snapshot", "_validate_local_state_dir", "validate_payload"}:
-                counts[name] += 1
+            if name in {"validate_payload", "_validate_payload"}:
+                counts["validate_payload"] += 1
             if name == "_read_file":
                 kind = frame.f_locals["record_type"].__name__
                 counts[kind] += 1
@@ -712,8 +712,7 @@ def test_fallback_enclosing_catalogue_does_not_require_direct_record_reader(tmp_
     writer = Repo(store)
     state = writer.save(EvidenceRoot(EvidenceValue(1, repo=writer), repo=writer))
     child = state.at(GraphPath((Parameter("child"),)))
-    monkeypatch.setattr(store, "read_state_ref_record", lambda *a: pytest.fail("retired StateRef reader called"))
-    monkeypatch.setattr(store, "iter_state_ref_records", lambda *a: pytest.fail("retired catalogue scanned"))
+    monkeypatch.setattr("dryml.core.query.authority.capture_store_projection", lambda *a, **kw: pytest.fail("load inventoried authority"))
     plan = build_exact_state_load_plan(Repo(store), child)
     assert len(plan.actions) == 1 and plan.actions[0].state.key == child.state.key
 

@@ -78,17 +78,17 @@ def test_cache_construction_keeps_live_and_saved_sources_inert(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     source = CountingDataset([np.asarray([1], dtype=np.int32)], Cardinality.finite(1))
-    before = tuple(store.iter_state_ref_records())
+    before = store.authority_cut()
     live = CachedDataset(source)
 
     assert source.opens == 0
-    assert tuple(store.iter_state_ref_records()) == before
+    assert store.authority_cut() == before
     saved = repo.save_object(source, store=store, deep_capture=True)
-    saved_before = tuple(store.iter_state_ref_records())
+    saved_before = store.authority_cut()
     referenced = CachedDataset(saved)
 
     assert source.opens == 0
-    assert tuple(store.iter_state_ref_records()) == saved_before
+    assert store.authority_cut() == saved_before
     assert not live.ready and not referenced.ready
 
 

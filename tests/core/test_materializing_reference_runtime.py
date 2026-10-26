@@ -51,14 +51,6 @@ def test_ref_exact_value_is_retained_without_materialization():
     assert parent.graph_at('$[@param("target")]') is target
 
 
-def test_unregistered_materializing_object_ref_is_rejected():
-    repo = Repo()
-    original = IdentifiedReferenceLeaf("exact", repo=repo)
-
-    with pytest.raises(RepoLoadError, match="declaration Store"):
-        ReferenceParent(original.object_ref, repo=repo)
-
-
 @pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_registered_materializing_object_ref_uses_its_claim(tmp_path):
     """A bound Node initializes once and closure publication supplies saved authority."""

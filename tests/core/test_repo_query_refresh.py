@@ -11,7 +11,6 @@ from dryml.core.query.model import QueryIndexIncompatible, QueryIndexUnavailable
 from dryml.core.query.source import SourceCapture
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
 
 
 class RefreshLeaf(Object):
@@ -215,8 +214,8 @@ def test_u2_same_producer_operands_preserve_external_scope_bindings(
     assert right_request.completed_domain(c.authority_fence_key())
     assert not right_request.completed_domain(b.authority_fence_key())
     calls.clear()
-    b.mark_query_index_dirty()
-    c.mark_query_index_dirty()
+    b.open_query_index()._mark_dirty()
+    c.open_query_index()._mark_dirty()
     for query in (combined, combined.closure(), combined.nested(),
                   combined.nested().owners(), combined.nested().targets()):
         query.count()
@@ -259,7 +258,7 @@ def test_u2_publication_failure_is_retryable_and_demand_recovery_outranks_reuse(
     store = _ready_store(tmp_path / "store")
     index = store.open_query_index()
     query = store.query().refresh(True)
-    store.mark_query_index_dirty()
+    store.open_query_index()._mark_dirty()
     captures = []
     original_init = SourceCapture.__init__
 
@@ -284,7 +283,7 @@ def test_u2_publication_failure_is_retryable_and_demand_recovery_outranks_reuse(
     assert not index._connections._leases and not index._build_claim_path().exists()
     assert query.explain(analyze=True).refresh_action == "validate"
     assert query.explain(analyze=True).refresh_action == "reused"
-    store.mark_query_index_dirty()
+    store.open_query_index()._mark_dirty()
     bounded = replace(query.cdefs().stored(), take_limit=1)
     explanation = bounded.explain(analyze=True)
     assert explanation.refresh is True and explanation.refresh_action == "rebuild"
@@ -370,7 +369,7 @@ def test_u3_demand_consumer_rejects_conflicting_repo_presentations(tmp_path, mon
     """Auto preflight cannot acknowledge shared dirty tokens for two destinations."""
     first = _ready_store(tmp_path / "store")
     second = DirStore(first.base_dir, query_index=SQLiteQueryIndexConfig(path=tmp_path / "second.sqlite"))
-    first.mark_query_index_dirty()
+    first.open_query_index()._mark_dirty()
     from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
     monkeypatch.setattr(SQLiteStoreQueryIndex, "refresh", lambda *a, **kw: pytest.fail("conflict maintained"))
     with pytest.raises(QueryIndexIncompatible):
@@ -407,7 +406,6 @@ def test_u3_optional_absence_exact_positive_scan_controls(tmp_path, monkeypatch,
     gc.collect()
     gc.collect()
     import warnings
-    import dryml.core.store.dir as dir_module
     from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
     from tests.core.test_local_state_discovery import DiscoveryValue
 
@@ -421,10 +419,8 @@ def test_u3_optional_absence_exact_positive_scan_controls(tmp_path, monkeypatch,
         def unavailable():
             raise QueryIndexUnavailable("optional SQLite unavailable")
         scoped.setattr(index_module, "require_sqlite", unavailable)
-        scoped.setattr(store, "_validated_definition_root_inventory",
-                       lambda: pytest.fail("optional exact positive acquired inventory"))
-        scoped.setattr(store, "iter_definition_records",
-                       lambda: pytest.fail("optional exact positive enumerated definitions"))
+        scoped.setattr("dryml.core.query.authority.capture_store_projection",
+                       lambda *a, **kw: pytest.fail("optional exact positive acquired inventory"))
         scoped.setattr(SQLiteStoreQueryIndex, "refresh",
                        lambda *a, **kw: pytest.fail("absent optional target cycled"))
         with warnings.catch_warnings(record=True) as observed:
@@ -459,7 +455,7 @@ def test_u3_warning_precedes_ready_validation_once(tmp_path, monkeypatch):
 
     store = _ready_store(tmp_path / "store")
     import dryml.core.query.authority as authority
-    store.mark_query_index_dirty()
+    store.open_query_index()._mark_dirty()
     original = authority.capture_store_projection
     scans = []
     with warnings.catch_warnings(record=True) as observed:
@@ -485,7 +481,7 @@ def test_u3_always_repeats_ready_validation_and_inert_paths_do_nothing(tmp_path,
         assert explanation.refresh_action == "validate" and explanation.store_scan_count == 0
     assert index.status().generation == generation
     monkeypatch.setattr(store, "open_query_index", lambda: pytest.fail("inert path opened index"))
-    monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("inert path read authority"))
+    monkeypatch.setattr("dryml.core.query.authority.capture_store_projection", lambda *a, **kw: pytest.fail("inert path read authority"))
     assert query.explain().refresh_action == "none"
     assert query.take(0).count() == 0
     assert query.nested().take(0).count() == 0
@@ -493,7 +489,7 @@ def test_u3_always_repeats_ready_validation_and_inert_paths_do_nothing(tmp_path,
 
 def test_u3_ready_explicit_scan_admission_precedes_backend_io(tmp_path, monkeypatch):
     store = _ready_store(tmp_path / "store")
-    store.mark_query_index_dirty()
+    store.open_query_index()._mark_dirty()
     import dryml.core.query.authority as authority
     monkeypatch.setattr(authority, "capture_store_projection", lambda *a, **k: pytest.fail("prohibited work inventoried authority"))
     root = Definition(RefreshLeaf, "root").concretize()
@@ -512,7 +508,7 @@ def test_u3_ready_explicit_scan_admission_precedes_backend_io(tmp_path, monkeypa
 def test_u3_demand_recovery_reports_actual_rebuild_and_failed_scan(tmp_path, monkeypatch):
     store = _ready_store(tmp_path / "store")
     index = store.open_query_index()
-    store.mark_query_index_dirty()
+    store.open_query_index()._mark_dirty()
     query = replace(store.query().cdefs().stored(), take_limit=1)
     original = index.refresh
 
@@ -656,7 +652,7 @@ def test_u3_target_resolution_retains_operand_and_scope_associations(tmp_path, m
     query = left.union(right).where(field("object").missing(), scope=store)
     capture = SourceCapture(query)
     capture.index_presentations = query._index_presentations(capture)
-    monkeypatch.setattr(store, "_validated_definition_root_inventory", lambda: pytest.fail("resolution captured authority"))
+    monkeypatch.setattr("dryml.core.query.authority.capture_store_projection", lambda *a, **kw: pytest.fail("resolution captured authority"))
     targets = capture.resolve_index_targets(explicit=True)
     assert len(targets) == 1
     presentations = targets[0].presentations

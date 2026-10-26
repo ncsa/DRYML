@@ -2,6 +2,16 @@
 
 ## 0.3.0b2 (unreleased)
 
+Legacy Repo/Store API v3 and compound-reference capabilities are removed, with
+no compatibility aliases or refusal stubs. `ObjectRef`, `StateRef`,
+`StateSelectorRef`, `ObjectSelector`, old Store record classes, reference JSON
+codecs, claim/declaration/fork/alias methods, and snapshot-directory access are
+absent. Use Node-local identities and full-StateKey selections. `RepoDefinition`
+now uses version 2 without claim settings; version 1 is rejected. Store format 4,
+Node identity 3, and SQLite schema/coverage 11/3 are retained. See
+[Repo/Store API retirement](repo_store_v3_retirement.md) for the migration table
+and long-lived-interpreter limitations.
+
 Identity and occurrence queries now provide an explicit `.iter()` terminal for
 single-use lazy consumption. First advancement captures required authority and
 metadata; matching or relationship traversal then advances on demand without a

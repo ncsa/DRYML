@@ -53,26 +53,19 @@ construction, ObjectId allocation, or publication occur during these operations.
 `SavedNode` is a named typing refinement; `require_saved` validates completeness
 and returns the supplied ConcreteNode itself. It is not an availability proof.
 
-## Existing exact-reference consumers
+## Identity And Selection
 
-`ObjectId` is a namespace plus framework-generated UUID nonce for one `Serializable` lineage. `ObjectRef(definition, objects)` combines V2 graph topology with all owned ObjectIds. `StateRef(object, states)` adds immutable local-state hashes. These values are import-free canonical leaves and their equality includes complete topology and IDs.
+`ObjectId` remains a namespace plus framework-generated UUID nonce for one
+`Serializable` lineage. `object_namespace(...)` controls new identities in a
+thread/task-local context. Neither allocation nor decoding publishes authority.
 
-`Ref(ObjectRef | StateRef)` is non-materializing. Bare or `Mat(ObjectRef | StateRef)` expands owned materializing topology. Materializing exact state references load through the exact StateRef path; a raw ObjectRef may be built only through its registered declaration and claim.
+Use `repo.describe(obj)` to inspect retained live identities, and `.object_view()`
+to obtain state-weakened metadata. Use explicit queries to discover and choose
+state; normalization does not resolve a soft alias or invent missing facets.
+`IdentitySet.object_projection()` returns a fixed IdentitySet of Node object
+views, merging evidence for equal projections.
 
-`StateSelectorRef(object, alias)` is soft only. Canonicalization resolves it once through a Repo to an exact StateRef before a CDef or finalized query exists. Object aliases name ObjectRefs; state aliases are scoped by complete ObjectRef. Alias movement never mutates a finalized CDef.
-
-`Definition.concretize(repo=resolver)` also accepts a metadata resolver exposing
-`resolve_state_selector(selector)`, as does `to_canonical`. Repeated occurrences of
-one selector resolve once per normalization. Missing-alias errors propagate, and a
-resolved StateRef outside the selector's complete ObjectRef scope is rejected.
-
-Use [Signatures](signatures.md) for `Ref`/`Mat` conversion, automatic selection,
-quotation data, and the distinction between metadata selection and Repo realization.
-Query V3 treats complete ObjectRef and StateRef values as identity members without
-dereferencing them; see [Graph Querying](graph_querying.md).
-
-The existing reference `object_projection()` and ObjectSelector APIs retain their
-V2 query semantics, including explicit inspection options. They do not define the
-new operation-projection hash domain. Legacy call-surface/query exports reject
-identity-3 Node facets and retained construction evidence when they cannot
-represent them; the authenticated Node codec carries those constraints losslessly.
+`ObjectRef`, `StateRef`, `StateSelectorRef`, `ObjectSelector`, `ObjectSelectorSet`,
+and their codecs are removed. See [API retirement](repo_store_v3_retirement.md).
+Use [Signatures](signatures.md) for `Ref`/`Mat` conversion and quotation data, and
+[Graph Querying](graph_querying.md) for Node discovery without materialization.

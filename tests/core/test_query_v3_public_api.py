@@ -8,8 +8,7 @@ import dryml.core as core
 import dryml.core.query as query
 import pytest
 
-from dryml.core import Definition, Object, ObjectId, ObjectRef, Repo, Serializable, SKIP_ARGS
-from dryml.core.repo import RepoLoadError
+from dryml.core import Definition, Object, ObjectId, Repo, Serializable, SKIP_ARGS
 from dryml.core.store.dir import DirStore
 
 
@@ -43,22 +42,12 @@ class LookupCountingStore(DirStore):
     def __init__(self, store):
         super().__init__(store.base_dir, query_index=store.query_index)
         self.definition_reads = 0
-        self.definition_enumerations = 0
-
-    def read_definition_record(self, digest):
-        self.definition_reads += 1
-        return super().read_definition_record(digest)
 
     def _read_file(self, path, record_type):
         from dryml.core.store.records import NodeRootRecord
         if record_type is NodeRootRecord:
             self.definition_reads = getattr(self, "definition_reads", 0) + 1
         return super()._read_file(path, record_type)
-
-    def iter_definition_records(self):
-        self.definition_enumerations += 1
-        return super().iter_definition_records()
-
 
 def test_retained_item_get_and_load_lookups_keep_their_candidate_universes(tmp_path):
     """Item/get retain known roots and cache entries; explicit loads stay structural."""
@@ -109,7 +98,6 @@ def test_retained_exact_item_and_get_use_v3_direct_root_lookup(tmp_path, monkeyp
     assert reopened[root.definition].definition.graph_equal(root.definition)
     assert reopened.get(root.definition).one().definition.graph_equal(root.definition)
     assert counting.definition_reads >= 1
-    assert counting.definition_enumerations == 0
 
 
 def test_explicit_weak_cached_child_is_a_retained_get_candidate(tmp_path):
@@ -238,7 +226,7 @@ def test_node_pattern_compiler_retains_visible_exact_residual_without_effects(mo
     monkeypatch.setattr(ObjectId, "__init__", forbidden("allocation"))
     monkeypatch.setattr(LookupStatefulLeaf, "__init__", forbidden("construction"))
     monkeypatch.setattr(Repo, "save_object", forbidden("capture"))
-    monkeypatch.setattr(DirStore, "read_definition_record", forbidden("io"))
+    monkeypatch.setattr(DirStore, "read_node", forbidden("io"))
     monkeypatch.setattr(DirStore, "read_state", forbidden("io"))
     compiled = compile_selector_graph(pattern)
     assert compiled.requires_scan and compiled.residual_reasons

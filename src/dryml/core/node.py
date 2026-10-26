@@ -254,8 +254,7 @@ class Node(Generic[T]):
                 when no IDs are missing. Calling again on the result is a no-op;
                 separate calls on an unbound source allocate independent IDs.
         Raises:
-            TypeError: If the owned graph is not concrete or contains legacy
-                ObjectRef/StateRef leaves, check_unique is not bool, or the
+            TypeError: If the owned graph is not concrete, check_unique is not bool, or the
                 selected authority is not a Repo. Call ``concretize()`` first.
             ValueError: If independent owned nodes share an ObjectId or a stateless
                 node carries identity/state facets, or checked allocation has no
@@ -283,7 +282,7 @@ class Node(Generic[T]):
             if not isinstance(repo, Repo):
                 raise TypeError("Checked identity allocation requires a Repo.")
         missing, identities = [], set()
-        for _, node in _owned_nodes(self, strict=True):
+        for _, node in _owned_nodes(self):
             if not isinstance(node, ConcreteNode):
                 raise TypeError("Identity allocation requires a concrete owned Node graph.")
             if not node._stateful_role:
@@ -615,11 +614,10 @@ def _all_nodes(root, *, quoted=False):
     return visit(root)
 
 
-def _owned_nodes(root, *, strict=False):
+def _owned_nodes(root):
     from .cdef_graph import EdgeKind
     from .links import DefLink
     from .quoted import QuotedDef
-    from .reference_values import ObjectRef, StateRef
     from .utils.graph.value import iter_value_edges
     from .utils.graph.path import graph_path_sort_key
 
@@ -632,8 +630,6 @@ def _owned_nodes(root, *, strict=False):
             return
         if isinstance(value, QuotedDef):
             return
-        if strict and isinstance(value, (ObjectRef, StateRef)):
-            raise TypeError("Saved completeness requires Node-local facets, not legacy owned reference leaves.")
         if isinstance(value, Node):
             if value._occurrence in seen:
                 return
@@ -919,7 +915,7 @@ def require_saved(node):
     if not isinstance(node, ConcreteNode):
         raise TypeError("Saved completeness requires a ConcreteNode graph.")
     identities = set()
-    for _, current in _owned_nodes(node, strict=True):
+    for _, current in _owned_nodes(node):
         if not isinstance(current, ConcreteNode):
             raise TypeError("Saved completeness requires a ConcreteNode graph.")
         if current._stateful_role:

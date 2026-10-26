@@ -10,7 +10,6 @@ from dryml.core import function
 from dryml.core import SavedNode
 from dryml.core.object import Pickleable
 from dryml.core.signatures import Mat, Ref
-from dryml.core.reference_values import StateRef
 from dryml.environments import req as environment_req
 from dryml.managed import ManagedConfig, managed_operation
 from dryml.worlds import req as world_req

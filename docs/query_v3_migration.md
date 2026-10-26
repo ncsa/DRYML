@@ -27,10 +27,9 @@ typed identities. Result ordering is deterministic by complete identity; it does
 mean newest, best, or completed.
 
 `object_projection()` is an explicit terminal on `IdentityQuery` and a source-free
-projection on `IdentitySet`. It maps ObjectRef and StateRef members to recursive
-`ObjectSelector` values, omits CDefs, merges evidence for equal projections, and
-returns a fixed `ObjectSelectorSet`. Exact reference selection remains unchanged;
-an ObjectSelector is the separate state-independent graph-selection value.
+projection on `IdentitySet`. It returns a fixed `IdentitySet` of Node object
+views and merges source evidence for equal projections. `ObjectSelector` and
+`ObjectSelectorSet` are removed; use ordinary Node patterns or `QueryPredicate`.
 
 `.iter()` now returns a single-use closeable generator on both identity and
 occurrence queries. It starts on first advancement and matches/traverses on
@@ -53,7 +52,8 @@ selection and exact Generator support remain distinct: exact support still requi
 proof rather than accepting a prefilter as an answer.
 
 Live Objects are not universe members. Use their retained definition for structural
-intent, or an exact ObjectRef/StateRef for identity intent. `cdefs()`,
+intent, or `repo.describe(obj)` / an explicitly selected saved Node for identity
+intent. `cdefs()`,
 `object_refs()`, and `state_refs()` are restrictions, not projections that load or
 construct data. ObjectId, namespace, exact-reference, alias, subtree, and state-hash
 searches compose directly on the identity plan. `stored(scope)` narrows existing
@@ -61,7 +61,7 @@ members by kind-specific authoritative membership and never fetches candidates.
 
 The retired reference `objects()` and `states()` aliases become a kind restriction
 followed by a terminal. The retired definition/result `objects()` materialization
-becomes explicit `repo.load_object(cdef)` or another explicit Repo load API after
+becomes explicit `repo.build(concrete_recipe)` or `repo.load(saved_node)` after
 identity selection. `Repo.get`, item access, and explicit load methods remain
 non-query APIs with their established candidate and error behavior.
 
@@ -71,7 +71,7 @@ non-query APIs with their established candidate and error behavior.
 with selection, kinds, membership, and algebra. Its `object`, `state`, `lineage`,
 and `snapshot` fields retain their existing operators, validation, current-versus-
 captured evidence meanings, and conflict errors. A state-metadata match can be
-expanded with relationship operations and then restricted to owning ObjectRefs when
+expanded with relationship operations and then restricted to owning Node object views when
 that association is intended; it does not silently become a structural object match.
 
 The retired containment adapter becomes an explicit root universe followed by

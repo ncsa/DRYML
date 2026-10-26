@@ -17,7 +17,6 @@ from ..cdef_identity import cdef_node_key
 from ..cdef_graph import EdgeKind
 from ..definition import ConcreteDefinition
 from ..links import DefLink
-from ..reference_values import ObjectRef, StateRef
 from ..node import Node
 from ..state_values import LocalState
 from ..utils.graph.path import GraphPath, graph_path_sort_key
@@ -60,8 +59,8 @@ class RelationshipHop:
 class RelationshipPath:
     """Immutable ordered typed hops for one retained relationship witness.
 
-    Association hops retain their empty field segments, so a StateRef-to-
-    ObjectRef relationship is distinguishable from an empty root path. This
+    Association hops retain their empty field segments, so a saved-Node-to-
+    object-view relationship is distinguishable from an empty root path. This
     query-owned representation never changes the authoritative GraphPath codec.
     """
 
@@ -111,7 +110,7 @@ class EdgePolicy:
 
     ``ALL`` follows every retained relationship. ``OWNED`` includes both
     associations and materializing ownership links; ``ASSOCIATIONS`` includes
-    only StateRef/ObjectRef and ObjectRef/CDef associations.
+    only saved/object-view and object-view/creation associations.
     """
 
     kinds: frozenset[RelationshipKind]
@@ -162,11 +161,11 @@ class DirectRelationship:
 
     kind: RelationshipKind
     path: GraphPath
-    target: ConcreteDefinition | ObjectRef | StateRef
+    target: ConcreteDefinition | Node | LocalState
 
 
 def iter_direct_relationships(
-    value: ConcreteDefinition | ObjectRef | StateRef,
+    value: ConcreteDefinition | Node | LocalState,
 ) -> Iterator[DirectRelationship]:
     """Yield direct identity relationships carried by one immutable value.
 
@@ -185,33 +184,10 @@ def iter_direct_relationships(
             yield DirectRelationship(RelationshipKind.OBJECT_DEFINITION, GraphPath(), value.creation_view())
         yield from _definition_edges(value)
         return
-    if isinstance(value, StateRef):
-        yield DirectRelationship(RelationshipKind.STATE_OBJECT, GraphPath(), value.object)
-        yield from _reference_edges(value, state=True)
-        return
-    if isinstance(value, ObjectRef):
-        yield DirectRelationship(RelationshipKind.OBJECT_DEFINITION, GraphPath(), value.definition)
-        yield from _reference_edges(value, state=False)
-        return
     if isinstance(value, ConcreteDefinition):
         yield from _definition_edges(value)
         return
-    raise TypeError("Query V3 relationships require a ConcreteDefinition, ObjectRef, or StateRef.")
-
-
-def _reference_edges(value: ObjectRef | StateRef, *, state: bool) -> Iterator[DirectRelationship]:
-    reference = value.object if isinstance(value, StateRef) else value
-    for edge in _definition_edges(reference.definition):
-        if edge.kind is RelationshipKind.REFERENCE:
-            yield edge
-            continue
-        try:
-            target = value.at(edge.path) if state else reference.at(edge.path)
-        except (TypeError, ValueError):
-            # A direct stateless CDef is represented by the CDef association and
-            # does not have an independently projectable exact reference value.
-            continue
-        yield DirectRelationship(edge.kind, edge.path, target)
+    raise TypeError("Query relationships require a Node, ConcreteDefinition, or LocalState.")
 
 
 def _definition_edges(value: ConcreteDefinition) -> Iterator[DirectRelationship]:
@@ -245,7 +221,7 @@ def _local_discovery_edges(node):
             yield from walk(value.target, path, value.kind.value)
         elif isinstance(value, Node):
             yield path, role, value
-        elif isinstance(value, (ObjectRef, StateRef, QuotedDef, SelectorSpec)):
+        elif isinstance(value, (QuotedDef, SelectorSpec)):
             return
         else:
             for edge in iter_value_edges(value):
@@ -308,16 +284,6 @@ class _DiscoveryPreparation:
             owned = (1 << occurrence) if stateful else 0
             has_id, has_state = oid is not None, node.state is not None
             complete = isinstance(node, ConcreteNode) and (not stateful or has_id and has_state)
-            # Legacy references are not admitted by require_saved's owned grammar.
-            def legacy(value):
-                if isinstance(value, (ObjectRef, StateRef)):
-                    return True
-                if isinstance(value, DefLink):
-                    return value.kind.value == "materialize" and legacy(value.target)
-                if isinstance(value, Node):
-                    return False
-                return any(legacy(edge.value) for edge in iter_value_edges(value))
-            complete &= not any(legacy(v) for _, v in _local_discovery_fields(node))
             for _, role, child in self.edges[marker]:
                 if role != "materialize":
                     continue
@@ -427,7 +393,7 @@ def _discovery_rows(root, record, *, preparation=None):
 
 def _value_edges(value: Any, path: GraphPath) -> Iterator[DirectRelationship]:
     if isinstance(value, DefLink):
-        if isinstance(value.target, (ConcreteDefinition, ObjectRef, StateRef)):
+        if isinstance(value.target, (ConcreteDefinition, Node)):
             kind = (
                 RelationshipKind.MATERIALIZE
                 if value.kind is EdgeKind.MATERIALIZE
@@ -435,14 +401,14 @@ def _value_edges(value: Any, path: GraphPath) -> Iterator[DirectRelationship]:
             )
             yield DirectRelationship(kind, path, value.target)
         return
-    if isinstance(value, (ConcreteDefinition, ObjectRef, StateRef)):
+    if isinstance(value, (ConcreteDefinition, Node)):
         yield DirectRelationship(RelationshipKind.MATERIALIZE, path, value)
         return
     for value_edge in iter_value_edges(value):
         yield from _value_edges(value_edge.value, path.child(value_edge.segment))
 
 
-RelationshipValue = ConcreteDefinition | ObjectRef | StateRef
+RelationshipValue = ConcreteDefinition | Node | LocalState
 RelationshipMatcher = Callable[[RelationshipValue], bool]
 
 
@@ -457,7 +423,7 @@ def relationship_closure(
     """Return complete identities reachable from ``roots``, including roots.
 
     Args:
-        roots: Detached CDefs, ObjectRefs, or StateRefs to expand.
+        roots: Detached Nodes, concrete definitions, or LocalStates to expand.
         edges: Immutable permitted relationship policy, defaulting to all kinds.
 
     Returns:
@@ -475,8 +441,8 @@ def relationship_closure(
     pending = [(value, 0) for value in roots]
     while pending:
         value, depth = pending.pop()
-        if not isinstance(value, (ConcreteDefinition, ObjectRef, StateRef, LocalState)):
-            raise TypeError("Relationship roots must be ConcreteDefinition, ObjectRef, or StateRef values.")
+        if not isinstance(value, (ConcreteDefinition, Node, LocalState)):
+            raise TypeError("Relationship roots must be Nodes, concrete definitions, or LocalStates.")
         key = identity_key(value)
         if key in retained:
             continue
@@ -738,5 +704,5 @@ def _validate_max_depth(max_depth: int | None) -> None:
 
 
 def _require_relationship_value(value: object, label: str) -> None:
-    if not isinstance(value, (ConcreteDefinition, ObjectRef, StateRef, LocalState)):
-        raise TypeError(f"{label} must be ConcreteDefinition, ObjectRef, or StateRef values.")
+    if not isinstance(value, (ConcreteDefinition, Node, LocalState)):
+        raise TypeError(f"{label} must be Nodes, concrete definitions, or LocalStates.")

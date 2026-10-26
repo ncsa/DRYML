@@ -73,9 +73,6 @@ class _PreparedPredicate:
             for operand in current.operands:
                 collect(operand)
         collect(predicate)
-        from ..selector import _contains_state_selector
-        if any(_contains_state_selector(root) for root in roots):
-            raise TypeError("Node query predicates require explicitly resolved state aliases.")
         from ..node_prepare import PreparationView
         self.prepared = NodePreparation(roots, view=PreparationView("query-pattern", _runtime_pattern_view))
         self.parameters = {}

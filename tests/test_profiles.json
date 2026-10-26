@@ -145,10 +145,9 @@
           ]
         },
         "tests/core/test_object_projection.py": {
-          "rationale": "Retain recursive projection identity, Ref opacity, and import-free purity for ExperimentData association.",
+          "rationale": "Retain Node projection identity, merged source evidence, and exact quotation semantics for ExperimentData association.",
           "functions": [
-            "test_recursive_object_projection_preserves_ids_roles_sharing_and_codec_meaning",
-            "test_projection_never_allocates_object_ids_or_resolves_symbols",
+            "test_node_object_projection_merges_state_replicas_and_preserves_evidence",
             "test_node_query_concrete_recipe_omits_facets_but_quoted_checkpoint_is_exact"
           ]
         },
@@ -463,7 +462,7 @@
           "rationale": "Retain typed associations, existential projections, missing/dirty disabled-refresh behavior across terminals, inherited budgets, external target scopes, and bounded evidence.",
           "functions": [
             "test_u2_occurrences_projections_closure_share_and_fixed_results_detach",
-            "test_v3_closure_uses_typed_associations_and_owned_state_adjacency",
+            "test_stateless_owner_projection_preserves_each_source_domain",
             "test_v3_direct_projections_ignore_raw_caps_without_enumerating_occurrences",
             "test_v3_direct_projection_visits_each_diamond_state_once",
             "test_v3_bounded_roots_stay_bounded_through_refinement_and_relationships",

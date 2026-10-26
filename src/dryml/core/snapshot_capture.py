@@ -13,7 +13,7 @@ from typing import Callable, Mapping, TYPE_CHECKING
 from dryml.environments import EnvironmentRecord
 from dryml.environments.combination import _requirements_for_classes
 
-from .metadata import LineageMetadata, SnapshotCapture
+from .metadata import NodeLineageMetadata, SnapshotCapture
 from .reference_values import ObjectId
 from .utils.graph.path import GraphPath
 
@@ -51,7 +51,7 @@ def install_lineage_fact(obj, object_id: ObjectId, created_at: datetime | None) 
     obj._lineage_created_at = created_at
 
 
-def capture_lineages(plan: "SavePlan") -> Mapping[GraphPath, LineageMetadata]:
+def capture_lineages(plan: "SavePlan") -> Mapping[GraphPath, NodeLineageMetadata]:
     """Project live creation evidence into the primary paths of one save plan.
 
     Args:
@@ -63,7 +63,7 @@ def capture_lineages(plan: "SavePlan") -> Mapping[GraphPath, LineageMetadata]:
         represented as unknown.
 
     Raises:
-        TypeError: If ``plan`` is not a save-plan-like object with an ObjectRef.
+        TypeError: If ``plan`` lacks a complete live Node save plan.
         ValueError: If retained bindings cannot resolve a primary ObjectId path.
 
     Side Effects:
@@ -72,40 +72,18 @@ def capture_lineages(plan: "SavePlan") -> Mapping[GraphPath, LineageMetadata]:
 
     from .node import Node, _owned_nodes
     node = getattr(plan, "node", None)
-    if isinstance(node, Node):
-        from .metadata import NodeLineageMetadata
-        root_object = plan.binding.roots[0].obj
-        result = {}
-        for path, child in _owned_nodes(node):
-            if child.object_id is None:
-                continue
-            bound = root_object.graph_at(path)
-            instant = (getattr(bound, "_lineage_created_at", None)
-                       if getattr(bound, "_lineage_fact_object_id", None) == child.object_id else None)
-            result[path] = NodeLineageMetadata(child.object_view(), "known" if instant is not None else "unknown", instant)
-        return result
-    reference = getattr(plan, "object_ref", None)
-    root = getattr(getattr(plan, "binding", None), "roots", (None,))[0]
-    root_object = getattr(root, "obj", None)
-    if root_object is None or reference is None:
+    if not isinstance(node, Node):
         raise TypeError("snapshot lineage capture requires a complete live SavePlan")
-    lineages = {}
-    for path in (GraphPath(), *reference.objects):
-        target = reference if not path else reference.at(path)
-        created_at = None
-        if target.object_id is not None:
-            try:
-                bound = root_object.graph_at(path)
-            except Exception as error:
-                raise ValueError(f"snapshot lineage path {path!s} has no live binding") from error
-            if getattr(bound, "_lineage_fact_object_id", None) == target.object_id:
-                created_at = getattr(bound, "_lineage_created_at", None)
-        lineages[path] = LineageMetadata(
-            target,
-            "known" if created_at is not None else "unknown",
-            created_at,
-        )
-    return lineages
+    root_object = plan.binding.roots[0].obj
+    result = {}
+    for path, child in _owned_nodes(node):
+        if child.object_id is None:
+            continue
+        bound = root_object.graph_at(path)
+        instant = (getattr(bound, "_lineage_created_at", None)
+                   if getattr(bound, "_lineage_fact_object_id", None) == child.object_id else None)
+        result[path] = NodeLineageMetadata(child.object_view(), "known" if instant is not None else "unknown", instant)
+    return result
 
 
 def _materializing_classes(plan: "SavePlan") -> tuple[object, ...]:

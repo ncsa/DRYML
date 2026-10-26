@@ -27,7 +27,7 @@ ClassMatchPolicy = Literal["selector", "exact"]
 QueryDomain = Literal["stored", "cached", "known", "nested"]
 QueryProjection = Literal["definitions", "owners", "object_refs", "state_refs"]
 ContainmentEdgePolicy = Literal["materialize", "ref", "all"]
-ContainmentTargetKind = Literal["definition", "object_ref", "state_ref"]
+ContainmentTargetKind = Literal["definition"]
 ContainmentCarrier = Literal["target", "owner", "occurrence"]
 
 
@@ -63,7 +63,7 @@ def validate_containment_target(target: Any) -> Any:
     """Require one exact value supported by containment query entry points.
 
     Args:
-        target: Concrete CDef, ObjectRef, or StateRef retained as immutable
+        target: Concrete definition retained as immutable
             containment-query intent.
 
     Returns:
@@ -77,25 +77,11 @@ def validate_containment_target(target: Any) -> Any:
     """
 
     from ..definition import ConcreteDefinition
-    from ..reference_values import ObjectRef, StateRef
-
-    if not isinstance(target, (ConcreteDefinition, ObjectRef, StateRef)):
+    if not isinstance(target, ConcreteDefinition):
         raise TypeError(
-            "containment target must be a ConcreteDefinition, ObjectRef, or StateRef."
+            "containment target must be a concrete definition."
         )
     return target
-
-
-def is_exact_reference_target(target: Any) -> bool:
-    """Return whether a containment target is an exact reference value.
-
-    Exact reference values select containment only; they do not select ordinary
-    reference-authority query domains.
-    """
-
-    from ..reference_values import ObjectRef, StateRef
-
-    return isinstance(target, (ObjectRef, StateRef))
 
 
 class QueryError(Exception):
@@ -448,40 +434,11 @@ class DefinitionOccurrence:
         return self.definition
 
 
-@dataclass(frozen=True, slots=True)
-class ReferenceOccurrence:
-    """One exact lightweight reference occurrence in immutable authority.
-
-    Attributes:
-        owner: Complete aggregate reference or Definition record containing the
-            value.
-        path: Typed GraphPath from ``owner`` to ``value``.
-        value: Exact ObjectRef or StateRef found at the path.
-        hops: Ordered direct-edge evidence when supplied by containment.
-
-    ``hops`` is intentionally excluded from equality and hashing to preserve
-    ordinary reference-query occurrence identity and construction.
-    """
-
-    owner: Any
-    path: DefinitionPath
-    value: Any
-    hops: tuple[ContainmentHop, ...] = field(
-        default=(), compare=False, hash=False, repr=False,
-    )
-
-    @property
-    def target(self) -> Any:
-        """Return the matched terminal value without changing legacy fields."""
-
-        return self.value
-
-
 def containment_target_kind(value: Any) -> ContainmentTargetKind:
     """Return the non-coercing containment kind for one terminal value.
 
     Args:
-        value: A retained CDef, ObjectRef, or StateRef terminal.
+        value: A retained concrete definition terminal.
 
     Returns:
         The terminal's exact containment kind.
@@ -494,18 +451,13 @@ def containment_target_kind(value: Any) -> ContainmentTargetKind:
     """
 
     from ..definition import ConcreteDefinition
-    from ..reference_values import ObjectRef, StateRef
 
     if isinstance(value, ConcreteDefinition):
         return "definition"
-    if isinstance(value, ObjectRef):
-        return "object_ref"
-    if isinstance(value, StateRef):
-        return "state_ref"
     raise TypeError(f"Unsupported containment terminal {type(value).__name__}.")
 
 
-def containment_witness_key(item: DefinitionOccurrence | ReferenceOccurrence) -> tuple[Any, ...]:
+def containment_witness_key(item: DefinitionOccurrence) -> tuple[Any, ...]:
     """Return the complete deduplication key for a containment witness.
 
     Args:
@@ -844,15 +796,15 @@ class QueryExplanation:
 class ResultUniverse:
     kind: Literal["definitions", "occurrences"]
     definitions: tuple[Any, ...] = ()
-    occurrences: tuple[DefinitionOccurrence | ReferenceOccurrence, ...] = ()
+    occurrences: tuple[DefinitionOccurrence, ...] = ()
     materializable: bool = False
     domain: str = "stored"
     replicas: dict[Any, tuple[Any, ...]] | None = None
     witnesses: tuple[Any, ...] = ()
     witness_complete: bool = False
     containment: ContainmentContext | None = None
-    containment_witnesses: tuple[DefinitionOccurrence | ReferenceOccurrence, ...] = ()
-    containment_private_witnesses: tuple[DefinitionOccurrence | ReferenceOccurrence, ...] = ()
+    containment_witnesses: tuple[DefinitionOccurrence, ...] = ()
+    containment_private_witnesses: tuple[DefinitionOccurrence, ...] = ()
     containment_private_replicas: dict[object, tuple[Any, ...]] | None = None
     containment_carrier: ContainmentCarrier = "target"
 

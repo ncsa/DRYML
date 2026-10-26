@@ -1,6 +1,6 @@
 import pytest
 
-from dryml.core import Definition, F, Object, ObjectId, ObjectRef
+from dryml.core import F, Object, ObjectId
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core.definition import ConcreteDefinition
@@ -14,13 +14,13 @@ from dryml.core.query.codecs import (
     decode_feature_token,
     decode_graph_path,
     decode_metadata_predicate,
-    decode_reference,
+    decode_object_id,
     digest_blob,
     encode_cdef,
     encode_feature_token,
     encode_graph_path,
     encode_metadata_predicate,
-    encode_reference,
+    encode_object_id,
 )
 from dryml.core.query.metadata import MetadataField, MetadataPredicate, field
 from dryml.core.query.model import FeatureToken
@@ -59,12 +59,11 @@ def test_reference_query_promotion_increments_its_index_codec_markers():
     assert QUERY_INDEX_CODEC_VERSION == 6
 
 
-def test_reference_codec_round_trips_complete_values():
-    """Derived reference rows retain complete ObjectId and ObjectRef values."""
+def test_object_id_codec_round_trips_complete_identity():
+    """The identity codec preserves both namespace and the complete UUID."""
 
-    definition = Definition(CodecLeaf, "reference").concretize()
-    for value in (ObjectId(("test",)), ObjectRef(definition, {})):
-        assert decode_reference(encode_reference(value)) == value
+    value = ObjectId(("test",))
+    assert decode_object_id(encode_object_id(value)) == value
 
 
 def test_cdef_codec_decodes_current_v2_record():

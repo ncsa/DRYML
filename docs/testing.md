@@ -29,6 +29,14 @@ run this representative gate once on Linux/Python 3.12 with a 30-minute job cap;
 the Python/platform matrix and heavy framework/native-estimator jobs run only
 after an explicit `exhaustive` or `coverage` workflow dispatch.
 
+The Repo/Store API-v3 retirement run selected 4,465 parameterized cases across
+the process-sensitive and ordinary interpreter phases: 4,436 passed and 29 skipped
+in 19m24s complete local wall time in `big_env`. The pre-retirement baseline selected
+4,542 cases. Counts include parameter products, not just test functions, and vary
+as maintained coverage evolves. Legacy-only cases were retired; current Node
+fixtures and representative profile entries were migrated. See
+[API retirement](repo_store_v3_retirement.md).
+
 **Exhaustive runs require an explicit user request.** Earlier instrumented full
 runs took roughly 2.5 hours. A generic request to implement, verify, review,
 commit, push, release, or fix CI is not permission to launch one. This policy
