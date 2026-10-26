@@ -6,6 +6,14 @@ serialized Object payloads are trusted same-host inputs. Readers reject malforme
 incomplete, unsupported, or incompatible authority before hydration or activation;
 there is no migration, conversion format, or fallback reader.
 
+The shared bounded JSON codec validates and detaches encoder-ready dict/list trees
+in one traversal. Frozen decoding still produces immutable mappings/tuples, and
+canonical byte ordering, duplicate rejection, cycle detection and all size/type
+bounds are unchanged. Node preparations may retain full canonical comparison
+evidence alongside keys in the same bounded LRU; repeated equality avoids
+relabeling without treating a matching digest as proof. These are implementation
+optimizations, with no persistent-format or identity-version change.
+
 ## Object And Store Authority
 
 ### Shared Node Graph V1 / CDef Identity 3

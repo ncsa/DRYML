@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from .config import ManagedConfig, _ResolvedManagedConfig
 from .control import (ControlHistory, ControlIntent, ControlSnapshot, ManagedControlStore,
                       StartPreparation, _same_snapshot_bytes)
+from dryml.core._content_facts import _content_facts_scope
 from .errors import (ManagedConfigError, ManagedConflictError,
                      ManagedRecoveryError, ManagedRerunRequiredError)
 from .identity import AdmissionIdentity, _argument_digest_bound, operation_digest
@@ -222,6 +223,7 @@ def _validate_start_control(config):
         raise ManagedConfigError("start_requires_rerun", "start_from requires explicit rerun on every invocation")
 
 
+@_content_facts_scope()
 def admit_execution(identity, descriptor, config, control, *, realize, execute):
     """Select replay/recovery/execution from detached facts under the same owner.
 
@@ -237,6 +239,9 @@ def admit_execution(identity, descriptor, config, control, *, realize, execute):
     this invocation. Caller adapters must not reconstruct receivers before this gate.
     Cleanup failures attach evidence without replacing the execution error, even
     on Python versions without exception-note support.
+    Bounded immutable control decodes are shared only within this caller's
+    admission; every authority read, owner/generation fence and acknowledgement
+    remains fresh. Decode facts are discarded on success, failure or cancellation.
     """
     from .descriptor import ManagedOperation
     _validate_start_control(config)
@@ -649,7 +654,12 @@ def request_interrupt(descriptor, instance, *, state_repo=None, control_store=No
 
 
 def _preobserve_snapshot_environment():
-    """Preserve the existing deferred observation seam for later execution integration."""
+    """Observe once before capture reservations and preserve unavailable evidence.
+
+    The caller retains the returned no-argument observer only for this invocation.
+    Ordinary errors are deferred to Core's capture-evidence handling; cancellation
+    propagates immediately. No Store authority or payload proof is retained.
+    """
     from dryml.environments.introspection import inspect_current
     try:
         environment = inspect_current()

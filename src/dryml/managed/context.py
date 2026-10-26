@@ -21,7 +21,9 @@ class ManagedContext:
     operation-wide and immutable; final selection protects its exact graph while
     completed-result authority remains owned by the result finalizer. retain/release
     manage independent explicit/durable roots without private-state serialization.
-    Foreign/retired/recursive use raises
+    Snapshot environment evidence is observed lazily once per invocation before
+    its first capture and shared by later captures. Replay and explicit final
+    selection without capture do not observe the environment. Foreign/retired/recursive use raises
     ManagedContextError; stale ownership raises ManagedConflictError. Accepted
     interruption always prevents completion, even when author code catches it.
     """
@@ -44,6 +46,7 @@ class ManagedContext:
         self._final_report = None
         self._failure_code = "method_error"
         self._checkpoint_error = None
+        self._snapshot_observer = None
 
     @property
     def active(self):
@@ -132,7 +135,8 @@ class ManagedContext:
         try:
             from .storage import _publish_checkpoint
             from .runtime import _associate_state
-            selected, report = _publish_checkpoint(self.state_repo, self._obj, states=states, store=self._store)
+            selected, report = _publish_checkpoint(self.state_repo, self._obj, states=states, store=self._store,
+                snapshot_observer=self._environment_observer())
             _associate_state(self, selected, "latest", report=report,
                              published=lambda: _checkpoint_boundary("state_published"))
             if initial:
@@ -288,13 +292,21 @@ class ManagedContext:
             self.control_store.retention.adopt(str(UUID(intent.token)), _stores(self._control))
         else:
             _checkpoint_boundary("final_capture_started")
-            selected, report = _publish_checkpoint(self.state_repo, self._obj, store=self._store)
+            selected, report = _publish_checkpoint(self.state_repo, self._obj, store=self._store,
+                snapshot_observer=self._environment_observer())
             self._final_report = report
             _associate_state(self, selected, "final", report=report,
                              published=lambda: _checkpoint_boundary("final_state_published"))
         self._final = selected
         self._safe_point()
         return selected
+
+    def _environment_observer(self):
+        """Retain one invocation's observation, never Store or payload authority."""
+        if self._snapshot_observer is None:
+            from .runtime import _preobserve_snapshot_environment
+            self._snapshot_observer = _preobserve_snapshot_environment()
+        return self._snapshot_observer
 
     def _safe_point(self, *, allow_completed=False):
         self._require_active(terminal_ok=True)
@@ -384,6 +396,7 @@ class ManagedContext:
 
     def _deactivate(self):
         self._active = False
+        self._snapshot_observer = None
 
 
 def _checkpoint_boundary(stage):

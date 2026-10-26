@@ -8,6 +8,7 @@ Store acquisition, SQL, projection maintenance or acknowledgement.
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from functools import wraps
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ import tempfile
 from uuid import UUID, uuid4
 
 from dryml.core.node import Node, require_saved
+from dryml.core._content_facts import _current_content_facts
 from dryml.core.node_codec import decode_node_graph, encode_node_graph
 from dryml.core.node_prepare import NodePreparation
 from dryml.core.repo import Repo
@@ -35,6 +37,19 @@ _MAX_BYTES = 1024 * 1024
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_GENERATION = 2**63 - 1
 _STATES = frozenset({"running", "interrupted", "failed", "finalizing", "completed"})
+
+
+def _decoded_record(reader):
+    @wraps(reader)
+    def decode(cls, payload, *args, **kwargs):
+        facts = _current_content_facts()
+        build = lambda: reader(cls, payload, *args, **kwargs)
+        operation_id = kwargs.get("operation_id")
+        if (facts is None or type(payload) is not bytes or args or set(kwargs) - {"operation_id"}
+                or operation_id is not None and type(operation_id) is not str):
+            return build()
+        return facts.decode((cls, reader, tuple(kwargs.items())), payload, build)
+    return decode
 
 
 def _digest(value, label):
@@ -71,8 +86,14 @@ def _data(payload):
     if type(payload) is not bytes or len(payload) > _MAX_BYTES:
         raise ManagedControlError("invalid_control", "control bytes exceed their support bound")
     try:
-        canonical_json_load_bytes(payload, max_depth=96, max_nodes=65536,
-            max_entries=16384, max_string=_MAX_BYTES, max_int_bits=64)
+        def validate():
+            canonical_json_load_bytes(payload, max_depth=96, max_nodes=65536,
+                max_entries=16384, max_string=_MAX_BYTES, max_int_bits=64)
+        facts = _current_content_facts()
+        if facts is None:
+            validate()
+        else:
+            facts.decode(("control-json", canonical_json_load_bytes), payload, validate)
         return json.loads(payload)
     except (ValueError, TypeError) as error:
         raise ManagedControlError("invalid_control", "control metadata is malformed") from error
@@ -87,6 +108,12 @@ def _closed(data, schema, version, fields):
 def _node_data(node):
     if node is None:
         return None
+    facts = _current_content_facts()
+    if facts is not None:
+        encoded = facts.decode(("control-node-encoding", node, encode_node_graph, NodePreparation), b"",
+            lambda: _bytes({"schema": "dryml-managed-node", "version": 1,
+                            "graph": encode_node_graph(NodePreparation((node,)))}))
+        return json.loads(encoded)
     return {"schema": "dryml-managed-node", "version": 1,
             "graph": encode_node_graph(NodePreparation((node,)))}
 
@@ -94,6 +121,13 @@ def _node_data(node):
 def _node(data, *, saved=False):
     if data is None:
         return None
+    facts = _current_content_facts()
+    if facts is not None:
+        return facts.decode(("node", saved), _bytes(data), lambda: _decode_node(data, saved=saved))
+    return _decode_node(data, saved=saved)
+
+
+def _decode_node(data, *, saved):
     _closed(data, "dryml-managed-node", 1, {"graph"})
     try:
         node = decode_node_graph(data["graph"])
@@ -432,11 +466,16 @@ class ControlSnapshot:
         return _bytes(self.to_data())
 
     @classmethod
+    @_decoded_record
     def from_bytes(cls, payload, *, operation_id=None):
         """Decode bytes and optional path digest, rejecting every incompatible nested codec.
 
         Returns ControlSnapshot; malformed/old records raise ManagedControlError
         without modifying source bytes or inspecting any referenced private data.
+        payload is exact bytes; operation_id is an optional path-bound digest.
+        Within the caller's admission, identical bytes/path constraints may reuse a
+        bounded immutable decode. This is never a current-authority or payload
+        witness; no IO occurs and callers must freshly read their source bytes.
         """
         data = _data(payload)
         fields = {"operation_id", "receiver", "member", "argument_digest", "run_id", "invocation_id",
@@ -558,8 +597,16 @@ class StartPreparation:
         return _bytes(self.to_data())
 
     @classmethod
+    @_decoded_record
     def from_bytes(cls, payload, *, operation_id):
-        """Decode exact start evidence for operation_id or raise ManagedControlError."""
+        """Decode exact bounded start evidence for a required path-bound operation.
+
+        payload is bytes and operation_id a lowercase digest. Returns immutable
+        StartPreparation; malformed/version-incompatible or mismatched nested
+        evidence raises ManagedControlError without changing source bytes. A
+        caller-local bounded content scope may reuse identical-byte decodes, never
+        current authority. No Store IO, hooks, restoration or capture occurs.
+        """
         data = _data(payload)
         _closed(data, "dryml-managed-start", 1, {"token", "previous", "proposed", "phase", "settled"})
         result = cls(data["token"], None if data["previous"] is None else

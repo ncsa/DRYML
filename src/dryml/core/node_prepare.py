@@ -20,6 +20,7 @@ from .utils.graph.hasher import fold_closure_masks
 
 
 EXACT_KEY_VERSION = "dryml-node-exact/v1"
+_FLAT_EVIDENCE = object()
 
 
 def _bytes(value):
@@ -612,6 +613,9 @@ class NodePreparation:
         Returns bool; foreign handles raise ValueError. Does not use digest equality
         as authority or consult external state. Exact unordered symmetry search can
         be expensive; counts expose that cost rather than imposing a refusal limit.
+        Full canonical evidence is retained in the same bounded owner LRU as
+        semantic keys; resident repeat comparisons require no relabeling. Eviction
+        or clear only changes work, never collision-sensitive equality.
         """
         if self.view.name != other.view.name:
             return False
@@ -622,11 +626,17 @@ class NodePreparation:
         return left == right
 
     def _flat(self, root, *, retain=False):
+        evidence_key = _FLAT_EVIDENCE, root
+        flat = self._facts.get(evidence_key)
+        if flat is not None:
+            self._facts.move_to_end(evidence_key)
+            return flat if retain else flat[0]
         cached = self._facts.get(root)
         if cached is not None and cached[3] is not None:
             order = cached[3][0]
             labels = {slot: index for index, slot in enumerate(order)}
             result = _bytes(_canonical_values([self._rows[slot] for slot in order], labels.__getitem__))
+            self._cache_put(evidence_key, (result, cached[3]), 192 + _primitive_size((result, cached[3])))
             return (result, cached[3]) if retain else result
         closure = self._closures[root]
         slots = []
@@ -636,6 +646,7 @@ class NodePreparation:
             slots.append(bit.bit_length() - 1)
             remaining ^= bit
         result, evidence = self._label_table(root, self._rows, self._children, slots)
+        self._cache_put(evidence_key, (result, evidence), 192 + _primitive_size((result, evidence)))
         return (result, evidence) if retain else result
 
     def _transport_order(self, root):

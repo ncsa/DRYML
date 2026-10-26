@@ -1,13 +1,84 @@
-"""Internal primitive and owned-size rules for Repo and pure Node content facts.
+"""Internal bounds and caller-scoped memoization for immutable content facts.
 
-This dependency-light helper owns no cache, parser, domain values or resources.
+This dependency-light helper owns no parser, domain policy or external resources.
 Sizes overcount repeated immutable leaves and prospective tuple/container slots;
 callers add source/context and facility bookkeeping before reserving storage.
 """
 
+import asyncio
+from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
+import os
 import sys
+from threading import get_ident
 import weakref
 from types import MappingProxyType
+
+
+_content_facts = ContextVar("dryml_immutable_content_facts", default=None)
+
+
+def _caller():
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return os.getpid(), get_ident(), task
+
+
+class _ContentFacts:
+    """Bound pure interpretations by complete input bytes within one caller scope.
+
+    At most 64 entries and 4 MiB of encoded source/output bytes are retained;
+    each interpreted value remains bounded by its owning decoder's grammar.
+    Kind keys distinguish reader implementations and interpretation parameters.
+    No paths, authority cuts, pending flags, owners or availability are cached.
+    """
+
+    def __init__(self):
+        self.caller = _caller()
+        self.entries = OrderedDict()
+        self.bytes = 0
+        self.active = True
+
+    def decode(self, kind, payload, build):
+        key = kind, payload
+        if key in self.entries:
+            self.entries.move_to_end(key)
+            return self.entries[key][0]
+        result = build()
+        charge = len(payload) + (len(result) if type(result) is bytes else 0)
+        if charge <= 4 * 1024 * 1024:
+            while self.entries and (len(self.entries) >= 64 or self.bytes + charge > 4 * 1024 * 1024):
+                _, (_, old_charge) = self.entries.popitem(last=False)
+                self.bytes -= old_charge
+            self.entries[key] = result, charge
+            self.bytes += charge
+        return result
+
+
+def _current_content_facts():
+    facts = _content_facts.get()
+    return facts if facts is not None and facts.active and facts.caller == _caller() else None
+
+
+@contextmanager
+def _content_facts_scope():
+    """Share immutable interpretations only; clear them on every outer scope exit."""
+    if _current_content_facts() is not None:
+        yield
+        return
+    facts = _ContentFacts()
+    token = _content_facts.set(facts)
+    try:
+        yield
+    finally:
+        facts.active = False
+        facts.entries.clear()
+        facts.bytes = 0
+        facts.caller = None
+        _content_facts.reset(token)
 
 
 def _primitive_size(value):

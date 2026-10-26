@@ -33,8 +33,20 @@ def deep_freeze_json(
 
     Mapping keys must be strings; sequences preserve their order.  Sets are
     intentionally rejected because they have no JSON meaning.  Bounds apply to
-    the complete value, including scalar nodes.
+    the complete value, including scalar nodes. value may contain JSON scalar,
+    Mapping and Sequence values; max_* integer parameters bound its tree. Returns
+    detached MappingProxyType/tuple containers. Raises CanonicalJSONError for
+    unsupported, cyclic, nonfinite or oversized input. Performs no IO or mutation.
     """
+    return _project_json(value, max_depth=max_depth, max_nodes=max_nodes,
+        max_entries=max_entries, max_string=max_string, max_int_bits=max_int_bits,
+        mutable=False)
+
+
+def _project_json(value, *, max_depth=DEFAULT_MAX_DEPTH, max_nodes=DEFAULT_MAX_NODES,
+                  max_entries=DEFAULT_MAX_ENTRIES, max_string=DEFAULT_MAX_STRING,
+                  max_int_bits=DEFAULT_MAX_INT_BITS, mutable):
+    """Validate and detach once into either frozen or encoder-ready containers."""
 
     nodes = [0]
     active: set[int] = set()
@@ -45,7 +57,21 @@ def deep_freeze_json(
             raise CanonicalJSONError("canonical JSON exceeds node bound", context={"limit": max_nodes})
         if depth > max_depth:
             raise CanonicalJSONError("canonical JSON exceeds depth bound", context={"limit": max_depth})
-        if isinstance(item, Mapping):
+        kind = type(item)
+        if kind is str:
+            check_string(item, max_string)
+            return item
+        if kind is bool or item is None:
+            return item
+        if kind is int:
+            if item.bit_length() > max_int_bits:
+                raise CanonicalJSONError("canonical JSON integer exceeds bit bound", context={"limit": max_int_bits})
+            return item
+        if kind is float:
+            if not math.isfinite(item):
+                raise CanonicalJSONError("canonical JSON floats must be finite")
+            return item
+        if type(item) is dict or isinstance(item, Mapping):
             identity = id(item)
             if identity in active:
                 raise CanonicalJSONError("canonical JSON cannot contain cyclic containers")
@@ -59,10 +85,11 @@ def deep_freeze_json(
                 keys.append(key)
             active.add(identity)
             try:
-                return MappingProxyType({key: freeze(item[key], depth + 1) for key in sorted(keys)})
+                projected = {key: freeze(item[key], depth + 1) for key in sorted(keys)}
+                return projected if mutable else MappingProxyType(projected)
             finally:
                 active.remove(identity)
-        if isinstance(item, Sequence) and not isinstance(item, str | bytes | bytearray):
+        if type(item) in (list, tuple) or isinstance(item, Sequence) and not isinstance(item, str | bytes | bytearray):
             identity = id(item)
             if identity in active:
                 raise CanonicalJSONError("canonical JSON cannot contain cyclic containers")
@@ -70,7 +97,8 @@ def deep_freeze_json(
                 raise CanonicalJSONError("canonical JSON sequence exceeds entry bound", context={"limit": max_entries})
             active.add(identity)
             try:
-                return tuple(freeze(child, depth + 1) for child in item)
+                projected = (freeze(child, depth + 1) for child in item)
+                return list(projected) if mutable else tuple(projected)
             finally:
                 active.remove(identity)
         if isinstance(item, str):
@@ -92,18 +120,15 @@ def deep_freeze_json(
 
 
 def json_ready(value: Any, **bounds: Any) -> Any:
-    """Return a detached mutable JSON projection after bounded validation."""
+    """Return detached dict/list JSON data with the same bounds as deep_freeze_json.
 
-    frozen = deep_freeze_json(value, **bounds)
-
-    def thaw(item: FrozenJson) -> Any:
-        if isinstance(item, Mapping):
-            return {key: thaw(value) for key, value in item.items()}
-        if isinstance(item, tuple):
-            return [thaw(value) for value in item]
-        return item
-
-    return thaw(frozen)
+    value accepts JSON scalars and supported Mapping/Sequence containers. Optional
+    max_* integer bounds apply to the complete tree. Validation and copying share
+    one traversal; source containers are never retained or mutated. Raises
+    CanonicalJSONError for cyclic, unsupported, nonfinite or oversized input and
+    TypeError for unknown bound arguments. Performs no IO.
+    """
+    return _project_json(value, mutable=True, **bounds)
 
 
 def canonical_json_dumps(data: Any, **bounds: Any) -> str:

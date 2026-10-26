@@ -179,6 +179,33 @@ def test_distribution_location_metadata_failure_is_unknown(stage, error_type):
     assert introspection._distribution_location(FailingDist()) is None
 
 
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="stdlib RECORD filtering fast path")
+@pytest.mark.parametrize("tail", ["later.py,,0\n", "invalid.py,,not-an-integer\n"])
+def test_record_location_checks_only_first_existing_file_and_validates_tail(tmp_path, monkeypatch, tail):
+    from pathlib import Path
+
+    info = tmp_path / "sample-1.dist-info"
+    info.mkdir()
+    (tmp_path / "first.py").touch()
+    (info / "RECORD").write_text("missing.py,,0\nfirst.py,,0\n" + tail)
+    dist = metadata.PathDistribution(info)
+    try:
+        expected = str(Path(dist.locate_file(dist.files[0])).parent)
+    except ValueError:
+        expected = None
+    visited = []
+    exists = Path.exists
+
+    def counted(path):
+        visited.append(path.name)
+        return exists(path)
+
+    monkeypatch.setattr(Path, "exists", counted)
+    assert introspection._distribution_location(dist) == expected
+    assert visited == ["missing.py", "first.py"]
+    assert expected == (None if "not-an-integer" in tail else str(tmp_path))
+
+
 def test_installed_software_evidence_ignores_transient_vendor_paths(
     monkeypatch, tmp_path,
 ):

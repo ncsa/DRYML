@@ -31,6 +31,31 @@ proofs and optional-backend limits are recorded in
 Acquiring low-level admission or constructing metadata alone does not retain
 private state. U15's selected saved-start handshake does acquire physical grants.
 
+### Invocation-local performance and evidence
+
+Snapshot environment evidence is observed lazily before the first capture's state
+reservations, once per executing invocation. Later checkpoints and automatic final
+capture reuse that observation, with independent capture timestamps and requirement
+collection. An unavailable observation remains unavailable for that invocation;
+resume/rerun starts a fresh observation. Replay and explicitly selected finals that
+need no capture perform no environment inventory.
+
+Admission also owns a caller-local, bounded memo of immutable metadata
+interpretations. Exact source bytes, reader implementations and interpretation
+parameters distinguish entries; encoding facts are attached to immutable Node
+handles. At most 64 entries and 4 MiB of encoded source/output bytes are retained,
+with interpreted values additionally bounded by their closed codec grammars. The
+outer admission clears every entry on normal return, failure or cancellation.
+Inherited process/thread/task contexts cannot use another caller's memo.
+
+This memo shares decoding, canonical JSON validation, and pure Node interpretation
+across control and Store readers. It does **not** cache file reads, pending flags,
+authority cuts, ownership, generations, payload availability, grants or publication
+acknowledgements. Every safe point rereads current bytes; every selected-state
+reader and external override is still freshly consulted. Changed/malformed bytes
+cannot match an old interpretation, and a hash alone is never a cache/equality
+proof. See [performance measurements](managed_lifecycle_performance.md).
+
 ### Execute transport boundaries
 
 [Generic Execute](execute.md) supplies detached invocation-graph transport;
