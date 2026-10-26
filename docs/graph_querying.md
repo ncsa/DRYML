@@ -30,7 +30,7 @@ when its containing publication is a recipe. It does not thereby acquire its own
 saved-root membership or capture-metadata holder. Fixed collections and owner
 projections preserve source domain tags, including stateless saved roots whose
 graph content equals their recipe view. `contains(node)` accepts a current Node
-object projection (and the retained ObjectRef adapter) and checks proper subtree
+object projection and checks proper subtree
 object-projection equality.
 
 ```python
@@ -179,21 +179,20 @@ It preserves boolean forms, typed paths, aliases, fixed facets, Match leaves and
 built-in `UniformIntRange` / `UniformFromSet` domains. Runtime Generator providers
 are nonportable and rejected. Decoding never resolves targets or executes code.
 
-Legacy `Selector`, `GeneratorSelector`, and reference selectors remain explicit
+`Selector` and `GeneratorSelector` remain explicit
 adapters. Legacy posting compilation retains an exact prepared residual and
 visible reasons; unsupported facet/predicate coverage requires scan fallback or
 refusal. Candidate IDs alone cannot certify Node acceptance or source completeness.
 
-## Retained Fixed-Reference and Composition API
+## Fixed Results And Composition
 
-The following reference-specific descriptions apply to the retained fixed
-ObjectRef/StateRef adapters. Store-4 source membership and page lifetimes are the
-Node contracts above; Store-3 persistent inputs are not supported or migrated.
+Source membership and page lifetimes follow the Node contracts above. Compound
+ObjectRef/StateRef adapters are removed; Store-3 inputs are not migrated.
 
 Query V3 has one composable identity universe. `Repo.query()` captures identity
 knowledge from connected Stores and retained caches; `Store.query()` captures one
 Store's authority. Construction is inert. Restrictions and terminals inspect
-definitions, complete ObjectRefs, StateRefs, and captured metadata without
+Nodes, LocalStates, and captured metadata without
 materializing Objects, reading payloads, allocating ObjectIds, saving, observing
 the host, or running workloads.
 
@@ -224,15 +223,15 @@ collected results are `IdentitySet` values with deterministic identity ordering.
 on demand. `take(n)` is the explicit eager bounded-prefix operation and retains
 visible boundedness on its returned set.
 
-Exact live StateRef selection restricts the complete knowledge universe: embedded
+Saved Node selection restricts the complete knowledge universe: embedded
 references in definitions, materializing subtree projections, and retained cache
 receipts participate alongside independent snapshots. `collect()` completes the
 contributing-source evidence rather than stopping at a direct snapshot hit.
 Knowledge does not imply independent `.stored()` membership or metadata-holder
-eligibility. An embedded or projected StateRef without its own snapshot remains
+eligibility. An embedded or projected saved Node without its own membership remains
 known but is not independently stored.
 
-Only an exact-StateRef `exists()` without alias, stored, metadata, cache-scope, or
+An exact saved-Node `exists()` without alias, stored, metadata, cache-scope, or
 source-evidence restrictions may use a validated direct positive without broad
 inventory. This direct authority proof cannot satisfy `require_indexed()`. A
 direct miss says nothing about embedded knowledge: a negative live
@@ -241,20 +240,11 @@ policy. Other exact terminals, including analyzed explanations, complete that
 inventory. Scoped scalar terminals validate their selected authority and captured
 read failures before stopping at a positive candidate.
 
-`ObjectRef.object_projection()` and `StateRef.object_projection()` produce an
-`ObjectSelector` for one complete realized graph. Projection preserves ObjectIds,
-CDef topology, and edge roles while replacing every encountered exact reference
-with a nested `ObjectSelector`; StateRef hashes do not participate. Raw ObjectRef
-or StateRef values that a caller explicitly embeds in an ObjectSelector remain
-exact pins. ObjectSelectors are query-only, but their `reference` property exposes
-the corresponding recursively state-weakened ObjectRef when a persistence API
-requires object-association authority.
-
-Use `query.object_projection()` or `identity_set.object_projection()` to collect
-and deduplicate reference members as a fixed `ObjectSelectorSet`. CDef members are
-omitted because they have no realized ObjectIds. This makes multiple checkpoints
-of one realized composite graph count once without merging separately constructed
-graphs:
+`node.object_view()` preserves identities, topology, roles and exact quoted data
+while weakening owned state selections. Use `query.object_projection()` or
+`identity_set.object_projection()` to collect Node object views as a fixed
+`IdentitySet`, merging evidence for equal projections. Multiple checkpoints of one
+realized graph can count once without merging separately identified graphs:
 
 ```python
 runs = repo.query().state_refs().object_projection()
@@ -299,7 +289,7 @@ federated snapshot, broader V3 acceleration, or indexed exact-miss/count executi
 
 `IdentityQuery.iter()` is an explicit terminal returning a single-use, closeable
 Python generator. Query plans themselves remain non-iterable. It yields the same
-complete CDef, ObjectRef or StateRef values in the same identity order as
+Node or LocalState values in the same identity order as
 `collect()`, without constructing a final matching `IdentitySet`:
 
 ```python

@@ -8,7 +8,7 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
-from dryml.core import Repo, Serializable, StateRef, Node, require_saved
+from dryml.core import Repo, Serializable, Node, require_saved
 from dryml.core.execute import CoreExecutionError, SharedDirStoreStrategy
 from dryml.core.execute_codec import decode_outcome
 from dryml.core.signatures import Ref

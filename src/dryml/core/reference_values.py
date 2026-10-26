@@ -1,8 +1,8 @@
-"""Import-free immutable identities for realized DRYML construction graphs.
+"""Namespace-scoped UUID identities for stateful Node occurrences.
 
-The values in this module deliberately describe graph topology and exact state
-identity without constructing Objects, resolving classes, or loading state.
-Store authority and runtime materialization are separate later boundaries.
+Identity allocation and decoding perform no construction, Store IO, or state
+selection. Legacy compound graph references are no longer part of this module;
+identities and state selections belong to Node-local facets.
 """
 
 from __future__ import annotations
@@ -10,20 +10,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
-import builtins
-import hashlib
+from dataclasses import dataclass
 import json
 import re
-from typing import Any, Iterator, TYPE_CHECKING
+from typing import Any, Iterator
 from uuid import UUID, uuid4
-
-from .freeze import FrozenDict
-from .utils.graph.path import GraphPath, GraphPathLike, Kwarg, Parameter, graph_path_sort_key, normalize_path
-from .utils.stable_hash import stable_int_hash
-
-if TYPE_CHECKING:
-    from .selector import ObjectSelector
 
 
 _NAMESPACE = ContextVar("dryml_object_namespace", default=())
@@ -32,7 +23,6 @@ _STATE_HASH = re.compile(r"[A-Za-z0-9]{1,32}-[0-9a-f]{64}\Z")
 _MAX_NAMESPACE_DEPTH = 16
 _MAX_NAMESPACE_PART_LENGTH = 64
 _MAX_NAMESPACE_LENGTH = 256
-_REFERENCE_CODEC_VERSION = 1
 
 
 def _normalize_namespace(namespace: tuple[str, ...] | list[str]) -> tuple[str, ...]:
@@ -45,32 +35,28 @@ def _normalize_namespace(namespace: tuple[str, ...] | list[str]) -> tuple[str, .
         if not isinstance(part, str):
             raise TypeError("ObjectId namespace parts must be strings.")
         if not _NAMESPACE_PART.fullmatch(part):
-            raise ValueError(
-                "ObjectId namespace parts must be non-empty ASCII alphanumeric strings."
-            )
+            raise ValueError("ObjectId namespace parts must be non-empty ASCII alphanumeric strings.")
         if len(part) > _MAX_NAMESPACE_PART_LENGTH:
-            raise ValueError(
-                f"ObjectId namespace parts must be at most {_MAX_NAMESPACE_PART_LENGTH} characters."
-            )
+            raise ValueError(f"ObjectId namespace parts must be at most {_MAX_NAMESPACE_PART_LENGTH} characters.")
         parts.append(part)
     if sum(len(part) for part in parts) > _MAX_NAMESPACE_LENGTH:
-        raise ValueError(
-            f"ObjectId namespace must be at most {_MAX_NAMESPACE_LENGTH} characters."
-        )
+        raise ValueError(f"ObjectId namespace must be at most {_MAX_NAMESPACE_LENGTH} characters.")
     return tuple(parts)
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class ObjectId:
-    """Durable identity of one stateful node in a realized graph.
+    """Immutable namespace and UUID identity for one stateful occurrence.
 
     Args:
-        namespace: Optional namespace for a new identity. ``None`` inherits the
-            current :func:`object_namespace` scope, while ``()`` is explicitly
-            empty.
-
-    Normal construction always allocates a fresh framework nonce. Decoders use
-    :meth:`from_data` to preserve an already-authoritative full UUID.
+        namespace (tuple[str, ...] | list[str] | None): New identity namespace.
+            None inherits object_namespace(); () explicitly selects no namespace.
+    Raises:
+        TypeError: If namespace components have unsupported types.
+        ValueError: If namespace text or size is outside the supported bounds.
+    Side Effects:
+        Allocates a fresh UUID4 nonce. No Store lookup, publication, construction,
+        or reservation occurs. Use from_data() to preserve a recorded nonce.
     """
 
     namespace: tuple[str, ...]
@@ -92,19 +78,12 @@ class ObjectId:
 
     @classmethod
     def from_data(cls, data: Any) -> "ObjectId":
-        """Decode one trusted full ObjectId record.
+        """Decode a closed namespace/nonce mapping, preserving the full UUID.
 
-        Args:
-            data: Mapping with exactly ``namespace`` and ``nonce`` fields.
-
-        Returns:
-            The validated identity with the persisted UUID preserved.
-
-        Raises:
-            TypeError: If the record fields have unsupported types.
-            ValueError: If the record is malformed.
+        Returns an immutable ObjectId without allocating a nonce. Unsupported
+        field types raise TypeError; malformed fields or UUIDs raise ValueError.
+        No external state is read or changed.
         """
-
         if not isinstance(data, Mapping) or set(data) != {"namespace", "nonce"}:
             raise ValueError("ObjectId records require exactly namespace and nonce fields.")
         try:
@@ -114,12 +93,12 @@ class ObjectId:
         return cls._trusted(data["namespace"], nonce)
 
     def to_data(self) -> dict[str, Any]:
-        """Return the lossless machine-readable ObjectId record."""
-
+        """Return a fresh JSON-compatible namespace/nonce mapping without effects."""
         return {"namespace": list(self.namespace), "nonce": str(self.nonce)}
 
     def __stable_leaf_bytes__(self) -> bytes:
-        return _canonical_bytes(("object-id", self.namespace, self.nonce.hex))
+        return json.dumps(("object-id", self.namespace, self.nonce.hex),
+                          separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
     def __str__(self) -> str:
         prefix = "/".join(self.namespace)
@@ -128,23 +107,19 @@ class ObjectId:
 
 @contextmanager
 def object_namespace(*parts: str) -> Iterator[tuple[str, ...]]:
-    """Append namespace parts for identities created inside the context.
+    """Append validated namespace parts within a thread/task-local context.
 
     Args:
-        *parts: Normalized namespace components to append to the current scope.
-
+        *parts (str): ASCII alphanumeric namespace components.
     Yields:
-        The effective immutable namespace tuple.
-
+        tuple[str, ...]: Effective immutable namespace for new ObjectIds.
     Raises:
         TypeError: If a component is not a string.
-        ValueError: If components violate namespace bounds or normalization.
-
+        ValueError: If the combined namespace violates text or size limits.
     Side Effects:
-        Installs a task- and thread-local ContextVar value that is restored on
-        normal or exceptional exit.
+        Installs a ContextVar value and restores it on normal or exceptional exit.
+        Existing identities are unchanged; entering the context allocates no ID.
     """
-
     namespace = _normalize_namespace(_NAMESPACE.get() + tuple(parts))
     token = _NAMESPACE.set(namespace)
     try:
@@ -153,668 +128,6 @@ def object_namespace(*parts: str) -> Iterator[tuple[str, ...]]:
         _NAMESPACE.reset(token)
 
 
-def _canonical_bytes(value: Any) -> bytes:
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-
-
-def _path_data(path: GraphPath) -> dict[str, Any]:
-    return path.to_data()
-
-
-def _normalize_mapping(mapping: Mapping[Any, Any], value_type: type, name: str) -> FrozenDict:
-    if not isinstance(mapping, Mapping):
-        raise TypeError(f"{name} must be a mapping.")
-    values: dict[GraphPath, Any] = {}
-    for path, value in mapping.items():
-        normalized = normalize_path(path)
-        if normalized in values:
-            raise ValueError(f"{name} contains duplicate path {normalized!s}.")
-        if not isinstance(value, value_type):
-            raise TypeError(f"{name} values must be {value_type.__name__} instances.")
-        values[normalized] = value
-    return FrozenDict(dict(sorted(values.items(), key=lambda item: graph_path_sort_key(item[0]))))
-
-
 def _validate_state_hash(value: str) -> None:
     if not isinstance(value, str) or not _STATE_HASH.fullmatch(value):
-        raise ValueError(
-            "State hashes must be '<codec>-<64 lowercase hexadecimal digest>' values."
-        )
-
-
-def _reference_types():
-    return ObjectRef, StateRef
-
-
-def _collect_occurrences(definition: Any, *, node_values=None) -> dict[object, list[GraphPath]]:
-    """Collect every owned stateful occurrence under a CDef without imports."""
-
-    from .definition import ConcreteDefinition
-    from .links import DefLink
-    from .cdef_graph import EdgeKind
-    from .utils.graph.value import iter_value_edges
-
-    occurrences: dict[object, list[GraphPath]] = {}
-    active: set[object] = set()
-
-    def visit_cdef(cdef: ConcreteDefinition, path: GraphPath) -> None:
-        key = ("cdef", cdef._node_id)
-        if cdef._stateful_role:
-            occurrences.setdefault(key, []).append(path)
-            if node_values is not None:
-                node_values[key] = cdef
-        if key in active:
-            raise ValueError(f"Materializing CDef cycle at {path!s}.")
-        active.add(key)
-        try:
-            for edge in iter_value_edges(cdef):
-                visit_value(edge.value, path.child(edge.segment))
-        finally:
-            active.remove(key)
-
-    def visit_imported(ref: ObjectRef | StateRef, path: GraphPath) -> None:
-        imported = ref.object if isinstance(ref, StateRef) else ref
-        inner = _collect_occurrences(imported.definition)
-        primary = _primary_paths(inner)
-        for key, primary_path in primary.items():
-            object_id = imported.objects[primary_path]
-            for occurrence in inner[key]:
-                occurrences.setdefault(("object-id", object_id), []).append(path.join(occurrence))
-
-    def visit_value(value: Any, path: GraphPath) -> None:
-        if isinstance(value, ConcreteDefinition):
-            visit_cdef(value, path)
-            return
-        if isinstance(value, DefLink):
-            if value.kind is EdgeKind.MATERIALIZE:
-                visit_value(value.target, path)
-            return
-        if isinstance(value, _reference_types()):
-            visit_imported(value, path)
-            return
-        for edge in iter_value_edges(value):
-            visit_value(edge.value, path.child(edge.segment))
-
-    visit_cdef(definition, GraphPath())
-    return occurrences
-
-
-def _primary_paths(occurrences: Mapping[object, list[GraphPath]]) -> dict[object, GraphPath]:
-    return {
-        key: min(paths, key=graph_path_sort_key)
-        for key, paths in occurrences.items()
-    }
-
-
-def _expected_paths(definition: Any, *, node_values=None) -> tuple[dict[object, GraphPath], dict[GraphPath, object]]:
-    by_key = _primary_paths(_collect_occurrences(definition, node_values=node_values))
-    return by_key, {path: key for key, path in by_key.items()}
-
-
-@dataclass(frozen=True, slots=True, init=False, eq=False)
-class ObjectRef:
-    """Exact graph topology plus one ObjectId for each owned stateful node.
-
-    Args:
-        definition: Root canonical CDef preserving the complete graph topology.
-        objects: Mapping from each required canonical primary path to ObjectId.
-
-    Raises:
-        TypeError: If inputs are not canonical CDef/path/ObjectId values.
-        ValueError: If paths, identities, aliases, or imported materializing
-            references do not form the exact complete owned-stateful mapping.
-            Imported occurrences must retain their embedded ObjectIds.
-
-    Validation also retains private immutable target/ObjectId associations for
-    shared Node encoding. Context-local unordered path ordinals are not portable
-    identity evidence; these associations let that codec rebase paths without
-    changing pin meanings. The existing V2 data record remains unchanged.
-
-    Equality compares exact configuration, roles, bindings and sharing within
-    each V2 reference/quotation value scope, including across authored Node and
-    decoded CDef handles. Cross-value aliases are not transported by V2. Full
-    Node closure equality remains available through Node.graph_equal and the
-    identity-3 codec; it is not inferred from ObjectRef value equality.
-    """
-
-    definition: Any
-    objects: Mapping[GraphPath, ObjectId]
-    _digest_cache: str | None = field(
-        default=None, init=False, repr=False, compare=False, hash=False,
-    )
-    _node_bindings: tuple = field(default=(), init=False, repr=False, compare=False, hash=False)
-
-    def __init__(self, definition: Any, objects: Mapping[Any, ObjectId]):
-        from .definition import ConcreteDefinition
-
-        if not isinstance(definition, ConcreteDefinition):
-            raise TypeError("ObjectRef definition must be a ConcreteDefinition.")
-        node_values = {}
-        expected_by_key, expected_by_path = _expected_paths(definition, node_values=node_values)
-        normalized = _normalize_mapping(objects, ObjectId, "ObjectRef objects")
-        if set(normalized) != set(expected_by_path):
-            missing = sorted(set(expected_by_path) - set(normalized), key=graph_path_sort_key)
-            extra = sorted(set(normalized) - set(expected_by_path), key=graph_path_sort_key)
-            raise ValueError(
-                f"ObjectRef objects must contain exactly canonical primary paths; "
-                f"missing={[str(path) for path in missing]!r}, extra={[str(path) for path in extra]!r}."
-            )
-        values = tuple(normalized.values())
-        if len(values) != len(set(values)):
-            raise ValueError("ObjectRef cannot assign one ObjectId to independent stateful nodes.")
-        for key, primary_path in expected_by_key.items():
-            if key[:1] == ("object-id",) and normalized[primary_path] != key[1]:
-                raise ValueError(
-                    f"ObjectRef imported primary path {primary_path!s} must retain "
-                    "its embedded ObjectId."
-                )
-        object.__setattr__(self, "definition", definition)
-        object.__setattr__(self, "objects", normalized)
-        object.__setattr__(self, "_digest_cache", None)
-        object.__setattr__(self, "_node_bindings", tuple(
-            (node_values.get(key), normalized[path]) for key, path in expected_by_key.items()))
-
-    @property
-    def object_id(self) -> ObjectId | None:
-        """Return the root identity, or ``None`` when the root is ephemeral."""
-
-        return self.objects.get(GraphPath())
-
-    def state(self, alias: str) -> "StateSelectorRef":
-        """Return a soft selector for a state alias scoped to this exact graph."""
-
-        return StateSelectorRef(self, alias)
-
-    def at(self, path: GraphPathLike = "$") -> "ObjectRef":
-        """Project a closed, rebased materializing subtree.
-
-        Args:
-            path: Canonical path to a CDef or materializing exact-reference edge,
-                including paths nested inside imported exact references.
-
-        Returns:
-            The selected subtree with every owned ObjectId path rebased to root.
-
-        Raises:
-            QueryPathError: If the path does not select a materializing subtree.
-            ValueError: If the path selects a Ref-only edge.
-        """
-
-        return _project_object_ref(self, normalize_path(path))
-
-    def object_projection(self, *, traverse_refs: bool = False) -> "ObjectSelector":
-        """Return a recursive selector for this object graph across states.
-
-        Args:
-            traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
-                Ref-held exact references are projected regardless of this flag.
-
-        Returns:
-            An ObjectSelector retaining this reference's ObjectIds, graph
-            topology, and edge roles. Every encountered ObjectRef or StateRef is
-            recursively represented by another ObjectSelector.
-
-        Raises:
-            TypeError: If ``traverse_refs`` is not a bool.
-            ValueError: If the graph contains an unsupported cycle.
-            CDefGraphCodecError: If identity-3 Node facets or retained construction
-                cannot be represented by this V2 query adapter. Use Node.object_view.
-
-        Side Effects:
-            None. The source reference and its authoritative ObjectId mapping are
-            not changed, and no Store is consulted.
-        """
-
-        from .cdef_codec import (
-            object_projection_cdef,
-            _object_reference_projection_cdef,
-        )
-        from .selector import ObjectSelector
-
-        reference = ObjectRef(
-            _object_reference_projection_cdef(
-                self.definition, traverse_refs=traverse_refs,
-            ),
-            self.objects,
-        )
-        return ObjectSelector._projected(
-            object_projection_cdef(
-                self.definition, traverse_refs=traverse_refs,
-            ),
-            self.objects,
-            reference,
-        )
-
-    def _identity_data(self, *, graph_hash=None) -> dict[str, Any]:
-        return {
-            "definition_graph": graph_hash or self.definition.graph_hash(),
-            "objects": [
-                [_path_data(path), object_id.to_data()]
-                for path, object_id in self.objects.items()
-            ],
-        }
-
-    def digest(self) -> str:
-        """Return and memoize a deterministic digest for this exact identity.
-
-        Memoization changes only private state on this immutable value and does
-        not read or mutate Store authority.
-        """
-
-        if self._digest_cache is None:
-            object.__setattr__(
-                self,
-                "_digest_cache",
-                hashlib.sha256(
-                    b"dryml-object-ref-v1\x00" + _canonical_bytes(self._identity_data())
-                ).hexdigest(),
-            )
-        return self._digest_cache
-
-    def __stable_leaf_bytes__(self) -> bytes:
-        return b"dryml-object-ref-v1\x00" + self.digest().encode("ascii")
-
-    def __hash__(self) -> int:
-        return stable_int_hash(self.digest())
-
-    def __eq__(self, other: object) -> bool:
-        from .cdef_codec import _reference_cdef_graph_equal
-
-        return (
-            isinstance(other, ObjectRef)
-            and _reference_cdef_graph_equal(self.definition, other.definition)
-            and self.objects == other.objects
-        )
-
-    def to_data(self) -> dict[str, Any]:
-        """Encode this reference with token-neutral CDef graph authority."""
-
-        from .cdef_codec import encode_cdef_graph
-
-        return {
-            "codec_version": _REFERENCE_CODEC_VERSION,
-            "definition": encode_cdef_graph(self.definition),
-            "objects": [
-                {"path": _path_data(path), "object_id": object_id.to_data()}
-                for path, object_id in self.objects.items()
-            ],
-        }
-
-    @classmethod
-    def from_data(cls, data: Any) -> "ObjectRef":
-        """Fully validate token-neutral ObjectRef authority with fresh graph nodes.
-
-        Args:
-            data (Mapping): Versioned graph and canonical path/ObjectId entries.
-        Returns:
-            Fresh ObjectRef preserving graph-local sharing and durable ObjectIds.
-        Raises:
-            TypeError: For unsupported field or identity types.
-            ValueError: For malformed graph, duplicate paths or wrong associations.
-        Side Effects:
-            No Store IO or class resolution; retains no cross-call graph storage.
-        """
-        return cls._from_data_prepared(data, None)
-
-    @classmethod
-    def _from_data_prepared(cls, data, prepared):
-
-        from .cdef_codec import decode_cdef_graph
-
-        if not isinstance(data, Mapping) or set(data) != {"codec_version", "definition", "objects"}:
-            raise ValueError("ObjectRef records require codec_version, definition, and objects fields.")
-        if data["codec_version"] != _REFERENCE_CODEC_VERSION or not isinstance(data["objects"], list):
-            raise ValueError("Unsupported or malformed ObjectRef record.")
-        objects = {}
-        for entry in data["objects"]:
-            if not isinstance(entry, Mapping) or set(entry) != {"path", "object_id"}:
-                raise ValueError("ObjectRef object entries require path and object_id fields.")
-            path = GraphPath.from_data(entry["path"])
-            if path in objects:
-                raise ValueError(f"ObjectRef record repeats path {path!s}.")
-            objects[path] = ObjectId.from_data(entry["object_id"])
-        if prepared is None:
-            definition = decode_cdef_graph(data["definition"])
-        else:
-            from .cdef_codec import _realize_prepared_graph
-            definition = _realize_prepared_graph(prepared.graph)
-        result = cls(definition, objects)
-        if prepared is not None:
-            object.__setattr__(result, "_digest_cache", hashlib.sha256(
-                b"dryml-object-ref-v1\x00" + _canonical_bytes(
-                    result._identity_data(graph_hash=prepared.graph_hash)
-                )).hexdigest())
-        return result
-
-
-@dataclass(frozen=True, slots=True, init=False, eq=False)
-class StateRef:
-    """Exact immutable local-state hashes for one complete ObjectRef graph.
-
-    Args:
-        object: Complete exact ObjectRef graph identity.
-        states: Mapping with exactly the ObjectRef primary paths and local hashes.
-
-    Raises:
-        TypeError: If the object or state mapping has unsupported types.
-        ValueError: If state paths differ from the ObjectRef or hashes are invalid.
-    """
-
-    object: ObjectRef
-    states: Mapping[GraphPath, str]
-    _digest_cache: str | None = field(
-        default=None, init=False, repr=False, compare=False, hash=False,
-    )
-
-    def __init__(self, object: ObjectRef, states: Mapping[Any, str]):
-        if not isinstance(object, ObjectRef):
-            raise TypeError("StateRef object must be an ObjectRef.")
-        normalized = _normalize_mapping(states, str, "StateRef states")
-        for state_hash in normalized.values():
-            _validate_state_hash(state_hash)
-        if set(normalized) != set(object.objects):
-            raise ValueError("StateRef states must have exactly the ObjectRef primary paths.")
-        builtins.object.__setattr__(self, "object", object)
-        builtins.object.__setattr__(self, "states", normalized)
-        builtins.object.__setattr__(self, "_digest_cache", None)
-
-    @property
-    def definition(self) -> Any:
-        """Return the complete underlying CDef topology without loading state."""
-
-        return self.object.definition
-
-    @property
-    def object_id(self) -> ObjectId | None:
-        """Return the identified root ObjectId, or ``None`` for ephemeral roots."""
-
-        return self.object.object_id
-
-    def at(self, path: GraphPathLike = "$") -> "StateRef":
-        """Project a closed subtree with enclosing authoritative state hashes.
-
-        Args:
-            path: Canonical path to a materializing subtree, including paths
-                nested inside imported exact references.
-
-        Returns:
-            An exact StateRef whose paths are rebased to the selected subtree.
-
-        Raises:
-            QueryPathError: If the path does not resolve to a subtree.
-            ValueError: If the path selects a Ref-only or non-materializing edge.
-        """
-
-        normalized = normalize_path(path)
-        projected = self.object.at(normalized)
-        states = _project_mapping(self.object.definition, self.object.objects, self.states, normalized)
-        return StateRef(projected, states)
-
-    def object_projection(self, *, traverse_refs: bool = False) -> "ObjectSelector":
-        """Return this StateRef's recursive non-state object selector.
-
-        Args:
-            traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
-                Ref-held exact references are projected regardless of this flag.
-
-        Returns:
-            An ObjectSelector retaining every ObjectId and all supported graph
-            roles while recursively removing StateRef selections.
-
-        Raises:
-            TypeError: If ``traverse_refs`` is not a bool.
-            ValueError: If the graph contains an unsupported cycle.
-            CDefGraphCodecError: If identity-3 Node evidence requires Node.object_view
-                rather than this existing V2 query adapter.
-
-        Side Effects:
-            None. This does not read state, materialize an Object, or allocate an
-            ObjectId. ``.object`` remains the existing shallow projection.
-        """
-
-        return self.object.object_projection(traverse_refs=traverse_refs)
-
-    def reference_value_at(self, path: GraphPathLike = "$") -> ObjectRef | "StateRef":
-        """Return terminal Ref-held exact reference data at a graph path.
-
-        Args:
-            path: Path through semantic CDef parameters and supported containers.
-                Earlier edges may be materializing, but the final edge must be a
-                Ref whose target is an ObjectRef or StateRef.
-
-        Returns:
-            The exact terminal ObjectRef or StateRef without weakening, loading,
-            or materializing it.
-
-        Raises:
-            ValueError: If the path is missing, crosses a Ref boundary, does not
-                end at Ref-held reference data, or uses an unsupported traversal.
-
-        Side Effects:
-            None. This accessor performs graph inspection only; it neither reads
-            state nor invokes arbitrary attributes or descriptors.
-        """
-
-        from .cdef_graph import EdgeKind
-        from .definition import ConcreteDefinition
-        from .links import DefLink
-        from .utils.graph.value import get_subtree
-
-        normalized = normalize_path(path)
-        if not normalized:
-            raise ValueError("Reference value paths must end at terminal Ref-held reference data.")
-        current: Any = self.definition
-        for index, segment in enumerate(normalized):
-            terminal = index == len(normalized) - 1
-            if isinstance(segment, Kwarg) and isinstance(current, ConcreteDefinition):
-                segment = Parameter(segment.name)
-            try:
-                selected = get_subtree(current, GraphPath((segment,)))
-            except Exception as error:
-                raise ValueError(f"Reference value path {normalized!s} is invalid.") from error
-            if isinstance(selected, DefLink):
-                if selected.kind is EdgeKind.REF:
-                    if not terminal:
-                        raise ValueError("Reference value paths cannot traverse a Ref boundary.")
-                    if isinstance(selected.target, (ObjectRef, StateRef)):
-                        return selected.target
-                    raise ValueError(
-                        "Reference value paths must end at terminal Ref-held reference data."
-                    )
-                if selected.kind is not EdgeKind.MATERIALIZE:
-                    raise ValueError("Reference value path has an unsupported edge role.")
-                if terminal:
-                    raise ValueError(
-                        "Reference value paths must end at terminal Ref-held reference data."
-                    )
-                selected = selected.target
-            elif terminal:
-                raise ValueError(
-                    "Reference value paths must end at terminal Ref-held reference data."
-                )
-
-            if isinstance(selected, (ObjectRef, StateRef)):
-                # Canonical CDefs erase materializing reference assertions while
-                # retaining Ref boundaries as links, so a direct exact reference
-                # here is an already-normalized materializing edge.
-                current = selected.definition
-                continue
-            current = selected
-
-    def digest(self) -> str:
-        """Return and memoize a deterministic digest for this state identity.
-
-        Memoization changes only private state on this immutable value and does
-        not read or mutate Store authority.
-        """
-
-        if self._digest_cache is None:
-            data = {
-                "object": self.object.digest(),
-                "states": [[_path_data(path), state_hash] for path, state_hash in self.states.items()],
-            }
-            builtins.object.__setattr__(
-                self,
-                "_digest_cache",
-                hashlib.sha256(
-                    b"dryml-state-ref-v1\x00" + _canonical_bytes(data)
-                ).hexdigest(),
-            )
-        return self._digest_cache
-
-    def __stable_leaf_bytes__(self) -> bytes:
-        return b"dryml-state-ref-v1\x00" + self.digest().encode("ascii")
-
-    def __hash__(self) -> int:
-        return stable_int_hash(self.digest())
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, StateRef) and self.object == other.object and self.states == other.states
-
-    def to_data(self) -> dict[str, Any]:
-        """Encode this reference with token-neutral CDef graph authority."""
-
-        return {
-            "codec_version": _REFERENCE_CODEC_VERSION,
-            "object": self.object.to_data(),
-            "states": [
-                {"path": _path_data(path), "state": state_hash}
-                for path, state_hash in self.states.items()
-            ],
-        }
-
-    @classmethod
-    def from_data(cls, data: Any) -> "StateRef":
-        """Fully validate token-neutral StateRef authority and realize fresh values.
-
-        Args:
-            data (Mapping): Versioned ObjectRef and canonical path/state entries.
-        Returns:
-            Fresh StateRef with the exact complete ObjectId/state association.
-        Raises:
-            TypeError: For unsupported reference or state types.
-            ValueError: For malformed graphs, duplicate paths or invalid hashes.
-        Side Effects:
-            No Store IO, payload reads or class resolution.
-        """
-        return cls._from_data_prepared(data, None)
-
-    @classmethod
-    def _from_data_prepared(cls, data, prepared):
-
-        if not isinstance(data, Mapping) or set(data) != {"codec_version", "object", "states"}:
-            raise ValueError("StateRef records require codec_version, object, and states fields.")
-        if data["codec_version"] != _REFERENCE_CODEC_VERSION or not isinstance(data["states"], list):
-            raise ValueError("Unsupported or malformed StateRef record.")
-        states = {}
-        for entry in data["states"]:
-            if not isinstance(entry, Mapping) or set(entry) != {"path", "state"}:
-                raise ValueError("StateRef state entries require path and state fields.")
-            path = GraphPath.from_data(entry["path"])
-            if path in states:
-                raise ValueError(f"StateRef record repeats path {path!s}.")
-            states[path] = entry["state"]
-        reference = (ObjectRef.from_data(data["object"]) if prepared is None
-                     else ObjectRef._from_data_prepared(data["object"], prepared))
-        return cls(reference, states)
-
-
-@dataclass(frozen=True, slots=True)
-class StateSelectorRef:
-    """Soft state-alias selector that must resolve before CDef finalization.
-
-    Args:
-        object: Exact ObjectRef scope for the selected alias.
-        alias: Non-empty Store-managed state alias text.
-
-    The value carries no state authority itself. A managing Repo resolves it to
-    one StateRef during canonicalization.
-    """
-
-    object: ObjectRef
-    alias: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.object, ObjectRef):
-            raise TypeError("StateSelectorRef object must be an ObjectRef.")
-        if not isinstance(self.alias, str) or not self.alias:
-            raise ValueError("StateSelectorRef alias must be a non-empty string.")
-
-    def __stable_leaf_bytes__(self) -> bytes:
-        return _canonical_bytes(("state-selector-ref", self.object.digest(), self.alias))
-
-
-def _unwrap_materializing(value: Any) -> Any:
-    from .links import DefLink
-    from .cdef_graph import EdgeKind
-
-    if isinstance(value, DefLink):
-        if value.kind is not EdgeKind.MATERIALIZE:
-            raise ValueError("Reference projection cannot select a Ref-only edge.")
-        return value.target
-    return value
-
-
-def _project_mapping(
-    definition: Any,
-    objects: Mapping[GraphPath, ObjectId],
-    values: Mapping[GraphPath, Any],
-    path: GraphPath,
-) -> FrozenDict:
-    from .definition import ConcreteDefinition
-
-    selected = _projection_target(definition, path)
-    if isinstance(selected, StateRef):
-        selected = selected.object
-    if isinstance(selected, ObjectRef):
-        selected = selected.definition
-    if not isinstance(selected, ConcreteDefinition):
-        raise ValueError(f"Path {path!s} does not select a materializing CDef subtree.")
-
-    occurrences = _collect_occurrences(definition)
-    primary = _primary_paths(occurrences)
-    occurrence_values = {
-        occurrence_path: values[primary[key]]
-        for key, paths in occurrences.items()
-        for occurrence_path in paths
-    }
-    selected_occurrences = _collect_occurrences(selected)
-    out: dict[GraphPath, Any] = {}
-    for key, local_paths in selected_occurrences.items():
-        local_primary = min(local_paths, key=graph_path_sort_key)
-        try:
-            out[local_primary] = occurrence_values[path.join(local_primary)]
-        except KeyError as error:
-            raise ValueError(f"Path {path!s} is not an owned subtree of this ObjectRef.") from error
-    return FrozenDict(dict(sorted(out.items(), key=lambda item: graph_path_sort_key(item[0]))))
-
-
-def _projection_target(definition: Any, path: GraphPath) -> Any:
-    """Resolve a materializing path while entering imported exact references."""
-
-    from .utils.graph.value import get_subtree
-
-    selected = definition
-    for index, segment in enumerate(path):
-        selected = _unwrap_materializing(get_subtree(selected, GraphPath((segment,))))
-        if isinstance(selected, StateRef):
-            selected = selected.object
-        if isinstance(selected, ObjectRef) and index != len(path) - 1:
-            selected = selected.definition
-    return selected
-
-
-def _project_object_ref(ref: ObjectRef, path: GraphPath) -> ObjectRef:
-    if not path:
-        return ref
-    selected = _projection_target(ref.definition, path)
-    if isinstance(selected, StateRef):
-        selected = selected.object
-    if isinstance(selected, ObjectRef):
-        return selected
-    from .definition import ConcreteDefinition
-
-    if not isinstance(selected, ConcreteDefinition):
-        raise ValueError(f"Path {path!s} does not select a materializing CDef subtree.")
-    projected = _project_mapping(ref.definition, ref.objects, ref.objects, path)
-    return ObjectRef(selected, projected)
+        raise ValueError("State hashes must be '<codec>-<64 lowercase hexadecimal digest>' values.")

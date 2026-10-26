@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from dryml.core import Executor as CoreExecutor
-from dryml.core import Repo, StateRef
+from dryml.core import Repo, SavedNode, require_saved
 from dryml.core.execute import CoreOptions
 from dryml.core.store.dir import DirStore
 from dryml.execute.ray import RayBackendConfig
@@ -28,7 +28,7 @@ def _one_cpu_world() -> WorldRequirement:
     })
 
 
-def _assert_fresh_result(state_dir: Path, state: StateRef) -> None:
+def _assert_fresh_result(state_dir: Path, state: SavedNode) -> None:
     """Read a result from exact state without providing source/control authority."""
 
     script = """
@@ -85,7 +85,7 @@ def test_existing_ray_fold_publishes_and_restores_its_result_without_source(tmp_
     state = fold.compute.status(
         state_repo=repo, control_store=control_store,
     ).final_state_ref
-    assert isinstance(state, StateRef)
+    assert require_saved(state) is state
     source_path.unlink()
     control_store.close()
     shutil.rmtree(control_dir)

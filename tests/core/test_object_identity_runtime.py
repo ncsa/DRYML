@@ -19,5 +19,5 @@ def test_only_serializable_nodes_receive_runtime_object_ids():
 
     assert parent.object_id is not None
     assert child.object_id is None
-    assert parent.object_ref.object_id == parent.object_id
+    assert repo.describe(parent).object_id == parent.object_id
     assert parent._last_state_hash is None

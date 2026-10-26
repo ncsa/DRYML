@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -191,64 +190,6 @@ class RepoQueryIndex:
             rebuild = getattr(index, "rebuild", None)
             if rebuild is not None:
                 rebuild()
-
-    def register_saved_graph(
-            self,
-            graph,
-            roots_by_store: Mapping[Any, Sequence[Any]],
-            state_refs_by_store: Mapping[Any, Sequence[Any]] | None = None) -> None:
-        """Register one completed authoritative save with derived Store indexes.
-
-        Args:
-            graph: Complete query graph published by the save.
-            roots_by_store: Stored roots grouped by owning Store.
-            state_refs_by_store: Newly published StateRefs grouped by Store for
-                incremental advisory-reference registration.
-
-        Raises:
-            Exception: Propagates a configured index registration failure after
-                marking the Store index dirty when supported.
-
-        Side Effects:
-            Updates available derived indexes or leaves their durable dirty
-            markers in place when registration fails.
-        """
-
-        if self._authority_only:
-            return
-        self.refresh_bindings()
-        binding_by_key = {binding.source_key: binding for binding in self._bindings}
-        for store, roots in roots_by_store.items():
-            roots = tuple(roots)
-            if not roots:
-                continue
-            binding = binding_by_key.get(_store_source_key(store))
-            if binding is None:
-                continue
-            if getattr(store, "query_index_policy", None) in {"memory", "none"}:
-                continue
-            index = self.open_store_index(binding)
-            if index is None:
-                continue
-            register_saved = getattr(index, "register_saved_graph", None)
-            register = register_saved or getattr(index, "register_stored_roots", None)
-            if register is None:
-                continue
-            try:
-                if register_saved is not None:
-                    references = () if state_refs_by_store is None else tuple(
-                        state_refs_by_store.get(store, ())
-                    )
-                    register(graph, roots, references)
-                else:
-                    register(graph, roots)
-            except QueryIndexUnavailable:
-                continue
-            except Exception:
-                marker = getattr(store, "mark_query_index_dirty", None)
-                if marker is not None:
-                    marker()
-                raise
 
     def close(self) -> None:
         """Detach this Repo's views without closing Store-owned indexes."""

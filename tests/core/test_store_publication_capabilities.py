@@ -46,7 +46,7 @@ def test_read_cut_expiry_clear_close_and_error_cleanup(tmp_path):
     assert repo._topology_leases == 0
     assert not cut.active
     with pytest.raises(RuntimeError, match="inactive"):
-        cut.snapshot(store, "a" * 64)
+        cut.check(store)
     with pytest.raises(RuntimeError, match="re-entered"):
         cut.__enter__()
     with repo._read_cut() as cleared:
@@ -56,7 +56,7 @@ def test_read_cut_expiry_clear_close_and_error_cleanup(tmp_path):
     repo.close(flush=False)
     with pytest.raises(RuntimeError, match="close"):
         repo._read_cut().__enter__()
-    assert store.read_state_ref_record("a" * 64) is None
+    assert store.read_node("a" * 64, kind="saved") is None
 
 
 def test_foreign_thread_cannot_read_or_unwind_cut(tmp_path):
@@ -169,10 +169,9 @@ def test_zip_cut_keeps_extractions_distinct_and_checks_cached_liveness(tmp_path,
     repo = Repo([first, second])
     try:
         with repo._read_cut() as cut:
-            assert first._can_reuse_exact_validation()
-            assert second._can_reuse_exact_validation()
             assert first.authority_fence_key() != second.authority_fence_key()
-            assert first._cut_snapshot_key(cut, state.digest) != second._cut_snapshot_key(cut, state.digest)
+            cut.check(first)
+            cut.check(second)
             assert first.read_node(state.digest).graph_equal(second.read_node(state.digest))
             second.close()
             assert os.path.isdir(second.base_dir)

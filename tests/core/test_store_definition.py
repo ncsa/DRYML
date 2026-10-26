@@ -11,7 +11,6 @@ from dryml import session
 from dryml.core import Object, Repo, RepoDefinitionError, RepoReconstructionError
 from dryml.core import session as core_session
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
 from dryml.core.node_prepare import NodePreparation
 from dryml.core.store.store import Store, StoreAuthorityError
 from dryml.core.store.zip import ZipStore
@@ -25,10 +24,10 @@ class StoreDefinitionRecordObject(Object):
         self.value = value
 
 
-def _record(value="record"):
-    """Return one small immutable record suitable for Store transaction tests."""
+def _object(value="record"):
+    """Return a stateless fixture whose Node can be published in a transaction."""
 
-    return DefinitionRecord(StoreDefinitionRecordObject(value).definition)
+    return StoreDefinitionRecordObject(value)
 
 
 def _committed_zip(path):
@@ -253,7 +252,7 @@ def test_cached_zip_hit_keeps_dirty_transaction_and_cache_cleanup_never_commits(
     definition = archive.to_definition()
     repo = Repo(archive)
     dryml.configure(repo=repo)
-    record = _record("dirty")
+    record = _object("dirty")
 
     with session.resource_cache():
         archive.publish_node(record.definition)
@@ -283,7 +282,7 @@ def test_cached_zip_hit_keeps_dirty_transaction_and_cache_cleanup_never_commits(
         reopened.close()
 
     committed = path.read_bytes()
-    discarded = _record("discarded")
+    discarded = _object("discarded")
 
     with session.resource_cache():
         owned = Store.from_definition(definition)
@@ -307,7 +306,7 @@ def test_cached_zip_commit_rekeys_its_live_transaction(tmp_path):
     try:
         with session.resource_cache():
             cached = Store.from_definition(definition)
-            cached.publish_node(_record("committed").definition)
+            cached.publish_node(_object("committed").definition)
             cached.commit()
 
             assert Store.from_definition(definition) is cached
@@ -324,7 +323,7 @@ def test_cached_zip_does_not_rekey_after_external_archive_replacement(tmp_path):
     try:
         with session.resource_cache():
             cached = Store.from_definition(definition)
-            replacement.publish_node(_record("replacement").definition)
+            replacement.publish_node(_object("replacement").definition)
             replacement.commit()
 
             assert Store.from_definition(definition) is not cached

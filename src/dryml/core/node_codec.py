@@ -1,6 +1,6 @@
 """Closed Node graph v1 blocks and compact authenticated root views.
 
-This is the identity-3 family, separate from the still-live CDef V2 Store codec.
+This is the identity-3 family for current graph transport and Store authority.
 Values use explicit codecs; neither pickle nor repr is semantic authority.
 Detached projection owners can retain all validated views from one shared decode.
 """
@@ -82,13 +82,11 @@ def _value_record(value, visit, state):
     from .config import ConfigRef
     from .links import DefLink
     from .quoted import QuotedDef, SelectorSpec
-    from .reference_values import ObjectRef, StateRef, StateSelectorRef
-    from .selector import ObjectSelector
     from .state_values import LocalState, StateKey
     from .template import Expr, Par, _BinaryExpr, _RepeatExpr, _validate_number
     from .params import Match
     from .symbol import symbol_ref
-    from .reference_json import _value_to_json
+    from ._value_json import _value_to_json
 
     encode = lambda item: _value(item, visit, state)
     if isinstance(value, (Node, ConcreteDefinition)):
@@ -122,22 +120,6 @@ def _value_record(value, visit, state):
         return {"tag": "repeat", "group": encode(value.group), "count": encode(value.count), "shared": value.shared}
     if isinstance(value, Match):
         return _match(value, encode)
-    if isinstance(value, StateRef):
-        return {"tag": "state-ref", "version": 1, "object": encode(value.object),
-                "states": {"tag": "set", "items": [
-                    {"identity": encode(value.object.objects[path]), "state": state}
-                    for path, state in value.states.items()]}}
-    if isinstance(value, ObjectRef):
-        bindings = _reference_bindings(value)
-        return {"tag": "object-ref", "version": 1, "definition": encode(value.definition),
-                "bindings": {"tag": "set", "items": [
-                    {"target": None if target is None else encode(target), "identity": encode(identity)}
-                    for target, identity in bindings]}}
-    if isinstance(value, StateSelectorRef):
-        return {"tag": "state-selector", "version": 1, "object": encode(value.object), "alias": value.alias}
-    if isinstance(value, ObjectSelector):
-        return {"tag": "object-selector", "version": 1,
-                "definition": encode(value.definition), "reference": encode(value.reference)}
     if isinstance(value, Mapping):
         from .utils.graph.path import canonical_key_bytes
         if any(type(key) not in (str, int) for key in value):
@@ -167,19 +149,6 @@ def _value_record(value, visit, state):
     # The shared explicit semantic leaf codecs cover DType, TensorSpec,
     # Cardinality and ObjectId. Unsupported/live values fail closed there.
     return {"tag": "leaf", "value": _value_to_json(value, grammar=3)}
-
-
-def _reference_bindings(reference):
-    bindings = getattr(reference, "_node_bindings", None)
-    if bindings is None:
-        # Old process-local pickle shells may predate this derived pure fact.
-        # Interpret their existing path authority once; never export rooted blobs.
-        from .reference_values import _expected_paths
-        nodes = {}
-        expected, _ = _expected_paths(reference.definition, node_values=nodes)
-        bindings = tuple((nodes.get(key), reference.objects[path]) for key, path in expected.items())
-        object.__setattr__(reference, "_node_bindings", bindings)
-    return bindings
 
 
 def _match(value, encode):
@@ -230,7 +199,7 @@ def _dtype(dtype):
         if dtype == plain and type(dtype) is type(plain):
             body = {"str": dtype.str}
         else:
-            from .reference_json import _encoded_type
+            from ._value_json import _encoded_type
             restored = np.dtype(dtype.type).newbyteorder(dtype.byteorder)
             if restored != dtype or restored.str != dtype.str or type(restored) is not type(dtype):
                 raise TypeError("NumPy extension dtype needs an explicit interpretation codec.")
@@ -298,7 +267,7 @@ def _restore_dtype(record):
     elif "base" in body:
         dtype = np.dtype((_restore_dtype(body["base"]), tuple(body["shape"])))
     elif "extension" in body:
-        from .reference_json import _decode_imported_type
+        from ._value_json import _decode_imported_type
         target = _decode_imported_type(body["extension"], "NumPy dtype", {"type", "module", "qualname"})
         dtype = np.dtype(target).newbyteorder(body["byteorder"])
     else:
@@ -326,9 +295,7 @@ def _restore(data, build, memo=None):
 
 def _restore_record(data, build, memo):
     from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple, FrozenNDArray
-    from .reference_json import _value_from_json
-    from .reference_values import ObjectRef, StateRef, StateSelectorRef
-    from .selector import ObjectSelector
+    from ._value_json import _value_from_json
     from .state_values import StateKey, LocalState
     from .utils.graph.path import GraphPath
     from .quoted import QuotedDef, SelectorSpec
@@ -343,7 +310,7 @@ def _restore_record(data, build, memo):
     if type(data) is not dict or type(data.get("tag")) is not str:
         raise NodeCodecError("Node values must be tagged records.")
     tag = data["tag"]
-    if tag in {"object-ref", "state-ref", "state-selector", "object-selector", "state-key", "local-state"}:
+    if tag in {"state-key", "local-state"}:
         if type(data.get("version")) is not int or data["version"] != 1:
             raise NodeCodecError("Incompatible nested Node reference/state version.")
     value = lambda item: _restore(item, build, memo)
@@ -415,44 +382,6 @@ def _restore_record(data, build, memo):
     if tag == "repeat":
         group = value(data["group"])
         return _RepeatExpr(list(group) if isinstance(group, FrozenList) else group, value(data["count"]), data["shared"])
-    if tag == "object-ref":
-        from .reference_values import _expected_paths
-        definition = value(data["definition"])
-        expected, _ = _expected_paths(definition)
-        objects = {}
-        if data["bindings"]["tag"] != "set":
-            raise NodeCodecError("Reference bindings must be unordered incidence.")
-        for item in data["bindings"]["items"]:
-            identity = value(item["identity"])
-            target = None if item["target"] is None else value(item["target"])
-            key = ("object-id", identity) if target is None else ("cdef", target._node_id)
-            path = expected[key]
-            if path in objects:
-                raise NodeCodecError("Duplicate reference binding target.")
-            objects[path] = identity
-        return ObjectRef(definition, objects)
-    if tag == "state-ref":
-        reference = value(data["object"])
-        if data["states"]["tag"] != "set":
-            raise NodeCodecError("Reference states must be unordered bindings.")
-        states = {}
-        for item in data["states"]["items"]:
-            identity = value(item["identity"])
-            if identity in states:
-                raise NodeCodecError("Duplicate state binding identity.")
-            states[identity] = item["state"]
-        if set(states) != set(reference.objects.values()):
-            raise NodeCodecError("State bindings must cover exactly the referenced identities.")
-        return StateRef(reference, {path: states[identity] for path, identity in reference.objects.items()})
-    if tag == "state-selector":
-        return StateSelectorRef(value(data["object"]), data["alias"])
-    if tag == "object-selector":
-        if set(data) != {"tag", "version", "definition", "reference"}:
-            raise NodeCodecError("Invalid ObjectSelector fields.")
-        definition, reference = value(data["definition"]), value(data["reference"])
-        if not isinstance(reference, ObjectRef):
-            raise NodeCodecError("ObjectSelector association must be an ObjectRef.")
-        return ObjectSelector._projected(definition, reference.objects, reference)
     if tag == "match":
         matcher = data["matcher"]
         kind = matcher["kind"]

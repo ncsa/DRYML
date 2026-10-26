@@ -603,7 +603,7 @@ def _receiver(instance):
     if isinstance(instance, Node): return instance
     if isinstance(instance, Object):
         construction = getattr(instance, "_construction_node", instance.definition)
-        return construction.with_realization(identities=instance.object_ref.objects)
+        return construction.with_realization(identities=instance._identity_node.identity_spec())
     raise ManagedConfigError("invalid_receiver", "metadata access requires a Node or Object receiver")
 
 

@@ -144,8 +144,8 @@ def test_save_rejects_source_store_entries_outside_its_closure(tmp_path):
     unrelated = repo.save_object(MetadataValue(2, repo=repo), store=source)
     repo.save_object(value, store=source)
 
-    with pytest.raises(ValueError, match="outside the saved snapshot closure"):
-        repo.save_object(value, store=target, source_stores={unrelated: source})
+    with pytest.raises(ValueError, match="outside the explicit state selection"):
+        repo.save_object(value, store=target, source_stores={unrelated.state.key: source})
 
 
 def test_metadata_rejects_unknown_and_disconnected_targets_before_mutation(tmp_path):
@@ -170,21 +170,23 @@ def test_nested_materializing_object_ref_is_a_metadata_holder_in_closure(tmp_pat
     reference_only = MetadataValue(2, repo=repo)
     root = MetadataContainer(
         [child, child],
-        DefLink.finalized(EdgeKind.REF, reference_only.object_ref),
+        DefLink.finalized(EdgeKind.REF, repo.describe(reference_only).object_view()),
         repo=repo,
     )
     state = repo.save_object(root, store=store)
     child_path = GraphPath((Parameter("children"), Index(0)))
     alias_path = GraphPath((Parameter("children"), Index(1)))
-    target = state.object_view().at(child_path)
+    projected = state.object_view()
+    target = projected.at(child_path)
 
-    assert state.object_view().at(alias_path) == target
+    assert projected.at(alias_path) is target
     assert store.read_node(state.at(child_path).exact_digest(), kind="saved") is None
     repo.set_metadata(target, {"nested": ["shared"]})
     assert repo.get_metadata(target) == {"nested": ["shared"]}
     assert repo.get_lineage_metadata(target).object_ref.graph_equal(target)
-    with pytest.raises(KeyError):
-        repo.get_metadata(repo.describe(reference_only))
+    assert repo.get_metadata(repo.describe(reference_only)) is None
+    assert reference_only.last_state_ref is None
+    assert all(state.at(path).object_id != reference_only.object_id for path in state.state_spec())
 
 
 def test_directory_lookup_and_all_save_wrappers_preserve_return_shapes(tmp_path):
@@ -209,8 +211,6 @@ def test_directory_lookup_and_all_save_wrappers_preserve_return_shapes(tmp_path)
 
     replica = repo.save_object(root, store=second, source_store=first)
     assert replica.graph_equal(state)
-    with pytest.raises(TypeError, match="StateRef"):
-        repo.get_snapshot_directory(state)
 
 
 def test_forks_copy_selected_current_annotations_by_value(tmp_path):

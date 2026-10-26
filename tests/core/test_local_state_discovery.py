@@ -39,7 +39,6 @@ def saved_values(tmp_path, count=12):
 
 def no_inventory(monkeypatch, store):
     monkeypatch.setattr(store, "inspect_states", lambda *a, **k: pytest.fail("variant inventory"))
-    monkeypatch.setattr(store, "iter_definition_records", lambda *a, **k: pytest.fail("legacy inventory"))
     import dryml.core.query.authority as authority
     original = authority.capture_store_projection
 

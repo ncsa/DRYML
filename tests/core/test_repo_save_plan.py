@@ -39,7 +39,7 @@ def test_save_plan_uses_retained_primary_bindings_once(tmp_path):
 
     assert len(plan.actions) == 1
     assert plan.actions[0].obj is child
-    assert plan.actions[0].path in parent.object_ref.objects
+    assert plan.actions[0].path in repo.describe(parent).identity_spec()
 
 
 def test_save_plan_keeps_independent_equal_nodes_distinct(tmp_path):

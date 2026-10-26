@@ -155,7 +155,8 @@ def test_large_mutable_current_and_history_budget_refuses_before_effects(tmp_pat
     def forbidden(*args, **kwargs):
         pytest.fail("over-budget preparation reached a writer/dirty effect")
     monkeypatch.setattr(store, "_atomic_write", forbidden)
-    monkeypatch.setattr(store, "mark_query_index_dirty", forbidden)
+    if store.open_query_index() is not None:
+        monkeypatch.setattr(store.open_query_index(), "_mark_dirty", forbidden)
     with pytest.raises(StoreRecordError, match="Oversized.*mutation-intent"):
         store._prepare_and_apply(prepare)
     assert store.authority_cut() == cut

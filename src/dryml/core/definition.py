@@ -1328,30 +1328,6 @@ class ConcreteDefinition(DefInterface, Mapping):
 
         return copy_cdef_graph(self)
 
-    def object_projection(self, *, traverse_refs: bool = False) -> "ConcreteDefinition":
-        """Return this CDef with exact references replaced by ObjectSelectors.
-
-        Args:
-            traverse_refs: Whether to enter Ref-held Template recipes. Ordinary
-                Ref-held exact references are projected regardless of this flag.
-
-        Returns:
-            An import-free, query-only CDef preserving graph topology, edge roles,
-            and all ObjectIds carried by recursive ObjectSelector leaves.
-
-        Raises:
-            TypeError: If ``traverse_refs`` is not a bool.
-            ValueError: If the graph contains an unsupported cycle.
-
-        Side Effects:
-            None. The source graph remains unchanged; no Objects, Stores, or
-            identities are created.
-        """
-
-        from .cdef_codec import object_projection_cdef
-
-        return object_projection_cdef(self, traverse_refs=traverse_refs)
-
     def graph_equal(self, other: object) -> bool:
         """Compare rooted CDef topology while ignoring private node tokens.
 
@@ -1752,7 +1728,6 @@ class SelectorMatcher(GraphMatcher):
             NodeKind.POD,
             NodeKind.TYPE,
             NodeKind.IDENTITY_VALUE,
-            NodeKind.REFERENCE_VALUE,
             NodeKind.IMPORT_REF,
             NodeKind.SOURCE_SPEC,
             NodeKind.UNSUPPORTED,

@@ -149,8 +149,7 @@ def test_repo_alias_deletion_is_not_a_legacy_cdef_mutation(primary_store_set):
 def test_repo_unknown_alias_raises(primary_store_set):
     repo = Repo(stores=primary_store_set.stores)
 
-    with pytest.raises(KeyError):
-        repo.get_alias("missing")
+    assert not repo.query().alias("missing").exists()
 
 
 def test_repo_rejects_bad_alias_name(primary_store_set):
@@ -158,11 +157,10 @@ def test_repo_rejects_bad_alias_name(primary_store_set):
     _require_writable(repo)
     obj = objects.TestClass1(40, test="bad")
 
-    with pytest.raises(TypeError):
-        repo.set_alias(123, obj)
-
-    with pytest.raises(ValueError):
-        repo.set_alias("", obj)
+    from dryml.core.store.records import StoreRecordError
+    for alias in (123, ""):
+        with pytest.raises((TypeError, ValueError, StoreRecordError)):
+            repo.save(obj, alias=alias)
 
 
 def test_repo_alias_conflict_across_stores_raises(store_resource_factory):

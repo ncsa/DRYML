@@ -113,11 +113,10 @@ def test_unordered_receiver_roundtrip_preserves_current_cas_bytes(tmp_path):
 
 def unordered_saved_receiver():
     """Metadata-only saved graph with ties, cross-aliases and retained state pins."""
-    from dryml.core import ObjectId, ObjectRef, StateRef, Serializable
+    from dryml.core import ObjectId, Serializable
     from dryml.core.cdef_graph import EdgeKind
     from dryml.core.links import DefLink
     from dryml.core.state_values import LocalState, StateKey
-    from dryml.core.utils.graph.path import GraphPath
     from tests.managed.test_u14_authority import Experiment
 
     leaves = []
@@ -127,11 +126,14 @@ def unordered_saved_receiver():
         latest = LocalState(StateKey(creation.creation_digest(), "Test-" + "b" * 64), creation)
         leaves.append(creation.with_identity(ObjectId()).with_state(state).with_realization(states={"$": latest}))
     first, second = (Definition(Experiment, leaves[0]).concretize() for _ in range(2))
-    reference = ObjectRef(Definition(Serializable).concretize(), {GraphPath(): ObjectId()})
+    recipe = Definition(Serializable).concretize()
+    reference = recipe.with_identity(ObjectId())
+    selected = reference.copy_graph().with_state(LocalState(
+        StateKey(recipe.creation_digest(), "Test-" + "c" * 64), recipe))
     return receiver({"members": set(leaves + [first, second]), "external": leaves[0],
         "chosen": first, "ordered": first, "reference": DefLink.finalized(EdgeKind.REF, leaves[1]),
         "opaque": {"bytes": b"\x00\xff\x80", "tuple": (1, -0.0), "set": frozenset({3, 5})},
-        "quoted": Definition(Dataset, value=[reference, StateRef(reference, {GraphPath(): "Test-" + "c" * 64})]).quote()})
+        "quoted": Definition(Dataset, value=[reference, selected]).quote()})
 
 
 def force_fresh_handle_order(monkeypatch):

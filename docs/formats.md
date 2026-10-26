@@ -60,7 +60,7 @@ construction links retain exact whole-table labeling with every member and alias
 The grammar preserves list/tuple/set/frozenset distinctions, exact string/integer
 map keys (not bool keys), symbolic ImportRef/SourceSpec values, supported symbolic
 arithmetic/repetition and Match leaves, factories, immutable Core semantic leaves,
-references, quotations, ObjectIds and LocalStates. Nested reference/state tags
+Node edges, quotations, ObjectIds and LocalStates. LocalState tags
 carry their own exact integer version 1, independently checked on read. There is
 no opaque serialization fallback for unsupported live/custom values or nonportable
 callbacks. Symbol-addressable `Satisfies` predicates carry explicit import/source
@@ -80,20 +80,12 @@ revalidated; an unavailable or incompatible extension is rejected.
 Managed/variable-width storage dtypes require a separate interpretation codec and
 are rejected before raw storage bytes can enter this fixed-storage format.
 
-Embedded ObjectRef bindings name target occurrences (or imported ObjectIds), and
-StateRef selections name ObjectIds. These unordered bindings are canonicalized
-with the complete graph. Context-local legacy SetMember ordinals/fingerprints do
-not enter their semantic preimages. The existing ObjectRef constructor retains
-pure target-binding facts while validating its public path map; the new reader
-reconstructs that map in the decoded graph's path context. This preserves pins and
-cross-boundary aliases even when fresh tokens change unordered path ordinals.
-Query-only ObjectSelectors have an explicit version-1 tag retaining their query
-definition and ObjectRef association as graph-aware shared-table values. This
-preserves recursive state-weakened selectors, directly constructed exact pins,
-and their occurrence/ObjectId bindings without nested rooted exports. Node graph
-transport does not admit these query values as legacy CDef/Store authority.
-The legacy V2 reference data layout remains separate; it is not admitted as
-format-4 Store authority.
+Node identity/state facets bind to occurrence/view slots. Context-local
+SetMember ordinals are navigation, not portable cross-graph identity evidence.
+Compound-reference, soft-state-selector, and ObjectSelector tags are removed from
+Node, CDef, template, Repo-definition, and execution codecs. Readers reject these
+tags instead of dropping or converting their evidence. The public reference JSON
+module and its codecs are absent; see [API retirement](repo_store_v3_retirement.md).
 
 Readers reject unknown fields/tags, invalid slots/block references, unused
 declarations, bad authentication, incompatible CDef identity/key versions and
@@ -210,8 +202,8 @@ installation does not declare the identities present in its constructor evidence
 
 Every supported query-visible built-in mutation enters one Store-owned protocol:
 creation/state installation, root/membership/declaration publication, membership
-withdrawal and Node-name CAS/delete/rename. The old main/ObjectRef/StateRef alias,
-snapshot, claim and annotation writers remain explicit refusals. Node names are
+withdrawal and Node-name CAS/delete/rename. The old main/compound-reference alias,
+snapshot, claim and annotation writers are removed. Node names are
 separate format-4 authority, not a second V2 reference persistence path.
 
 `authority.record` holds the persistent Store UUID, committed nonnegative epoch,
@@ -356,12 +348,11 @@ and undeclared durability; `require_durable()` refuses a buffered completion cla
 New consumer preflight passes `record_family="dryml-node-graph/v1"` independently
 of its diagnostic operation name; omitted/legacy families fail before hooks.
 
-### Historical Store V3 / Remaining CDef V2 Consumer Codecs
+### Historical Store V3 / Plain CDef V2 Codecs
 
-The following describes the old Store family for contrast and the codecs still
-used by consumers awaiting their cutover. **New built-in Stores neither open V3
-authority nor publish this layout.** Standalone legacy codec admission is not
-current Store admission.
+The following describes the removed Store family for contrast. **Built-in Stores
+neither open V3 authority nor publish this layout.** Plain CDef graph codecs remain
+for normalized construction metadata; compound-reference support is removed.
 
 CDef V2 graph records contain deterministic graph-local labels, class references,
 fully bound parameters, and stateful-role bits. `ObjectRef` records add canonical
@@ -374,12 +365,9 @@ Comparisons involving an identity-3 Node root retain full cross-boundary topolog
 Legacy V2 export/digest paths refuse Node-local facets and retained construction
 handles that they cannot represent. Unbound V2 consumer bytes remain unchanged.
 
-Core owns the portable `dryml-reference-json` v1 envelope for embedding exact
-`ObjectRef` and `StateRef` authority in closed JSON formats. It tags canonical
-Definition atoms, frozen containers, symbols, factories, tensor specifications,
-and reference identity without loading Objects or state. Store authority records
-continue to use their separate trusted dill frame; `StateRef.to_data()` alone is
-a token-neutral Python record and is not promised to be JSON-compatible.
+The former `dryml-reference-json` envelope, public module and codecs are removed.
+Current Node semantic leaves use a private bounded grammar; it provides no
+compound-reference or old Store decoding path.
 
 ### Rejected Historical Store Formats
 
@@ -550,19 +538,20 @@ fidelity. These inputs contain no backend objects, TFDS content, Store snapshots
 or live payloads. Their old generator is historical provenance, not a supported
 command for regenerating current authority or replacing these frozen bytes.
 
-## Repo Definition V1
+## Repo Definition V2
 
-Repo definition v1 is the inert canonical-JSON envelope
-`{"schema": "dryml-repo-definition", "version": 1, ...}` for portable Repo
+Repo definition v2 is the inert canonical-JSON envelope
+`{"schema": "dryml-repo-definition", "version": 2, ...}` for portable Repo
 configuration, not Store authority or an exact-state selector. It carries an
 ordered table of supported DirStore and path-backed ZipStore descriptors, default
 selection, normalized routing selector descriptors, and supported declarative
-settings. Paths are absolute persistent locations: a ZipStore descriptor never
+settings without claim clocks, lease duration or owner-token factories. Version 1
+is rejected. Paths are absolute persistent locations: a ZipStore descriptor never
 contains its temporary extraction directory.
 
 The selector grammar is closed and preserves Definition/CDef sharing, omitted
 positional arguments, links, selector-as-data wrappers, supported `Match` tags,
-symbol representation, and exact ObjectRef/StateRef leaves. Symbolic Definition
+symbol representation, and Node facets. Symbolic Definition
 quotation and generator-selector domain payloads use the separate bounded codecs
 above; retired SearchSpace generator tags are not accepted.
 Unordered graph-bearing values, normalized Nodes, exact facets and retained
@@ -580,7 +569,7 @@ portable admission and canonical re-encoding before live reconstruction. The
 same occurrence table preserves independent equal unordered members, joins to
 ordered branches, normalized structure, fixed facets, quotation and retained
 construction views. Compatible simple descriptors retain their original closed
-grammar, including pre-resolution validation of reference paths/fingerprints.
+grammar, with retired compound-reference tags rejected before reconstruction.
 This is configuration transport, not a Store migration or a new semantic graph
 authority. Block authentication/source-byte CAS and graph identity stay distinct.
 

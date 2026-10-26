@@ -158,45 +158,37 @@ def test_broad_capture_reuses_one_record_family_pass_and_exact_state_reads_direc
     store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(store)
     state = repo.save_object(SourceLeaf("saved", repo=repo))
-    calls = {}
-    names = (
-        "iter_definition_records",
-        "iter_declaration_records", "iter_state_ref_records",
-        "iter_object_alias_records", "iter_state_alias_records",
-    )
-    for name in names:
-        original = getattr(store, name)
-
-        def counted(*args, _name=name, _original=original, **kwargs):
-            calls[_name] = calls.get(_name, 0) + 1
-            return _original(*args, **kwargs)
-
-        monkeypatch.setattr(store, name, counted)
+    from dryml.core.query import authority
+    calls = []
+    original = authority.capture_store_projection
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(authority, "capture_store_projection", counted)
     base = store.query()
     base.union(base).collect()
 
-    assert calls == {}
-    for name in names:
-        monkeypatch.setattr(store, name, lambda: pytest.fail("exact read enumerated inventory"))
+    assert calls == [1]
+    monkeypatch.setattr(authority, "capture_store_projection", lambda *a, **kw: pytest.fail("exact read enumerated inventory"))
     assert store.query().local_states().state_key(state.state.key).one().key == state.state.key
 
 
 def test_stored_restriction_builds_root_membership_once_per_cut(tmp_path, monkeypatch):
-    from dryml.core.query.authority import CapturedStoreFacts
+    from dryml.core.query.source import _NodeFacts
     from dryml.core.query.query import IdentityQuery
 
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     repo.save_object(SourceLeaf("first", repo=repo))
     repo.save_object(SourceLeaf("second", repo=repo))
-    original = CapturedStoreFacts._authoritative_root_definitions
+    original = _NodeFacts._authoritative_root_definitions
     calls = []
 
     def counted(self):
         calls.append(1)
         yield from original(self)
 
-    monkeypatch.setattr(CapturedStoreFacts, "_authoritative_root_definitions", counted)
+    monkeypatch.setattr(_NodeFacts, "_authoritative_root_definitions", counted)
     assert IdentityQuery.from_store(store).stored().saved().count() == 2
     assert len(calls) <= 1
 
@@ -318,7 +310,7 @@ def test_exact_state_negative_requires_complete_knowledge_or_scan_refusal(tmp_pa
     assert embedded.query().sel(state).exists()
     assert not empty.query().sel(state).exists()
     for store in (embedded, empty):
-        monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("forbidden fallback scanned"))
+        monkeypatch.setattr("dryml.core.query.authority.capture_store_projection", lambda *a, **kw: pytest.fail("forbidden fallback scanned"))
         with pytest.raises(QueryWouldScanError, match="inventory scan"):
             store.query().sel(state).scan_policy("forbid").exists()
 
@@ -458,4 +450,4 @@ def test_zip_inventory_preserves_uncommitted_transaction_domains(tmp_path):
         first.close()
         second.close()
     with pytest.raises(RuntimeError, match="closed"):
-        first._validated_definition_root_inventory()
+        SourceCapture().capture_store(first)

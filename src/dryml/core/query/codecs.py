@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from ..definition import ConcreteDefinition
-from ..reference_values import ObjectId, ObjectRef, StateRef
+from ..reference_values import ObjectId
 from ..utils.general import pickler, unpickler
 from .model import FeatureToken
 from .path import GRAPH_PATH_SCHEMA_VERSION, GraphPath
@@ -74,15 +74,15 @@ class QueryIndexCodec:
 
         return digest_blob(blob)
 
-    def encode_reference(self, value: ObjectId | ObjectRef | StateRef) -> bytes:
-        """Encode a canonical lightweight reference value for an index row."""
+    def encode_object_id(self, value: ObjectId) -> bytes:
+        """Encode an ObjectId for an index row, without Store access."""
 
-        return encode_reference(value)
+        return encode_object_id(value)
 
-    def decode_reference(self, blob: bytes) -> ObjectId | ObjectRef | StateRef:
-        """Decode a canonical lightweight reference value from an index row."""
+    def decode_object_id(self, blob: bytes) -> ObjectId:
+        """Validate and decode an index ObjectId; reject other reference kinds."""
 
-        return decode_reference(blob)
+        return decode_object_id(blob)
 
     def encode_metadata_predicate(self, value) -> bytes:
         """Encode a bounded metadata predicate without display parsing.
@@ -173,32 +173,30 @@ def decode_graph_path(blob: bytes) -> GraphPath:
         raise QueryCodecError("Decoded graph path payload is invalid.") from exc
 
 
-def encode_reference(value: ObjectId | ObjectRef | StateRef) -> bytes:
-    """Encode one complete reference identity without loading Objects or state."""
+def encode_object_id(value: ObjectId) -> bytes:
+    """Return index codec bytes for an ObjectId without loading Objects or state.
 
-    if isinstance(value, ObjectId):
-        kind, data = "object-id", value.to_data()
-    elif isinstance(value, ObjectRef):
-        kind, data = "object-ref", value.to_data()
-    elif isinstance(value, StateRef):
-        kind, data = "state-ref", value.to_data()
-    else:
-        raise TypeError(f"encode_reference expected ObjectId, ObjectRef, or StateRef, got {type(value).__name__}.")
-    return _pack("reference", REFERENCE_CODEC_VERSION, {"kind": kind, "value": data})
+    Unsupported inputs raise TypeError. The existing object-id envelope remains
+    stable for current derived indexes; no compound-reference codec is admitted.
+    """
+    if not isinstance(value, ObjectId):
+        raise TypeError(f"encode_object_id expected ObjectId, got {type(value).__name__}.")
+    return _pack("reference", REFERENCE_CODEC_VERSION, {"kind": "object-id", "value": value.to_data()})
 
 
-def decode_reference(blob: bytes) -> ObjectId | ObjectRef | StateRef:
-    """Decode one complete lightweight reference identity from index bytes."""
+def decode_object_id(blob: bytes) -> ObjectId:
+    """Return an ObjectId from trusted index bytes, without external reads.
+
+    Malformed, unsupported, or compound-reference envelopes raise QueryCodecError.
+    """
 
     value = _unpack(blob, expected_kind="reference", expected_version=REFERENCE_CODEC_VERSION)
     if not isinstance(value, dict) or set(value) != {"kind", "value"}:
         raise QueryCodecError("Decoded reference payload must contain kind and value.")
-    decoders = {"object-id": ObjectId.from_data, "object-ref": ObjectRef.from_data, "state-ref": StateRef.from_data}
-    decoder = decoders.get(value["kind"])
-    if decoder is None:
+    if value["kind"] != "object-id":
         raise QueryCodecError(f"Unknown reference kind {value['kind']!r}.")
     try:
-        return decoder(value["value"])
+        return ObjectId.from_data(value["value"])
     except Exception as exc:
         raise QueryCodecError("Decoded reference value is invalid.") from exc
 

@@ -1,4 +1,4 @@
-"""Focused v1 portable Repo-definition coverage."""
+"""Focused v2 portable Repo-definition coverage."""
 
 from copy import deepcopy
 from io import BytesIO
@@ -14,9 +14,9 @@ import pytest
 
 from dryml.core import (
     AnyValue, Choice, ConcreteDefinition, Definition, Exact, F, IntRange, Match, Missing, ObjectId,
-    ObjectRef, Present, Ref, Repo, RepoDefinition, RepoDefinitionError,
+    LocalState, Present, Ref, Repo, RepoDefinition, RepoDefinitionError,
     RepoReconstructionError, SelectorSpec,
-    Satisfies, Selector, SKIP_ARGS, StateRef, SubclassOf,
+    Satisfies, Selector, SKIP_ARGS, StateKey, SubclassOf,
 )
 from dryml.core.object import Object, Serializable
 from dryml.core.params import AnyMatcher, ExactMatcher
@@ -27,8 +27,6 @@ from dryml.core.symbol import ImportRef
 from dryml.core.cdef_graph import EdgeKind
 from dryml.core.links import DefLink
 import dryml.core.session as session
-from dryml.core.utils.graph.path import GraphPath, Parameter
-from dryml.core.utils.graph.value import iter_set_members
 from dryml.core.utils.stable_hash import stable_hash_function
 
 
@@ -216,7 +214,7 @@ def test_definition_distinguishes_disabled_empty_and_shorthand_routing(tmp_path)
 
 
 def test_definition_rejects_dirty_and_nonportable_runtime_configuration(tmp_path):
-    """Export refuses dirty archives, custom backends, and runtime factories."""
+    """Export refuses dirty archives, custom backends, and nonportable values."""
     archive = _archive_store(tmp_path / "store.zip")
     archive._archive_dirty = True
     with pytest.raises(RepoDefinitionError, match="clean committed archive"):
@@ -224,8 +222,6 @@ def test_definition_rejects_dirty_and_nonportable_runtime_configuration(tmp_path
     assert archive._archive_dirty is True
 
     store = DirStore(tmp_path / "store", query_index="none")
-    with pytest.raises(RepoDefinitionError, match="owner-token"):
-        Repo(store, owner_token_factory=lambda: "owner").to_definition()
     from dryml.core.query.sqlite import SQLiteQueryIndexConfig
     custom_index = DirStore(tmp_path / "custom", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     with pytest.raises(RepoDefinitionError, match="query policy"):
@@ -352,52 +348,6 @@ def test_definition_rejects_physical_store_aliases_before_opening(tmp_path, monk
     archive.close()
 
 
-@pytest.mark.parametrize("mutation", ["envelope", "segment", "unversioned"], ids=str)
-def test_definition_rejects_unknown_or_unversioned_nested_graph_paths(tmp_path, monkeypatch, mutation):
-    """Reference path envelopes and segments use only the closed portable grammar."""
-
-    leaf = Definition(ReferenceLeaf).concretize()
-    root = Definition(ReferenceWrapper, leaf).concretize()
-    path = GraphPath((Parameter("child"),))
-    reference = ObjectRef(root, {path: ObjectId(("child",))})
-    store = DirStore(tmp_path / "store", query_index="none")
-    selector = Selector(Definition(DefinitionTarget, reference))
-    repo = Repo(
-        store,
-        save_routing=SaveRouting(((selector, store),)),
-    )
-    data = _legacy_route_data(repo, selector)
-
-    def first_reference(value):
-        if isinstance(value, dict):
-            if value.get("kind") == "object-ref":
-                return value
-            for child in value.values():
-                found = first_reference(child)
-                if found is not None:
-                    return found
-        elif isinstance(value, list):
-            for child in value:
-                found = first_reference(child)
-                if found is not None:
-                    return found
-        return None
-
-    descriptor = first_reference(data["routing"]["routes"][0]["selector"])
-    encoded_path = descriptor["objects"][0]["path"]
-    if mutation == "envelope":
-        encoded_path["unknown"] = True
-    elif mutation == "segment":
-        encoded_path["segments"][0]["unknown"] = True
-    else:
-        descriptor["objects"][0]["path"] = encoded_path["segments"]
-
-    monkeypatch.setattr(ImportRef, "resolve", lambda *args: pytest.fail("resolved symbol"))
-    for decode in (RepoDefinition.from_data, lambda value: RepoDefinition.from_json(json.dumps(value))):
-        with pytest.raises(RepoDefinitionError, match="reference path"):
-            decode(data)
-
-
 @pytest.mark.parametrize("field, value", [
     ("string", "x" * (1024 * 1024 + 1)),
     ("integer", 1 << 4096),
@@ -429,71 +379,6 @@ def test_definition_rejects_duplicate_json_keys_and_cycles(tmp_path):
     assert "object at" not in str(error.value)
 
 
-def test_definition_encodes_complete_nested_reference_topology_inertly(tmp_path, monkeypatch):
-    """Exact reference leaves retain all paths, identities, states, and edge roles."""
-
-    leaf = Definition(ReferenceLeaf).concretize()
-    child_path = GraphPath((Parameter("child"),))
-    imported = ObjectRef(leaf, {GraphPath(): ObjectId(("imported",))})
-    imported_state = StateRef(imported, {GraphPath(): _state_hash("b")})
-    outer = Definition(
-        ReferenceWrapper,
-        DefLink.finalized(EdgeKind.MATERIALIZE, imported_state),
-        child_alias=DefLink.finalized(EdgeKind.REF, imported_state),
-    ).concretize()
-    outer_ref = ObjectRef(outer, {child_path: imported.object_id})
-    state = StateRef(outer_ref, {child_path: _state_hash("c")})
-    selector = Selector(
-        Definition(
-            DefinitionTarget,
-            DefLink.finalized(EdgeKind.MATERIALIZE, state),
-            ref=DefLink.finalized(EdgeKind.REF, state),
-            open_leaf={"x": state},
-        )
-    )
-    store = DirStore(tmp_path / "store", query_index="none")
-    repo = Repo(store, save_routing=SaveRouting(((selector, store),)))
-    data = _legacy_route_data(repo, selector)
-
-    monkeypatch.setattr(
-        ObjectRef,
-        "from_data",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("materialized reference")),
-    )
-    monkeypatch.setattr(
-        StateRef,
-        "from_data",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("materialized state")),
-    )
-
-    assert RepoDefinition.from_data(data).to_data() == data
-
-    def first_descriptor(value, kind):
-        if isinstance(value, dict):
-            if value.get("kind") == kind:
-                return value
-            for item in value.values():
-                found = first_descriptor(item, kind)
-                if found is not None:
-                    return found
-        elif isinstance(value, list):
-            for item in value:
-                found = first_descriptor(item, kind)
-                if found is not None:
-                    return found
-        return None
-
-    state_descriptor = first_descriptor(data["routing"]["routes"][0]["selector"], "state-ref")
-    assert state_descriptor is not None
-    state_descriptor["states"] = []
-    with pytest.raises(RepoDefinitionError, match="state paths"):
-        RepoDefinition.from_data(data)
-
-    state_descriptor["object"]["objects"] = []
-    with pytest.raises(RepoDefinitionError, match="CDef topology"):
-        RepoDefinition.from_data(data)
-
-
 def test_definition_enforces_total_encoded_bound_and_sanitizes_unicode(tmp_path):
     """Mapping, constructor, export, and JSON paths share encoded-byte limits."""
 
@@ -511,104 +396,12 @@ def test_definition_enforces_total_encoded_bound_and_sanitizes_unicode(tmp_path)
     assert "\\ud800" not in str(error.value)
 
 
-def test_definition_validates_materializing_reference_paths_inside_sets(tmp_path):
-    """Set-member fingerprints retain and validate exact materializing paths."""
-
-    leaf = Definition(ReferenceLeaf).concretize()
-    segment = iter_set_members({leaf})[0][0]
-    root = Definition(ReferenceWrapper, {leaf}).concretize()
-    path = GraphPath((Parameter("child"), segment))
-    reference = ObjectRef(root, {path: ObjectId(("setchild",))})
-    state = StateRef(reference, {path: _state_hash("d")})
-    store = DirStore(tmp_path / "store", query_index="none")
-    selector = Selector(Definition(DefinitionTarget, state))
-    repo = Repo(store, save_routing=SaveRouting(((selector, store),)))
-    data = _legacy_route_data(repo, selector)
-
-    assert RepoDefinition.from_data(data).to_data() == data
-
-    def set_descriptor(value):
-        if isinstance(value, dict):
-            if value.get("kind") == "set":
-                return value
-            for item in value.values():
-                found = set_descriptor(item)
-                if found is not None:
-                    return found
-        elif isinstance(value, list):
-            for item in value:
-                found = set_descriptor(item)
-                if found is not None:
-                    return found
-        return None
-
-    encoded_set = set_descriptor(data["routing"]["routes"][0]["selector"])
-    assert encoded_set is not None
-    encoded_set["items"][0]["fingerprint"] = "0" * 64
-    with pytest.raises(RepoDefinitionError, match="set fingerprint"):
-        RepoDefinition.from_data(data)
-
-
-def test_definition_rejects_forged_set_fingerprints_with_matching_reference_paths(tmp_path):
-    """Inert decode derives set identity instead of trusting matching path data."""
-
-    leaf = Definition(ReferenceLeaf).concretize()
-    segment = iter_set_members({leaf})[0][0]
-    root = Definition(ReferenceWrapper, {leaf}).concretize()
-    path = GraphPath((Parameter("child"), segment))
-    reference = ObjectRef(root, {path: ObjectId(("setchild",))})
-    state = StateRef(reference, {path: _state_hash("d")})
-    store = DirStore(tmp_path / "store", query_index="none")
-    selector = Selector(Definition(DefinitionTarget, state))
-    repo = Repo(
-        store,
-        save_routing=SaveRouting(((selector, store),)),
-    )
-    data = _legacy_route_data(repo, selector)
-
-    def first_set(value):
-        if isinstance(value, dict):
-            if value.get("kind") == "set":
-                return value
-            for child in value.values():
-                found = first_set(child)
-                if found is not None:
-                    return found
-        elif isinstance(value, list):
-            for child in value:
-                found = first_set(child)
-                if found is not None:
-                    return found
-        return None
-
-    encoded_set = first_set(data["routing"]["routes"][0]["selector"])
-    assert encoded_set is not None
-    original = encoded_set["items"][0]["fingerprint"]
-    forged = "0" * 64 if original != "0" * 64 else "1" * 64
-
-    def replace_fingerprint(value):
-        if isinstance(value, dict):
-            for key, child in value.items():
-                if key == "fingerprint" and child == original:
-                    value[key] = forged
-                else:
-                    replace_fingerprint(child)
-        elif isinstance(value, list):
-            for child in value:
-                replace_fingerprint(child)
-
-    replace_fingerprint(data)
-    for decode in (RepoDefinition.from_data, lambda value: RepoDefinition.from_json(json.dumps(value))):
-        with pytest.raises(RepoDefinitionError, match="set fingerprint"):
-            decode(deepcopy(data))
-
-
 def test_definition_accepts_set_members_with_exact_reference_semantics(tmp_path):
-    """Descriptor fingerprints preserve ObjectRef and StateRef set members inertly."""
+    """Portable Node selectors preserve identity/state set members inertly."""
 
     leaf = Definition(ReferenceLeaf).concretize()
-    reference = ObjectRef(leaf, {GraphPath(): ObjectId(("setref",))})
-    state = StateRef(reference, {GraphPath(): _state_hash("f")})
+    reference = leaf.with_identity(ObjectId(("setref",)))
+    state = reference.with_state(LocalState(StateKey(leaf.creation_digest(), _state_hash("f")), leaf.creation_view()))
     store = DirStore(tmp_path / "store", query_index="none")
     data = Repo(
         store,
@@ -714,7 +507,7 @@ def test_reconstruction_preflights_bad_store_before_resolving_selector_symbols(
         Repo.from_definition(RepoDefinition.from_data(data))
 
     assert resolved == []
-    assert source.read_main_ref() is None
+    assert source.read_node_name("main") is None
 
 
 def _compact_binary_cdef_dag_data(tmp_path, depth):
@@ -743,13 +536,13 @@ def _compact_binary_cdef_dag_data(tmp_path, depth):
     return data
 
 
-def test_definition_rejects_compact_semantic_dag_above_visit_budget(tmp_path):
-    """Compact shared CDef DAGs cannot expand topology work exponentially."""
+def test_definition_rejects_retired_reference_descriptor_before_expansion(tmp_path):
+    """Retired reference tags fail before traversing their described topology."""
 
     data = _compact_binary_cdef_dag_data(tmp_path, 17)
     assert len(json.dumps(data)) < 100_000
 
-    with pytest.raises(RepoDefinitionError, match="semantic"):
+    with pytest.raises(RepoDefinitionError, match="value tag is unsupported"):
         RepoDefinition.from_data(data)
 
 
@@ -993,8 +786,8 @@ def test_definition_unordered_transport_retains_facets_construction_and_quotatio
 def test_definition_node_selector_retains_reference_bindings_inertly(tmp_path, monkeypatch):
     """Shared-table reference bindings retain pins and joins without rooted exports."""
     leaf = Definition(ReferenceLeaf).concretize()
-    reference = ObjectRef(leaf, {GraphPath(): ObjectId(("portable",))})
-    state = StateRef(reference, {GraphPath(): _state_hash("c")})
+    reference = leaf.with_identity(ObjectId(("portable",)))
+    state = reference.with_state(LocalState(StateKey(leaf.creation_digest(), _state_hash("c")), leaf.creation_view()))
     root = Definition(DefinitionTarget, {Definition(DefinitionTarget, state), Definition(DefinitionTarget, state)}, leaf=leaf, state=state)
     store = DirStore(tmp_path / "store", query_index="none")
     source = Repo(store, save_routing=SaveRouting(((Selector(root), store),)))
@@ -1006,10 +799,10 @@ def test_definition_node_selector_retains_reference_bindings_inertly(tmp_path, m
     try:
         restored = rebuilt.save_routing.routes[0][0].root
         selected = restored.kwargs["state"]
-        assert selected.object.definition is restored.kwargs["leaf"]
-        assert selected.object.objects == reference.objects
-        assert selected.states == state.states
-        assert all(member.args[0].object.definition is restored.kwargs["leaf"] for member in restored.args[0])
+        assert selected._occurrence is restored.kwargs["leaf"]._occurrence
+        assert selected.object_id == reference.object_id
+        assert selected.state == state.state
+        assert all(member.args[0] is selected for member in restored.args[0])
         assert root.graph_equal(restored)
         assert rebuilt.to_definition().to_json() == definition.to_json()
     finally:
@@ -1273,7 +1066,7 @@ def test_reconstruction_failure_closes_only_freshly_opened_resources(tmp_path, m
 
     assert source_store not in opened
     assert opened
-    assert source_store.read_main_ref() is None
+    assert source_store.read_node_name("main") is None
     archive.close()
 
 
@@ -1617,8 +1410,8 @@ def test_definition_reconstruction_preserves_roles_and_exact_reference_identity(
 
     shared = Definition(ReferenceLeaf, 1).concretize()
     independent = Definition(ReferenceLeaf, 1).concretize()
-    object_ref = ObjectRef(shared, {GraphPath(): ObjectId(("selector",))})
-    state_ref = StateRef(object_ref, {GraphPath(): _state_hash("e")})
+    object_ref = shared.with_identity(ObjectId(("selector",)))
+    state_ref = object_ref.with_state(LocalState(StateKey(shared.creation_digest(), _state_hash("e")), shared.creation_view()))
     nested = Selector(Definition(ReconstructionTarget, SKIP_ARGS, value=Exact("nested")))
     role_value = Definition(SelectorDataTarget, nested).concretize()
     ref_value = Definition(
@@ -1626,15 +1419,15 @@ def test_definition_reconstruction_preserves_roles_and_exact_reference_identity(
     ).concretize()
     selector = Selector(Definition(
         ReconstructionTarget,
-        value=Exact([shared, shared, independent, object_ref, state_ref, role_value, ref_value]),
+        value=Exact([shared, shared, independent, object_ref.quote(), state_ref.quote(), role_value, ref_value]),
     ))
     matching = Definition(
         ReconstructionTarget,
-        [shared, shared, independent, object_ref, state_ref, role_value, ref_value],
+        [shared, shared, independent, object_ref.quote(), state_ref.quote(), role_value, ref_value],
     ).concretize()
     unmatched = Definition(
         ReconstructionTarget,
-        [shared, independent, independent, object_ref, state_ref, role_value, ref_value],
+        [shared, independent, independent, object_ref.quote(), state_ref.quote(), role_value, ref_value],
     ).concretize()
     store = DirStore(tmp_path / "store", query_index="none")
     source = Repo(store, save_routing=SaveRouting(((selector, store),)))

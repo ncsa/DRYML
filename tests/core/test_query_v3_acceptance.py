@@ -53,7 +53,7 @@ def test_ae1_ae8_ae22_authority_metadata_and_query_effects(tmp_path, monkeypatch
     reopened = Repo(DirStore(store.base_dir, query_index="memory"))
     monkeypatch.setattr(
         reopened.default_store,
-        "_validate_local_state_dir",
+        "read_states",
         lambda *_args, **_kwargs: pytest.fail("query opened a saved payload"),
     )
 

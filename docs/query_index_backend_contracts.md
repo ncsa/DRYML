@@ -208,11 +208,15 @@ backend: required rebuild inventory is admitted before it starts, including if
 readiness changes after preflight. `maintain_store()` without that callback retains
 its ordinary explicit maintenance policy.
 
-## Retained Legacy Standalone SQLite Contracts
+## Historical Store-3 Design And Standalone CDef Indexes
 
-The remaining sections describe the retained legacy consumer implementation.
-They do not govern Store-4 Node sources. Standalone codecs and SQLite interfaces
-remain separate from current persistent input support; old Stores are not migrated.
+The Store-3 reference, snapshot, alias, inventory and rebuild paths described
+below are historical and have been removed, including their refusal stubs.
+They do not govern Store-4 Node sources. The standalone manually populated CDef
+catalog still supports graph registration, lowering, read views and validation;
+it has no Store authority for rebuild or explicit reconciliation. Store-4
+maintenance uses the projection contract above. See
+[API retirement](repo_store_v3_retirement.md); old Stores are not migrated.
 
 Query indexes are derived acceleration for current Store authority. DefinitionRecords, explicit stored-root membership, declarations, complete v3 snapshots, aliases, lineage records, current annotation records, and verified snapshot-local directories remain authoritative. Closure-only DefinitionRecords hydrate graph nodes but do not become stored roots during rebuild. A backend must reject incompatible schema or semantic metadata before row decoding or ready activation, then rebuild only derived files from validated records.
 

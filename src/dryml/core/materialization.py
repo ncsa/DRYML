@@ -209,7 +209,7 @@ def _node_inputs(node, *, classes=None, preparation=None):
         raise TypeError("Repo.build requires a ConcreteNode; concretize the recipe first.")
     prepared = NodePreparation((node,)) if preparation is None else preparation
     prepared._slot(node)
-    owned = tuple(_owned_nodes(node, strict=True))
+    owned = tuple(_owned_nodes(node))
     classes = _NodeBindings() if classes is None else classes
     identities = set()
     for path, current in owned:
@@ -246,8 +246,7 @@ def realize_node(repo, node, *, cache="weak", reuse_live="matching", exact=False
     from dryml.runtime import materialization_admission
     from .node import require_saved
     from .repo import RepoLoadError
-    from .repo_plan import apply_exact_reference_identity
-    from .reference_values import ObjectRef
+    from .repo_plan import apply_node_identities
     from .state import construction_identity
 
     if cache not in {"weak", "strong", "none"} or reuse_live not in {"matching", "greedy", "never"}:
@@ -382,7 +381,7 @@ def realize_node(repo, node, *, cache="weak", reuse_live="matching", exact=False
                     if current._stateful_role and current.object_id is None:
                         target = selected[current]
                         lineage_facts[target.object_id] = getattr(target, "_lineage_created_at", None)
-                apply_exact_reference_identity(root, ObjectRef(runtime, identities), lineage_facts=lineage_facts)
+                apply_node_identities(root, runtime.with_realization(identities=identities), lineage_facts=lineage_facts)
                 if not publish_structural:
                     for obj in completed:
                         _publish_cache(repo, obj, cache)
@@ -831,7 +830,7 @@ def preflight_materialization_classes(*roots) -> _NodeBindings:
     """Resolve and admit every class in a selected materializing closure.
 
     Args:
-        *roots: CDefs, ObjectRefs, StateRefs, or nested values selected for live
+        *roots: Concrete definitions or nested values selected for live
             materialization.
 
     Returns:
@@ -848,7 +847,6 @@ def preflight_materialization_classes(*roots) -> _NodeBindings:
 
     from .links import DefLink
     from .quoted import QuotedDef, SelectorSpec
-    from .reference_values import ObjectRef, StateRef
     from .utils.graph.value import iter_value_edges
 
     manifest = _NodeBindings()
@@ -870,9 +868,6 @@ def preflight_materialization_classes(*roots) -> _NodeBindings:
     def visit_value(value) -> None:
         if isinstance(value, ConcreteDefinition):
             visit_cdef(value)
-            return
-        if isinstance(value, (ObjectRef, StateRef)):
-            visit_cdef(value.definition)
             return
         if isinstance(value, DefLink):
             if value.kind is EdgeKind.MATERIALIZE:
@@ -918,23 +913,18 @@ def build_materialization_plan(
         cdef: ConcreteDefinition,
         *,
         cache: CachePolicy = "weak",
-        require_store: bool = False,
         memo: dict | None = None,
         path: list[str | int] | None = None) -> MaterializationPlan:
     """Build a definition-only plan without acquiring live cached Objects.
 
     Plan construction remains available during strict orchestration. It may
-    inspect cache and Store availability metadata but never resolves classes,
+    inspect cache metadata but never resolves classes,
     restores state, or retains a live Object in the returned plan.
     """
 
     if memo is None:
         memo = {}
     graph = ConcreteDefinitionGraph.from_root(cdef)
-    if require_store and repo._first_store_with(cdef) is None:
-        from .repo import RepoLoadError
-
-        raise RepoLoadError("No connected Store contains this structural CDef; use load_or_build to construct it.")
     included = _included_nodes(repo, graph, cdef, memo)
     order = tuple(
         node for node in graph.topological_order(dependencies_first=True)
@@ -1065,22 +1055,19 @@ def _execute_materialization_plan(
     return local_memo[root]
 
 
-def from_canonical_local(value: Any, *, resolve_cdef, repo, resolve_reference=None):
+def from_canonical_local(value: Any, *, resolve_cdef, repo):
     """Decode constructor values using already-selected graph dependencies.
 
     Args:
         value: Canonical constructor value to decode.
         resolve_cdef: Callback returning selected direct CDef dependencies.
         repo: Repo owning the realization.
-        resolve_reference: Optional exact StateRef resolver for materializing
-            reference leaves.
 
     Returns:
         Runtime constructor data retaining selected Object identity.
     """
     return from_canonical(
         value, repo=repo, resolve_cdef=resolve_cdef,
-        resolve_reference=resolve_reference,
     )
 
 

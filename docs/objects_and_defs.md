@@ -116,9 +116,8 @@ an exact ObjectId and LocalState, with no independent identity collisions. It
 returns the **same handle**, typed as the named `SavedNode` completeness
 refinement. It adds no graph wrapper and asserts neither payload availability nor
 current restore compatibility. Ephemeral nodes need no own private-state facet.
-Mixed owned legacy ObjectRef/StateRef leaves are rejected by this new completeness
-validator, rather than treated as an empty owned closure. Existing reference
-consumers retain their separate APIs. `copy_graph()` preserves facets and the
+Compound-reference types and their codecs are removed; use Node-local facets.
+`copy_graph()` preserves facets and the
 alias partition while creating fresh private Node handles, without ObjectId
 allocation or encoding.
 
@@ -240,10 +239,9 @@ The receiver and supplied graph are immutable and remain unchanged on failure.
 
 The Node view APIs above are metadata-only. Repo build/load/apply/restore consume
 these views with fresh state validation as described below. Managed-operation
-integration remains a separate consumer boundary. The V2 `object_projection()`
-query adapter and legacy call-surface
-thaw/export refuse identity-3 facets or retained construction evidence rather
-than silently dropping them. Use the Node APIs above for the new views.
+integration remains a separate consumer boundary. Plain CDef call-surface
+thaw/export refuses identity-3 facets or retained construction evidence rather
+than silently dropping them. Use the Node APIs above for these views.
 
 ## Live Objects And Exact State
 
@@ -251,7 +249,7 @@ An `Object` is one live realization. `Serializable` marks nodes that receive an
 `ObjectId`; a plain Object is ephemeral even when it owns stateful descendants.
 `Object.graph_at()` reads retained realization bindings without construction,
 restoration, cache lookup, or imports. It returns a live Object for a materializing
-path and the corresponding CDef, ObjectRef, or StateRef value unchanged for a
+path and the corresponding retained Node or quotation value unchanged for a
 reference path.
 
 ```python
@@ -336,10 +334,11 @@ bindings and framework runtime metadata. A stateless Object root can own statefu
 descendants; its checkpoint state comes from those descendants, not unsaved
 root-only attributes.
 
-ObjectRef/StateRef are legacy in-memory annotation/reference adapters. New public
+ObjectRef/StateRef and their adapter APIs are removed. Public
 materialization and capture use Node-local facets; persisted V2 snapshots are not
 revived by format-4 loading. Exact state identity, sharing and reference-as-value
-semantics remain independent of Store placement or replication.
+semantics remain independent of Store placement or replication. See
+[Repo/Store API retirement](repo_store_v3_retirement.md) for replacements.
 
 Pre-V2 CDef records, raw tuple/dict records, missing identity versions, and mixed
 graphs are rejected before construction. There is no migration, converter, or dual

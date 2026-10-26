@@ -16,7 +16,6 @@ from .types import is_pod
 from .utils.graph import GraphCtx, GraphTransformer
 from .policies import CachePolicy
 from .errors import CannotConcretizeParameterizedDefinition, CannotConcretizeSelectorReference, CycleError
-from .cdef_identity import V2_IDENTITY_VERSION
 
 if TYPE_CHECKING:
     from .definition import ConcreteDefinition
@@ -29,7 +28,7 @@ from .tensor_spec import TensorSpec
 from .cardinality import Cardinality
 from .config import ConfigRef
 from .factory import FactorySpec
-from .reference_values import ObjectId, ObjectRef, StateRef, StateSelectorRef
+from .reference_values import ObjectId
 # If Backend is a real runtime type/class, include it too.
 # from .backend import Backend
 
@@ -49,8 +48,6 @@ IDENTITY_VALUE_TYPES = (
     ConfigRef,
     FactorySpec,
     ObjectId,
-    ObjectRef,
-    StateRef,
 )
 
 
@@ -222,12 +219,9 @@ class NodeKind(Enum):
     QUOTED_DEF = auto()
     SELECTOR_SPEC = auto()
     SELECTOR = auto()
-    OBJECT_SELECTOR = auto()
     PAR = auto()
     EXPR = auto()
     OBJECT = auto()
-    REFERENCE_VALUE = auto()
-    STATE_SELECTOR_REF = auto()
 
     UNSUPPORTED = auto()
 
@@ -248,7 +242,7 @@ def node_kind(x: Any) -> NodeKind:
     from .object import Object
     from .params import Match
     from .quoted import QuotedDef, SelectorSpec
-    from .selector import ObjectSelector, Selector
+    from .selector import Selector
     from .template import Expr
 
     if isinstance(x, type):
@@ -256,9 +250,6 @@ def node_kind(x: Any) -> NodeKind:
 
     if is_pod(x):
         return NodeKind.POD
-
-    if isinstance(x, (ObjectRef, StateRef)):
-        return NodeKind.REFERENCE_VALUE
 
     if is_identity_value(x):
         return NodeKind.IDENTITY_VALUE
@@ -293,9 +284,6 @@ def node_kind(x: Any) -> NodeKind:
     if isinstance(x, DefLink):
         return NodeKind.DEFLINK
 
-    if isinstance(x, StateSelectorRef):
-        return NodeKind.STATE_SELECTOR_REF
-
     if isinstance(x, QuotedDef):
         return NodeKind.QUOTED_DEF
 
@@ -304,9 +292,6 @@ def node_kind(x: Any) -> NodeKind:
 
     if isinstance(x, Selector):
         return NodeKind.SELECTOR
-
-    if isinstance(x, ObjectSelector):
-        return NodeKind.OBJECT_SELECTOR
 
     if isinstance(x, Match):
         return NodeKind.PAR
@@ -336,6 +321,11 @@ def node_kind(x: Any) -> NodeKind:
 
 
 def is_canonical_value(x: Any) -> bool:
+    """Return whether x is an already canonical value category, without realization.
+
+    Accepts any value and returns bool. Classification may import lightweight Core
+    owners; it performs no Store IO, symbol resolution, or object construction.
+    """
     return node_kind(x) in {
         NodeKind.POD,
         NodeKind.IDENTITY_VALUE,
@@ -349,7 +339,6 @@ def is_canonical_value(x: Any) -> bool:
         NodeKind.SELECTOR_SPEC,
         NodeKind.IMPORT_REF,
         NodeKind.SOURCE_SPEC,
-        NodeKind.REFERENCE_VALUE,
     } or _is_naked_core_type(x)
 
 
@@ -359,9 +348,10 @@ def _is_naked_core_type(x: Any) -> bool:
 
 
 def is_runtime_leaf(x: Any) -> bool:
-    """
-    Values that should usually be treated as terminal by runtime-oriented
-    graph traversals.
+    """Return whether x is terminal for ordinary runtime graph traversal.
+
+    Accepts any value and returns bool without mutation, Store IO, or construction.
+    Classification may import lightweight Core owners.
     """
     return node_kind(x) in {
         NodeKind.POD,
@@ -372,7 +362,6 @@ def is_runtime_leaf(x: Any) -> bool:
         NodeKind.FUNCTION,
         NodeKind.IMPORT_REF,
         NodeKind.SOURCE_SPEC,
-        NodeKind.REFERENCE_VALUE,
     }
 
 
@@ -640,7 +629,7 @@ class _ToCanonicalTransformer(GraphTransformer):
         """Memoize graph-bearing sources by Python identity within one scope."""
 
         kind = node_kind(obj)
-        if kind in {NodeKind.DEFINITION, NodeKind.OBJECT, NodeKind.STATE_SELECTOR_REF}:
+        if kind in {NodeKind.DEFINITION, NodeKind.OBJECT}:
             return id(obj)
         return None
 
@@ -668,7 +657,6 @@ class _ToCanonicalTransformer(GraphTransformer):
 
     def dispatch(self, obj: Any, ctx: GraphCtx) -> Any:
         from .definition import ConcreteDefinition
-        from .object import Object
 
         kind = node_kind(obj)
         repo = ctx.state["repo"]
@@ -701,19 +689,6 @@ class _ToCanonicalTransformer(GraphTransformer):
         if kind is NodeKind.OBJECT:
             repo.cache_weak(obj)
             return obj.__cdef__
-
-        if kind is NodeKind.STATE_SELECTOR_REF:
-            resolver = getattr(repo, "resolve_state_selector", None)
-            if not callable(resolver):
-                raise TypeError(
-                    "StateSelectorRef requires a managing Repo with resolve_state_selector()."
-                )
-            resolved = resolver(obj)
-            if not isinstance(resolved, StateRef):
-                raise TypeError("StateSelectorRef resolution must return a StateRef.")
-            if resolved.object != obj.object:
-                raise ValueError("StateSelectorRef resolution returned a StateRef outside its ObjectRef scope.")
-            return resolved
 
         if kind is NodeKind.DEFLINK:
             from .cdef_graph import EdgeKind
@@ -814,7 +789,6 @@ class _ThawValueTransformer(GraphTransformer):
             NodeKind.POD,
             NodeKind.TYPE,
             NodeKind.IDENTITY_VALUE,
-            NodeKind.STATE_SELECTOR_REF,
         }
 
     def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
@@ -869,9 +843,6 @@ class _ThawValueTransformer(GraphTransformer):
         if kind is NodeKind.CONCRETE_DEFINITION:
             return thaw_definition_surface_value(obj, memo=ctx.memo)
 
-        if kind is NodeKind.REFERENCE_VALUE:
-            return obj
-
         if kind is NodeKind.DEFLINK:
             return obj
 
@@ -896,11 +867,10 @@ class _ThawValueTransformer(GraphTransformer):
 
 
 class _FromCanonicalTransformer(GraphTransformer):
-    def __init__(self, repo: "Repo", cache: CachePolicy, *, resolve_cdef=None, resolve_reference=None):
+    def __init__(self, repo: "Repo", cache: CachePolicy, *, resolve_cdef=None):
         self.repo = repo
         self.cache = cache
         self.resolve_cdef = resolve_cdef
-        self.resolve_reference = resolve_reference
 
     def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
         return node_kind(obj) in {
@@ -946,20 +916,6 @@ class _FromCanonicalTransformer(GraphTransformer):
             if self.resolve_cdef is not None:
                 return self.resolve_cdef(obj)
             return self.repo._materialize_cdef(
-                obj,
-                cache=self.cache,
-                memo=ctx.memo,
-                path=list(ctx.path),
-            )
-
-        if kind is NodeKind.REFERENCE_VALUE:
-            from .reference_values import StateRef
-
-            if self.resolve_reference is not None:
-                return self.resolve_reference(obj)
-            if isinstance(obj, StateRef):
-                return self.repo.load_state_ref(obj)
-            return self.repo._materialize_object_ref(
                 obj,
                 cache=self.cache,
                 memo=ctx.memo,
@@ -1057,14 +1013,6 @@ def to_canonical(
 
     if memo is None:
         memo = {}
-    if repo is not None and callable(getattr(repo, "resolve_state_selector", None)):
-        ctx = GraphCtx(
-            path=tuple(path) if path is not None else (),
-            memo=memo,
-            state={"repo": repo},
-        )
-        return _ToCanonicalTransformer().transform(x, ctx)
-
     with manage_repo(repo=repo) as sub_repo:
         ctx = GraphCtx(
             path=tuple(path) if path is not None else (),
@@ -1098,8 +1046,29 @@ def from_canonical(
     memo: dict | None = None,
     path: list[str | int] | tuple[str | int, ...] | None = None,
     resolve_cdef=None,
-    resolve_reference=None,
 ):
+    """Reconstruct canonical values under the supplied Repo's runtime admission.
+
+    Args:
+        x: Canonical value or nested supported containers.
+        repo: Repo owning materialization and cache policy.
+        cache: weak/strong/none cache selection.
+        memo: Optional operation-local identity memo.
+        path: Optional diagnostic path for this root.
+        resolve_cdef: Optional callback returning an already-selected concrete
+            dependency instead of independently materializing it.
+
+    Returns:
+        Runtime values with shared dependencies preserved and Ref data inert.
+
+    Raises:
+        TypeError: For unsupported canonical values.
+        Exception: Propagates admission, resolution, and materialization failures.
+
+    Side Effects:
+        May resolve symbols, construct/restore Objects, and populate Repo caches.
+        It does not publish Store authority.
+    """
     from dryml.runtime import materialization_admission
 
     with materialization_admission(operation="canonical_reconstruction"):
@@ -1112,7 +1081,6 @@ def from_canonical(
         )
         return _FromCanonicalTransformer(
             repo, cache, resolve_cdef=resolve_cdef,
-            resolve_reference=resolve_reference,
         ).transform(x, ctx)
 
 
@@ -1215,7 +1183,7 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
     from .object import Object
     from .params import Match
     from .quoted import QuotedDef, SelectorSpec
-    from .selector import ObjectSelector, Selector
+    from .selector import Selector
     from .template import Expr
 
     if isinstance(value, Distribution):
@@ -1227,7 +1195,7 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
         )
     if isinstance(value, Object):
         return value.definition
-    if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, ObjectSelector, Match, Expr, ObjectRef, StateRef, StateSelectorRef)):
+    if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, Match, Expr)):
         return value
     kind = node_kind(value)
     if kind in {NodeKind.NDARRAY, NodeKind.FROZEN_NDARRAY}:
@@ -1257,8 +1225,6 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
         NodeKind.FROZEN_NDARRAY,
         NodeKind.IMPORT_REF,
         NodeKind.SOURCE_SPEC,
-        NodeKind.REFERENCE_VALUE,
-        NodeKind.STATE_SELECTOR_REF,
     }:
         return value
     if kind is NodeKind.FUNCTION:
@@ -1320,15 +1286,13 @@ def _freeze_concrete_value(value: Any, *, stack: set[int], path: tuple[str | int
         from .definition import ConcreteDefinition
         from .cdef_graph import EdgeKind
         from .quoted import QuotedDef, SelectorSpec
-        from .selector import ObjectSelector, Selector
+        from .selector import Selector
         if not value.is_finalized:
             raise TypeError(
                 f"Unresolved DefLink assertion cannot enter ConcreteDefinition at {_path_label(path)}."
             )
         if isinstance(value.target, Selector):
             raise CannotConcretizeSelectorReference(path, value.target)
-        if isinstance(value.target, ObjectSelector):
-            return value
         if isinstance(value.target, (QuotedDef, SelectorSpec)):
             if value.kind is not EdgeKind.REF:
                 raise TypeError(
@@ -1391,17 +1355,16 @@ def freeze_link_target(value: Any) -> Any:
     from .definition import ConcreteDefinition, Definition
     from .object import Object
     from .quoted import QuotedDef, SelectorSpec
-    from .selector import ObjectSelector, Selector
+    from .selector import Selector
 
     if isinstance(value, Object):
         return value.definition
     if isinstance(value, (
-        Definition, ConcreteDefinition, Selector, ObjectSelector, QuotedDef, SelectorSpec,
-        ObjectRef, StateRef, StateSelectorRef,
+        Definition, ConcreteDefinition, Selector, QuotedDef, SelectorSpec,
     )):
         return value
     raise TypeError(
         "DefLink target must be Definition, ConcreteDefinition, Selector, "
-        "ObjectSelector, QuotedDef, SelectorSpec, ObjectRef, StateRef, StateSelectorRef, or "
+        "QuotedDef, SelectorSpec, or "
         f"Object; got {type(value).__name__}."
     )

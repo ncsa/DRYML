@@ -43,8 +43,6 @@ def _project(root, *, compatibility, _memo=None, _adapted=None):
     from .definition import ConcreteDefinition
     from .factory import FactorySpec
     from .node import _as_node_view, _clone, _Facets, _rewrite
-    from .reference_values import ObjectRef, StateRef, _expected_paths
-    from .node_codec import _reference_bindings
     from .template import _BinaryExpr, _RepeatExpr
 
     def node(source, result):
@@ -56,20 +54,6 @@ def _project(root, *, compatibility, _memo=None, _adapted=None):
                       result.parameters if concrete else result.kwargs, facets)
 
     def value(current, visit):
-        if isinstance(current, StateRef):
-            return visit(current.object)
-        if isinstance(current, ObjectRef):
-            definition = visit(_as_node_view(current.definition, adapted))
-            if compatibility:
-                return definition
-            # Rebase target associations, not context-local unordered path ordinals.
-            expected, _ = _expected_paths(definition)
-            objects = {}
-            for target, identity in _reference_bindings(current):
-                key = (("object-id", identity) if target is None else
-                       ("cdef", visit(_as_node_view(target, adapted))._node_id))
-                objects[expected[key]] = identity
-            return ObjectRef(definition, objects)
         if isinstance(current, FactorySpec):
             return FactorySpec._from_symbolic_parts(current.target, visit(current.args), visit(current.kwargs))
         if isinstance(current, ConfigRef) and current.has_default:
@@ -91,8 +75,7 @@ def state_compatibility_view(root):
     Args:
         root (ConcreteNode | ConcreteDefinition): Destination or origin evidence.
     Returns:
-        ConcreteNode: Class/configuration, topology/sharing and link-role evidence;
-        legacy exact graph references are weakened to their construction graphs.
+        ConcreteNode: Class/configuration, topology/sharing and link-role evidence.
     Raises:
         TypeError, ValueError: For nonconcrete roots or unsupported graph values.
     Side Effects:
@@ -107,7 +90,7 @@ def object_projection(root):
     Args:
         root (Node | ConcreteDefinition): Soft or normalized supplied graph.
     Returns:
-        Node: Alias-preserving view, including recursively weakened legacy StateRefs.
+        Node: Alias-preserving view with unquoted graph state selections removed.
     Raises:
         TypeError, ValueError: For unsupported graph values.
     Side Effects:

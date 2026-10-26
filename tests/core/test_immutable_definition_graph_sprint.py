@@ -476,10 +476,6 @@ def test_concrete_node_facets_saved_refinement_and_retained_construction_view():
         captured._facets = concrete._facets
     with pytest.raises(TypeError):
         require_saved(Definition(Serializable))
-    from dryml.core import ObjectRef
-    legacy = ObjectRef(Definition(Serializable).concretize(), {GraphPath(): ObjectId()})
-    with pytest.raises(TypeError, match="Node-local facets"):
-        require_saved(Definition(Nest3, legacy).concretize())
 
 
 def test_nested_concretization_keeps_facets_aliases_and_named_paths():

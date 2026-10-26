@@ -178,17 +178,15 @@ def test_concurrent_misses_reserve_before_copy_and_do_not_hold_lock():
     assert len(facility._resident) == 1 and not facility._pending
 
 
-def test_failed_scope_discards_staged_facts_and_partial_authority():
+def test_failed_scope_discards_staged_facts():
     """Even a caught substep failure prevents admission from its owning cut."""
     repo = Repo()
     with repo._read_cut() as cut:
         _stage_test_fact(cut, b"first")
-        cut.snapshots["partial"] = object()
-        cut.resolved_state_refs["partial"] = object()
-        cut.validated_state_refs.append(object())
+        assert cut._pending
         cut.discard()
         _stage_test_fact(cut, b"later", prepare=lambda: pytest.fail("failed scope prepared"))
-        assert not cut.snapshots and not cut.resolved_state_refs and not cut.validated_state_refs
+        assert not cut._pending
     assert repo._validation_evidence.accounted_bytes == 0
     assert not repo._validation_evidence._resident
 
@@ -258,7 +256,7 @@ def test_borrowed_facility_distinct_cuts_lifetime_clear_and_detach():
         owner.close(flush=False)
     with owner._read_cut() as outer, borrower._read_cut() as inner:
         assert inner.repo is borrower and outer.repo is owner
-        assert inner.snapshots is not outer.snapshots
+        assert inner._pending is not outer._pending
         assert inner.prepared(("test-primitive", 1), b"retained") == b"retained"
         owner.clear_cache(strong=False, weak=False)
         for cut in (inner, outer):

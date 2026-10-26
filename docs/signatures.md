@@ -21,7 +21,7 @@ resolved Nodes as inert quotation data and delivers the same immutable handle.
 `Mat(value)` are assertions, not conversion requests: an opposing assertion fails
 before selection. An unannotated slot is `Mat` by default. Scalars and a directly
 supplied live `Object` continue to pass through naturally, while an unannotated
-`Definition`, `ConcreteDefinition`, `ObjectRef`, or `StateRef` is materialized.
+`Definition` or concrete Node is materialized.
 
 Supported reference metadata targets include `Node`, `ConcreteNode`, and
 `SavedNode`. `Ref[Node]` requires symbolically resolved metadata, preserving
@@ -34,15 +34,14 @@ does not assert payload availability or current-use state compatibility.
 `Ref[IdentitySpec]` and `Ref[StateSpec]` deliver independent partial facet maps as
 metadata, extracting the materializing ownership closure from a supplied Node.
 They do not capture or allocate missing facets. Retained exact targets are
-`Definition`, `ConcreteDefinition`, `ObjectRef`, `StateRef`, `Object`, `QuotedDef`,
+`Definition`, `ConcreteDefinition`, `Object`, `QuotedDef`,
 `Selector`, and `SelectorSpec` where applicable. `Mat[T]` accepts an Object class
 (including a subclass), validates the target class, and leaves the one owning
 aggregate Repo boundary to concretize/materialize it. `Mat[Node]` and its
 refinements are invalid metadata targets; legacy `Mat[Definition]` and
 `Mat[ConcreteDefinition]` remain available for existing consumers.
-Exact requests deliver that exact authority: a `StateRef` supplied to
-`Ref[ObjectRef]` delivers its `ObjectRef`, for example. `Ref[AutoRef]` retains an
-incoming Node or explicitly supplied legacy reference kind. For a live Object it
+Exact requests deliver the requested metadata capability. `Ref[AutoRef]` retains an
+incoming Node. For a live Object it
 selects the construction definition for an entirely stateless materializing graph.
 For a stateful graph (including an ephemeral root with stateful descendants), it
 returns the known last complete saved Node when that receipt's object projection
@@ -50,8 +49,8 @@ matches the receiver's retained construction and live identities; otherwise it
 returns the identity-bound construction Node. A mutated live payload does not
 invalidate that historical receipt. Automatic selection performs no Store IO,
 capture, restore, or search for a new receipt, and does not certify current payload
-availability. A Node receipt is not converted to the legacy `StateRef` type:
-requesting that unsupported delivery from a live Object raises `SignatureError`.
+availability. An explicit `Ref[SavedNode]` requires a supplied complete Node;
+it does not infer a receipt from a live Object.
 A bare soft `Definition` is ambiguous and fails with guidance to wrap it
 in `Ref(...)`; that explicit assertion retains the Definition as reference data.
 `AutoRef` is an annotation-only marker class; use `Ref[AutoRef]`, not
@@ -71,15 +70,14 @@ For example, `Ref[Node | ConcreteNode | SavedNode]` selects the uniquely availab
 maximal refinement, preserving the selected handle and facets. Independent
 identity/state alternatives such as `Ref[IdentitySpec | StateSpec]` are ambiguous
 when both deliveries are available and raise `SignatureError`; neither dimension
-is silently preferred or discarded. Retained legacy compound-reference unions
-are comparable by their actual guarantees. Ambiguous strengthening fails instead
+is silently preferred or discarded. Ambiguous strengthening fails instead
 of falling back. Nullable forms are flat:
-`Ref[ObjectRef | None]` and `Ref[ObjectRef] | None` accept a plain `None`;
-distributed forms such as `Ref[ConcreteDefinition] | Ref[ObjectRef] | None` are
+`Ref[Node | None]` and `Ref[Node] | None` accept a plain `None`;
+distributed forms such as `Ref[Node] | Ref[ConcreteNode] | None` are
 equivalent. Only plain `None` may appear outside role branches, and opposing value
 wrappers still conflict before the nullable branch is considered. `Ref[None]` does
 not compile. Ref/Mat forms are top-level only. Nested roles such as
-`list[Ref[ObjectRef]]`, container targets, mixed Ref/Mat unions, incomparable data
+`list[Ref[Node]]`, container targets, mixed Ref/Mat unions, incomparable data
 unions, and Ref Object-subclass annotations fail with `SignatureError`.
 
 `QuotedDef` and `SelectorSpec` are expression data. Use `Ref[QuotedDef]`,
@@ -105,9 +103,8 @@ arithmetic expressions, without making it a CDef graph edge. Direct `QuotedDef`
 and `Ref[QuotedDef]` remain the explicit wrapper-preserving local-data APIs.
 Node-only expression data uses the closed `dryml-node-template` v1 family with
 the existing authenticated Node graph codec; compatible legacy expression data
-retains its v1 family. Existing V2 Repo/Store boundaries reject unsupported Node
-identity/state facets rather than losing them. This signature cutover does not
-implement Node facet realization or a Store migration.
+retains its v1 family. Plain CDef export rejects Node facets it cannot represent;
+the authenticated Node codec carries them without loss. No Store migration occurs.
 
 The only nested Template grammar is `Mapping[str, Template]` (or the equivalent
 `Mapping[str, Template[Node]]`, including the retained Definition spelling), optionally unioned with `None`. Activated
@@ -115,14 +112,9 @@ normalization validates string keys, orders entries by `canonical_key_bytes`, an
 admits every value independently. Lists, tuples, nested mappings, non-string
 keys, and nested Ref/Mat forms are rejected.
 
-`StateRef.reference_value_at(path)` is the narrow graph-inspection accessor for a
-terminal `Ref` field containing an exact `ObjectRef` or `StateRef`. It may pass
-through preceding materializing graph edges but never crosses a Ref boundary,
-loads state, or accesses Python attributes. `StateRef.at(path)` remains limited to
-materializing subtrees and rejects Ref-only paths. Symbolic artifact bindings use
-the accessor matching the stored edge: for example, materializing
-`Experiment.test_data` is projected with `StateRef.at(path)`, while terminal
-Ref-held fields retain their exact stored reference value.
+Use Node `.at(path)` for metadata navigation and respect the stored edge role.
+Ref-held and quoted values remain data; their presence does not authorize
+materialization or include them in owned IdentitySpec/StateSpec maps.
 
 A fresh constructor with an explicit Ref/Mat role validates finalized structural
 links against that role before canonicalization can erase their edge authority.
@@ -150,45 +142,24 @@ or disconnected source authority fails instead of falling back to another
 replica. Read-only source use admits multiple DirStore handles naming one
 physical domain; writable save destinations continue to reject that overlap.
 
-The following declaration/ClaimRecord discussion describes retained legacy
-reference adapters, whose Store-3 publication APIs are unsupported on built-in
-format-4 Stores. It does not add claims or automatic discovery to Node refinements.
-
 Definition-to-CDef reference strengthening requires an already fully bound
-expression; it cannot fill defaults or run a search. CDef-to-ObjectRef selection
-uses matching authoritative declarations even when their claims are `available`,
-`claimed`, or `completed`. That declaration eligibility does not grant construction:
-`Mat` separately requires an eligible live object, saved state, or active claim.
-When `ReferenceSelection` pins a declaration Store for a Mat slot, delivery requires
-that exact handle to remain connected with matching declaration and ClaimRecord
-authority. Repo does not substitute another replica; conflicting Store domains for
-the same selected identity fail before realization effects. Duplicate connected
-handles in one authority-fence domain are treated as the same Store domain.
-
-`Mat[StateRef]` submits the selected exact snapshot to Repo. Repo owns claim
-admission, reservations, caching, restoration, and cleanup. A direct live Object
-is preserved for ordinary `Mat[Object]` delivery. Under Repo's existing
-`reuse_live="matching"` or `"greedy"` policy, a checkpoint-marked live object
-mutated after that checkpoint can be reused without restoration; use
-`reuse_live="never"` when a fresh load is required. This accepted limitation does
-not permit selecting another identity or snapshot.
-
-Aggregate ObjectRef admission classifies nested dependencies before claims are
-acquired. A nested identity already selected as live or from saved state is reused
-during parent construction rather than reclaimed or reconstructed. Unresolved
-nested declarations use their preflighted claim and any explicitly pinned
-declaration Store.
+expression; it cannot fill defaults or run a search. Declaration claim states and
+compound-reference strengthening are retired. `Mat[Object]` submits the selected
+Node to Repo, which owns admission, reservations, caching, restoration, and cleanup.
+A supplied live Object passes through. Selected state on a Node is freshly
+validated and restored even when an eligible live realization is reused;
+`reuse_live="never"` requires a fresh realization.
 
 Before a `Mat` boundary begins any construction, exact restore, cache update, or
-claim acquisition, Repo resolves the complete selected materializing closure and
+reservation acquisition, Repo resolves the complete selected materializing closure and
 rejects an abstract current Object class with `TypeError`. This includes nested
-materializing CDefs, ObjectRefs, StateRefs, and greedy-reuse candidates. `Ref`
+materializing Nodes and reuse candidates. `Ref`
 links, quotations, and reference-as-value values are terminal data, so their
 hidden definitions are not resolved by this admission check.
 
 Selection, normalization, and `function` never save, open a Repo, allocate an
-identity, or capture payloads. They can read supplied Repo authority for reference
-evidence. Mat realization can construct, restore, reserve, or claim through Repo.
+identity, or capture payloads during metadata selection. Mat realization can
+allocate missing identities, construct, restore, or reserve through Repo.
 Return normalization happens after the target body, so it sees a receipt saved by
 the body; a return error does not roll back body effects or automatic saving by a
 higher-level owner.
@@ -346,7 +317,8 @@ There are no aliases or forwarding modules for these names. In particular,
 `Ref(value)` in an unannotated constructor or function slot now fails because that
 slot defaults to Mat. New live constructor arguments can therefore form a selected
 reference edge or materializing value according to their signature rather than the
-retired role policy. Existing CDef, ObjectRef, and StateRef encodings and Store
+retired role policy. Compound-reference types/codecs and Store-3 APIs are now
+removed; see [API retirement](repo_store_v3_retirement.md). Existing persisted
 contents are not rewritten or migrated.
 
 ## Errors

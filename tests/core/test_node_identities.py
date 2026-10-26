@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from dryml.core import (
-    ConcreteNode, Definition, LocalState, Object, ObjectId, ObjectRef, Repo,
+    ConcreteNode, Definition, LocalState, Object, ObjectId, Repo,
     Serializable, StateKey, object_namespace,
 )
 from dryml.core.cdef_graph import EdgeKind
@@ -14,7 +14,6 @@ from dryml.core.node_codec import decode_node_graph, encode_node_graph
 from dryml.core.node_prepare import NodePreparation
 from dryml.core.store import StoreAuthorityError, StoreCapabilityError
 from dryml.core.store.dir import DirStore
-from dryml.core.utils.graph.path import GraphPath
 
 
 class IdentityNode(Serializable):
@@ -142,7 +141,7 @@ def test_allocate_identities_needs_no_construction_resolution_or_store(monkeypat
     assert not identified.state_spec()
 
 
-@pytest.mark.parametrize("invalid", ["soft", "collision", "stateless_id", "stateless_state", "legacy"])
+@pytest.mark.parametrize("invalid", ["soft", "collision", "stateless_id", "stateless_state"])
 def test_allocate_identities_rejects_invalid_graph_before_allocating(monkeypatch, invalid):
     from dryml.core import reference_values
 
@@ -163,10 +162,6 @@ def test_allocate_identities_rejects_invalid_graph_before_allocating(monkeypatch
         recipe = Definition(IdentityEnvelope).concretize()
         recipe = recipe.with_state(_state(recipe, "a"))
         match = "Stateless"
-    else:
-        legacy = ObjectRef(Definition(IdentityNode).concretize(), {GraphPath(): ObjectId()})
-        recipe = Definition(IdentityNode, [legacy]).concretize()
-        expected, match = TypeError, "legacy"
 
     def forbidden():
         pytest.fail("invalid graph consumed a new identity")

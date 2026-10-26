@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import dryml.dispatch as dispatch
-from dryml.core import Repo, Serializable, StateRef
+from dryml.core import Repo, Serializable, require_saved
 from dryml.core.execute import CoreOptions
 from dryml.core.store.dir import DirStore
 from dryml.dispatch import InProcess, ProbeOptions
@@ -272,7 +272,7 @@ def test_dispatch_ray_runs_every_managed_decorator_order_with_selected_control(
         ).state == "not_started"
         report = view.explain(operation)
         assert report.eligible, report.diagnostics
-        assert isinstance(view.run(operation, argument_state), StateRef)
+        require_saved(view.run(operation, argument_state))
         restored = repo.load_state_ref(
             operation.status(
                 state_repo=repo, control_store=control_store,

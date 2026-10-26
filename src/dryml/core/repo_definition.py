@@ -1,4 +1,4 @@
-"""Detached, bounded v1 configuration records for :class:`dryml.core.Repo`.
+"""Detached, bounded v2 configuration records for :class:`dryml.core.Repo`.
 
 This module deliberately represents configuration only. Its decoding paths do
 not open Stores, resolve recipe symbols, construct live selectors, or activate
@@ -29,7 +29,7 @@ _BOUNDS = dict(
 )
 _MAX_JSON_BYTES = 16 * 1024 * 1024
 _SCHEMA = "dryml-repo-definition"
-_STATE_HASH = re.compile(r"[A-Za-z0-9]{1,32}-[0-9a-f]{64}\Z")
+_VERSION = 2
 _CLASS_POLICIES = frozenset(("selector", "exact"))
 
 
@@ -348,109 +348,6 @@ def _descriptor_set_fingerprint(
         )
         return _stable_mapping_hash("dryml.core.params.Match", [("stable_key", stable_key)])
 
-    def cdef_graph_hash(root: str) -> str:
-        """Recreate the token-free CDef graph digest from descriptor edges."""
-
-        from .utils.graph.path import GraphPath, Index, Key, Parameter, SetMember, graph_path_sort_key
-
-        edges: dict[str, list[tuple[GraphPath, str, str]]] = {}
-        reached: set[str] = set()
-
-        def direct(current: Mapping[str, Any], graph_path: GraphPath):
-            kind = current["kind"]
-            if kind == "definition-ref":
-                yield graph_path, current["label"], "materialize"
-            elif kind == "link":
-                target = current["target"]
-                if target["kind"] == "definition-ref":
-                    yield graph_path, target["label"], current["edge"]
-            elif kind in {"list", "tuple"}:
-                for index, child in enumerate(current["items"]):
-                    yield from direct(child, graph_path.child(Index(index)))
-            elif kind == "map":
-                for name, child in current["items"]:
-                    yield from direct(child, graph_path.child(Key(name)))
-            elif kind == "set":
-                for member in current["items"]:
-                    yield from direct(member["value"], graph_path.child(SetMember(member["fingerprint"])))
-
-        def visit(label: str) -> None:
-            if label in reached:
-                return
-            reached.add(label)
-            node = labels[label]
-            node_edges = []
-            for name, child in node["parameters"]:
-                node_edges.extend(direct(child, GraphPath((Parameter(name),))))
-            edges[label] = node_edges
-            for _, child, _ in node_edges:
-                visit(child)
-
-        visit(root)
-        stable_hashes = {label: definition(label, 0) for label in reached}
-        minimum_paths = {root: GraphPath()}
-        pending = [(root, GraphPath())]
-        while pending:
-            parent, parent_path = pending.pop()
-            for edge_path, child, _ in edges[parent]:
-                candidate = parent_path.join(edge_path)
-                previous = minimum_paths.get(child)
-                if previous is None or graph_path_sort_key(candidate) < graph_path_sort_key(previous):
-                    minimum_paths[child] = candidate
-                    pending.append((child, candidate))
-        ordered = sorted(reached, key=lambda label: (graph_path_sort_key(minimum_paths[label]), stable_hashes[label]))
-        graph_labels = {label: f"n{index}" for index, label in enumerate(ordered)}
-        node_order: list[str] = []
-        seen: set[str] = set()
-
-        def order(label: str) -> None:
-            if label in seen:
-                return
-            seen.add(label)
-            node_order.append(label)
-            for _, child, _ in sorted(edges[label], key=lambda edge: (graph_path_sort_key(edge[0]), stable_hashes[edge[1]], edge[2])):
-                order(child)
-
-        order(root)
-        projection = {
-            "root": graph_labels[root],
-            "nodes": [
-                {
-                    "label": graph_labels[label],
-                    "stable_hash": stable_hashes[label],
-                    "edges": [
-                        (kind, edge_path.to_bytes().hex(), graph_labels[child])
-                        for edge_path, child, kind in sorted(
-                            edges[label],
-                            key=lambda edge: (graph_path_sort_key(edge[0]), graph_labels[edge[1]], edge[2]),
-                        )
-                    ],
-                }
-                for label in node_order
-            ],
-        }
-        payload = json.dumps(projection, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return hashlib.sha256(b"dryml-cdef-graph-v1\x00" + payload).hexdigest()
-
-    def object_ref(current: Mapping[str, Any]) -> str:
-        graph_hash = cdef_graph_hash(current["definition"]["label"])
-        from .utils.graph.path import GraphPath, graph_path_sort_key
-
-        entries = sorted(
-            current["objects"],
-            key=lambda entry: graph_path_sort_key(GraphPath.from_data(entry["path"])),
-        )
-        payload = {
-            "definition_graph": graph_hash,
-            "objects": [[entry["path"], entry["object_id"]] for entry in entries],
-        }
-        digest = hashlib.sha256(
-            b"dryml-object-ref-v1\x00" + json.dumps(
-                payload, separators=(",", ":"), ensure_ascii=True,
-            ).encode("ascii")
-        ).hexdigest()
-        return hashlib.sha256(b"dryml-object-ref-v1\x00" + digest.encode("ascii")).hexdigest()
-
     def item(current: Mapping[str, Any], depth: int) -> str:
         budget.visit(path, depth)
         kind = current["kind"]
@@ -485,36 +382,6 @@ def _descriptor_set_fingerprint(
                 ) from None
         if kind == "match":
             return match(current, depth + 1)
-        if kind == "object-ref":
-            return object_ref(current)
-        if kind == "state-ref":
-            graph_hash = cdef_graph_hash(current["object"]["definition"]["label"])
-            from .utils.graph.path import GraphPath, graph_path_sort_key
-
-            objects = sorted(
-                current["object"]["objects"],
-                key=lambda entry: graph_path_sort_key(GraphPath.from_data(entry["path"])),
-            )
-            object_identity = {
-                "definition_graph": graph_hash,
-                "objects": [[entry["path"], entry["object_id"]] for entry in objects],
-            }
-            object_digest = hashlib.sha256(
-                b"dryml-object-ref-v1\x00" + json.dumps(
-                    object_identity, separators=(",", ":"), ensure_ascii=True,
-                ).encode("ascii")
-            ).hexdigest()
-            states = sorted(
-                current["states"],
-                key=lambda entry: graph_path_sort_key(GraphPath.from_data(entry["path"])),
-            )
-            state_digest = hashlib.sha256(
-                b"dryml-state-ref-v1\x00" + json.dumps(
-                    {"object": object_digest, "states": [[entry["path"], entry["state"]] for entry in states]},
-                    separators=(",", ":"), ensure_ascii=True,
-                ).encode("ascii")
-            ).hexdigest()
-            return hashlib.sha256(b"dryml-state-ref-v1\x00" + state_digest.encode("ascii")).hexdigest()
         raise _error(path, "set member has unsupported stable semantics")
 
     return item(value, 0)
@@ -614,7 +481,6 @@ class _SelectorEncoder:
         from .links import DefLink
         from .params import Match
         from .quoted import QuotedDef, SelectorSpec
-        from .reference_values import ObjectRef, StateRef
         from .selector import Selector
         from .generator import GeneratorSelector
         from .symbol import ImportRef, SourceSpec
@@ -641,10 +507,6 @@ class _SelectorEncoder:
             if not value.is_finalized:
                 raise _error(path, "unresolved link assertion is not portable")
             return {"kind": "link", "edge": value.kind.value, "target": self.value(value.target, path + ".target", depth + 1)}
-        if isinstance(value, ObjectRef):
-            return {"kind": "object-ref", "definition": self.definition(value.definition, path + ".definition", depth + 1), "objects": value.to_data()["objects"]}
-        if isinstance(value, StateRef):
-            return {"kind": "state-ref", "object": self.value(value.object, path + ".object", depth + 1), "states": value.to_data()["states"]}
         if isinstance(value, FactorySpec):
             return {
                 "kind": "factory",
@@ -939,42 +801,6 @@ def _validate_match(value: Mapping[str, Any], path: str, validate_value: Any) ->
 
 
 
-def _validate_reference_graph_path(value: Any, path: str) -> None:
-    """Validate the canonical closed GraphPath form used inside references."""
-
-    from .utils.graph.path import GRAPH_PATH_SCHEMA_VERSION
-
-    record = _exact_keys(value, {"schema_version", "segments"}, path)
-    if record["schema_version"] != GRAPH_PATH_SCHEMA_VERSION or not isinstance(record["segments"], list):
-        raise _error(path, "reference path is invalid")
-    for index, segment in enumerate(record["segments"]):
-        segment_path = f"{path}.segments[{index}]"
-        if not isinstance(segment, Mapping) or not isinstance(segment.get("kind"), str):
-            raise _error(segment_path, "reference path segment is invalid")
-        kind = segment["kind"]
-        if kind in {"parameter", "kwarg"}:
-            _exact_keys(segment, {"kind", "name"}, segment_path)
-            if not isinstance(segment["name"], str):
-                raise _error(segment_path, "reference path segment is invalid")
-        elif kind in {"arg", "index"}:
-            _exact_keys(segment, {"kind", "index"}, segment_path)
-            if type(segment["index"]) is not int or segment["index"] < 0:
-                raise _error(segment_path, "reference path segment is invalid")
-        elif kind == "key":
-            _exact_keys(segment, {"kind", "value"}, segment_path)
-            if type(segment["value"]) not in {str, int}:
-                raise _error(segment_path, "reference path segment is invalid")
-        elif kind == "set_member":
-            _exact_keys(segment, {"kind", "fingerprint", "ordinal"}, segment_path)
-            if (
-                    not isinstance(segment["fingerprint"], str)
-                    or type(segment["ordinal"]) is not int
-                    or segment["ordinal"] < 0):
-                raise _error(segment_path, "reference path segment is invalid")
-        else:
-            raise _error(segment_path, "reference path segment is invalid")
-
-
 def _validate_selector(value: Any, path: str) -> None:
     if isinstance(value, Mapping) and value.get("kind") == "node-selector":
         _node_selector_root(value, path)
@@ -1058,122 +884,6 @@ def _validate_selector(value: Any, path: str) -> None:
             active.remove(label)
             seen.add(label)
         return label
-
-    def reference_entries(entries: Any, item_path: str, *, state: bool) -> dict[Any, Any]:
-        if not isinstance(entries, list) or len(entries) > 4096:
-            raise _error(item_path, "reference entries are invalid")
-        from .reference_values import ObjectId
-        from .utils.graph.path import GraphPath
-
-        result = {}
-        for index, entry in enumerate(entries):
-            entry_path = f"{item_path}[{index}]"
-            _exact_keys(entry, {"path", "state"} if state else {"path", "object_id"}, entry_path)
-            try:
-                _validate_reference_graph_path(entry["path"], entry_path + ".path")
-                graph_path = GraphPath.from_data(entry["path"])
-                if graph_path in result:
-                    raise ValueError()
-                value = entry["state"] if state else ObjectId.from_data(entry["object_id"])
-                if state and (not isinstance(value, str) or not _STATE_HASH.fullmatch(value)):
-                    raise ValueError()
-            except (RecursionError, TypeError, ValueError, OverflowError):
-                raise _error(entry_path, "reference path or identity is invalid") from None
-            result[graph_path] = value
-        if not state and len(set(result.values())) != len(result):
-            raise _error(item_path, "independent reference identities are duplicated")
-        return result
-
-    def validate_object_topology(current: Mapping[str, Any], item_path: str) -> None:
-        """Check ObjectRef paths against the complete descriptor-only CDef graph."""
-
-        from .utils.graph.path import (
-            GraphPath,
-            Index,
-            Key,
-            Parameter,
-            SetMember,
-            graph_path_sort_key,
-        )
-
-        root_label = definition_ref(current["definition"], item_path + ".definition", cdef=True)
-        objects = reference_entries(current["objects"], item_path + ".objects", state=False)
-        expected: dict[tuple[Any, ...], tuple[GraphPath, Any | None]] = {}
-        def add(key: tuple[Any, ...], graph_path: GraphPath, object_id: Any | None) -> None:
-            if len(expected) >= _BOUNDS["max_entries"] and key not in expected:
-                raise _error(item_path, "reference topology entry bound exceeded")
-            previous = expected.get(key)
-            if previous is None or graph_path_sort_key(graph_path) < graph_path_sort_key(previous[0]):
-                expected[key] = (graph_path, object_id)
-
-        def visit_reference(reference: Mapping[str, Any], graph_path: GraphPath, reference_path: str) -> None:
-            object_descriptor = reference if reference["kind"] == "object-ref" else reference["object"]
-            embedded = reference_entries(
-                object_descriptor["objects"], reference_path + ".objects", state=False
-            )
-            for child_path, object_id in embedded.items():
-                add(("object-id", object_id), graph_path.join(child_path), object_id)
-
-        def visit_value(value: Mapping[str, Any], graph_path: GraphPath, value_path: str, active_labels: set[str], depth: int) -> None:
-            budget.visit(value_path, depth)
-            kind = value["kind"]
-            if kind == "definition-ref":
-                label = value["label"]
-                if labels[label]["node_kind"] != "cdef":
-                    raise _error(value_path, "CDef graph contains a partial Definition")
-                visit_cdef(label, graph_path, value_path, active_labels, depth + 1)
-                return
-            if kind in {"object-ref", "state-ref"}:
-                visit_reference(value, graph_path, value_path)
-                return
-            if kind == "link":
-                if value["edge"] == "materialize":
-                    visit_value(value["target"], graph_path, value_path + ".target", active_labels, depth + 1)
-                return
-            if kind in {"list", "tuple"}:
-                for index, child in enumerate(value["items"]):
-                    visit_value(child, graph_path.child(Index(index)), f"{value_path}[{index}]", active_labels, depth + 1)
-                return
-            if kind == "map":
-                for index, pair in enumerate(value["items"]):
-                    visit_value(pair[1], graph_path.child(Key(pair[0])), f"{value_path}[{index}]", active_labels, depth + 1)
-                return
-            if kind == "set":
-                for member in value["items"]:
-                    visit_value(
-                        member["value"],
-                        graph_path.child(SetMember(member["fingerprint"])),
-                        value_path + ".set",
-                        active_labels, depth + 1,
-                    )
-                return
-            if kind == "match":
-                raise _error(value_path, "CDef graph contains a parameter placeholder")
-
-        def visit_cdef(label: str, graph_path: GraphPath, value_path: str, active_labels: set[str], depth: int) -> None:
-            budget.visit(value_path, depth)
-            if label in active_labels:
-                raise _error(value_path, "definition cycle is unsupported")
-            node = labels[label]
-            if node["stateful_role"]:
-                add(("node", label), graph_path, None)
-            active_labels.add(label)
-            for name, child in node["parameters"]:
-                visit_value(
-                    child,
-                    graph_path.child(Parameter(name)),
-                    f"{value_path}.parameters",
-                    active_labels, depth + 1,
-                )
-            active_labels.remove(label)
-
-        visit_cdef(root_label, GraphPath(), item_path + ".definition", set(), 0)
-        expected_paths = {path for path, _ in expected.values()}
-        if set(objects) != expected_paths:
-            raise _error(item_path, "reference paths do not match CDef topology")
-        for key, (graph_path, object_id) in expected.items():
-            if object_id is not None and objects[graph_path] != object_id:
-                raise _error(item_path, "reference identity does not match imported topology")
 
     def item(current: Any, item_path: str, depth: int = 0) -> None:
         budget.visit(item_path, depth)
@@ -1295,22 +1005,6 @@ def _validate_selector(value: Any, path: str) -> None:
                 names.add(pair[0])
                 item(pair[1], pair_path, depth + 1)
             return
-        if kind == "object-ref":
-            _exact_keys(current, {"kind", "definition", "objects"}, item_path)
-            definition_ref(current["definition"], item_path + ".definition", depth + 1, cdef=True)
-            reference_entries(current["objects"], item_path + ".objects", state=False)
-            validate_object_topology(current, item_path)
-            return
-        if kind == "state-ref":
-            _exact_keys(current, {"kind", "object", "states"}, item_path)
-            if not isinstance(current["object"], Mapping) or current["object"].get("kind") != "object-ref":
-                raise _error(item_path, "state reference object is invalid")
-            item(current["object"], item_path + ".object", depth + 1)
-            objects = reference_entries(current["object"]["objects"], item_path + ".object.objects", state=False)
-            states = reference_entries(current["states"], item_path + ".states", state=True)
-            if set(objects) != set(states):
-                raise _error(item_path, "state paths do not match object reference")
-            return
         raise _error(item_path, "value tag is unsupported")
 
     if not isinstance(record["root"], Mapping) or record["root"].get("kind") != "definition-ref":
@@ -1322,7 +1016,7 @@ def _validate_selector(value: Any, path: str) -> None:
 
 def _validate_data(data: Any) -> dict[str, Any]:
     record = _exact_keys(data, {"schema", "version", "stores", "default_store", "routing", "settings"}, "$")
-    if record["schema"] != _SCHEMA or type(record["version"]) is not int or record["version"] != 1:
+    if record["schema"] != _SCHEMA or type(record["version"]) is not int or record["version"] != _VERSION:
         raise _error("$", "schema or version is unsupported")
     if not isinstance(record["stores"], list):
         raise _error("$.stores", "must be a list")
@@ -1349,16 +1043,10 @@ def _validate_data(data: Any) -> dict[str, Any]:
             if type(route["store"]) is not int or not 0 <= route["store"] < len(record["stores"]):
                 raise _error(f"$.routing.routes[{index}]", "store index is invalid")
             _validate_selector(route["selector"], f"$.routing.routes[{index}].selector")
-    settings = _exact_keys(record["settings"], {"config", "lease_duration", "save_objs_on_deletion"}, "$.settings")
+    settings = _exact_keys(record["settings"], {"config", "save_objs_on_deletion"}, "$.settings")
     _json_value(settings["config"], "$.settings.config")
     if not isinstance(settings["config"], Mapping):
         raise _error("$.settings.config", "must be a mapping")
-    if (
-        type(settings["lease_duration"]) not in {int, float}
-        or not math.isfinite(settings["lease_duration"])
-        or not 0 < settings["lease_duration"] <= 3600
-    ):
-        raise _error("$.settings.lease_duration", "is invalid")
     if type(settings["save_objs_on_deletion"]) is not bool:
         raise _error("$.settings.save_objs_on_deletion", "must be bool")
     return json.loads(_bounded_json_bytes(record, "$"))
@@ -1401,10 +1089,10 @@ def _validate_store_descriptor(value: Any, path: str = "$") -> dict[str, Any]:
 
 @dataclass(frozen=True, slots=True, init=False)
 class RepoDefinition:
-    """An immutable, inert v1 Repo configuration snapshot.
+    """An immutable, inert v2 Repo configuration snapshot.
 
     Args:
-        data: Complete JSON-compatible v1 envelope containing supported Store,
+        data: Complete JSON-compatible v2 envelope containing supported Store,
             routing, and declarative-setting descriptors.
 
     ``to_data`` and ``from_data`` only inspect detached descriptors. They never
@@ -1422,14 +1110,14 @@ class RepoDefinition:
     _data: dict[str, Any]
 
     def __init__(self, data: Mapping[str, Any]) -> None:
-        """Validate and retain one inert v1 configuration mapping.
+        """Validate and retain one inert v2 configuration mapping.
 
         Args:
-            data: Complete v1 envelope with only supported JSON descriptors.
+            data: Complete v2 envelope with only supported JSON descriptors.
 
         Raises:
             TypeError: If ``data`` is not a mapping.
-            RepoDefinitionError: If the envelope violates the closed v1 schema.
+            RepoDefinitionError: If the envelope violates the closed v2 schema.
         """
         if not isinstance(data, Mapping):
             raise TypeError("Repo definition data must be a mapping.")
@@ -1457,10 +1145,10 @@ class RepoDefinition:
 
     @classmethod
     def from_data(cls, data: Mapping[str, Any]) -> "RepoDefinition":
-        """Validate and detach one v1 mapping without activating resources.
+        """Validate and detach one v2 mapping without activating resources.
 
         Args:
-            data: Complete JSON-compatible v1 envelope.
+            data: Complete JSON-compatible v2 envelope.
 
         Returns:
             An immutable inert configuration value.
@@ -1482,7 +1170,7 @@ class RepoDefinition:
         """Return deterministic bounded JSON for caller-owned transport.
 
         Returns:
-            Canonical v1 JSON text no larger than the encoded-size limit.
+            Canonical v2 JSON text no larger than the encoded-size limit.
 
         Raises:
             RepoDefinitionError: If retained data cannot be encoded safely.
@@ -1497,7 +1185,7 @@ class RepoDefinition:
         """Parse and validate bounded JSON without opening Stores or symbols.
 
         Args:
-            data: JSON text containing one complete v1 envelope.
+            data: JSON text containing one complete v2 envelope.
 
         Returns:
             An immutable inert configuration value.
@@ -1569,10 +1257,8 @@ def _selector_from_data(value: Mapping[str, Any]):
         PresentMatcher, SubclassMatcher,
     )
     from .quoted import QuotedDef, SelectorSpec
-    from .reference_values import ObjectId, ObjectRef, StateRef
     from .selector import Selector
     from .generator import GeneratorSelector
-    from .utils.graph.path import GraphPath
 
     if value.get("kind") == "template-selector":
         return GeneratorSelector.from_data(value["payload"])
@@ -1660,18 +1346,6 @@ def _selector_from_data(value: Mapping[str, Any]):
                 tuple(item(child) for child in current["args"]),
                 FrozenDict((name, item(child)) for name, child in current["kwargs"]),
             )
-        if kind == "object-ref":
-            objects = {
-                GraphPath.from_data(entry["path"]): ObjectId.from_data(entry["object_id"])
-                for entry in current["objects"]
-            }
-            return ObjectRef(item(current["definition"]), objects)
-        if kind == "state-ref":
-            states = {
-                GraphPath.from_data(entry["path"]): entry["state"]
-                for entry in current["states"]
-            }
-            return StateRef(item(current["object"]), states)
         raise AssertionError(f"validated selector value has unknown kind {kind!r}")
 
     def definition(label: str) -> Any:
@@ -1775,7 +1449,6 @@ def _reconstruct_repo_from_data(data: Mapping[str, Any], routing_parts, *, cache
             repo,
             opened,
             config=data["settings"]["config"],
-            lease_duration=data["settings"]["lease_duration"],
             save_routing=routing,
         )
         repo.save_objs_on_deletion = data["settings"]["save_objs_on_deletion"]
@@ -1850,7 +1523,6 @@ def _repo_cache_key_from_data(data: Mapping[str, Any]) -> tuple[Any, ...]:
         raise RepoDefinitionError("Repo definition cache key is invalid.") from None
     return (
         "repo", stores, data["default_store"], routing, config,
-        float(data["settings"]["lease_duration"]),
         data["settings"]["save_objs_on_deletion"],
     )
 
@@ -1892,7 +1564,6 @@ def _repo_cache_key_from_repo(repo: Any) -> tuple[Any, ...] | None:
                 }
             config = canonical_json_bytes(repo.config, **_BOUNDS)
             routing_bytes = canonical_json_bytes(routing, **_BOUNDS)
-            lease_duration = float(repo._lease_duration)
             deletion_save = repo.save_objs_on_deletion
         except (RecursionError, TypeError, ValueError, OverflowError, UnicodeError, OSError):
             return None
@@ -1900,7 +1571,7 @@ def _repo_cache_key_from_repo(repo: Any) -> tuple[Any, ...] | None:
         return None
     return (
         "repo", store_keys, 0 if store_keys else None, routing_bytes, config,
-        lease_duration, deletion_save,
+        deletion_save,
     )
 
 
@@ -2032,9 +1703,6 @@ def definition_from_repo(repo: Any) -> RepoDefinition:
         if repo._closing or repo._closed:
             raise RepoDefinitionError("Repo definition cannot be exported after close begins.")
         repo._save_context_leases += 1
-        if repo._clock_explicit or repo._owner_token_factory_explicit:
-            repo._save_context_leases -= 1
-            raise RepoDefinitionError("Repo definition does not support explicit clock or owner-token factory.")
         try:
             connected = repo._normalize_store_handles(repo.stores, reject_physical=True)
         except (TypeError, ValueError, OSError):
@@ -2045,7 +1713,6 @@ def definition_from_repo(repo: Any) -> RepoDefinition:
         stores_snapshot = tuple(connected)
         routing_snapshot = repo._save_routing
         config_snapshot = dict(repo.config)
-        lease_duration = repo._lease_duration
         save_objs_on_deletion = repo.save_objs_on_deletion
 
     try:
@@ -2076,13 +1743,12 @@ def definition_from_repo(repo: Any) -> RepoDefinition:
             }
         data = {
             "schema": _SCHEMA,
-            "version": 1,
+            "version": _VERSION,
             "stores": stores,
             "default_store": 0 if stores else None,
             "routing": routing_data,
             "settings": {
                 "config": config_snapshot,
-                "lease_duration": lease_duration,
                 "save_objs_on_deletion": save_objs_on_deletion,
             },
         }

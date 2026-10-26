@@ -18,7 +18,7 @@ import zipfile
 from contextlib import contextmanager, nullcontext
 
 from ... import filesystem
-from .dir import DirStore, _REMOVED_ENTRY_PREFIX, _EXACT_READERS, _EXACT_READER_NAMES
+from .dir import DirStore, _REMOVED_ENTRY_PREFIX
 from .records import StoreFormatRecord, StoreRecordError, _MAX_RECORD_BYTES
 from ...locking import interprocess_lock
 from .store import StoreAuthorityError, StoreCapabilityError, StorePublicationCapabilities
@@ -315,19 +315,6 @@ class ZipStore(DirStore):
                 self._archive_dirty = True
             super()._atomic_write(path, payload)
 
-    def mark_query_index_dirty(self, cdef=None, *, metadata_target=None) -> str | None:
-        """Publish a scoped dirty marker within this archive transaction.
-
-        Accepts the definition or exact metadata target documented by DirStore
-        and returns its marker path, or None without SQLite. Raises the same
-        validation/I/O errors, or StoreAuthorityError for a closed/stale archive.
-        Acquires the archive transaction fence before publishing the token.
-        """
-
-        self._assert_open()
-        with self.transaction_fence():
-            return super().mark_query_index_dirty(cdef, metadata_target=metadata_target)
-
     def clear_query_index_dirty(self) -> None:
         """Remove extracted dirty markers and retain that buffered mutation.
 
@@ -432,11 +419,12 @@ class ZipStore(DirStore):
 
         return locked()
 
-    def delete_metadata(self, target) -> bool:
+    def delete_metadata(self, target, *, scope=None) -> bool:
         """Remove current metadata and retain the buffered archive dirty marker.
 
         Args:
-            target: Exact ObjectRef or StateRef attachment scope.
+            target: Concrete Node object projection or saved graph.
+            scope: object/state or None, with the inference in read_metadata.
 
         Returns:
             ``True`` when a mapping was removed, otherwise ``False``.
@@ -454,50 +442,9 @@ class ZipStore(DirStore):
 
         self._assert_open()
         with self.transaction_fence():
-            result = super().delete_metadata(target)
+            result = super().delete_metadata(target, scope=scope)
             if result:
                 self._archive_dirty = True
-            return result
-
-    def publish_snapshot(
-            self, reference, *, evidence, annotations=None, local_states,
-            children=None, _before_annotation_write=None):
-        """Refuse unmigrated V3 snapshot publication on this format-4 transaction.
-
-        StoreCapabilityError precedes publication effects; the following arguments
-        retain the legacy consumer interface pending its owning cutover.
-
-        Args:
-            reference: Exact StateRef to install.
-            evidence: Fresh or copied snapshot metadata evidence.
-            annotations: Optional current-metadata replacements for root scopes.
-            local_states: Mapping of local paths to validated payload sources.
-            children: Optional child snapshot projections.
-            _before_annotation_write: Internal phase callback invoked immediately
-                before each requested current-metadata write.
-
-        Returns:
-            Detached SnapshotMetadata for the installed or equal existing snapshot.
-
-        Raises:
-            TypeError: If inputs are unsupported.
-            StoreAuthorityError: If snapshot authority is inconsistent.
-            StoreCapabilityError: If the archive cannot publish safely.
-
-        Side Effects:
-            Serializes same-handle publication, modifies only the extraction, and
-            marks the transaction dirty. Archive replacement is deferred to
-            ``commit()``; current annotations retain Store-local LWW behavior.
-        """
-
-        self._assert_open()
-        with self.transaction_fence():
-            result = super().publish_snapshot(
-                reference, evidence=evidence, annotations=annotations,
-                local_states=local_states, children=children,
-                _before_annotation_write=_before_annotation_write,
-            )
-            self._archive_dirty = True
             return result
 
     def _archive_identity(self, path: str | None = None) -> str | None:
@@ -626,14 +573,6 @@ class ZipStore(DirStore):
         if getattr(self, "_closed_handle", False):
             raise RuntimeError("ZipStore transaction is closed.")
 
-    def _can_reuse_exact_validation(self):
-        """Require live, unmodified wrappers and their captured base delegates."""
-        self._assert_open()
-        return super()._can_reuse_exact_validation() and all(
-            getattr(DirStore, name) is value
-            for name, value in _EXACT_READERS[DirStore].items()
-        )
-
     def preflight_publication(self, operation: str, *, local_state: bool = False,
                               record_family: str | None = None) -> None:
         """Validate inherited publication capabilities on an open transaction.
@@ -658,29 +597,11 @@ class ZipStore(DirStore):
         self._assert_open()
         super().preflight_publication(operation, local_state=local_state, record_family=record_family)
 
-    def _read_file(self, path, record_type, *, preparation=None):
+    def _read_file(self, path, record_type):
         """Read one record only while this extracted transaction remains live."""
 
         self._assert_open()
-        if preparation is None:
-            return super()._read_file(path, record_type)
-        return super()._read_file(path, record_type, preparation=preparation)
-
-    def _read_json(self, path, *, cut=None, kind=None):
-        """Read one JSON sidecar only while this transaction remains live."""
-
-        self._assert_open()
-        if cut is None:
-            return super()._read_json(path)
-        return super()._read_json(path, cut=cut, kind=kind)
-
-    def _read_snapshot(self, digest, *, payloads=False, directory=None, cut=None):
-        """Read one snapshot only while this transaction remains live."""
-
-        self._assert_open()
-        if cut is None:
-            return super()._read_snapshot(digest, payloads=payloads, directory=directory)
-        return super()._read_snapshot(digest, payloads=payloads, directory=directory, cut=cut)
+        return super()._read_file(path, record_type)
 
     def _query_index_dirty_markers(self):
         """Read dirty tokens only while this transaction remains live."""
@@ -720,114 +641,6 @@ class ZipStore(DirStore):
         self._assert_open()
         return super().query_index_status()
 
-    def iter_definition_records(self):
-        """Return validated definitions from an open transaction.
-
-        Returns:
-            Deterministically ordered immutable definition records.
-
-        Raises:
-            RuntimeError: If this transaction is closed.
-            StoreAuthorityError: If retained authority is malformed.
-
-        Side Effects:
-            None.
-        """
-
-        self._assert_open()
-        return super().iter_definition_records()
-
-    def iter_stored_root_records(self):
-        """Return validated stored-root memberships from an open transaction.
-
-        Returns:
-            Deterministically ordered stored-root records.
-
-        Raises:
-            RuntimeError: If this transaction is closed.
-            StoreAuthorityError: If retained authority is malformed.
-
-        Side Effects:
-            None.
-        """
-
-        self._assert_open()
-        return super().iter_stored_root_records()
-
-    def _validated_definition_root_inventory(self):
-        """Read one validated inventory in this open extracted transaction only."""
-
-        self._assert_open()
-        return super()._validated_definition_root_inventory()
-
-    def iter_state_ref_records(self):
-        """Return validated StateRef records from an open transaction.
-
-        Returns:
-            Deterministically ordered exact snapshot records.
-
-        Raises:
-            RuntimeError: If this transaction is closed.
-            StoreAuthorityError: If retained authority is malformed.
-
-        Side Effects:
-            None.
-        """
-
-        self._assert_open()
-        return super().iter_state_ref_records()
-
-    def iter_declaration_records(self):
-        """Return validated declarations from an open transaction.
-
-        Returns:
-            Deterministically ordered declaration records.
-
-        Raises:
-            RuntimeError: If this transaction is closed.
-            StoreAuthorityError: If retained authority is malformed.
-
-        Side Effects:
-            None.
-        """
-
-        self._assert_open()
-        return super().iter_declaration_records()
-
-    def iter_object_alias_records(self):
-        """Return validated object aliases from an open transaction.
-
-        Returns:
-            Deterministically ordered object-alias records.
-
-        Raises:
-            RuntimeError: If this transaction is closed.
-            StoreAuthorityError: If retained authority is malformed.
-
-        Side Effects:
-            None.
-        """
-
-        self._assert_open()
-        return super().iter_object_alias_records()
-
-    def iter_state_alias_records(self):
-        """Return validated state aliases from an open transaction.
-
-        Returns:
-            Deterministically ordered state-alias records.
-
-        Raises:
-            RuntimeError: If this transaction is closed.
-            StoreAuthorityError: If retained authority is malformed.
-
-        Side Effects:
-            None.
-        """
-
-        self._assert_open()
-        return super().iter_state_alias_records()
-
     def catalog_key(self) -> str:
         """Return a stable archive identity without leaking extraction paths."""
         if self._file_like:
@@ -864,10 +677,3 @@ class ZipStore(DirStore):
                 return
             self._tmp.cleanup()
             self._closed_handle = True
-
-
-ZipStore.publish_snapshot._dryml_annotation_phase_callback = True
-_EXACT_READERS[ZipStore] = {
-    name: getattr(ZipStore, name)
-    for name in (*_EXACT_READER_NAMES, "_assert_open", "transaction_fence")
-}

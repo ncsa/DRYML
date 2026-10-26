@@ -740,7 +740,7 @@ def _prepared_update_targets(
         if isinstance(value, Object):
             if id(value) not in seen:
                 seen.add(id(value))
-                targets.append({"path": path, "object_digest": value.object_ref.digest(), "object": value})
+                targets.append({"path": path, "object_digest": value._identity_node.object_projection_digest(), "object": value})
             return
         if isinstance(value, Mapping):
             if id(value) in seen:
@@ -770,13 +770,12 @@ def _recover_result_objects(value: Any, repo: Repo, automatic_references: frozen
     repeated and diamond result aliases stay shared without reusing caller inputs.
     """
     from .definition import ConcreteDefinition
-    from .reference_values import ObjectRef, StateRef
 
     references: list[Any] = []
     seen_references: set[int] = set()
 
     def collect(item: Any, seen: set[int]) -> None:
-        if isinstance(item, (ConcreteDefinition, ObjectRef, StateRef)):
+        if isinstance(item, ConcreteDefinition):
             if id(item) in automatic_references and id(item) not in seen_references:
                 references.append(item)
                 seen_references.add(id(item))
@@ -800,7 +799,7 @@ def _recover_result_objects(value: Any, repo: Repo, automatic_references: frozen
     memo = {} if memo is None else memo
 
     def replace(item: Any) -> Any:
-        if isinstance(item, (ConcreteDefinition, ObjectRef, StateRef)):
+        if isinstance(item, ConcreteDefinition):
             return materialized.get(id(item), item)
         if isinstance(item, tuple):
             if id(item) not in memo:

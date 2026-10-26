@@ -87,7 +87,7 @@ def test_snapshot_failure_reports_unattempted_late_work_before_hooks(tmp_path, m
         for item in report.publications
         if item.phase in {"membership", "index"}
     )
-    assert tuple(store.iter_stored_root_records()) == ()
+    assert not store.query().stored().exists()
 
 
 @pytest.mark.parametrize("fault", ["missing_source", "wrong_uuid", "mixed_source_index"])

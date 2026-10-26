@@ -44,13 +44,6 @@ class FaultContainer(Object):
         self.left, self.right = left, right
 
 
-class LegacySignatureStore(DirStore):
-    """A retired override must neither intercept nor constrain native batches."""
-
-    def publish_snapshot(self, *args, **kwargs):
-        pytest.fail("retired snapshot override was called")
-
-
 def _publication(error):
     publications = error.report.publications
     assert {p.phase for p in publications} == {"snapshot"}
@@ -144,9 +137,9 @@ def test_descendant_lineage_failure_preserves_exact_completed_path_statuses(tmp_
     assert len(publication.state_keys) == len(publication.protected_state_keys) == 2
 
 
-def test_legacy_store_snapshot_override_requires_callback_only_for_annotations(tmp_path):
-    """Native batches no longer need legacy per-annotation callback signatures."""
-    store = LegacySignatureStore(tmp_path / "store")
+def test_native_annotations_preserve_first_capture(tmp_path):
+    """Current annotation replacements preserve immutable first-capture evidence."""
+    store = DirStore(tmp_path / "store")
     repo, value = Repo(store), FaultPayload()
     state = repo.save_object(value)
     captured = store._read_node_metadata(state, "capture").to_bytes()
@@ -156,9 +149,9 @@ def test_legacy_store_snapshot_override_requires_callback_only_for_annotations(t
     assert not store.authority_cut().pending
 
 
-def test_annotation_callback_gate_applies_only_to_destinations_with_actual_writes(tmp_path):
-    """Each published root gets annotations; absent writes need no legacy hook."""
-    root, child = DirStore(tmp_path / "root"), LegacySignatureStore(tmp_path / "child")
+def test_annotations_apply_to_each_routed_root_with_actual_writes(tmp_path):
+    """Each published root gets requested annotations; unannotated copies stay absent."""
+    root, child = DirStore(tmp_path / "root"), DirStore(tmp_path / "child")
     repo = Repo([root, child], save_routing=SaveRouting(
         ((Selector(FaultContainer), root), (Selector(FaultPayload), child)), graph_mode="per-object"))
     state = repo.save_object(FaultContainer(FaultPayload("left"), FaultPayload("right")),
@@ -172,7 +165,7 @@ def test_annotation_callback_gate_applies_only_to_destinations_with_actual_write
     plain = Repo(child).save_object(FaultPayload("unannotated"))
     assert child.read_metadata(plain.object_view()) is None
     assert child.read_metadata(plain) is None
-    replica = LegacySignatureStore(tmp_path / "replica")
+    replica = DirStore(tmp_path / "replica")
     copied = Repo([child, replica]).save_object(FaultPayload("unannotated"), store=replica,
                                                states=plain.state_spec(), source_store=child)
     assert copied.object_id != plain.object_id and copied.state == plain.state

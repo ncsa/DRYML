@@ -26,14 +26,6 @@ class MultiState(Serializable):
         self.value = pickle_load(f"{src_dir}/value.pkl")
 
 
-class CountingDirStore(DirStore):
-    calls = 0
-
-    def hydrate_index(self):
-        type(self).calls += 1
-        return super().hydrate_index()
-
-
 def test_distinct_cdefs_in_two_stores_produce_two_v3_identities(tmp_path):
     store1 = DirStore(tmp_path / "store1")
     store2 = DirStore(tmp_path / "store2")
@@ -76,20 +68,26 @@ def test_equivalent_store_instances_share_physical_identity(tmp_path):
     assert len(results.sources(obj.definition)) == 1
 
 
-def test_v3_capture_deduplicates_equivalent_store_instances(tmp_path):
+def test_v3_capture_deduplicates_equivalent_store_instances(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
     obj = MultiLeaf("same", repo=repo)
     repo.save_object(obj)
 
-    CountingDirStore.calls = 0
+    from dryml.core.query import authority
+    original = authority.capture_store_projection
+    calls = []
+    def capture(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(authority, "capture_store_projection", capture)
     repo2 = Repo(stores=[
-        CountingDirStore(store.base_dir, query_index="memory"),
-        CountingDirStore(store.base_dir, query_index="memory"),
+        DirStore(store.base_dir, query_index="memory"),
+        DirStore(store.base_dir, query_index="memory"),
     ])
 
     assert repo2.query().cdefs().stored().count() == 1
-    assert CountingDirStore.calls == 0
+    assert calls == [1]
 
 
 def test_v3_query_uses_replaced_connected_store_reference(tmp_path):
@@ -152,7 +150,6 @@ def test_u7_reversed_store_order_acquires_unique_sorted_retained_cuts(tmp_path, 
     from dataclasses import replace
     import threading
     from dryml.core import Definition
-    from dryml.core.store.records import DefinitionRecord
 
     stores = tuple(DirStore(tmp_path / name, query_index="sqlite") for name in ("a", "b"))
     values = sorted((Definition(MultiLeaf, str(i)).concretize() for i in range(3)),
@@ -195,7 +192,7 @@ def test_u7_reversed_store_order_acquires_unique_sorted_retained_cuts(tmp_path, 
         monkeypatch.setattr(store, "authority_read_fence", fence)
         monkeypatch.setattr(index, "status", status)
         monkeypatch.setattr(index, "_ensure_ready", lambda: pytest.fail("repairing entry inside cut"))
-        monkeypatch.setattr(store, "iter_definition_records", lambda: pytest.fail("ready replicas enumerated authority"))
+    monkeypatch.setattr("dryml.core.query.authority.capture_store_projection", lambda *a, **kw: pytest.fail("ready replicas enumerated authority"))
 
     def query(selected):
         try:

@@ -31,7 +31,6 @@ from .model import (
     QueryStats,
     RefreshPolicy,
     StoreId,
-    V3ProjectionCoverage,
 )
 from .identity import identity_key
 from .relationships import iter_direct_relationships, relationship_closure
@@ -611,14 +610,16 @@ class DefinitionCatalog:
         self._hydrate_stores(unseen, stats=stats)
 
     def ensure_exact_stored(self, cdef: ConcreteDefinition, *, stats: QueryStats | None = None) -> bool:
-        found = False
-        for store in self._unique_repo_stores():
-            persisted = store.read_definition(cdef) if hasattr(store, "read_definition") else None
-            if persisted is not None and persisted == cdef:
-                self.register_stored(cdef, store)
-                found = True
+        """Check retained CDef membership in this process-local catalog.
+
+        cdef is a ConcreteDefinition; optional stats records an index hit. Returns
+        bool without Store reads or authority mutation. Cache synchronization and
+        graph validation errors from the retained read view propagate.
+        """
+        with self.read_view(include_cached=False) as view:
+            found = bool(view.filter_stored_ids(view.exact_ids(cdef)))
         if found and stats is not None:
-            stats.fast_path = "exact-root-store-has"
+            stats.fast_path = "exact-root-index"
         return found
 
     def register_cached(self, cdef: ConcreteDefinition) -> DefinitionId:
@@ -924,7 +925,10 @@ class DefinitionCatalog:
         self._check_memory_hydration_allowed(store, explicit=explicit)
         sid = self._store_key(store)
         try:
-            cdefs = tuple(store.hydrate_index())
+            from .source import SourceCapture
+
+            facts = SourceCapture().capture_store(store)
+            cdefs = tuple(facts._authoritative_root_definitions())
         except Exception as e:
             raise QueryIndexError(f"Failed to hydrate query index from store {store!r}: {e}") from e
         for cdef in cdefs:

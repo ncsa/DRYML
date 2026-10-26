@@ -59,7 +59,7 @@ class StateGraphReservation(AbstractContextManager):
 
     Instances are created only by :meth:`Repo.reserve_state_graph` for state IO,
     not to claim an entire managed execution lifetime. The lease
-    covers the root's immutable ObjectRef, every stateful ObjectId, and the
+    covers the root's immutable Node description, every stateful ObjectId, and the
     exact live nodes observed during preflight. ``release()`` is idempotent for
     the owning process and thread; inherited or foreign callers cannot release
     a token.
@@ -199,4 +199,4 @@ def is_reserved(node: object) -> bool:
 def reserve_node(node: object) -> StateGraphReservation:
     """Temporarily reserve one exact stateful live node during generic reuse."""
 
-    return reserve(node.object_ref, (node,), (node.object_id,))
+    return reserve(node._identity_node, (node,), (node.object_id,))

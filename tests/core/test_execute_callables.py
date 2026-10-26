@@ -8,7 +8,7 @@ import functools
 import os
 from pathlib import Path
 
-from dryml.core import ObjectRef, Repo, Serializable, function
+from dryml.core import Node, Repo, Serializable, function
 from dryml.core.execute import ExecutionContext, SharedDirStoreStrategy, invoke_prepared_call, worker_context
 from dryml.core.execute_codec import CoreCallCodecError, encode_invocation
 from dryml.core.signatures import Ref
@@ -205,9 +205,9 @@ def _identity(value):
     return value
 
 
-def _reference_only(value: Ref[ObjectRef]):
+def _reference_only(value: Ref[Node]):
     """Prove a Ref input remains authority data in the worker."""
-    return value.digest()
+    return value.exact_digest()
 
 
 def test_fresh_subprocess_transports_every_callable_owner_and_shared_capture_graph(tmp_path):
@@ -243,7 +243,7 @@ def test_fresh_subprocess_transports_every_callable_owner_and_shared_capture_gra
     value.value = 11
     repo.save_object(value, deep_capture=True)
     assert _subprocess_invoke(SlotCallableInstance(older), (older,), repo, spool) == (14, True)
-    assert _subprocess_invoke(_reference_only, (older.object,), repo, spool) == older.object.digest()
+    assert _subprocess_invoke(_reference_only, (older.object_view(),), repo, spool) == older.object_view().exact_digest()
     assert calls == []
 
 

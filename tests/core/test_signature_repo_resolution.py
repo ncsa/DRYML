@@ -139,7 +139,7 @@ def test_automatic_selection_counts_stateful_descendants_but_not_ref_data(tmp_pa
 @pytest.mark.parametrize("ephemeral_root", (False, True))
 def test_automatic_saved_live_receipt_is_metadata_only(tmp_path, monkeypatch, ephemeral_root):
     """Saved live roots and owned descendants select their receipt without IO/hooks."""
-    from dryml.core import StateRef, function, require_saved
+    from dryml.core import function, require_saved
 
     repo = Repo(DirStore(tmp_path / "store", query_index="none"))
     child = SignatureCounter(3)
@@ -150,7 +150,7 @@ def test_automatic_saved_live_receipt_is_metadata_only(tmp_path, monkeypatch, ep
     def forbidden(*args, **kwargs):
         pytest.fail("automatic Ref performed IO, capture, or restore")
 
-    for name in ("save", "save_object", "load", "describe", "reference_evidence"):
+    for name in ("save", "save_object", "load", "describe"):
         monkeypatch.setattr(repo, name, forbidden)
     monkeypatch.setattr(repo.default_store, "authority_cut", forbidden)
     monkeypatch.setattr(repo.default_store, "read_states", forbidden)
@@ -169,22 +169,22 @@ def test_automatic_saved_live_receipt_is_metadata_only(tmp_path, monkeypatch, ep
     assert require_saved(saved) is saved
     assert saved.object_id is None if ephemeral_root else saved.object_id == child.object_id
     with pytest.raises(SignatureError, match="unavailable"):
-        _plan(Ref[StateRef]).prepare_args((live,), {}, repo=repo)
+        _plan(Ref[SavedNode]).prepare_args((live,), {}, repo=repo)
 
 
 def test_automatic_receipt_checks_projection_not_constructor_object(tmp_path):
     """An ordinary ``object`` parameter cannot impersonate a receipt's authority."""
-    from dryml.core import StateRef
 
     repo = Repo(DirStore(tmp_path / "store", query_index="none"))
     live = SignatureObjectParameter()
     saved = repo.save(live)
     assert _plan(Ref[AutoRef]).prepare_args((live,), {}).authority["value"] is saved
 
-    unrelated = Definition(SignatureObjectParameter, live.object_ref).concretize().with_realization(
+    identity = repo.describe(live).object_view()
+    unrelated = Definition(SignatureObjectParameter, identity).concretize().with_realization(
         identities={"$": live.object_id}, states={"$": saved.state},
     )
-    assert unrelated.object == live.object_ref
+    assert unrelated.object is identity
     live._last_state_ref = unrelated
     selected = _plan(Ref[AutoRef]).prepare_args((live,), {}).deliver_args()[0][0]
     assert isinstance(selected, ConcreteNode)
@@ -192,25 +192,11 @@ def test_automatic_receipt_checks_projection_not_constructor_object(tmp_path):
     assert selected.state is None
     assert not selected.object_projection_equal(unrelated)
     with pytest.raises(SignatureError, match="unavailable"):
-        _plan(Ref[StateRef]).prepare_args((live,), {})
+        _plan(Ref[SavedNode]).prepare_args((live,), {})
 
     live._last_state_ref = saved.without_state()
     incomplete = _plan(Ref[AutoRef]).prepare_args((live,), {}).authority["value"]
     assert incomplete.state is None and incomplete.object_id == live.object_id
-
-
-def test_explicit_legacy_reference_values_keep_their_supported_roles():
-    """Supplied old reference values retain Ref/Mat selection without conversion."""
-    from dryml.core import ObjectRef, StateRef
-
-    live = SignatureCounter(1)
-    reference = live.object_ref
-    state = StateRef(reference, {path: "pickle-" + "a" * 64 for path in reference.objects})
-    assert _plan(Ref[AutoRef]).prepare_args((reference,), {}).deliver_args()[0][0] is reference
-    assert _plan(Ref[AutoRef]).prepare_args((state,), {}).deliver_args()[0][0] is state
-    assert _plan(Ref[ObjectRef]).prepare_args((state,), {}).deliver_args()[0][0] is reference
-    assert _plan(Ref[StateRef]).prepare_args((state,), {}).deliver_args()[0][0] is state
-    assert _plan(Mat[StateRef]).prepare_args((state,), {}).authority["value"] is state
 
 
 def test_state_selection_deduplicates_replicas_and_rejects_ambiguity(tmp_path):
@@ -243,7 +229,7 @@ def test_declaration_claim_statuses_remain_reference_eligible(tmp_path, status, 
     """Recipe-only, live-reserved and saved Nodes remain inert reference metadata."""
 
     store = DirStore(tmp_path / "store")
-    repo = Repo(store, clock=lambda: 10.0)
+    repo = Repo(store)
     reference = Definition(SignatureCounter, 1).with_identity(ObjectId()).concretize()
     record = store.publish_node(reference)
     from contextlib import ExitStack

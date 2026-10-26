@@ -181,7 +181,7 @@ def test_public_save_returns_saved_node_and_publishes_local_state(tmp_path):
     state = obj.save(repo=repo, main=False)
 
     assert isinstance(state, Node)
-    assert dict(state.identity_spec().items()) == dict(obj.object_ref.objects)
+    assert dict(state.identity_spec()) == dict(repo.describe(obj).identity_spec())
     assert store.read_node(saved_digest(state), kind="saved").graph_equal(state)
     with store.read_state(state.state.key) as source:
         assert Path(source.data_directory, "value.txt").read_text() == "10"
@@ -241,7 +241,7 @@ def test_explicit_store_save_copies_reusable_state_into_its_closure(tmp_path):
     child_state = repo.save_object(child, store=source)
     root = SaveLoadNode(child, repo=repo)
 
-    child_path = next(path for path, object_id in root.object_ref.objects.items() if object_id == child.object_id)
+    child_path = next(path for path, object_id in repo.describe(root).identity_spec().items() if object_id == child.object_id)
     copied_state, copied_report = repo.save_object(root, states={child_path: child_state.state}, store=copied, report_stores=True)
     copied_path = next(path for path, object_id in copied_state.identity_spec().items() if object_id == child.object_id)
     assert copied_report.required_stores == (copied,)

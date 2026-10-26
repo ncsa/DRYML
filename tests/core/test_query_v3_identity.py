@@ -1,6 +1,6 @@
 import pytest
 
-from dryml.core import Definition, ObjectId, ObjectRef, Serializable, StateRef
+from dryml.core import Definition, LocalState, ObjectId, Serializable, StateKey
 from dryml.core.query.identity import IdentitySet, Occurrence, OccurrenceSet, SourceEvidence
 from dryml.core.utils.graph.path import GraphPath, Key
 
@@ -75,10 +75,11 @@ def test_complete_identity_graph_keys_are_stable_across_query_operators():
 
 def test_reference_identity_uses_complete_object_and_state_reference_values():
     cdef = Definition(V3IdentityLeaf, "target").concretize()
-    first = ObjectRef(cdef, {GraphPath(): ObjectId()})
-    second = ObjectRef(cdef.copy_graph(), {GraphPath(): ObjectId()})
-    first_state = StateRef(first, {GraphPath(): "pkl-" + "1" * 64})
-    second_state = StateRef(second, {GraphPath(): "pkl-" + "1" * 64})
+    first = cdef.with_identity(ObjectId())
+    second = cdef.copy_graph().with_identity(ObjectId())
+    state = LocalState(StateKey(cdef.creation_digest(), "pkl-" + "1" * 64), cdef.creation_view())
+    first_state = first.with_state(state)
+    second_state = second.with_state(state)
 
     assert IdentitySet((first, second)).count() == 2
     assert IdentitySet((first_state, second_state)).count() == 2

@@ -240,7 +240,6 @@ class _Encoder:
         from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
         from .links import DefLink
         from .quoted import QuotedDef, SelectorSpec
-        from .reference_values import ObjectRef, StateRef
         from .selector import Selector
         from .template import Expr, Par, _BinaryExpr, _RepeatExpr, _validate_number
         if isinstance(value, Par):
@@ -305,14 +304,6 @@ class _Encoder:
             return {"tag": "selector-spec", "selector": self.value(value.selector, depth)}
         if isinstance(value, Selector):
             return {"tag": "selector", "root": self.value(value.root, depth), "strict": value.strict, "cls_policy": value.cls_policy}
-        if isinstance(value, ObjectRef):
-            objects = value.to_data()["objects"]
-            self.consume_entries(len(objects))
-            return {"tag": "object-ref", "definition": self.value(value.definition, depth), "objects": objects}
-        if isinstance(value, StateRef):
-            states = value.to_data()["states"]
-            self.consume_entries(len(states))
-            return {"tag": "state-ref", "object": self.value(value.object, depth), "states": states}
         raise TemplateCodecError("template value type is not portable")
 
 
@@ -427,7 +418,6 @@ def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
     from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
     from .links import DefLink
     from .quoted import QuotedDef, SelectorSpec
-    from .reference_values import ObjectId, ObjectRef, StateRef
     from .selector import Selector
     from .template import Expr, Par, _BinaryExpr, _RepeatExpr, _validate_number
     from .utils.graph.path import GraphPath
@@ -497,18 +487,6 @@ def _decode_node(data: object, state: _DecodeState, depth: int) -> object:
     if tag == "selector" and set(data) == {"tag", "root", "strict", "cls_policy"}:
         try: return Selector(value(data["root"]), strict=data["strict"], cls_policy=data["cls_policy"])
         except Exception: raise TemplateCodecError("template selector is invalid") from None
-    if tag == "object-ref" and set(data) == {"tag", "definition", "objects"}:
-        if not isinstance(data["objects"], list):
-            raise TemplateCodecError("template object reference is invalid")
-        state.consume_entries(len(data["objects"]))
-        try: return ObjectRef(value(data["definition"]), {GraphPath.from_data(item["path"]): ObjectId.from_data(item["object_id"]) for item in data["objects"]})
-        except Exception: raise TemplateCodecError("template object reference is invalid") from None
-    if tag == "state-ref" and set(data) == {"tag", "object", "states"}:
-        if not isinstance(data["states"], list):
-            raise TemplateCodecError("template state reference is invalid")
-        state.consume_entries(len(data["states"]))
-        try: return StateRef(value(data["object"]), {GraphPath.from_data(item["path"]): item["state"] for item in data["states"]})
-        except Exception: raise TemplateCodecError("template state reference is invalid") from None
     raise TemplateCodecError("template node tag is invalid")
 
 
@@ -524,7 +502,7 @@ def _needs_node_codec(value):
     from .links import DefLink
     from .quoted import QuotedDef
     from .state_values import LocalState, StateKey
-    from .reference_values import ObjectId, StateSelectorRef
+    from .reference_values import ObjectId
     from .config import ConfigRef
     from .dtype import DType
     from .tensor_spec import TensorSpec
@@ -539,7 +517,7 @@ def _needs_node_codec(value):
         seen.add(id(current))
         if isinstance(current, (ConcreteNode, LocalState, StateKey, frozenset, np.ndarray, np.generic)):
             return True
-        if isinstance(current, (ObjectId, StateSelectorRef, ConfigRef, DType, TensorSpec, Cardinality, Match)):
+        if isinstance(current, (ObjectId, ConfigRef, DType, TensorSpec, Cardinality, Match)):
             return True
         if isinstance(current, Node) and (current.object_id is not None or current.state is not None or current._construction is not None):
             return True

@@ -22,7 +22,6 @@ from .definition import ConcreteDefinition
 from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from .links import DefLink
 from .quoted import QuotedDef, SelectorSpec
-from .reference_values import ObjectRef, StateRef
 from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
 
@@ -503,253 +502,6 @@ def copy_cdef_graph(root: ConcreteDefinition) -> ConcreteDefinition:
     return decode_cdef_graph(encode_cdef_graph(root))
 
 
-def object_projection_cdef(
-        root: ConcreteDefinition, *, traverse_refs: bool = False) -> ConcreteDefinition:
-    """Recursively replace exact references in a CDef graph with ObjectSelectors.
-
-    Args:
-        root: Exact CDef graph to rewrite without resolving its class authority.
-        traverse_refs: Whether to enter Ref-held quoted Definition data. Ordinary
-            Ref-held exact references are always rewritten.
-
-    Returns:
-        A graph-isomorphic query CDef whose supported exact references are
-        ObjectSelectors. Raw references subsequently added by a caller remain exact.
-
-    Raises:
-        TypeError: If ``root`` is not a CDef or ``traverse_refs`` is not bool.
-        ValueError: If an unsupported cyclic construction graph is encountered.
-        CDefGraphCodecError: If identity-3 facets/construction would be lost at
-            this legacy query boundary. Use Node.object_view for those graphs.
-
-    Side Effects:
-        None. The projection does not resolve imports, materialize objects, read
-        Stores, or allocate ObjectIds.
-    """
-
-    return _object_projection_cdef(
-        root, traverse_refs=traverse_refs, selector_references=True,
-    )
-
-
-def _object_reference_projection_cdef(
-        root: ConcreteDefinition, *, traverse_refs: bool = False) -> ConcreteDefinition:
-    """Return the authoritative ObjectRef-compatible non-state CDef projection."""
-
-    return _object_projection_cdef(
-        root, traverse_refs=traverse_refs, selector_references=False,
-    )
-
-
-def _object_projection_cdef(
-        root: ConcreteDefinition, *, traverse_refs: bool,
-        selector_references: bool) -> ConcreteDefinition:
-    if not isinstance(root, ConcreteDefinition):
-        raise TypeError(f"Expected ConcreteDefinition, got {type(root).__name__}.")
-    if type(traverse_refs) is not bool:
-        raise TypeError("traverse_refs must be a bool.")
-    _require_v2_evidence(root)
-
-    from .cdef_graph import EdgeKind
-    from .definition import Definition
-    from .factory import FactorySpec
-    from .template import _BinaryExpr, _RepeatExpr
-
-    memo: dict[int, Any] = {}
-    active: set[int] = set()
-
-    def rewrite_reference(ref: ObjectRef):
-        marker = id(ref)
-        if marker in memo:
-            return memo[marker]
-        if marker in active:
-            raise ValueError("Object projection does not support cyclic reference graphs.")
-        active.add(marker)
-        try:
-            definition = rewrite(ref.definition)
-            if selector_references:
-                from .selector import ObjectSelector
-
-                reference = ObjectRef(
-                    _object_reference_projection_cdef(
-                        ref.definition, traverse_refs=traverse_refs,
-                    ),
-                    ref.objects,
-                )
-                result = ObjectSelector._projected(
-                    definition, ref.objects, reference,
-                )
-            else:
-                result = ObjectRef(definition, ref.objects)
-            memo[marker] = result
-            return result
-        finally:
-            active.remove(marker)
-
-    def rewrite(current: Any) -> Any:
-        if isinstance(current, StateRef):
-            marker = id(current)
-            if marker in memo:
-                return memo[marker]
-            result = rewrite_reference(current.object)
-            memo[marker] = result
-            return result
-        if isinstance(current, ObjectRef):
-            return rewrite_reference(current)
-        if isinstance(current, DefLink):
-            marker = id(current)
-            if marker in memo:
-                return memo[marker]
-            if (
-                traverse_refs
-                and current.kind is EdgeKind.REF
-                and isinstance(current.target, QuotedDef)
-            ):
-                value = rewrite(current.target.value)
-                target = (
-                    current.target
-                    if value is current.target.value
-                    else QuotedDef(value)
-                )
-            else:
-                target = rewrite(current.target)
-            result = current if target is current.target else (
-                DefLink.finalized(current.kind, target)
-                if current.is_finalized
-                else DefLink.assertion(current.kind, target)
-            )
-            memo[marker] = result
-            return result
-        if isinstance(current, ConcreteDefinition):
-            marker = id(current)
-            if marker in memo:
-                return memo[marker]
-            if marker in active:
-                raise ValueError("Object projection does not support cyclic CDef graphs.")
-            active.add(marker)
-            try:
-                parameters = FrozenDict(
-                    (name, rewrite(value))
-                    for name, value in current.parameters.items()
-                )
-                result = current if all(
-                    parameters[name] is value
-                    for name, value in current.parameters.items()
-                ) else ConcreteDefinition._from_bound_record(
-                    current.cls,
-                    BoundArguments(parameters.items()),
-                    stateful_role=current._stateful_role,
-                )
-                memo[marker] = result
-                return result
-            finally:
-                active.remove(marker)
-        if isinstance(current, Definition):
-            marker = id(current)
-            if marker in memo:
-                return memo[marker]
-            args = (
-                None if current.args is None
-                else FrozenTuple(rewrite(value) for value in current.args)
-            )
-            kwargs = FrozenDict(
-                (name, rewrite(value)) for name, value in current.kwargs.items()
-            )
-            result = current if (
-                (args is None and current.args is None)
-                or (args is not None and all(
-                    new is old for new, old in zip(args, current.args)
-                ))
-            ) and all(kwargs[name] is value for name, value in current.kwargs.items()) else (
-                Definition._from_symbolic_parts(current.cls, args, kwargs)
-            )
-            memo[marker] = result
-            return result
-        if isinstance(current, FactorySpec):
-            marker = id(current)
-            if marker in memo:
-                return memo[marker]
-            args = FrozenTuple(rewrite(value) for value in current.args)
-            kwargs = FrozenDict(
-                (name, rewrite(value)) for name, value in current.kwargs.items()
-            )
-            result = current if all(
-                new is old for new, old in zip(args, current.args)
-            ) and all(kwargs[name] is value for name, value in current.kwargs.items()) else (
-                FactorySpec._from_symbolic_parts(current.target, args, kwargs)
-            )
-            memo[marker] = result
-            return result
-        if isinstance(current, _BinaryExpr):
-            marker = id(current)
-            if marker in memo:
-                return memo[marker]
-            left, right = rewrite(current.left), rewrite(current.right)
-            result = current if left is current.left and right is current.right else (
-                _BinaryExpr(current.operation, left, right)
-            )
-            memo[marker] = result
-            return result
-        if isinstance(current, _RepeatExpr):
-            marker = id(current)
-            if marker in memo:
-                return memo[marker]
-            group = tuple(rewrite(value) for value in current.group)
-            count = rewrite(current.count)
-            result = current if all(
-                new is old for new, old in zip(group, current.group)
-            ) and count is current.count else _RepeatExpr(
-                list(group) if isinstance(current.group, FrozenList) else group,
-                count,
-                current.shared,
-            )
-            memo[marker] = result
-            return result
-        if isinstance(current, (FrozenDict, dict)):
-            marker = id(current)
-            if marker in memo:
-                return memo[marker]
-            items = [(key, rewrite(value)) for key, value in current.items()]
-            result = current if all(
-                value is current[key] for key, value in items
-            ) else (FrozenDict(items) if isinstance(current, FrozenDict) else dict(items))
-            memo[marker] = result
-            return result
-        if isinstance(current, (FrozenList, list)):
-            marker = id(current)
-            if marker in memo:
-                return memo[marker]
-            values = tuple(rewrite(value) for value in current)
-            result = current if all(
-                new is old for new, old in zip(values, current)
-            ) else FrozenList(values)
-            memo[marker] = result
-            return result
-        if isinstance(current, (FrozenTuple, tuple)):
-            marker = id(current)
-            if marker in memo:
-                return memo[marker]
-            values = tuple(rewrite(value) for value in current)
-            result = current if all(
-                new is old for new, old in zip(values, current)
-            ) else FrozenTuple(values)
-            memo[marker] = result
-            return result
-        if isinstance(current, (FrozenSet, frozenset, set)):
-            marker = id(current)
-            if marker in memo:
-                return memo[marker]
-            values = tuple(rewrite(value) for value in current)
-            result = current if all(
-                new is old for new, old in zip(values, current)
-            ) else FrozenSet(values)
-            memo[marker] = result
-            return result
-        return current
-
-    return rewrite(root)
-
-
 def validate_cdef_stateful_role(cdef: ConcreteDefinition, cls: type) -> None:
     """Validate recorded role authority against an already-resolved class.
 
@@ -894,8 +646,6 @@ def _require_v2_evidence(root):
             visit(value.value)
         elif isinstance(value, SelectorSpec):
             visit(value.selector.root)
-        elif isinstance(value, (ObjectRef, StateRef)):
-            visit(value.definition)
         elif isinstance(value, FactorySpec):
             visit(value.args)
             visit(value.kwargs)
@@ -983,16 +733,6 @@ def _encode_value(
     labels: dict[object, str],
     quotation_budget: _QuotationBudget,
 ) -> dict[str, Any]:
-    from .selector import ObjectSelector
-
-    if isinstance(value, ObjectSelector):
-        raise CDefGraphCodecError(
-            "ObjectSelector values are query-only and cannot enter CDef authority."
-        )
-    if isinstance(value, ObjectRef):
-        return {"kind": "object_ref", "value": value.to_data()}
-    if isinstance(value, StateRef):
-        return {"kind": "state_ref", "value": value.to_data()}
     if isinstance(value, ConcreteDefinition):
         return {"kind": "cdef", "label": labels[cdef_node_key(value)]}
     if isinstance(value, QuotedDef):
@@ -1063,12 +803,6 @@ def _decode_value(
             "CDef graph value payload must be a tagged mapping."
         )
     kind = data["kind"]
-    if kind == "object_ref":
-        _require_exact_keys(data, {"kind", "value"}, "ObjectRef")
-        return ObjectRef.from_data(data["value"])
-    if kind == "state_ref":
-        _require_exact_keys(data, {"kind", "value"}, "StateRef")
-        return StateRef.from_data(data["value"])
     if kind == "cdef":
         _require_exact_keys(data, {"kind", "label"}, "CDef reference")
         label = data["label"]
@@ -1102,10 +836,10 @@ def _decode_value(
             data["target"], build, payloads, quotation_budget
         )
         if not isinstance(target, (
-            ConcreteDefinition, ObjectRef, StateRef, QuotedDef, SelectorSpec,
+            ConcreteDefinition, QuotedDef, SelectorSpec,
         )):
             raise CDefGraphCodecError(
-                "CDef link target must be a CDef, ObjectRef, StateRef, or "
+                "CDef link target must be a CDef or "
                 "exact constructor-data quotation."
             )
         if isinstance(target, (QuotedDef, SelectorSpec)) and edge_kind is not EdgeKind.REF:

@@ -61,12 +61,10 @@ runtime or a conversion path. Snapshot-directory workflows are not supported
 against built-in format-4 Stores.
 New consumer preflight must declare `record_family="dryml-node-graph/v1"`; the
 operation's human-readable diagnostic name does not select a persistent format.
-Legacy publication entry points remain explicit `StoreCapabilityError` refusals:
-definition/declaration/claim records, old aliases/main references, V3 snapshots,
-and old reference annotation/lineage writers install nothing. They do not provide
-a Store migration path. This does not reject ordinary legacy reference values at
-their separately supported explicit transport/value-codec boundaries, or change
-current Node queries and buffered archive metadata publication.
+Legacy publication entry points and compound-reference types have been removed,
+including their former refusal stubs and transport/value-codec support. Imports
+fail with `ImportError`; removed methods are absent. See the
+[Repo/Store API retirement guide](repo_store_v3_retirement.md) for replacements.
 
 DirStore installation primitives return after native filesystem content and
 directory persistence barriers. ZipStore's corresponding receipt is explicitly
@@ -906,9 +904,10 @@ removal failure is raised at fence exit; calling `close()` again retries cleanup
 
 ## Portable Repo Definitions
 
-`Repo.to_definition()` exports a detached `RepoDefinition` v1 configuration
+`Repo.to_definition()` exports a detached `RepoDefinition` v2 configuration
 snapshot. It contains supported Store descriptors and their order/default,
-normalized routing rules, `config`, lease duration, and deletion-save setting.
+normalized routing rules, `config`, and deletion-save setting. Version 1 and its
+claim lease settings are rejected rather than converted.
 It excludes Store contents, aliases, claims, main definitions, live Object
 affinity, caches, sessions, archive buffers, and runtime resources. It does not
 commit archives, save Objects, resolve symbols, or activate a session.
@@ -926,8 +925,8 @@ Canonical transport placement resolves unordered ties over the complete table,
 including retained construction views and occurrence joins. JSON bytes are stable
 across hash seeds and round trips. This placement does not redefine semantic graph
 identity or substitute for source-byte authentication/CAS. Compatible simple
-selectors retain the existing closed descriptor spelling; its reference-path and
-set-fingerprint checks remain in force. Unknown carrier, graph, identity and key
+selectors retain the existing closed descriptor spelling. Retired compound-reference
+tags are rejected. Unknown carrier, graph, identity and key
 versions are rejected. No Store conversion or migration is performed.
 
 `RepoDefinition.to_data()` and `to_json()` expose detached data for caller-owned
@@ -977,7 +976,7 @@ thread/task lifetime; [Generic Execute](execute.md) uses that same facility only
 within a worker setup scope.
 
 The cache also matches a Repo by ordered Store keys, default ordering, routing,
-nested JSON configuration, lease duration, and deletion-save setting. Equivalent
+nested JSON configuration and deletion-save setting. Equivalent
 detached requests return one leased Repo; different behavior remains a different
 Repo even when Store handles overlap. Before every lookup the cache rechecks live
 Repo snapshots, so direct configuration, routing, default-order, or nested
@@ -1012,9 +1011,9 @@ deletion saves.
 
 Definition export rejects dirty, missing, or zero-length ZipStore archives,
 file-like archives, unsupported Store types/settings, nonportable configuration,
-ambiguous built-in physical destinations, and explicit custom clocks or owner
-token factories. A definition describes configuration, not a frozen data snapshot:
-use StateRefs to request exact saved Object state.
+ambiguous built-in physical destinations. The removed claim clock/owner-factory
+arguments are no longer Repo constructor options. A definition describes
+configuration, not a frozen data snapshot: use saved Nodes for exact Object state.
 
 ### Core Execute Shared Storage
 
@@ -1031,13 +1030,13 @@ physical destinations, unsupported query policy, and non-direct strategies befor
 worker submission. It neither creates a Store nor substitutes a replica. The
 definition is configuration only, so input Objects are not auto-saved. Worker
 publication uses normal Repo save authority; result/update evidence contains only
-exact StateRefs and Store-table-relative facts. Recovery and worker teardown close
+exact saved Nodes and Store-table-relative facts. Recovery and worker teardown close
 their freshly opened handles with `flush=False` and never close the caller's Repo
 or Store. See [Generic Execute](execute.md) for the execution lifecycle.
 
 A managed Artifact worker publishes its final state through the same ordinary
 Repo/managed authority. Its coordinator-visible result is the exact final
-`StateRef`, and a later reader reconnects only the required state Store to restore
+saved Node, and a later reader reconnects only the required state Store to restore
 the result. The worker does not transfer live source/model payloads or managed
 control records to that reader; those references remain required only for a later
 compute or rerun.
@@ -1066,8 +1065,8 @@ or reopen behavior.
 ## Store Authority And Lifetime
 
 `DirStore` is the supported directory checkpoint backend. Its immutable
-definitions, complete v3 snapshot directories, snapshot-local states, lineage,
-declarations, claims, aliases, main references, and mutable current metadata are
+Node definitions, saved roots, full-key state variants, lineage, declaration
+anchors, retained roots, Node names, and mutable current metadata are
 authoritative. SQLite query indexes, metadata projections, record-reference
 indexes, caches, and dirty markers are derived state and can be rebuilt without
 replacing Store records. New and old incompatible Store formats fail before

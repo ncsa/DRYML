@@ -9,11 +9,10 @@ from time import monotonic, sleep
 import pytest
 
 from dryml.core import ConcreteDefinition, Executor as CoreExecutor
-from dryml.core import Object, ObjectRef, Repo, Serializable, StateRef
+from dryml.core import Node, Object, Repo, Serializable, require_saved
 from dryml.core.execute import CoreOptions
 from dryml.core.store.dir import DirStore
 from dryml.execute.ray import RayBackendConfig, RayFuture
-from dryml.managed import managed_operation
 from dryml.worlds import CountConstraint, ResourceRequirement, RoleRequirement, WorldRequirement
 from .conftest import require_ray_integration
 from tests.managed.execution_fixtures import (
@@ -63,7 +62,8 @@ def _one_cpu_world() -> WorldRequirement:
 def _ray_train(value):
     """Produce raw metrics plus stateful, stateless, and reference-valued results."""
     value.value += 5
-    return RayTrainingValue(value.value), RayStatelessResult(), value.object_ref, value.value / 5
+    from dryml.core.execute import current_context
+    return RayTrainingValue(value.value), RayStatelessResult(), current_context().repo.describe(value).object_view(), value.value / 5
 
 
 def _ray_update_child(root):
@@ -128,9 +128,10 @@ def test_existing_ray_core_recovers_training_results_nested_updates_and_control_
     try:
         future = executor.submit(_ray_train, value, world=_one_cpu_world())
         stateful, stateless, existing, metric = future.result(timeout=30)
-        assert isinstance(stateful, StateRef)
+        assert require_saved(stateful) is stateful
         assert isinstance(stateless, ConcreteDefinition)
-        assert isinstance(existing, ObjectRef)
+        assert isinstance(existing, Node)
+        assert existing.object_projection_equal(repo.describe(value))
         assert metric == 2.0
         assert value.value == 10
         assert isinstance(future.backend_future, RayFuture)
@@ -142,11 +143,11 @@ def test_existing_ray_core_recovers_training_results_nested_updates_and_control_
 
         nested = executor.submit(_ray_update_child, root, world=_one_cpu_world())
         returned = nested.result(timeout=30)
-        assert isinstance(returned, StateRef)
+        assert require_saved(returned) is returned
         assert root.child.value == 10
-        assert returned == root.last_state_ref.at(next(
+        assert returned.graph_equal(root.last_state_ref.at(next(
             path for path, child in root._runtime_projection.items() if child is root.child
-        ))
+        )))
         nested.cleanup(timeout=30)
 
         control = executor.submit(_ray_control_store_path, world=_one_cpu_world())
@@ -220,7 +221,7 @@ def test_existing_ray_core_runs_every_managed_decorator_order_once(
     try:
         operation = getattr(value, member)
         future = executor.submit(operation, argument_state, world=_one_cpu_world())
-        assert isinstance(future.result(timeout=30), StateRef)
+        require_saved(future.result(timeout=30))
         future.cleanup(timeout=30)
         restored = repo.load_state_ref(
             operation.status(

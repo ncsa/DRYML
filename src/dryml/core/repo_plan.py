@@ -19,7 +19,7 @@ from .object import Object, Serializable
 from .policies import RepoGraphOptions
 from .selector import Selector
 from .generator import GeneratorSelector
-from .store.store import Store, StoreCapabilityError
+from .store.store import Store
 from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
 from .utils.graph.path import Parameter
@@ -139,12 +139,6 @@ class RealizationScope:
         compare=False,
         hash=False,
     )
-    _claim_cleanups: list[Callable[[], Any]] = field(
-        default_factory=list,
-        repr=False,
-        compare=False,
-        hash=False,
-    )
 
     def workspace_node_label(self, node_key: object) -> str:
         """Return one token-neutral label for a private node in this scope."""
@@ -155,40 +149,6 @@ class RealizationScope:
                 label = f"node-{uuid.uuid4().hex}"
                 self._workspace_node_labels[node_key] = label
             return label
-
-    def add_claim_cleanup(self, cleanup: Callable[[], Any]) -> None:
-        """Register claim abandonment if this realization later fails.
-
-        Args:
-            cleanup: No-argument callback that abandons claims owned by this
-                realization without touching successor generations.
-
-        Side Effects:
-            Retains the callback until the scope exits and invokes it in reverse
-            order only when realization raises.
-        """
-        self._claim_cleanups.append(cleanup)
-
-
-@dataclass(frozen=True, slots=True)
-class AggregateMaterializationPlan:
-    """Detached selected roots admitted together by :class:`dryml.core.repo.Repo`.
-
-    Args:
-        roots: Selected materializing boundary values in caller delivery order.
-        cache: Effective cache policy retained for structural realization.
-        reuse_live: Effective exact-state live-reuse policy.
-
-    This plan deliberately carries no live Objects, payload bytes, or callable
-    constructors.  Repo completes its authority preflight and claim admission
-    before executing it, so a signature boundary cannot recreate restoration
-    policy or publication behavior.
-    """
-
-    roots: tuple[Any, ...]
-    cache: str
-    reuse_live: str
-
 
 _CURRENT_REALIZATION_SCOPE: ContextVar[RealizationScope | None] = ContextVar(
     "dryml_realization_scope", default=None
@@ -207,16 +167,6 @@ def realization_scope() -> Iterator[RealizationScope]:
     token = _CURRENT_REALIZATION_SCOPE.set(scope)
     try:
         yield scope
-    except BaseException as error:
-        for cleanup in reversed(scope._claim_cleanups):
-            try:
-                cleanup()
-            except BaseException as cleanup_error:
-                if hasattr(error, "add_note"):
-                    error.add_note(
-                        f"Realization claim cleanup also failed: {cleanup_error!r}"
-                    )
-        raise
     finally:
         _CURRENT_REALIZATION_SCOPE.reset(token)
 
@@ -290,18 +240,26 @@ class GraphApplyResult(Generic[T]):
 
 @dataclass(frozen=True, slots=True)
 class SaveAction:
-    """One owned Serializable node selected for graph-state publication."""
+    """One owned live node selected for graph-state publication.
+
+    path is its primary GraphPath, definition its concrete construction metadata,
+    and obj the live Serializable. This detached action invokes no hooks and
+    establishes no payload availability; the owning save validates it before use.
+    """
 
     path: GraphPath
     definition: ConcreteDefinition
     obj: Object
-    state_hash: str | None = None
-    source_store: Any = None
 
 
 @dataclass(frozen=True, slots=True)
 class SnapshotAction:
-    """One exact materializing subtree selected for StateRef projection."""
+    """One owned subtree selected for saved Node projection.
+
+    path is the primary GraphPath, definition the concrete construction metadata,
+    and obj its optional retained live Object. Construction performs no IO; the
+    owning save validates the action before capture or publication.
+    """
 
     path: GraphPath
     definition: ConcreteDefinition
@@ -313,8 +271,8 @@ class SavePlan:
     """Retained live bindings and pure Node preparation for one logical save.
 
     graph/binding/actions/snapshots retain exact live occurrences and routes;
-    object_ref/object_ids adapt the pre-cutover live identity interface. node is
-    the sole Node realization carrier, not a second StateRef state map.
+    object_ref/object_ids retain the identity-bound runtime Node projection. node
+    retains the normalized construction selections for state capture.
     preparation owns the final shared export and observable work counts;
     capture_counts detaches earlier creation-key work without retaining a second
     graph owner. No field proves current Store availability or grants a lease.
@@ -622,17 +580,17 @@ def attach_runtime_binding(
         obj: Successfully initialized live Object.
         memo: Current private-node materialization memo containing dependencies.
         runtime_parameters: Optional bound runtime values supplied to the
-            constructor. They are authoritative for materializing reference
-            leaves and avoid decoding an exact StateRef a second time.
+            constructor. They retain the admitted materializing bindings.
 
     Side Effects:
         Stores immutable construction bindings, defensive runtime projections,
-        scope, ObjectId/ObjectRef metadata, and the current Store affinity on
+        scope, Node identity metadata, and the current Store affinity on
         ``obj``. No user attributes are inspected.
     """
 
     from .canonical import from_canonical
-    from .reference_values import ObjectId, ObjectRef
+    from .reference_values import ObjectId
+    from .node import _as_node_view
 
     bindings = _NodeBindings()
     bindings[cdef] = obj
@@ -686,107 +644,44 @@ def attach_runtime_binding(
         path = GraphPath() if node.definition is cdef else graph.primary_path(cdef, node.definition)
         object_ids[path] = object_id
 
-    for name, value in cdef.parameters.items():
-        _collect_imported_object_ids(value, GraphPath((Parameter(name),)), object_ids)
-
     obj._realization_scope = current_realization_scope()
     obj._runtime_bindings = runtime_values
     obj._runtime_projection = runtime_values
     obj._store_affinity = repo.obj_default_store.get(cdef)
     obj._last_state_hash = getattr(obj, "_last_state_hash", None)
     obj._object_id = getattr(obj, "_object_id", None) if isinstance(obj, Serializable) else None
-    obj._object_ref = ObjectRef(cdef, object_ids)
-
-    pending_claims = []
-    claim_leases = []
-    seen_objects = set()
-    seen_claims = set()
-    for candidate in runtime_values.values():
-        if not isinstance(candidate, Object) or id(candidate) in seen_objects:
-            continue
-        seen_objects.add(id(candidate))
-        pairs = list(getattr(candidate, "_pending_claim_dependencies", ()))
-        lease = getattr(candidate, "_claim_lease", None)
-        if lease is not None:
-            pairs.append((lease, candidate))
-        for dependency_lease, dependency_obj in pairs:
-            key = id(dependency_lease)
-            if key not in seen_claims:
-                pending_claims.append((dependency_lease, dependency_obj))
-                seen_claims.add(key)
-        for dependency_lease in getattr(candidate, "_claim_leases", ()):
-            if dependency_lease not in claim_leases:
-                claim_leases.append(dependency_lease)
-    if pending_claims:
-        obj._pending_claim_dependencies = tuple(pending_claims)
-        obj._claim_leases = tuple(claim_leases)
+    obj._identity_node = _as_node_view(cdef).with_realization(identities=object_ids)
 
 
-def _collect_imported_object_ids(value: Any, path: GraphPath, out: dict) -> None:
-    """Expand immutable materializing reference IDs under an outer occurrence.
-
-    Repeated materializing exact references retain one ObjectId entry at the
-    minimum canonical path, matching ObjectRef's alias representation.
-    """
-
-    from .cdef_graph import EdgeKind
-    from .links import DefLink
-    from .reference_values import ObjectRef, StateRef
-
-    if isinstance(value, StateRef):
-        value = value.object
-    if isinstance(value, ObjectRef):
-        for child_path, object_id in value.objects.items():
-            candidate_path = path.join(child_path)
-            existing_path = next(
-                (known_path for known_path, known_id in out.items()
-                 if known_id == object_id),
-                None,
-            )
-            if existing_path is None:
-                out[candidate_path] = object_id
-            elif graph_path_sort_key(candidate_path) < graph_path_sort_key(existing_path):
-                del out[existing_path]
-                out[candidate_path] = object_id
-        return
-    if isinstance(value, DefLink):
-        if value.kind is EdgeKind.MATERIALIZE:
-            _collect_imported_object_ids(value.target, path, out)
-        return
-    for edge in iter_value_edges(value):
-        _collect_imported_object_ids(edge.value, path.child(edge.segment), out)
-
-
-def apply_exact_reference_identity(obj: Object, reference, *, lineage_facts=None) -> None:
-    """Rebind a completed materialized subtree to supplied exact ObjectIds.
+def apply_node_identities(obj: Object, node, *, lineage_facts=None) -> None:
+    """Bind a completed live subtree to its exact runtime identity Node.
 
     Args:
-        obj: Freshly materialized root for ``reference.definition``.
-        reference: ObjectRef whose topology and ObjectIds are authoritative.
+        obj: Freshly materialized root matching the retained runtime construction.
+        node: ConcreteNode realization overlay with every owned ObjectId.
         lineage_facts: Optional primary-path or ObjectId-keyed known/unknown
             creation facts. Omitted facts are explicitly restored as unknown.
 
     Raises:
-        ValueError: If a reference path does not resolve to the expected live
+        ValueError: If a Node path does not resolve to the expected live
             Object or the supplied topology cannot be retained.
 
     Side Effects:
-        Replaces IDs and subtree ObjectRefs only after construction has
+        Replaces IDs and subtree identity Nodes only after construction has
         completed. State restoration remains the later exact-load boundary.
     """
 
-    from .metadata import LineageMetadata
-    from .reference_values import ObjectRef
+    from .definition import ConcreteNode
     from .snapshot_capture import install_lineage_fact
 
-    if not isinstance(reference, ObjectRef):
-        raise TypeError("Exact runtime materialization requires an ObjectRef.")
-    if not obj.definition.graph_equal(reference.definition):
-        raise ValueError("Materialized exact reference topology does not match its ObjectRef.")
-    for path, object_id in reference.objects.items():
+    if not isinstance(node, ConcreteNode):
+        raise TypeError("Runtime identity binding requires a ConcreteNode.")
+    if not node.construction_view.graph_equal(obj.definition):
+        raise ValueError("Materialized topology does not match its runtime Node.")
+    for path, object_id in node.identity_spec().items():
         bound = obj.graph_at(path)
         if not isinstance(bound, Object):
-            raise ValueError(f"Exact ObjectRef path {path!s} did not resolve to an Object.")
+            raise ValueError(f"Identity Node path {path!s} did not resolve to an Object.")
         bound._object_id = object_id
         fact = None
         if lineage_facts is not None:
@@ -794,17 +689,10 @@ def apply_exact_reference_identity(obj: Object, reference, *, lineage_facts=None
                 fact = lineage_facts[path]
             elif object_id in lineage_facts:
                 fact = lineage_facts[object_id]
-        if isinstance(fact, LineageMetadata):
-            fact = fact.created_at
         install_lineage_fact(bound, object_id, fact)
-        try:
-            bound._object_ref = reference.at(path)
-        except ValueError:
-            # An alias occurrence still names the same completed Object; its
-            # primary ObjectRef remains attached by the corresponding path.
-            pass
-    obj._object_ref = reference
-    obj._object_id = reference.object_id
+        bound._identity_node = node.at(path)
+    obj._identity_node = node
+    obj._object_id = node.object_id
 
 
 def _record_runtime_values(canonical: Any, runtime: Any, path: GraphPath, out: dict[GraphPath, Any]) -> None:
@@ -840,10 +728,7 @@ def _rebase_imported_runtime_projections(
 
     from .cdef_graph import EdgeKind
     from .links import DefLink
-    from .reference_values import ObjectRef, StateRef
-
-    if isinstance(canonical, (ObjectRef, StateRef)) or (
-            isinstance(canonical, ConcreteDefinition)
+    if (isinstance(canonical, ConcreteDefinition)
             and path.segments and isinstance(runtime, Object)):
         if not isinstance(runtime, Object):
             raise ValueError(f"Materialized exact reference at {path!s} did not produce an Object.")
@@ -996,7 +881,7 @@ def build_save_plan(
         A graph plan with each unique owned Serializable node exactly once.
 
     Raises:
-        RepoSaveError: If retained bindings cannot prove a total ObjectRef map.
+        RepoSaveError: If retained bindings cannot prove a complete identity map.
     """
     if not isinstance(value, Object):
         raise TypeError("Graph save requires one live Object root.")
@@ -1010,12 +895,12 @@ def build_save_plan(
     if binding.missing:
         missing = next(iter(binding.missing))
         raise RepoSaveError(f"Definition of object {missing} is not reachable in this repo!")
-    reference = getattr(value, "_object_ref", None)
-    if reference is None or not reference.definition.graph_equal(value.definition):
-        raise RepoSaveError("Live root lacks complete retained ObjectRef evidence.")
+    reference = getattr(value, "_identity_node", None)
+    if reference is None or not reference.construction_view.graph_equal(value.definition):
+        raise RepoSaveError("Live root lacks complete retained Node identity evidence.")
     actions: list[SaveAction] = []
-    seeds = _seed_state_refs(value.definition)
-    for path in reference.objects:
+    identities = reference.identity_spec()
+    for path in identities:
         try:
             obj = value.graph_at(path)
         except Exception:
@@ -1027,12 +912,7 @@ def build_save_plan(
                 )
             actions.append(SaveAction(path, obj.definition, obj))
             continue
-        seed = seeds.get(path)
-        if seed is not None:
-            definition, state_hash = seed
-            actions.append(SaveAction(path, definition, value, state_hash=state_hash))
-            continue
-        raise RepoSaveError(f"No retained Serializable binding or exact seed state at {path!s}.")
+        raise RepoSaveError(f"No retained Serializable binding at {path!s}.")
     snapshots: list[SnapshotAction] = []
     nodes: list[Object] = []
     seen_nodes: set[int] = set()
@@ -1062,7 +942,7 @@ def build_save_plan(
         add_snapshot(action.path, action.definition, None)
     from .node import _as_node_view
     retained = getattr(value, "_construction_node", None)
-    node = (_as_node_view(value.definition) if retained is None else retained).with_realization(identities=reference.objects)
+    node = (_as_node_view(value.definition) if retained is None else retained).with_realization(identities=identities)
     return SavePlan(
         graph=binding.graph,
         binding=binding,
@@ -1070,7 +950,7 @@ def build_save_plan(
         snapshots=tuple(snapshots),
         nodes=tuple(nodes),
         object_ref=reference,
-        object_ids=tuple(reference.objects.values()),
+        object_ids=tuple(identities.values()),
         node=node,
     )
 
@@ -1085,7 +965,7 @@ def validate_retained_save_plan(plan: SavePlan, value: Object) -> None:
 
     from .repo import RepoSaveError
 
-    if plan.binding.roots[0].obj is not value or value.object_ref != plan.object_ref:
+    if plan.binding.roots[0].obj is not value or not value._identity_node.graph_equal(plan.object_ref):
         raise RepoSaveError("State graph reservation does not cover this exact live graph.")
     if any(getattr(node, "_restore_failed", False) for node in plan.nodes):
         raise RepoSaveError("State graph contains an invalidated restore target.")
@@ -1162,55 +1042,9 @@ _CODEC_RE = re.compile(r"^[A-Za-z0-9]{1,32}$")
 def _validate_codecs(actions: Iterable[SaveAction]) -> None:
     """Validate every selected developer codec before any serializer runs."""
     for action in actions:
-        if action.state_hash is not None:
-            continue
         codec = getattr(action.obj, "state_codec", None)
         if not isinstance(codec, str) or not _CODEC_RE.fullmatch(codec):
             raise _save_error(action.path, "state_codec must match [A-Za-z0-9]{1,32}")
-
-
-def _seed_state_refs(definition: ConcreteDefinition) -> dict[GraphPath, tuple[ConcreteDefinition, str]]:
-    """Expand embedded materializing exact StateRefs into enclosing state paths."""
-    result: dict[GraphPath, tuple[ConcreteDefinition, str]] = {}
-    for outer, reference in _embedded_state_refs(definition):
-        for path, state_hash in reference.states.items():
-            result[outer.join(path)] = (reference.object.at(path).definition, state_hash)
-    return result
-
-
-def _embedded_state_refs(definition: ConcreteDefinition):
-    """Yield materializing StateRefs with their paths in one enclosing CDef."""
-    from .cdef_graph import EdgeKind
-    from .links import DefLink
-    from .reference_values import StateRef
-
-    result = []
-    visited: set[object] = set()
-
-    def visit_value(value: Any, path: GraphPath) -> None:
-        if isinstance(value, StateRef):
-            result.append((path, value))
-            return
-        if isinstance(value, ConcreteDefinition):
-            visit_cdef(value, path)
-            return
-        if isinstance(value, DefLink):
-            if value.kind is EdgeKind.MATERIALIZE:
-                visit_value(value.target, path)
-            return
-        for edge in iter_value_edges(value):
-            visit_value(edge.value, path.child(edge.segment))
-
-    def visit_cdef(cdef: ConcreteDefinition, path: GraphPath) -> None:
-        key = cdef_node_key(cdef)
-        if key in visited:
-            return
-        visited.add(key)
-        for edge in iter_value_edges(cdef):
-            visit_value(edge.value, path.child(edge.segment))
-
-    visit_cdef(definition, GraphPath())
-    return tuple(result)
 
 
 def _unique_stores(stores: Iterable[Any]) -> tuple[Any, ...]:
@@ -1223,29 +1057,6 @@ def _unique_stores(stores: Iterable[Any]) -> tuple[Any, ...]:
         seen.add(id(store))
         result.append(store)
     return tuple(result)
-
-
-def _has_complete_local_states(store, state_ref, sources) -> bool:
-    """Return whether an exact snapshot retains every selected local payload."""
-
-    record = store.read_state_ref_record(state_ref.digest())
-    if record is None or record.state_ref != state_ref:
-        return False
-    return all(
-        store.validate_local_state(state_ref, path).state_hash
-        == source.manifest.state_hash
-        for path, source in sources.items()
-    )
-
-
-def _supports_annotation_phase_callback(store) -> bool:
-    """Return whether this Store override implements exact annotation callbacks."""
-
-    return bool(getattr(
-        type(store).publish_snapshot,
-        "_dryml_annotation_phase_callback",
-        False,
-    ))
 
 
 @dataclass(frozen=True)
@@ -1426,10 +1237,6 @@ def execute_routed_save_plan(
         from .metadata import SaveAnnotations
         if not isinstance(annotations, SaveAnnotations):
             raise TypeError("annotations must be a SaveAnnotations or None.")
-    if any(getattr(node, "_claim_lease", None) or getattr(node, "_pending_claim_dependencies", ()) for node in plan.nodes):
-        raise StoreCapabilityError("Legacy construction-claim publication requires the Node materialization cutover.")
-    if any(action.state_hash is not None for action in plan.actions):
-        raise StoreCapabilityError("Legacy exact-reference seed publication requires the Node materialization cutover.")
     for target in targets:
         target.preflight_save_batch()
     prior = root_obj.last_state_ref

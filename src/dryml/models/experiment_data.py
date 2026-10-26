@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from dryml.core import Node, ObjectSelector, Ref
+from dryml.core import Node, Ref
 from dryml.core.node import require_saved
 from dryml.core.node_codec import decode_node_graph, encode_node_graph
 from dryml.core.node_prepare import NodePreparation
@@ -323,19 +323,17 @@ class ExperimentData(Serializable):
         return pd.DataFrame.from_records(records, columns=columns)
 
     @classmethod
-    def _definition(cls, experiment: Node | ObjectSelector):
+    def _definition(cls, experiment: Node):
         experiment = cls._subject_reference(experiment)
         return cls.defn(Ref(experiment)).concretize()
 
     @staticmethod
-    def _subject_reference(experiment: Node | ObjectSelector) -> Node:
-        """Normalize a query selector to persistent Experiment association authority."""
+    def _subject_reference(experiment: Node) -> Node:
+        """Project a Node to persistent Experiment association authority."""
 
-        if isinstance(experiment, ObjectSelector):
-            experiment = experiment.reference
         if not isinstance(experiment, Node):
             raise TypeError(
-                "ExperimentData requires an Experiment ObjectRef or ObjectSelector projection."
+                "ExperimentData requires an Experiment Node."
             )
         return experiment.object_view()
 
@@ -366,11 +364,11 @@ class ExperimentData(Serializable):
         return saved
 
     @classmethod
-    def find(cls, experiment: Ref[Node] | ObjectSelector, *, repo, store=None):
+    def find(cls, experiment: Ref[Node], *, repo, store=None):
         """Load the Store-current history for one projected Experiment subject.
 
         Args:
-            experiment: Projected Experiment object-view Node or ObjectSelector.
+            experiment: Experiment Node, projected to its object view for lookup.
             repo: Connected Repo holding declaration and state authority.
             store: Optional selected Store. It is required for ambiguous Store
                 topology and restricts loading to that authority.
@@ -380,7 +378,7 @@ class ExperimentData(Serializable):
             matching declaration or snapshot identity exists.
 
         Raises:
-            ExperimentDataError: If the projected subject is invalid.
+            TypeError: If the subject is not a Node.
             StoreAuthorityError: If matching history is incomplete, corrupt, or
             ambiguous. Repo load errors remain explicit.
         """
@@ -392,7 +390,7 @@ class ExperimentData(Serializable):
         return loaded
 
     @classmethod
-    def get_or_create(cls, experiment: Ref[Node] | ObjectSelector, *, repo, store=None):
+    def get_or_create(cls, experiment: Ref[Node], *, repo, store=None):
         """Return the unique current history, creating or safely recovering it.
 
         A new history uses a format-4 absent-name CAS. Recovery
@@ -400,7 +398,7 @@ class ExperimentData(Serializable):
         ambiguous alias-less history remains an authority error.
 
         Args:
-            experiment: Projected Experiment object-view Node or ObjectSelector.
+            experiment: Experiment Node, projected to its object view for lookup.
             repo: Connected Repo holding or receiving history authority.
             store: Optional selected writable Store. Omit it only for an
                 unambiguous writable physical Store topology.
@@ -409,8 +407,7 @@ class ExperimentData(Serializable):
             A fresh or newly initialized current ExperimentData object.
 
         Raises:
-            TypeError: If ``experiment`` is not a projected Node or
-                ObjectSelector.
+            TypeError: If ``experiment`` is not a Node.
             StoreAuthorityError: If initialization evidence is incomplete,
                 populated, malformed, or ambiguous.
             RepoSaveError: If Store selection or initial immutable publication

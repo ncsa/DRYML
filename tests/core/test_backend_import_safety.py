@@ -124,7 +124,6 @@ from dryml.core.definition import ConcreteDefinition
 from dryml.core.bound_args import BoundArguments
 from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
 from dryml.core.symbol import ImportRef
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -461,7 +460,6 @@ from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord
 from dryml.core.symbol import ImportRef, SourceSpec
 
 with tempfile.TemporaryDirectory() as tmp:

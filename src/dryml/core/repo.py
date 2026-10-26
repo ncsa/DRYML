@@ -25,7 +25,6 @@ from collections.abc import Iterable, Mapping
 from collections import defaultdict, OrderedDict
 import hashlib
 import atexit
-import time
 import stat
 import sys
 from threading import RLock, current_thread
@@ -36,7 +35,7 @@ from .definition import Definition, ConcreteDefinition
 from .cdef_graph import ConcreteDefinitionGraph
 from .object import Object
 from .store.store import (
-    Store, StoreAliasConflictError, StoreAuthorityError, StoreCapabilityError,
+    Store, StoreAuthorityError, StoreCapabilityError,
 )
 from .policies import CachePolicy, LiveReusePolicy, RepoGraphOptions
 from .canonical import from_canonical
@@ -48,14 +47,6 @@ from .query.result import ObjectResultSet
 
 if TYPE_CHECKING:
     from .repo_definition import RepoDefinition
-
-
-_active_object_ref_builds: ContextVar[frozenset[tuple[int, str]]] = ContextVar(
-    "dryml_active_object_ref_builds", default=frozenset()
-)
-_active_object_ref_results: ContextVar[Mapping[tuple[int, str], Object] | None] = ContextVar(
-    "dryml_active_object_ref_results", default=None
-)
 
 
 def _content_hash(source):
@@ -227,9 +218,8 @@ class _ValidationEvidence:
 class _AuthorityReadCut:
     """One owner-bound topology/fence lease, never an ambient validity cache.
 
-    Internal consumers may retain resolved StateRefs and successful eager closure
-    matches only for this captured view and identical validation policy. Discard
-    and exit clear those values alongside bundle/payload evidence.
+    Prepared immutable content may be shared across cuts, but never substitutes
+    for current Store authority or payload validation.
     """
 
     def __init__(self, facility, repo, *, selected_stores=()):
@@ -242,11 +232,6 @@ class _AuthorityReadCut:
         self._entered = False
         self.stores = ()
         self.selected_stores = tuple(selected_stores)
-        self.snapshots = {}
-        self.locals = {}
-        self.eager_snapshots = {}
-        self.resolved_state_refs = {}
-        self.validated_state_refs = []
         self._stack = None
         self._pending = set()
         self._failed = False
@@ -318,11 +303,6 @@ class _AuthorityReadCut:
         self._check_owner()
         self._failed = True
         self.facility.finish(self, success=False)
-        self.snapshots.clear()
-        self.locals.clear()
-        self.eager_snapshots.clear()
-        self.resolved_state_refs.clear()
-        self.validated_state_refs.clear()
 
     def prepared(self, context, source):
         """Return exact-matched immutable content, never a validity verdict."""
@@ -330,41 +310,6 @@ class _AuthorityReadCut:
 
     def stage_prepared(self, context, source, owned_size, prepare):
         self.facility.stage(self, context, source, owned_size, prepare)
-
-    def snapshot(self, store, digest):
-        self.check(store)
-        try:
-            return store._read_snapshot_for_cut(self, digest)
-        except BaseException:
-            self.discard()
-            raise
-
-    def records(self, store):
-        self.check(store)
-        try:
-            return store._state_ref_records_for_cut(self)
-        except BaseException:
-            self.discard()
-            raise
-
-    def metadata(self, store, digest):
-        self.check(store)
-        try:
-            return store._snapshot_metadata_for_cut(self, digest)
-        except BaseException:
-            self.discard()
-            raise
-
-    def open_local(self, store, reference, path, *, defer_payload=False):
-        self.check(store)
-        try:
-            return store._open_local_state_for_cut(
-                self, reference, path, defer_payload=defer_payload,
-            )
-        except BaseException:
-            self.discard()
-            raise
-
 
 def _node_key(key):
     """Normalize a runtime map key to private CDef node identity."""
@@ -387,86 +332,6 @@ def _unique_objects(objects):
             seen.add(obj_id)
             unique.append(obj)
     return tuple(unique)
-
-
-def _fork_rekey_reference(reference, namespace, *, record_candidate=None):
-    """Rekey an exact reference graph, including materializing embedded refs.
-
-    The CDef codec is used as the immutable graph reconstruction boundary.  A
-    single old-to-new ObjectId map preserves sharing across the root and every
-    embedded materializing ObjectRef/StateRef without using local state bytes as
-    identity evidence.
-    """
-    from .cdef_codec import decode_cdef_graph, encode_cdef_graph
-    from .reference_values import ObjectId, ObjectRef, StateRef, _expected_paths
-
-    replacements = {}
-    object_cache = {}
-    state_cache = {}
-
-    def replacement(old):
-        result = replacements.get(old)
-        if result is None:
-            result = ObjectId._trusted(
-                old.namespace if namespace is None else namespace, uuid4()
-            )
-            replacements[old] = result
-            if record_candidate is not None:
-                record_candidate(result)
-        return result
-
-    def transform_value(data):
-        kind = data.get("kind")
-        if kind == "object_ref":
-            data["value"] = rekey_object(ObjectRef.from_data(data["value"])).to_data()
-        elif kind == "state_ref":
-            data["value"] = rekey_state(StateRef.from_data(data["value"])).to_data()
-        elif kind == "link":
-            transform_value(data["target"])
-        elif kind == "dict":
-            for _, value in data["items"]:
-                transform_value(value)
-        elif kind in {"list", "tuple", "set"}:
-            for value in data["items"]:
-                transform_value(value)
-
-    def rekey_definition(definition):
-        data = encode_cdef_graph(definition)
-        for node in data["nodes"]:
-            transform_value(node["parameters"])
-        return decode_cdef_graph(data)
-
-    def rekey_object(old):
-        cached = object_cache.get(old.digest())
-        if cached is not None:
-            return cached
-        definition = rekey_definition(old.definition)
-        expected, _ = _expected_paths(definition)
-        objects = {}
-        for key, path in expected.items():
-            if key[0] == "object-id":
-                objects[path] = key[1]
-            else:
-                objects[path] = replacement(old.objects[path])
-        result = ObjectRef(definition, objects)
-        object_cache[old.digest()] = result
-        return result
-
-    def rekey_state(old):
-        cached = state_cache.get(old.digest())
-        if cached is not None:
-            return cached
-        result = StateRef(rekey_object(old.object), old.states)
-        state_cache[old.digest()] = result
-        return result
-
-    if isinstance(reference, StateRef):
-        root = rekey_state(reference)
-    elif isinstance(reference, ObjectRef):
-        root = rekey_object(reference)
-    else:
-        raise TypeError("Fork rekeying requires an ObjectRef or StateRef.")
-    return root, dict(state_cache)
 
 
 class _NodeMap(dict):
@@ -650,57 +515,6 @@ class RepoSaveError(Exception):
         self.report = report
 
 
-@dataclass(frozen=True, slots=True)
-class ReferenceDeclarationEvidence:
-    """One deduplicated declaration identity observed in a stable Store cut.
-
-    Attributes:
-        object_ref: Complete declared identity whose definition matched the
-            requested complete topology.
-        stores: Connected Store handles carrying equal declaration replicas.
-        claim_statuses: Valid associated ClaimRecord statuses in Store order.
-
-    Declaration identity is evidence for reference selection only.  It does not
-    grant construction permission or acquire a claim.
-    """
-
-    object_ref: object
-    stores: tuple[Store, ...]
-    claim_statuses: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ReferenceStateEvidence:
-    """One deduplicated exact StateRef observed in a stable Store cut.
-
-    Attributes:
-        state_ref: Complete immutable snapshot authority.
-        stores: Connected Store handles carrying equal immutable replicas.
-
-    State-only evidence can satisfy an explicitly supplied ObjectRef lookup but
-    does not become declaration evidence for CDef strengthening.
-    """
-
-    state_ref: object
-    stores: tuple[Store, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ReferenceEvidence:
-    """Authoritative declaration and snapshot facts from one Repo evidence cut.
-
-    Attributes:
-        declarations: Topology-matching declared identities with validated claims.
-        states: Topology-matching immutable snapshots, including state-only facts.
-
-    The value contains no live Objects, payload bytes, query-index results, or
-    construction reservations.  It is intended for read-only authority selection.
-    """
-
-    declarations: tuple[ReferenceDeclarationEvidence, ...]
-    states: tuple[ReferenceStateEvidence, ...]
-
-
 def _record_late_publication(
         report, *, store, phase, state_ref, operation, checker, error_checker=None):
     """Run one post-authority boundary and return an updated immutable report."""
@@ -856,16 +670,6 @@ class RepoGraphError(Exception):
     pass
 
 
-@dataclass(frozen=True, slots=True)
-class _ClaimLease:
-    """One live first-construction fence retained until initial StateRef publication."""
-
-    store: Store
-    object_ref: object
-    generation: int
-    owner: str
-
-
 SelectorType = Callable | Definition | ConcreteDefinition
 RevisionType = dict[ConcreteDefinition, str]
 
@@ -931,10 +735,7 @@ class Repo:
     # Helper class for saving objects
     def __init__(
             self, stores=None, config: Mapping[str, Any] | None = None,
-            *, clock: Callable[[], float] | None = None,
-            lease_duration: float = 30.0,
-            owner_token_factory: Callable[[], str] | None = None,
-            save_routing=None,
+            *, save_routing=None,
             _state_io: bool = False):
         """Create a Repo over supplied Store handles and optional routing policy.
 
@@ -943,9 +744,6 @@ class Repo:
                 them.  Configured routing requires one handle per physical
                 built-in destination; repeated occurrences of one handle dedupe.
             config: Initial runtime-only configuration values.
-            clock: Optional claim-clock function.
-            lease_duration: Bounded claim duration in seconds.
-            owner_token_factory: Optional claim-owner token factory.
             save_routing: ``None``, a detached SaveRouting, or a placement
                 shorthand.  Shorthands configure empty first-match rules.
             _state_io: Internal authority-only view mode.
@@ -974,13 +772,6 @@ class Repo:
         self.cdef_cache = weakref.WeakValueDictionary()
         self.obj_config = {}
         self.config = dict(config or {})
-        if not isinstance(lease_duration, (int, float)) or not 0 < lease_duration <= 3600:
-            raise ValueError("lease_duration must be a positive bounded number of seconds.")
-        self._clock_explicit = clock is not None
-        self._owner_token_factory_explicit = owner_token_factory is not None
-        self._clock = clock or time.time
-        self._lease_duration = float(lease_duration)
-        self._owner_token_factory = owner_token_factory or (lambda: uuid4().hex)
         self._state_io = _state_io
         self._configuration_lock = RLock()
         self._configuration_pid = os.getpid()
@@ -1044,14 +835,6 @@ class Repo:
                     if node_main is not None:
                         self.main_def = store.read_node(node_main.root_digest, kind=node_main.root_kind)
                         break
-                    main = store.read_main_ref()
-                    if main is None:
-                        continue
-                    definition = store.read_definition_record(main.definition_digest)
-                    if definition is None:
-                        raise RepoLoadError("Main reference points to a missing DefinitionRecord.")
-                    self.main_def = definition.definition
-                    break
         except BaseException:
             if hasattr(self, "_query_index"):
                 try:
@@ -1580,7 +1363,7 @@ class Repo:
     def _cache_exact_graph(self, root: Object, cache: CachePolicy) -> None:
         """Publish an exact graph to the requested cache after identity rebinding.
 
-        Exact ObjectRef construction first replaces provisional ObjectIds and
+        Identity-bound Node construction first replaces provisional ObjectIds and
         lineage facts. This helper preserves normal cache behavior without
         exposing a provisional fact table to cache consumers.
         """
@@ -1613,7 +1396,7 @@ class Repo:
     def _all_live_candidates(self, *, reservation=None) -> tuple[Object, ...]:
         """Return all distinct cached live Objects without structural lookup.
 
-        Exact StateRef reuse filters this complete live set by ObjectId, graph
+        Exact saved-Node reuse filters this complete live set by ObjectId, graph
         topology, bindings, and reservation availability.  It intentionally does
         not use CDef equality as an identity key. An internal exact-load identity
         reservation may expose only candidates covered by that caller-owned token.
@@ -1706,7 +1489,7 @@ class Repo:
         """Reserve one exact live state graph for this process and thread.
 
         Args:
-            obj: Live root with complete retained ObjectRef/runtime bindings.
+            obj: Live root with complete retained Node/runtime bindings.
 
         Returns:
             An active :class:`StateGraphReservation` context manager covering the
@@ -1874,18 +1657,6 @@ class Repo:
             target._store_affinity = store
         return store
 
-    def _selected_writable_store(self, store, operation: str) -> Store:
-        """Select one writable Store or reject ambiguous reference mutation."""
-        if store is not None:
-            selected = self._ensure_store(store)
-            selected.preflight_publication(operation)
-            return selected
-        candidates = [candidate for candidate in self.stores if candidate.publication_capabilities.writable]
-        if len(candidates) != 1:
-            raise RepoSaveError(f"{operation} requires an explicit Store or exactly one writable Repo Store.")
-        candidates[0].preflight_publication(operation)
-        return candidates[0]
-
     def _selected_writable_physical_store(self, store, operation: str, *, record_family=None) -> Store:
         """Select one connected writable physical Store for current-state CAS.
 
@@ -1925,45 +1696,11 @@ class Repo:
     def _metadata_target(target):
         """Validate one metadata attachment target without touching live Objects."""
 
-        from .reference_values import ObjectRef, StateRef
         from .node import Node
 
-        if isinstance(target, Node):
-            return target
-
-        if not isinstance(target, (ObjectRef, StateRef)):
-            raise TypeError("metadata target must be an ObjectRef or StateRef.")
+        if not isinstance(target, Node):
+            raise TypeError("metadata target must be a Node.")
         return target
-
-    def _metadata_holds_target(self, store: Store, target) -> bool:
-        """Return whether one Store holds the exact metadata target authority.
-
-        A complete snapshot retains the exact ObjectRefs for its materializing
-        descendants. Those projections remain metadata holders even when they
-        have no separate declaration or child snapshot record. Ref-only paths
-        never occur in ``ObjectRef.objects`` and cannot satisfy this check.
-        """
-
-        from .reference_values import ObjectRef
-        from .node import Node
-        if isinstance(target, Node):
-            with store._metadata_read():
-                return store._holds_node_metadata(target)
-
-        if isinstance(target, ObjectRef):
-            if self._reference_authoritative_in(store, target):
-                return True
-            for record in store.iter_state_ref_records():
-                for path in record.state_ref.object.objects:
-                    if record.state_ref.object.at(path) == target:
-                        return True
-            return False
-        record = store.read_state_ref_record(target.digest())
-        if record is None:
-            return False
-        if record.state_ref != target:
-            raise StoreAuthorityError("StateRef digest collision has incompatible authority.")
-        return True
 
     @contextmanager
     def _authority_read_fences(self, stores=None):
@@ -1981,35 +1718,11 @@ class Repo:
         """Capture selections/topology before fences; substeps pass the cut explicitly."""
         return self._validation_evidence.read_cut(self, selected_stores=selected_stores)
 
-    def _metadata_holders(self, target, *, store=None) -> tuple[Store, ...]:
-        """Select connected target-holding Stores without treating nonholders as votes."""
-
-        selected = (
-            (self._connected_metadata_store(store),) if store is not None else tuple(self.stores)
-        )
-        holders = tuple(candidate for candidate in selected if self._metadata_holds_target(candidate, target))
-        if not holders:
-            raise KeyError(target.digest())
-        return holders
-
-    def _get_metadata_unfenced(self, target, *, store=None):
-        """Read one current mapping while the caller holds authority fences."""
-
-        values = [
-            candidate.read_metadata(target)
-            for candidate in self._metadata_holders(target, store=store)
-        ]
-        first = values[0]
-        if any(value != first for value in values[1:]):
-            raise MetadataConflictError("Selected Stores disagree about current metadata.")
-        return first
-
     def get_metadata(self, target, *, store=None, scope=None):
         """Return fresh detached annotations for a current concrete Node target.
 
         Args:
-            target: Concrete Node object projection or saved graph. Fixed reference
-                adapters remain available only where their Store supports them.
+            target: Concrete Node object projection or saved graph.
             store: Optional already-connected Store restricting the authority cut.
             scope: object/state, or None to infer state when the Node has selected
                 state and object otherwise. Use state explicitly for stateless saved
@@ -2031,35 +1744,8 @@ class Repo:
         """
 
         target = self._metadata_target(target)
-        from .node import Node
-        if isinstance(target, Node):
-            from .metadata import _node_annotation_scope
-            return self._node_metadata_values(target, store=store, scope=_node_annotation_scope(scope))
-        selected = (
-            (self._connected_metadata_store(store),) if store is not None else tuple(self.stores)
-        )
-        with self._authority_read_fences(selected):
-            return self._get_metadata_unfenced(target, store=store)
-
-    def _metadata_mutation_store(self, target, store, operation: str) -> Store:
-        """Choose one writable target holder for a local LWW metadata mutation."""
-
-        holders = self._metadata_holders(target, store=store)
-        if store is not None:
-            selected = holders[0]
-            from .node import Node
-            selected.preflight_publication(operation, **({"record_family": "dryml-node-graph/v1"} if isinstance(target, Node) else {}))
-            return selected
-        writable = tuple(
-            candidate for candidate in holders if candidate.publication_capabilities.writable
-        )
-        if len(writable) != 1:
-            raise RepoSaveError(
-                f"{operation} requires an explicit Store or exactly one writable target-holding Repo Store."
-            )
-        from .node import Node
-        writable[0].preflight_publication(operation, **({"record_family": "dryml-node-graph/v1"} if isinstance(target, Node) else {}))
-        return writable[0]
+        from .metadata import _node_annotation_scope
+        return self._node_metadata_values(target, store=store, scope=_node_annotation_scope(scope))
 
     def set_metadata(self, target, values, *, store=None, scope=None) -> None:
         """Atomically replace one selected current metadata mapping.
@@ -2098,14 +1784,8 @@ class Repo:
         detached = encode_metadata_mapping(values)
         from .metadata import decode_metadata_mapping
 
-        from .node import Node
-        if isinstance(target, Node):
-            selected = self._node_metadata_mutation_store(target, store, scope)
-            selected.write_metadata(target, decode_metadata_mapping(detached), scope=scope)
-            return
-
-        selected = self._metadata_mutation_store(target, store, "write current metadata")
-        selected.write_metadata(target, decode_metadata_mapping(detached))
+        selected = self._node_metadata_mutation_store(target, store, scope)
+        selected.write_metadata(target, decode_metadata_mapping(detached), scope=scope)
 
     def delete_metadata(self, target, *, store=None, scope=None) -> bool:
         """Atomically remove one selected current mapping and return prior presence.
@@ -2134,26 +1814,21 @@ class Repo:
         """
 
         target = self._metadata_target(target)
-        from .node import Node
-        if isinstance(target, Node):
-            return self._node_metadata_mutation_store(target, store, scope).delete_metadata(target, scope=scope)
-        selected = self._metadata_mutation_store(target, store, "delete current metadata")
-        return selected.delete_metadata(target)
+        return self._node_metadata_mutation_store(target, store, scope).delete_metadata(target, scope=scope)
 
     def get_lineage_metadata(self, target, *, store=None):
         """Return immutable creation evidence or a valid unknown marker.
 
         Args:
-            target: Current Node object projection, or retained fixed ObjectRef.
+            target: Current Node object projection.
             store: Optional connected Store restricting the authority cut.
 
         Returns:
-            Detached NodeLineageMetadata for a Node (LineageMetadata for a fixed
-            reference). A valid target with no creation evidence
+            Detached NodeLineageMetadata. A valid target with no creation evidence
             returns an explicit unknown marker rather than an inferred timestamp.
 
         Raises:
-            TypeError: If ``target`` is not an ObjectRef or ``store`` has an
+            TypeError: If ``target`` is not a Node or ``store`` has an
                 unsupported type.
             ValueError: If ``store`` is not connected.
             KeyError: If no selected Store holds ``target``.
@@ -2166,56 +1841,21 @@ class Repo:
             payloads, materialize Objects, run probes, or modify authority.
         """
 
-        from .metadata import LineageMetadata
-        from .reference_values import ObjectRef
-        from .node import Node
-        if isinstance(target, Node):
-            return self._node_metadata_values(target, store=store, scope="lineage")
-
-        if not isinstance(target, ObjectRef):
-            raise TypeError("lineage metadata target must be an ObjectRef.")
-        selected = (
-            (self._connected_metadata_store(store),) if store is not None else tuple(self.stores)
-        )
-        values = []
-        with self._authority_read_fences(selected):
-            for candidate in self._metadata_holders(target, store=store):
-                value = candidate.read_lineage_metadata(target)
-                if value is None:
-                    # U3 snapshot directories are already authoritative lineage
-                    # carriers; a separate lineage sidecar is optional acceleration.
-                    for state_record in candidate.iter_state_ref_records():
-                        snapshot = candidate.read_snapshot_metadata(state_record.digest)
-                        if snapshot is None:
-                            continue
-                        value = next(
-                            (fact for fact in snapshot.lineages.values() if fact.object_ref == target),
-                            None,
-                        )
-                        if value is not None:
-                            break
-                values.append(value)
-        # A holder with no lineage record is valid unknown creation evidence;
-        # it must still conflict with a different holder's known fact.
-        if any(value != values[0] for value in values[1:]):
-            raise MetadataConflictError("Selected Stores disagree about lineage metadata.")
-        return LineageMetadata(target, "unknown", None) if values[0] is None else values[0]
+        return self._node_metadata_values(self._metadata_target(target), store=store, scope="lineage")
 
     def get_snapshot_metadata(self, target, *, store=None):
         """Return detached first-capture metadata for one exact saved graph.
 
         Args:
-            target: Saved Node whose complete captured evidence is required, or a
-                retained fixed StateRef on a supporting Store.
+            target: Saved Node whose complete captured evidence is required.
             store: Optional connected Store restricting the authority cut.
 
         Returns:
-            Detached NodeSnapshotMetadata for a Node (SnapshotMetadata for a fixed
-            reference) from the complete captured
+            Detached NodeSnapshotMetadata from the complete captured
             association. Later current-metadata edits are never merged into it.
 
         Raises:
-            TypeError: If ``target`` is not a StateRef or ``store`` has an
+            TypeError: If ``target`` is not a Node or ``store`` has an
                 unsupported type.
             ValueError: If ``store`` is not connected.
             KeyError: If no selected Store holds ``target``.
@@ -2229,27 +1869,7 @@ class Repo:
             materializing Objects, running probes, or modifying Store authority.
         """
 
-        from .reference_values import StateRef
-        from .node import Node
-        if isinstance(target, Node):
-            return self._node_metadata_values(target, store=store, scope="capture")
-
-        if not isinstance(target, StateRef):
-            raise TypeError("snapshot metadata target must be a StateRef.")
-        selected = (
-            (self._connected_metadata_store(store),) if store is not None else tuple(self.stores)
-        )
-        values = []
-        with self._authority_read_fences(selected):
-            for candidate in self._metadata_holders(target, store=store):
-                value = candidate.read_snapshot_metadata(target.digest())
-                if value is None or value.state_ref != target:
-                    raise StoreAuthorityError("StateRef authority lacks complete captured metadata.")
-                values.append(value)
-        first = values[0]
-        if any(value != first for value in values[1:]):
-            raise MetadataConflictError("Selected Stores disagree about snapshot metadata.")
-        return first
+        return self._node_metadata_values(self._metadata_target(target), store=store, scope="capture")
 
     def _node_metadata_values(self, target, *, store, scope):
         import json
@@ -2293,699 +1913,6 @@ class Repo:
             raise RepoSaveError("Node metadata mutation requires an explicit Store when holders are ambiguous.")
         return holders[0]
 
-    def get_snapshot_directory(self, target, *, store=None):
-        """Locate one exact complete v3 snapshot directory in connected Stores.
-
-        Args:
-            target: Exact :class:`StateRef` to locate.
-            store: Optional connected Store that must hold ``target``.
-
-        Returns:
-            The selected Store's borrowed directory path. ZipStore paths remain
-            valid only while that Store handle stays open.
-
-        Raises:
-            KeyError: If no selected Store holds a complete matching snapshot.
-            RepoLoadError: If more than one connected Store holds it and no Store
-                was selected, or one Store exposes incompatible authority.
-        """
-
-        from .reference_values import StateRef
-
-        if not isinstance(target, StateRef):
-            raise TypeError("target must be a StateRef.")
-        candidates = self.stores if store is None else (self._connected_metadata_store(store),)
-        matches = []
-        with self._authority_read_fences(candidates):
-            for candidate in candidates:
-                try:
-                    directory = candidate.get_snapshot_directory(target)
-                except KeyError:
-                    continue
-                matches.append(directory)
-        if not matches:
-            raise KeyError(target.digest())
-        if store is None and len(matches) != 1:
-            raise RepoLoadError("Snapshot location is ambiguous across connected Stores; select store explicitly.")
-        return matches[0]
-
-    def _reference_authoritative_in(self, store: Store, reference) -> bool:
-        """Return whether a complete ObjectRef is authoritative in one Store."""
-        declaration = store.read_declaration_record(reference.digest())
-        if declaration is not None:
-            if declaration.object_ref != reference:
-                raise RepoLoadError("Declaration digest collision has incompatible ObjectRef authority.")
-            return True
-        return any(record.state_ref.object == reference for record in store.iter_state_ref_records())
-
-    def _alias_records(self, alias: str, *, state_scope=None):
-        records = []
-        for store in self.stores:
-            record = (
-                store.read_state_alias(state_scope.digest(), alias)
-                if state_scope is not None else store.read_object_alias(alias)
-            )
-            if record is not None:
-                if state_scope is not None and record.object_ref != state_scope:
-                    raise StoreAuthorityError(
-                        "State alias scope does not match its direct record path."
-                    )
-                records.append((store, record))
-        return records
-
-    def _single_alias_target(self, alias: str, *, state_scope=None):
-        self._validate_alias(alias)
-        records = self._alias_records(alias, state_scope=state_scope)
-        if not records:
-            raise KeyError(f"Repo has no alias {alias!r}.")
-        targets = {
-            record.state_ref_digest if state_scope is not None else record.object_ref.digest()
-            for _, record in records
-        }
-        if len(targets) != 1:
-            detail = ", ".join(
-                f"{store!r}={record.state_ref_digest if state_scope is not None else record.object_ref.digest()}"
-                for store, record in records
-            )
-            raise RepoLoadError(f"Alias {alias!r} conflicts across connected Stores: {detail}.")
-        return records[0]
-
-    def set_alias(self, alias: str, target, *, store=None, save_live: bool = True):
-        """Publish a Store-local alias for existing ObjectRef authority.
-
-        Args:
-            alias: Non-empty path-safe alias text.
-            target: Existing ``ObjectRef`` or ``StateRef``, or a live ``Object``.
-            store: Explicit writable target Store, required when writable Repo
-                Stores are ambiguous.
-            save_live: Whether a live target may be saved before aliasing.
-
-        Returns:
-            The authoritative ObjectRef selected for the alias.
-
-        Raises:
-            TypeError: If the alias or target type is invalid.
-            ValueError: If the alias is empty or a live target is not saveable.
-            RepoLoadError: If the target lacks same-Store declaration or StateRef
-                authority.
-
-        Side Effects:
-            May save a live graph, then atomically replaces one mutable alias
-            record. It never creates declaration or StateRef authority itself.
-
-        Concurrency:
-            Mutation holds the selected Store writer lock. A stale claimant cannot
-            create StateRef authority through this method.
-
-        Store Requirements:
-            The selected Store must be writable and provide atomic mutable-record
-            replacement and writer serialization.
-        """
-        from .reference_values import ObjectRef, StateRef
-        from .store.records import ObjectAliasRecord
-
-        self._validate_alias(alias)
-        selected = self._selected_writable_store(store, "write object alias")
-        if isinstance(target, Object):
-            if not save_live:
-                raise ValueError("Object aliases require an authoritative ObjectRef; save the live object first.")
-            target = self.save_object(target, store=selected).object
-        elif isinstance(target, StateRef):
-            target = target.object
-        if not isinstance(target, ObjectRef):
-            raise TypeError("Object aliases target ObjectRef, StateRef, or a saved live Object.")
-        with selected.writer_lock():
-            if not self._reference_authoritative_in(selected, target):
-                raise RepoLoadError("Object aliases require same-Store declaration or StateRef authority.")
-            selected.write_object_alias(ObjectAliasRecord(alias, target))
-        return target
-
-    def get_alias(self, alias: str):
-        """Resolve an ObjectRef alias, accepting only identical Store replicas.
-
-        Args:
-            alias: Non-empty object alias to resolve.
-
-        Returns:
-            The complete authoritative ObjectRef.
-
-        Raises:
-            KeyError: If no connected Store defines the alias.
-            RepoLoadError: If connected Stores define conflicting targets.
-
-        Side Effects:
-            None. This reads authoritative mutable records and never constructs a
-            live Object or consults a derived index.
-
-        Concurrency:
-            Readers observe a complete old or new record through atomic Store
-            replacement; identical replicated values are deduplicated.
-
-        Store Requirements:
-            Every connected Store must implement object-alias reads.
-        """
-        _, record = self._single_alias_target(alias)
-        return record.object_ref
-
-    def resolve_object_alias(self, alias: str):
-        """Resolve a Store object alias to its complete ObjectRef.
-
-        Args:
-            alias: Non-empty Store-local object alias.
-
-        Returns:
-            The authoritative ObjectRef selected from identical Store replicas.
-
-        Raises:
-            KeyError: If no connected Store defines ``alias``.
-            RepoLoadError: If connected Stores disagree about its target.
-
-        Side Effects:
-            None. This reads mutable alias authority and does not construct an
-            Object or select a StateRef.
-        """
-        return self.get_alias(alias)
-
-    def delete_alias(self, alias: str, *, store=None):
-        """Retire unsupported legacy CDef alias deletion.
-
-        Mutable reference deletion is outside the current authority protocol; it
-        is rejected rather than silently updating retired alias state.
-        """
-        raise NotImplementedError("Deleting reference aliases is not implemented by the current Store protocol.")
-
-    def aliases(self) -> dict[str, object]:
-        """Return the legacy in-memory alias cache, which is intentionally empty."""
-        return {}
-
-    def set_state_alias(self, alias: str, state_ref, *, store=None):
-        """Publish a state alias scoped by the complete ObjectRef identity.
-
-        Args:
-            alias: Non-empty path-safe state alias text.
-            state_ref: Existing exact StateRef to name.
-            store: Explicit writable target Store when Repo Stores are ambiguous.
-
-        Returns:
-            The supplied StateRef.
-
-        Raises:
-            TypeError: If ``state_ref`` is not a StateRef.
-            RepoLoadError: If its exact immutable record is not in the selected
-                Store.
-
-        Side Effects:
-            Atomically replaces one Store-local mutable state-alias record; it
-            does not publish state, mutate a CDef, or create ObjectRef authority.
-
-        Concurrency:
-            The selected Store writer lock serializes replacement with competing
-            aliases and StateRef publication.
-
-        Store Requirements:
-            The selected Store must be writable and carry the exact StateRef.
-        """
-        from .reference_values import StateRef
-        from .store.records import StateAliasRecord
-
-        self._validate_alias(alias)
-        if not isinstance(state_ref, StateRef):
-            raise TypeError("State aliases require an exact StateRef target.")
-        selected = self._selected_writable_store(store, "write state alias")
-        with selected.writer_lock():
-            record = selected.read_state_ref_record(state_ref.digest())
-            if record is None or record.state_ref != state_ref:
-                raise RepoLoadError("State aliases require same-Store exact StateRef authority.")
-            selected.write_state_alias(StateAliasRecord(alias, state_ref.object, state_ref.digest()))
-        return state_ref
-
-    def resolve_state_selector(self, selector):
-        """Resolve one soft StateSelectorRef through non-conflicting Store refs.
-
-        Args:
-            selector: StateSelectorRef containing complete ObjectRef scope and
-                Store-local alias text.
-
-        Returns:
-            The exact immutable StateRef named by the selector.
-
-        Raises:
-            TypeError: If ``selector`` is not a StateSelectorRef.
-            KeyError: If no connected Store has the scoped alias.
-            RepoLoadError: If aliases conflict or their target record is missing
-                or has a different ObjectRef.
-
-        Side Effects:
-            None. Selector resolution reads authority only and never materializes
-            state or changes an alias.
-
-        Concurrency:
-            A reader accepts only one identical target across connected Stores.
-
-        Store Requirements:
-            Connected Stores must expose state aliases and StateRef records.
-        """
-        from .reference_values import StateSelectorRef
-
-        if not isinstance(selector, StateSelectorRef):
-            raise TypeError("resolve_state_selector requires a StateSelectorRef.")
-        store, record = self._single_alias_target(selector.alias, state_scope=selector.object)
-        state = store.read_state_ref_record(record.state_ref_digest)
-        if state is None or state.state_ref.object != selector.object:
-            raise RepoLoadError("State alias points to missing or incompatible StateRef authority.")
-        return state.state_ref
-
-    def _read_state_alias_in_store(self, store, object_ref, alias: str):
-        """Read and validate one selected Store's complete current state alias."""
-
-        record = store.read_state_alias(object_ref.digest(), alias)
-        if record is None:
-            raise KeyError(f"Repo has no alias {alias!r}.")
-        if record.object_ref != object_ref:
-            raise StoreAuthorityError("State alias scope does not match its requested ObjectRef.")
-        state = store.read_state_ref_record(record.state_ref_digest)
-        if state is None or state.state_ref.object != object_ref:
-            raise StoreAuthorityError("State alias points to missing or incompatible StateRef authority.")
-        return state.state_ref
-
-    def resolve_state_alias(self, object_ref, alias: str, *, store=None):
-        """Resolve one ObjectRef-scoped state alias to an exact StateRef.
-
-        Args:
-            object_ref: Complete ObjectRef scope for the state alias.
-            alias: Non-empty Store-local state alias.
-            store: Optional connected Store whose current authority is selected.
-                Without it, identical replicas are accepted while conflicting
-                connected Store values raise an explicit conflict.
-
-        Returns:
-            The immutable StateRef selected from non-conflicting Stores.
-
-        Raises:
-            TypeError: If ``object_ref`` is not an ObjectRef or ``store`` is not
-                a connected Store handle.
-            KeyError: If no connected Store defines the scoped alias.
-            RepoLoadError: If unselected replica authority conflicts.
-            StoreAuthorityError: If selected alias scope or target authority is
-                malformed or incomplete.
-
-        Side Effects:
-            None. Alias resolution reads authority only and never restores state.
-        """
-        from .reference_values import ObjectRef, StateSelectorRef
-
-        if not isinstance(object_ref, ObjectRef):
-            raise TypeError("resolve_state_alias requires an ObjectRef scope.")
-        self._validate_alias(alias)
-        if store is not None:
-            selected = self._connected_metadata_store(store)
-            with selected.authority_read_fence():
-                return self._read_state_alias_in_store(selected, object_ref, alias)
-        return self.resolve_state_selector(StateSelectorRef(object_ref, alias))
-
-    def get_or_declare_object_ref(self, cdef: ConcreteDefinition, *, store=None):
-        """Return one selected Store's unique declaration or register it atomically.
-
-        Args:
-            cdef: Concrete definition whose existing declaration is sought.
-            store: Optional connected writable Store. Omit it only when exactly one
-                writable physical Store is connected.
-
-        Returns:
-            The unique complete ObjectRef declared for ``cdef`` in the selected
-            Store. A missing declaration is allocated and registered through the
-            normal DefinitionRecord, ClaimRecord, and DeclarationRecord boundary.
-
-        Raises:
-            TypeError: If ``cdef`` is not concrete or ``store`` is invalid.
-            ValueError: If a new declaration has no allocatable durable lineage.
-            RepoLoadError: If matching declarations or their claims are malformed
-                or ambiguous.
-            RepoSaveError: If no unique writable physical Store is selected.
-
-        Side Effects:
-            May allocate and register one ObjectRef under the selected Store's
-            writer fence. It does not construct a live object or publish a state.
-        """
-
-        from .store.records import ClaimRecord
-
-        if not isinstance(cdef, ConcreteDefinition):
-            raise TypeError("get_or_declare_object_ref requires a ConcreteDefinition.")
-        selected = self._selected_writable_physical_store(store, "get or declare ObjectRef")
-        with selected.writer_lock():
-            matches = [
-                record.object_ref for record in selected.iter_declaration_records()
-                if record.object_ref.definition.graph_equal(cdef)
-            ]
-            if len(matches) > 1:
-                raise RepoLoadError("Selected Store has multiple declarations for this definition.")
-            if matches:
-                reference = matches[0]
-                claim = selected.read_claim_record(reference.digest())
-                if not isinstance(claim, ClaimRecord) or claim.object_digest != reference.digest():
-                    raise RepoLoadError("Selected declaration lacks compatible ClaimRecord authority.")
-                return reference
-            reference = self._declaration_reference(cdef, None)
-            return self._register_declaration(reference, selected)
-
-    def _fresh_state_alias_target(self, store, object_ref, alias: str):
-        """Read one current alias from fresh physical authority after an uncertain write."""
-
-        from .store.zip import ZipStore
-
-        if type(store) is ZipStore:
-            if store.archive_path is None:
-                raise StoreAuthorityError("File-like ZipStore cannot provide fresh mutable authority.")
-            if not os.path.exists(store.archive_path):
-                return None
-            fresh = ZipStore.open_existing(store.archive_path)
-            try:
-                with fresh.authority_read_fence():
-                    try:
-                        return self._read_state_alias_in_store(fresh, object_ref, alias)
-                    except KeyError:
-                        return None
-            finally:
-                fresh.close()
-        with store.authority_read_fence():
-            try:
-                return self._read_state_alias_in_store(store, object_ref, alias)
-            except KeyError:
-                return None
-
-    def _reconcile_current_state_alias(
-            self, store, proposed, alias: str, expected_digest: str | None,
-    ):
-        """Classify a possibly acknowledged CAS only from current physical authority."""
-
-        observed = self._fresh_state_alias_target(store, proposed.object, alias)
-        if observed == proposed:
-            return proposed
-        observed_digest = None if observed is None else observed.digest()
-        if observed_digest == expected_digest:
-            raise RepoSaveError(
-                "Current state alias remains at its expected predecessor; reload and reapply the mutation."
-            )
-        raise StoreAliasConflictError(
-            "Current state alias changed to another authoritative target during publication."
-        )
-
-    def save_object_if_current(self, obj, *, alias: str, expected, store=None):
-        """Save an immutable snapshot and CAS-advance one selected current-state alias.
-
-        Args:
-            obj: Live Object to snapshot through the ordinary Repo save path.
-            alias: Non-empty state alias scoped by the snapshot's ObjectRef.
-            expected: Exact predecessor StateRef, or ``None`` when the alias must
-                be absent. A mismatched current alias never falls back to LWW.
-            store: Optional connected writable Store. Omit it only when exactly one
-                writable physical Store is connected.
-
-        Returns:
-            The newly published exact StateRef after CAS, required buffered commit,
-            and fresh alias/target read-back all succeed.
-
-        Raises:
-            TypeError: If the object, alias, expected StateRef, or Store is invalid.
-            StoreAliasConflictError: If another valid alias target wins the CAS.
-            RepoSaveError: If publication outcome remains at the predecessor and a
-                consumer must reload and reapply, or normal snapshot publication
-                fails.
-            StoreAuthorityError: If current alias or snapshot authority is malformed.
-
-        Side Effects:
-            Publishes an immutable snapshot before changing the Store-local alias.
-            A failed CAS can retain that safe unreferenced snapshot. Path-backed
-            ZipStores commit the selected transaction before success is reported.
-        """
-
-        from .reference_values import StateRef
-        from dryml.runtime import materialization_admission
-
-        if not isinstance(obj, Object):
-            raise TypeError("save_object_if_current requires a live Object.")
-        self._validate_alias(alias)
-        if expected is not None and not isinstance(expected, StateRef):
-            raise TypeError("expected must be an exact StateRef or None.")
-        selected = self._selected_writable_physical_store(store, "save current state")
-        if expected is not None and expected.object != obj.object_ref:
-            raise ValueError("expected StateRef must have the same ObjectRef scope as obj.")
-        with materialization_admission(operation="repo_save_object_if_current"):
-            proposed = self.save_object(obj, store=selected)
-        expected_digest = None if expected is None else expected.digest()
-        from .store.records import StateAliasRecord
-
-        record = StateAliasRecord(alias, proposed.object, proposed.digest())
-        try:
-            selected.compare_and_set_state_alias(
-                record, expected_state_ref_digest=expected_digest,
-            )
-            selected.commit()
-        except StoreAliasConflictError:
-            raise
-        except Exception:
-            return self._reconcile_current_state_alias(
-                selected, proposed, alias, expected_digest,
-            )
-        return self._reconcile_current_state_alias(selected, proposed, alias, expected_digest)
-
-    def reference_evidence(self, cdef: ConcreteDefinition) -> ReferenceEvidence:
-        """Read matching declaration and StateRef facts under one stable cut.
-
-        Args:
-            cdef: Complete CDef topology for which reference authority is sought.
-
-        Returns:
-            Deduplicated matching declaration and StateRef evidence. Equal
-            replicas remain represented by every contributing Store handle.
-
-        Raises:
-            TypeError: If ``cdef`` is not a ConcreteDefinition.
-            RepoLoadError: If a required authoritative record is inaccessible,
-            corrupt, incompatible, or lacks its associated ClaimRecord.
-            StoreCapabilityError: If any connected Store cannot provide a stable
-            metadata-read fence.
-
-        Side Effects:
-            Acquires all connected Store authority fences in deterministic order.
-            It never queries derived indexes, acquires claims, creates identities,
-            loads payloads, or writes Store records.
-
-        Concurrency:
-            Cooperating publication is excluded over the complete scan. Duplicate
-            handles in one Store lock domain acquire one fence while retaining
-            their separate read provenance in the returned evidence.
-        """
-        from .store.records import ClaimRecord
-
-        if not isinstance(cdef, ConcreteDefinition):
-            raise TypeError("reference_evidence requires a ConcreteDefinition.")
-        groups: dict[str, list[Store]] = {}
-        for store in self.stores:
-            key = store.authority_fence_key()
-            groups.setdefault(key, []).append(store)
-        declarations: list[ReferenceDeclarationEvidence] = []
-        states: list[ReferenceStateEvidence] = []
-
-        def add_declaration(reference, store, claim):
-            for index, current in enumerate(declarations):
-                if current.object_ref == reference:
-                    declarations[index] = ReferenceDeclarationEvidence(
-                        reference, current.stores + (store,),
-                        current.claim_statuses + (claim.status,),
-                    )
-                    return
-            declarations.append(
-                ReferenceDeclarationEvidence(reference, (store,), (claim.status,))
-            )
-
-        def add_state(reference, store):
-            for index, current in enumerate(states):
-                if current.state_ref == reference:
-                    states[index] = ReferenceStateEvidence(
-                        reference, current.stores + (store,)
-                    )
-                    return
-            states.append(ReferenceStateEvidence(reference, (store,)))
-
-        try:
-            with ExitStack() as fences:
-                for key in sorted(groups):
-                    fences.enter_context(groups[key][0].authority_read_fence())
-                for store in self.stores:
-                    for record in store.iter_declaration_records():
-                        reference = record.object_ref
-                        if not reference.definition.graph_equal(cdef):
-                            continue
-                        claim = store.read_claim_record(reference.digest())
-                        if not isinstance(claim, ClaimRecord):
-                            raise RepoLoadError(
-                                "Matching declaration lacks authoritative ClaimRecord evidence."
-                            )
-                        if claim.object_digest != reference.digest():
-                            raise RepoLoadError(
-                                "Matching declaration has incompatible ClaimRecord evidence."
-                            )
-                        add_declaration(reference, store, claim)
-                    for record in store.iter_state_ref_records():
-                        state_ref = record.state_ref
-                        if state_ref.definition.graph_equal(cdef):
-                            add_state(state_ref, store)
-        except (RepoLoadError, StoreCapabilityError):
-            raise
-        except Exception as error:
-            raise RepoLoadError("Authoritative reference evidence could not be read.") from error
-        return ReferenceEvidence(tuple(declarations), tuple(states))
-
-    def _references(self):
-        """Yield every Store-authoritative ObjectRef once with its Store/source."""
-        seen = set()
-        for store in self.stores:
-            for record in store.iter_declaration_records():
-                reference = record.object_ref
-                key = (reference.digest(), store.catalog_key())
-                if key not in seen:
-                    seen.add(key)
-                    yield store, reference, "declaration"
-            for record in store.iter_state_ref_records():
-                reference = record.state_ref.object
-                key = (reference.digest(), store.catalog_key())
-                if key not in seen:
-                    seen.add(key)
-                    yield store, reference, "state-ref"
-
-    def find_object_refs(self, object_id=None, *, namespace=None, contains=None):
-        """Scan current authority for complete refs matching durable identity facts.
-
-        Args:
-            object_id: Optional complete ``ObjectId`` to match.
-            namespace: Optional tuple namespace prefix to match exactly at the
-                beginning of a contained ObjectId namespace.
-            contains: Optional ObjectRef that must occur as a closed subtree.
-
-        Returns:
-            Deterministically ordered ``(Store, ObjectRef)`` pairs.  This direct
-            scan deliberately remains correct without a derived query index.
-
-        Raises:
-            TypeError: If an identity, namespace prefix, or containment reference
-                has an unsupported type.
-            ValueError: If a namespace prefix violates ObjectId validation.
-
-        Side Effects:
-            None. This scans declaration and StateRef authority; local-state bytes
-            and query indexes do not participate in identity resolution.
-
-        Concurrency:
-            Each scanned record is complete immutable authority. Results may span
-            Store generations when another writer publishes during the scan.
-
-        Store Requirements:
-            Connected Stores must expose iterable declaration and StateRef records.
-        """
-        from .reference_values import ObjectId, ObjectRef
-
-        if object_id is not None and not isinstance(object_id, ObjectId):
-            raise TypeError("object_id must be an ObjectId.")
-        if namespace is not None:
-            namespace = tuple(namespace)
-            # Validate the supplied prefix without allocating an ID.
-            ObjectId._trusted(namespace, uuid4())
-        if contains is not None and not isinstance(contains, ObjectRef):
-            raise TypeError("contains must be an ObjectRef.")
-        matches = []
-        for store, reference, _ in self._references():
-            if object_id is not None and object_id not in reference.objects.values():
-                continue
-            if namespace is not None and not any(value.namespace[:len(namespace)] == namespace for value in reference.objects.values()):
-                continue
-            if contains is not None and not any(reference.at(path) == contains for path in reference.objects):
-                continue
-            matches.append((store, reference))
-        return tuple(matches)
-
-    def lookup_object_ref(self, object_id):
-        """Resolve one ObjectId to its canonical closed ObjectRef subtree.
-
-        Args:
-            object_id: Complete durable ObjectId to resolve.
-
-        Returns:
-            The canonical closed ObjectRef subtree named by the identity.
-
-        Raises:
-            TypeError: If ``object_id`` is not an ObjectId.
-            KeyError: If no connected authoritative record names it.
-            RepoLoadError: If records use the same ID for incompatible subtrees.
-
-        Side Effects:
-            None. The lookup scans immutable declaration and StateRef authority,
-            never a derived index or local state bytes.
-
-        Concurrency:
-            Immutable records make each candidate stable; concurrent publication
-            can add a later candidate but cannot rewrite an observed one.
-
-        Store Requirements:
-            Connected Stores must expose authoritative record iteration.
-        """
-        candidates = []
-        for store, reference in self.find_object_refs(object_id):
-            for path, candidate_id in reference.objects.items():
-                if candidate_id == object_id:
-                    candidates.append((store, reference.at(path)))
-        if not candidates:
-            raise KeyError(f"No Store authority names ObjectId {object_id!s}.")
-        target = candidates[0][1]
-        if any(candidate != target for _, candidate in candidates[1:]):
-            details = ", ".join(f"{store!r}={reference.digest()}" for store, reference in candidates)
-            raise RepoLoadError(f"ObjectId {object_id!s} has incompatible closed-subtree authority: {details}.")
-        return target
-
-    find_object_ref = lookup_object_ref
-
-    def _assert_compatible_object_ids(self, reference) -> None:
-        """Reject reuse of an ObjectId with a different authoritative closure."""
-        expected = set(reference.objects.values())
-        existing_by_id = defaultdict(list)
-        for store, authoritative, _ in self._references():
-            for path, object_id in authoritative.objects.items():
-                if object_id in expected:
-                    existing_by_id[object_id].append(
-                        (store, authoritative.at(path))
-                    )
-        for path, object_id in reference.objects.items():
-            candidates = existing_by_id.get(object_id, ())
-            if not candidates:
-                continue
-            expected_subtree = reference.at(path)
-            if any(existing != expected_subtree for _, existing in candidates):
-                raise RepoLoadError(
-                    f"ObjectId {object_id!s} is already authoritative for an incompatible closed subtree."
-                )
-
-    def _declaration_reference(self, cdef, namespace):
-        """Allocate only CDef-owned unidentified Serializable node IDs."""
-        from .reference_values import ObjectId, ObjectRef, _expected_paths
-
-        by_key, _ = _expected_paths(cdef)
-        objects = {}
-        allocated = 0
-        for key, path in by_key.items():
-            if key[0] == "object-id":
-                objects[path] = key[1]
-            else:
-                object_id = ObjectId(namespace)
-                self._record_lineage_candidate(object_id)
-                objects[path] = object_id
-                allocated += 1
-        if not objects:
-            raise ValueError("Cannot declare an all-ephemeral graph; build its CDef normally.")
-        if not allocated:
-            raise ValueError("Declaration has no new durable lineage; build its CDef normally.")
-        return ObjectRef(cdef, objects)
-
     def _record_lineage_candidate(self, object_id, created_at=None):
         """Retain one process-local creation fact for a newly allocated ObjectId.
 
@@ -3002,962 +1929,6 @@ class Repo:
             created_at = current_utc_time()
         self._lineage_candidates.setdefault(object_id, created_at)
         return self._lineage_candidates[object_id]
-
-    def _register_declaration(
-            self, reference, store, *, allow_preallocated: bool = False,
-            _before_phase=None):
-        """Publish Definition, available claim, then declaration under one fence."""
-        from .metadata import LineageMetadata
-        from .reference_values import ObjectRef
-        from .store.records import ClaimRecord, DeclarationRecord, DefinitionRecord
-        from .utils.graph.path import GraphPath
-
-        if not isinstance(reference, ObjectRef) or not reference.objects:
-            raise ValueError("Declarations require a complete non-empty ObjectRef.")
-        store.preflight_publication("declare ObjectRef")
-        lineages = {
-            path: LineageMetadata(
-                reference if not path else reference.at(path),
-                "known" if self._lineage_candidates.get(object_id) is not None else "unknown",
-                self._lineage_candidates.get(object_id),
-            )
-            for path, object_id in reference.objects.items()
-        }
-        if GraphPath() not in lineages:
-            lineages[GraphPath()] = LineageMetadata(reference, "unknown", None)
-        with store.writer_lock():
-            self._assert_compatible_object_ids(reference)
-            if _before_phase is not None:
-                _before_phase("definition", GraphPath())
-            definition_record = store.write_definition_record(
-                DefinitionRecord(reference.definition), stored_root=False
-            )
-            existing = store.read_declaration_record(reference.digest())
-            claim = store.read_claim_record(reference.digest())
-            if existing is not None:
-                if existing.object_ref != reference:
-                    raise RepoLoadError("Declaration digest collision has incompatible ObjectRef authority.")
-                if claim is None:
-                    raise RepoLoadError("Declaration exists without ClaimRecord; Store authority is corrupt.")
-                for path, lineage in lineages.items():
-                    if _before_phase is not None:
-                        _before_phase("lineage", path)
-                    store.write_lineage_metadata(lineage)
-                if _before_phase is not None:
-                    _before_phase("membership", GraphPath())
-                store.write_definition_record(definition_record, stored_root=True)
-                return reference
-            # An interrupted claim without a declaration is not authority. Its
-            # complete record can safely be replaced by registration's fence.
-            if claim is None or claim.object_digest != reference.digest():
-                store.write_claim_record(ClaimRecord(reference.digest(), 0, "available"))
-            elif claim.status != "available":
-                raise RepoLoadError("Unregistered ObjectRef claim is not available for recovery.")
-            for path, lineage in lineages.items():
-                if _before_phase is not None:
-                    _before_phase("lineage", path)
-                store.write_lineage_metadata(lineage)
-            store.write_declaration_record(DeclarationRecord(reference))
-            if _before_phase is not None:
-                _before_phase("membership", GraphPath())
-            store.write_definition_record(definition_record, stored_root=True)
-        return reference
-
-    def declare_object(self, cdef: ConcreteDefinition, *, store=None, namespace=None):
-        """Preallocate and register one first-construction ObjectRef.
-
-        Args:
-            cdef: V2 ConcreteDefinition with at least one new owned Serializable
-                lineage.
-            store: Explicit writable registration Store when Repo Stores are
-                ambiguous.
-            namespace: Optional ObjectId namespace; ``None`` uses the active
-                allocation scope and ``()`` is explicitly empty.
-
-        Returns:
-            Complete registered non-empty ObjectRef.
-
-        Raises:
-            TypeError: If ``cdef`` is not concrete.
-            ValueError: If the graph is all-ephemeral or already has no new
-                durable lineage to allocate.
-            RepoLoadError: If an existing ObjectId has incompatible authority.
-
-        Side Effects:
-            Under one writer lock, installs/verifies DefinitionRecord, writes an
-            available ClaimRecord, then writes DeclarationRecord as the only
-            registration boundary.
-
-        Concurrency:
-            Writer serialization prevents competing registration from reusing an
-            ID with a different closed subtree.
-
-        Store Requirements:
-            The selected Store must support immutable install, atomic claim
-            replacement, and writer serialization.
-        """
-        if not isinstance(cdef, ConcreteDefinition):
-            raise TypeError("declare_object requires a ConcreteDefinition.")
-        selected = self._selected_writable_store(store, "declare ObjectRef")
-        reference = self._declaration_reference(cdef, namespace)
-        return self._register_declaration(reference, selected)
-
-    def _matching_state_ref(self, store, reference):
-        """Return a matching complete StateRef record, if initial completion exists."""
-        for record in store.iter_state_ref_records():
-            if record.state_ref.object == reference:
-                return record
-        return None
-
-    def _acquire_claim(self, reference, store):
-        """Acquire or recover one declaration claim under the Store writer fence."""
-        from .store.records import ClaimRecord
-
-        with store.writer_lock():
-            declaration = store.read_declaration_record(reference.digest())
-            claim = store.read_claim_record(reference.digest())
-            if declaration is None:
-                raise RepoLoadError("build_object_ref requires a registered declaration in its selected Store.")
-            if declaration.object_ref != reference or claim is None:
-                raise RepoLoadError("Declaration and ClaimRecord authority is missing or incompatible.")
-            if claim.object_digest != reference.digest():
-                raise RepoLoadError("ClaimRecord does not match its declaration.")
-            completed = self._matching_state_ref(store, reference)
-            if completed is not None:
-                if claim.status != "completed" or claim.state_ref_digest != completed.digest:
-                    store.write_claim_record(ClaimRecord(reference.digest(), claim.generation, "completed", state_ref_digest=completed.digest))
-                return None
-            now = self._clock()
-            if claim.status == "completed":
-                raise RepoLoadError("Declared ObjectRef is already completed; choose its exact StateRef.")
-            if claim.status == "claimed" and claim.lease_until > now:
-                raise RepoLoadError("Declared ObjectRef has an active first-construction claim.")
-            owner = self._owner_token_factory()
-            if not isinstance(owner, str) or not owner:
-                raise ValueError("owner_token_factory must return a non-empty string.")
-            generation = claim.generation + 1
-            store.write_claim_record(ClaimRecord(reference.digest(), generation, "claimed", owner, now + self._lease_duration))
-            return _ClaimLease(store, reference, generation, owner)
-
-    def _pending_declaration_references(self, reference, *, validate_stores=True):
-        """Return materializing nested declarations in dependency-first order.
-
-        Args:
-            reference: Registered parent ``ObjectRef`` to inspect.
-            validate_stores: Whether each dependency must have one unambiguous
-                connected Store during this traversal. Aggregate admission sets
-                this false because its later claim preflight owns pinned Store
-                and authority-fence-domain selection.
-
-        Returns:
-            Tuples of materializing ``GraphPath`` and unique nested ``ObjectRef``
-            values, ordered with each nested dependency before its parent.
-
-        Raises:
-            TypeError: If ``reference`` is not an ObjectRef.
-            RepoLoadError: If materializing declarations form a cycle, or when
-                ``validate_stores`` is true and a nested ObjectRef has no
-                unambiguous declaration Store.
-
-        Side Effects:
-            None. The direct authority scan neither claims nor constructs a node.
-
-        Store Requirements:
-            With ``validate_stores``, each nested ObjectRef must be registered in
-            exactly one connected Store. Ref-only links and embedded StateRefs
-            are not declarations.
-        """
-        from .cdef_graph import EdgeKind
-        from .definition import ConcreteDefinition
-        from .links import DefLink
-        from .reference_values import ObjectRef, StateRef
-        from .utils.graph.path import GraphPath
-        from .utils.graph.value import iter_value_edges
-
-        if not isinstance(reference, ObjectRef):
-            raise TypeError("Pending declaration traversal requires an ObjectRef.")
-        result = []
-        seen = {reference.digest()}
-        active = set()
-
-        def visit_value(value, path):
-            if isinstance(value, ObjectRef):
-                visit_reference(value, path)
-            elif isinstance(value, StateRef):
-                return
-            elif isinstance(value, ConcreteDefinition):
-                visit_cdef(value, path)
-            elif isinstance(value, DefLink):
-                if value.kind is EdgeKind.MATERIALIZE:
-                    visit_value(value.target, path)
-            else:
-                for edge in iter_value_edges(value):
-                    visit_value(edge.value, path.child(edge.segment))
-
-        def visit_cdef(cdef, path):
-            for edge in iter_value_edges(cdef):
-                visit_value(edge.value, path.child(edge.segment))
-
-        def visit_reference(child, path):
-            digest = child.digest()
-            if digest in active:
-                raise RepoLoadError("Materializing declaration references cannot form a cycle.")
-            if digest in seen:
-                return
-            active.add(digest)
-            try:
-                if validate_stores:
-                    self._selected_declaration_store(child, None)
-                visit_cdef(child.definition, path)
-                result.append((path, child))
-                seen.add(digest)
-            finally:
-                active.remove(digest)
-
-        visit_cdef(reference.definition, GraphPath())
-        return tuple(result)
-
-    def _renew_claim(self, lease: _ClaimLease) -> None:
-        """Extend a live first-build lease only when its full fence still matches."""
-        from .store.records import ClaimRecord
-
-        with lease.store.writer_lock():
-            declaration = lease.store.read_declaration_record(lease.object_ref.digest())
-            claim = lease.store.read_claim_record(lease.object_ref.digest())
-            now = self._clock()
-            if declaration is None or declaration.object_ref != lease.object_ref or claim is None:
-                raise RepoLoadError("Cannot renew a missing declaration claim.")
-            if (claim.object_digest != lease.object_ref.digest()
-                    or claim.generation != lease.generation or claim.owner != lease.owner
-                    or claim.status != "claimed" or claim.lease_until <= now):
-                raise RepoLoadError("Cannot renew a stale first-construction claim.")
-            lease.store.write_claim_record(ClaimRecord(claim.object_digest, claim.generation, "claimed", claim.owner, now + self._lease_duration))
-
-    def _abandon_claim(self, lease: _ClaimLease) -> bool:
-        """Release exactly one matching live generation; stale leases do nothing."""
-        from .store.records import ClaimRecord
-
-        with lease.store.writer_lock():
-            declaration = lease.store.read_declaration_record(lease.object_ref.digest())
-            claim = lease.store.read_claim_record(lease.object_ref.digest())
-            if declaration is None or declaration.object_ref != lease.object_ref or claim is None:
-                return False
-            if (claim.object_digest != lease.object_ref.digest()
-                    or claim.generation != lease.generation or claim.owner != lease.owner
-                    or claim.status != "claimed" or claim.lease_until <= self._clock()):
-                return False
-            lease.store.write_claim_record(ClaimRecord(claim.object_digest, claim.generation, "available"))
-            return True
-
-    def abandon_object_ref(self, live_object: Object) -> bool:
-        """Abandon the exact live graph's current initial-construction claim.
-
-        Args:
-            live_object: Object returned by ``build_object_ref``.
-
-        Returns:
-            Whether this call released its still-current claim generation.
-
-        Raises:
-            None. Missing, completed, or stale claims return ``False``.
-
-        Side Effects:
-            Atomically returns only this live generation to ``available`` and
-            clears the live object's lease when successful.
-
-        Concurrency:
-            Generation and owner comparisons under the Store writer lock prevent
-            stale builders from abandoning a successor's claim.
-
-        Store Requirements:
-            The original declaration Store must remain writable and connected.
-        """
-        lease = getattr(live_object, "_claim_lease", None)
-        if not isinstance(lease, _ClaimLease):
-            return False
-        result = self._abandon_claim(lease)
-        if result:
-            live_object._claim_lease = None
-        return result
-
-    def build_object_ref(self, reference, *, store=None):
-        """Construct one registered ObjectRef through its unique active claim.
-
-        Args:
-            reference: Complete non-empty registered ObjectRef.
-            store: Its explicit declaration Store, or omitted only when exactly
-                one connected Store contains the declaration.
-
-        Returns:
-            Fresh live Object graph retaining the exact reference and active claim
-            generations through initial StateRef publication.
-
-        Raises:
-            ValueError: If ``reference`` is empty or not an ObjectRef.
-            RepoLoadError: If registration is missing, ambiguous, completed,
-                actively claimed, stale, or nested declaration authority fails.
-
-        Side Effects:
-            Acquires unique nested declarations before their parent, constructs
-            the graph, attaches exact IDs and leases, and releases only claims
-            acquired by this attempt in reverse order on failure.
-
-        Concurrency:
-            Each acquire and renewal compares declaration digest, generation,
-            owner, status, and lease under Store writer serialization.
-
-        Store Requirements:
-            The declaration Store for every pending materializing ObjectRef must
-            be connected, unambiguous, writable, and writer-serialized.
-        """
-        from .reference_values import ObjectRef
-        from .repo_plan import apply_exact_reference_identity
-        from .materialization import preflight_materialization_classes
-
-        if not isinstance(reference, ObjectRef) or not reference.objects:
-            raise ValueError("build_object_ref requires a non-empty ObjectRef.")
-        class_manifest = preflight_materialization_classes(reference)
-        selected = self._selected_declaration_store(reference, store)
-        acquired = []
-        try:
-            dependencies = self._pending_declaration_references(reference)
-            for _, dependency in dependencies:
-                dependency_store = self._selected_declaration_store(dependency, None)
-                dependency_lease = self._acquire_claim(dependency, dependency_store)
-                if dependency_lease is None:
-                    raise RepoLoadError("Nested ObjectRef is already completed; choose an exact StateRef.")
-                acquired.append(dependency_lease)
-            lease = self._acquire_claim(reference, selected)
-            if lease is None:
-                raise RepoLoadError("Declared ObjectRef is complete; load its exact StateRef.")
-            acquired.append(lease)
-            active = _active_object_ref_builds.get()
-            token = _active_object_ref_builds.set(
-                active | {
-                    (id(self), item.object_ref.digest())
-                    for item in acquired
-                }
-            )
-            try:
-                obj = self._materialize_cdef(
-                    reference.definition, cache="none", class_manifest=class_manifest,
-                )
-            finally:
-                _active_object_ref_builds.reset(token)
-            apply_exact_reference_identity(
-                obj, reference, lineage_facts=self._lineage_candidates,
-            )
-            self._cache_exact_graph(obj, "weak")
-            obj._store_affinity = selected
-            obj._claim_lease = lease
-            obj._claim_leases = tuple(acquired)
-            pending = []
-            for path, dependency in dependencies:
-                try:
-                    dependency_obj = obj.graph_at(path)
-                except Exception as error:
-                    raise RepoLoadError(
-                        f"Nested ObjectRef at {path!s} did not retain a live construction binding."
-                    ) from error
-                if not isinstance(dependency_obj, Object):
-                    raise RepoLoadError(
-                        f"Nested ObjectRef at {path!s} did not materialize an Object."
-                    )
-                child_lease = next(item for item in acquired if item.object_ref == dependency)
-                dependency_obj._claim_lease = child_lease
-                pending.append((child_lease, dependency_obj))
-            obj._pending_claim_dependencies = tuple(pending)
-            self._renew_claim(lease)
-            return obj
-        except BaseException:
-            for acquired_lease in reversed(acquired):
-                self._abandon_claim(acquired_lease)
-            raise
-
-    def _selected_declaration_store(self, reference, store):
-        """Resolve one declaration Store explicitly or from unambiguous authority."""
-        if store is not None:
-            selected = self._ensure_store(store)
-            declaration = selected.read_declaration_record(reference.digest())
-            if declaration is None or declaration.object_ref != reference:
-                raise RepoLoadError("Selected Store does not contain this ObjectRef declaration.")
-            return selected
-        matches = [candidate for candidate in self.stores if (record := candidate.read_declaration_record(reference.digest())) is not None and record.object_ref == reference]
-        if len(matches) != 1:
-            raise RepoLoadError("build_object_ref requires an explicit declaration Store or one unambiguous connected Store.")
-        return matches[0]
-
-    def _complete_initial_state_ref(self, state_ref, store, lease) -> None:
-        """Fence initial StateRef publication against the live claim generation."""
-        if not isinstance(lease, _ClaimLease) or lease.store is not store or lease.object_ref != state_ref.object:
-            return
-        declaration = store.read_declaration_record(state_ref.object.digest())
-        claim = store.read_claim_record(state_ref.object.digest())
-        now = self._clock()
-        if declaration is None or declaration.object_ref != state_ref.object or claim is None:
-            raise RepoSaveError("Initial StateRef publication lost declaration authority.")
-        if (claim.generation != lease.generation or claim.owner != lease.owner
-                or claim.status != "claimed" or claim.lease_until <= now):
-            raise RepoSaveError("Initial StateRef publication lost its claim generation.")
-
-    def _mark_initial_state_ref_complete(self, state_ref, store, lease) -> None:
-        """Replace a verified live claim with completed StateRef authority."""
-        from .store.records import ClaimRecord
-
-        if not isinstance(lease, _ClaimLease) or lease.store is not store or lease.object_ref != state_ref.object:
-            return
-        declaration = store.read_declaration_record(state_ref.object.digest())
-        claim = store.read_claim_record(state_ref.object.digest())
-        now = self._clock()
-        if (declaration is None or declaration.object_ref != state_ref.object or claim is None
-                or claim.object_digest != lease.object_ref.digest()
-                or claim.generation != lease.generation or claim.owner != lease.owner
-                or claim.status != "claimed" or claim.lease_until <= now):
-            raise RepoSaveError("Initial StateRef was published but its claim fence changed.")
-        store.write_claim_record(ClaimRecord(claim.object_digest, claim.generation, "completed", state_ref_digest=state_ref.digest()))
-
-    def _preflight_routed_claims(self, plan, routed):
-        """Validate and renew every pending claim before routed save hooks run.
-
-        Claims retain declaration-Store authority.  A route that excludes that
-        Store is rejected rather than silently adding a destination, and nested
-        claims retain their construction dependency order.
-        """
-        root = plan.binding.roots[0].obj
-        candidates = [root]
-        candidates.extend(action.obj for action in plan.actions if isinstance(action.obj, Object))
-        action_for_object = {id(action.obj): action for action in plan.actions}
-        leases = []
-        seen = set()
-
-        def add(lease, obj=None):
-            if not isinstance(lease, _ClaimLease) or id(lease) in seen:
-                return
-            action = action_for_object.get(id(obj)) if obj is not None else None
-            if action is None:
-                action = next(
-                    (
-                        item for item in plan.actions
-                        if getattr(item.obj, "object_ref", None) == lease.object_ref
-                    ),
-                    None,
-                )
-            if action is None:
-                raise RepoSaveError("Pending declaration has no retained routed save action.")
-            if not any(destination is lease.store for destination in routed.destinations[action.path]):
-                raise RepoSaveError("Pending declaration Store is excluded by the effective save destinations.")
-            seen.add(id(lease))
-            leases.append((lease, action))
-
-        # build_object_ref records nested leases first, then the enclosing lease.
-        for lease in getattr(root, "_claim_leases", ()):
-            add(lease)
-        for candidate in candidates:
-            add(getattr(candidate, "_claim_lease", None), candidate)
-            for lease, dependency in getattr(candidate, "_pending_claim_dependencies", ()):
-                add(lease, dependency)
-        for lease, _ in leases:
-            self._renew_claim(lease)
-        return tuple(leases)
-
-    def _clear_completed_routed_claim(self, plan, lease) -> None:
-        """Drop only one confirmed completed routed claim from live metadata."""
-        candidates = _unique_objects(
-            (plan.binding.roots[0].obj, *(
-                action.obj for action in plan.actions if isinstance(action.obj, Object)
-            ))
-        )
-        for candidate in candidates:
-            if getattr(candidate, "_claim_lease", None) is lease:
-                candidate._claim_lease = None
-            candidate._claim_leases = tuple(
-                item for item in getattr(candidate, "_claim_leases", ()) if item is not lease
-            )
-            candidate._pending_claim_dependencies = tuple(
-                (item, dependency)
-                for item, dependency in getattr(candidate, "_pending_claim_dependencies", ())
-                if item is not lease
-            )
-
-    def fork_object_ref(
-            self, reference, *, store=None, namespace=None,
-            copy_annotations: bool = False, source_store=None):
-        """Rekey a non-empty ObjectRef and register a state-free declaration.
-
-        Args:
-            reference: Complete non-empty source ObjectRef.
-            store: Explicit writable declaration Store when Repo Stores are
-                ambiguous.
-            namespace: Replacement namespace for every new ObjectId, or ``None``
-                to preserve each source namespace independent of active scopes.
-            copy_annotations: Whether to copy the selected source's current
-                object mapping by value after fork authority is complete.
-            source_store: Optional connected source Store used to disambiguate
-                current metadata when annotation copying is requested.
-
-        Returns:
-            A graph-isomorphic ObjectRef with fresh nonces and a new available
-            ClaimRecord/DeclarationRecord boundary.
-
-        Raises:
-            ValueError: If the reference is empty or namespace validation fails.
-            TypeError: If the reference has an unsupported type.
-            RepoLoadError: If existing identity authority conflicts.
-            RepoSaveError: If publication fails, with a partial StoreReport that
-                classifies completed definition, lineage, membership, and current
-                metadata boundaries.
-
-        Side Effects:
-            Allocates IDs, publishes the fork declaration, persists its new
-            lineage facts, and optionally installs a copied current mapping.
-
-        Concurrency:
-            Registration runs under one Store writer lock; the fork has no
-            authority if publication fails before DeclarationRecord installation.
-
-        Store Requirements:
-            The selected Store must provide current writable declaration and claim
-            publication semantics.
-        """
-        from .metadata import LineageMetadata
-        from .reference_values import ObjectRef
-        from .repo_plan import _PublicationLedger, _raise_publication_failure
-        from .store.records import DefinitionRecord
-        from .utils.graph.path import GraphPath
-
-        if not isinstance(reference, ObjectRef) or not reference.objects:
-            raise ValueError("fork_object_ref requires a non-empty ObjectRef.")
-        if not isinstance(copy_annotations, bool):
-            raise TypeError("copy_annotations must be a bool.")
-        selected = self._selected_writable_store(store, "fork ObjectRef")
-        source = None if source_store is None else self._connected_metadata_store(source_store)
-        values = None
-        if copy_annotations:
-            candidates = (source,) if source is not None else tuple(self.stores)
-            with self._authority_read_fences(candidates):
-                values = self._get_metadata_unfenced(reference, store=source)
-        fork, _ = _fork_rekey_reference(
-            reference, namespace, record_candidate=self._record_lineage_candidate,
-        )
-        ledger = _PublicationLedger((selected,))
-        definition_index = ledger.plan(selected, GraphPath(), None, None, "definition", object_id=fork.object_id)
-        lineage_indexes = {
-            path: ledger.plan(
-                selected, path, None, None, "lineage",
-                object_id=(fork if not path else fork.at(path)).object_id,
-            )
-            for path in dict.fromkeys((GraphPath(), *fork.objects))
-        }
-        membership_index = ledger.plan(selected, GraphPath(), None, None, "membership", object_id=fork.object_id)
-        metadata_index = (
-            ledger.plan(selected, GraphPath(), None, None, "object_metadata", object_id=fork.object_id)
-            if values is not None else None
-        )
-        attempted = set()
-        definition = DefinitionRecord(fork.definition)
-        lineages = {
-            path: LineageMetadata(
-                fork if not path else fork.at(path),
-                "known" if self._lineage_candidates.get(
-                    (fork if not path else fork.at(path)).object_id
-                ) is not None else "unknown",
-                self._lineage_candidates.get((fork if not path else fork.at(path)).object_id),
-            )
-            for path, object_id in fork.objects.items()
-        }
-        if GraphPath() not in lineages:
-            lineages[GraphPath()] = LineageMetadata(fork, "unknown", None)
-
-        def begin_phase(phase, path):
-            attempted.add(
-                lineage_indexes[path] if phase == "lineage"
-                else definition_index if phase == "definition"
-                else membership_index
-            )
-
-        try:
-            fork = self._register_declaration(
-                fork, selected, allow_preallocated=True, _before_phase=begin_phase,
-            )
-            if not ledger.confirm(
-                    definition_index,
-                    lambda: selected.read_definition_record(definition.digest) is not None,
-            ):
-                raise RepoSaveError("Fork definition publication did not survive read-back.")
-            if not ledger.confirm(
-                    membership_index,
-                    lambda: selected.read_stored_root_record(definition.digest) is not None,
-            ):
-                raise RepoSaveError("Fork membership publication did not survive read-back.")
-            for path, lineage_index in lineage_indexes.items():
-                lineage = lineages[path]
-                if not ledger.confirm(
-                        lineage_index,
-                        lambda lineage=lineage:
-                        selected.read_lineage_metadata(lineage.object_ref) == lineage,
-                ):
-                    raise RepoSaveError("Fork lineage publication did not survive read-back.")
-            if values is not None:
-                attempted.add(metadata_index)
-                self.set_metadata(fork, values, store=selected)
-                if not ledger.confirm(
-                        metadata_index,
-                        lambda: selected.read_metadata(fork) == values,
-                ):
-                    raise RepoSaveError("Fork metadata publication did not survive read-back.")
-        except BaseException as error:
-            if definition_index in attempted:
-                ledger.failed(
-                    definition_index,
-                    lambda: selected.read_definition_record(definition.digest) is not None,
-                )
-            if membership_index in attempted:
-                ledger.failed(
-                    membership_index,
-                    lambda: selected.read_stored_root_record(definition.digest) is not None,
-                )
-            for path, lineage_index in lineage_indexes.items():
-                if lineage_index in attempted:
-                    lineage = lineages[path]
-                    ledger.failed(
-                        lineage_index,
-                        lambda lineage=lineage:
-                        selected.read_lineage_metadata(lineage.object_ref) == lineage,
-                    )
-            if metadata_index in attempted:
-                ledger.failed(
-                    metadata_index,
-                    lambda: selected.read_metadata(fork) == values,
-                )
-            _raise_publication_failure(error, ledger.report({}, ()))
-        return fork
-
-    def fork_state_ref(
-            self, state_ref, *, store=None, namespace=None, copy_annotations=(),
-            source_store=None, source_stores=None):
-        """Rekey verified state authority and publish only after closure staging.
-
-        Args:
-            state_ref: Complete non-empty authoritative StateRef to fork.
-            store: Explicit writable target Store when Repo Stores are ambiguous.
-            namespace: Replacement namespace for all newly allocated IDs, or
-                ``None`` to preserve source namespaces despite active scopes.
-            copy_annotations: Tuple selecting ``"object"`` and/or ``"state"``
-                current mappings to copy by value.
-            source_store: Optional connected Store selecting root snapshot and
-                current metadata authority.
-            source_stores: Optional exact StateRef-to-Store mapping selecting
-                source authority throughout an embedded snapshot closure.
-
-        Returns:
-            New exact StateRef with fresh ObjectIds and the source local-state
-            hashes.
-
-        Raises:
-            ValueError: If the source is not a non-empty StateRef.
-            RepoLoadError: If the root or materializing seed authority/local state
-                is missing, conflicting, or fails verification.
-            StoreAuthorityError: If target publication or copying fails.
-            RepoSaveError: If publication fails after target work begins, with a
-                partial StoreReport for every planned fork boundary.
-
-        Side Effects:
-            Verifies every local state before allocating fork authority. The
-            target receives complete snapshot-local payloads, DefinitionRecords,
-            lineage facts, and embedded seed snapshots before root membership.
-
-        Concurrency:
-            Source records and requested current mappings are captured under one
-            ordered authority cut. Final publication is serialized by the target
-            Store writer lock; completed immutable work survives later failure.
-
-        Store Requirements:
-            Source Stores must remain connected for closure verification. The
-            target must provide writable composite snapshot publication semantics.
-        """
-        from .reference_values import StateRef
-        from .metadata import LineageMetadata, SaveAnnotations
-        from .repo_plan import (
-            SavedSnapshot, _PublicationLedger, _embedded_state_refs,
-            _has_complete_local_states, _raise_publication_failure,
-            _supports_annotation_phase_callback,
-        )
-        from .snapshot_capture import _capture_snapshot_evidence
-        from .store.records import DefinitionRecord
-        from .utils.graph.path import GraphPath
-
-        if not isinstance(state_ref, StateRef) or not state_ref.object.objects:
-            raise ValueError("fork_state_ref requires a non-empty StateRef.")
-        if not isinstance(copy_annotations, tuple) or any(
-                scope not in {"object", "state"} for scope in copy_annotations):
-            raise TypeError("copy_annotations must be a tuple containing 'object' and/or 'state'.")
-        if source_store is not None:
-            source_store = self._connected_metadata_store(source_store)
-        if source_stores is not None and not isinstance(source_stores, Mapping):
-            raise TypeError("source_stores must be a mapping or None.")
-        selected = self._selected_writable_store(store, "fork StateRef")
-        # Validate the root and every materializing exact seed before allocating
-        # new identities. A non-federated fork must carry this complete closure.
-        references = []
-        seen_references = set()
-
-        def collect(reference):
-            if reference.digest() in seen_references:
-                return
-            source_record = None
-            for candidate in self.stores:
-                record = candidate.read_state_ref_record(reference.digest())
-                if record is not None:
-                    if record.state_ref != reference:
-                        raise RepoLoadError("StateRef digest collision has incompatible authority.")
-                    source_record = record
-                    break
-            if source_record is None:
-                raise RepoLoadError("Fork source lacks an authoritative exact StateRef record.")
-            seen_references.add(reference.digest())
-            references.append(reference)
-            for _, seed in _embedded_state_refs(reference.definition):
-                collect(seed)
-
-        sources = {}
-        with self._authority_read_fences():
-            collect(state_ref)
-            for reference in references:
-                matches = []
-                selected_source = (
-                    source_stores.get(reference) if source_stores is not None else None
-                ) or source_store
-                candidates = (
-                    (self._connected_metadata_store(selected_source),)
-                    if selected_source is not None else self.stores
-                )
-                for candidate in candidates:
-                    try:
-                        payloads = {
-                            path: candidate.open_local_state(reference, path)
-                            for path in reference.states
-                        }
-                        captured = candidate.read_snapshot_metadata(reference.digest())
-                    except Exception:
-                        continue
-                    if captured is not None:
-                        matches.append((candidate, payloads, captured))
-                if not matches:
-                    raise RepoLoadError("Fork source lacks one complete snapshot-local payload closure.")
-                first = matches[0]
-                if any(item[2] != first[2] for item in matches[1:]):
-                    raise MetadataConflictError("Fork source snapshots disagree about captured evidence.")
-                sources[reference.digest()] = first[1]
-            copy_source = source_store
-            if copy_source is None and source_stores is not None:
-                copy_source = source_stores.get(state_ref)
-                if copy_source is not None:
-                    copy_source = self._connected_metadata_store(copy_source)
-            copied_annotations = SaveAnnotations(
-                object=(self._get_metadata_unfenced(state_ref.object, store=copy_source)
-                        if "object" in copy_annotations else None),
-                state=(self._get_metadata_unfenced(state_ref, store=copy_source)
-                       if "state" in copy_annotations else None),
-            ) if copy_annotations else None
-        if (
-                copied_annotations is not None
-                and (copied_annotations.object is not None or copied_annotations.state is not None)
-                and not _supports_annotation_phase_callback(selected)):
-            raise StoreCapabilityError(
-                "Fork annotation copies require exact publication phase callbacks."
-            )
-        fork, forked_references = _fork_rekey_reference(
-            state_ref, namespace, record_candidate=self._record_lineage_candidate,
-        )
-        ledger = _PublicationLedger((selected,))
-        publication_indexes = {}
-        for reference in references:
-            target = forked_references[reference.digest()]
-            indexes = {
-                phase: ledger.plan(selected, GraphPath(), None, target, phase, object_id=target.object_id)
-                for phase in ("definition", "state", "snapshot")
-            }
-            indexes["lineage"] = {
-                path: ledger.plan(
-                    selected, path, None, target, "lineage",
-                    object_id=(target.object if not path else target.object.at(path)).object_id,
-                )
-                for path in dict.fromkeys((GraphPath(), *target.object.objects))
-            }
-            if target == fork:
-                indexes["membership"] = ledger.plan(
-                    selected, GraphPath(), None, target, "membership", object_id=target.object_id,
-                )
-                if copied_annotations is not None:
-                    if copied_annotations.object is not None:
-                        indexes["object_metadata"] = ledger.plan(
-                            selected, GraphPath(), None, target, "object_metadata", object_id=target.object_id,
-                        )
-                    if copied_annotations.state is not None:
-                        indexes["state_metadata"] = ledger.plan(
-                            selected, GraphPath(), None, target, "state_metadata", object_id=target.object_id,
-                        )
-            publication_indexes[target.digest()] = indexes
-        staged = []
-        snapshots = []
-        try:
-            for reference in references:
-                target = forked_references[reference.digest()]
-                payloads = {
-                    path: selected.prepare_rebound_local_state(
-                        source, target.object.at(path).definition,
-                    )
-                    for path, source in sources[reference.digest()].items()
-                }
-                staged.extend(payloads.values())
-                lineages = {
-                    path: LineageMetadata(
-                        target.object if not path else target.object.at(path),
-                        "known" if self._lineage_candidates.get(object_id) is not None else "unknown",
-                        self._lineage_candidates.get(object_id),
-                    )
-                    for path, object_id in target.object.objects.items()
-                }
-                lineages[GraphPath()] = LineageMetadata(
-                    target.object,
-                    "known" if self._lineage_candidates.get(target.object.object_id) is not None else "unknown",
-                    self._lineage_candidates.get(target.object.object_id),
-                )
-                evidence = _capture_snapshot_evidence(
-                    lineages, (None,),
-                )
-                indexes = publication_indexes[target.digest()]
-                attempted = set()
-                definitions = tuple(
-                    DefinitionRecord(node.definition)
-                    for node in ConcreteDefinitionGraph.from_root(target.definition).nodes()
-                )
-                try:
-                    attempted.add(indexes["definition"])
-                    for definition in definitions:
-                        selected.write_definition_record(definition, stored_root=False)
-                    if not ledger.confirm(
-                            indexes["definition"],
-                            lambda definitions=definitions: all(
-                                selected.read_definition_record(item.digest) is not None
-                                for item in definitions
-                            ),
-                    ):
-                        raise RepoSaveError("Fork definition publication did not survive read-back.")
-                    for path, lineage in evidence.lineages.items():
-                        lineage_index = indexes["lineage"][path]
-                        attempted.add(lineage_index)
-                        selected.write_lineage_metadata(lineage)
-                        if not ledger.confirm(
-                                lineage_index,
-                                lambda lineage=lineage:
-                                selected.read_lineage_metadata(lineage.object_ref) == lineage,
-                        ):
-                            raise RepoSaveError("Fork lineage publication did not survive read-back.")
-                    attempted.update((indexes["state"], indexes["snapshot"]))
-
-                    def begin_annotation_write(scope):
-                        attempted.add(indexes[f"{scope}_metadata"])
-
-                    publication_arguments = {
-                        "evidence": evidence,
-                        "annotations": copied_annotations if target == fork else None,
-                        "local_states": payloads,
-                        "children": {},
-                    }
-                    if _supports_annotation_phase_callback(selected):
-                        publication_arguments["_before_annotation_write"] = begin_annotation_write
-                    selected.publish_snapshot(target, **publication_arguments)
-                    if not ledger.confirm(
-                            indexes["state"],
-                            lambda target=target, payloads=payloads:
-                            _has_complete_local_states(selected, target, payloads),
-                    ):
-                        raise RepoSaveError("Fork payload publication did not survive read-back.")
-                    if not ledger.confirm(
-                            indexes["snapshot"],
-                            lambda target=target:
-                            selected.read_state_ref_record(target.digest()) is not None,
-                    ):
-                        raise RepoSaveError("Fork snapshot publication did not survive read-back.")
-                    if "object_metadata" in indexes and not ledger.confirm(
-                            indexes["object_metadata"],
-                            lambda target=target: selected.read_metadata(target.object)
-                            == copied_annotations.object,
-                    ):
-                        raise RepoSaveError("Fork object metadata did not survive read-back.")
-                    if "state_metadata" in indexes and not ledger.confirm(
-                            indexes["state_metadata"],
-                            lambda target=target: selected.read_metadata(target)
-                            == copied_annotations.state,
-                    ):
-                        raise RepoSaveError("Fork state metadata did not survive read-back.")
-                    if "membership" in indexes:
-                        attempted.add(indexes["membership"])
-                        root_definition = DefinitionRecord(target.definition)
-                        selected.write_definition_record(root_definition, stored_root=True)
-                        if not ledger.confirm(
-                                indexes["membership"],
-                                lambda root_definition=root_definition:
-                                selected.read_stored_root_record(root_definition.digest) is not None,
-                        ):
-                            raise RepoSaveError("Fork membership did not survive read-back.")
-                    snapshots.append(SavedSnapshot(target, (selected,), (selected,)))
-                except BaseException as error:
-                    if indexes["definition"] in attempted:
-                        ledger.failed(
-                            indexes["definition"],
-                            lambda definitions=definitions: all(
-                                selected.read_definition_record(item.digest) is not None
-                                for item in definitions
-                            ),
-                        )
-                    for path, lineage_index in indexes["lineage"].items():
-                        if lineage_index in attempted:
-                            lineage = evidence.lineages[path]
-                            ledger.failed(
-                                lineage_index,
-                                lambda lineage=lineage:
-                                selected.read_lineage_metadata(lineage.object_ref) == lineage,
-                            )
-                    if indexes["state"] in attempted:
-                        ledger.failed(
-                            indexes["state"],
-                            lambda target=target, payloads=payloads:
-                            _has_complete_local_states(selected, target, payloads),
-                        )
-                    if indexes["snapshot"] in attempted:
-                        ledger.failed(
-                            indexes["snapshot"],
-                            lambda target=target:
-                            selected.read_state_ref_record(target.digest()) is not None,
-                        )
-                    if indexes.get("object_metadata") in attempted:
-                        ledger.failed(
-                            indexes["object_metadata"],
-                            lambda target=target: selected.read_metadata(target.object)
-                            == copied_annotations.object,
-                        )
-                    if indexes.get("state_metadata") in attempted:
-                        ledger.failed(
-                            indexes["state_metadata"],
-                            lambda target=target: selected.read_metadata(target)
-                            == copied_annotations.state,
-                        )
-                    if indexes.get("membership") in attempted:
-                        root_definition = DefinitionRecord(target.definition)
-                        ledger.failed(
-                            indexes["membership"],
-                            lambda root_definition=root_definition:
-                            selected.read_stored_root_record(root_definition.digest) is not None,
-                        )
-                    _raise_publication_failure(
-                        error, ledger.report({}, (), snapshots),
-                    )
-        finally:
-            for source in staged:
-                source.store.discard_local_state_staging(source.handle)
-        return fork
 
     def set_config(self, key: str, value: Any) -> None:
         """Set one runtime configuration value in the next export/save snapshot.
@@ -4114,23 +2085,6 @@ class Repo:
 
         return value
 
-    def has_cdef_light(self, cdef: ConcreteDefinition) -> bool:
-        """Inspect whether current definition authority exists in a connected Store.
-
-        Args:
-            cdef (ConcreteDefinition): Exact structural graph authority to inspect.
-        Returns:
-            bool: Whether a validated DefinitionRecord currently exists.
-        Raises:
-            StoreAuthorityError: For corrupt advertised definition authority.
-            RuntimeError: If an eligible built-in read cannot retain this Repo.
-        Side Effects:
-            Reads fresh bytes and dill without payloads or construction. Eligible
-            built-ins explicitly borrow bounded preparation in a fresh read cut;
-            custom/overridden readers retain their public uncached behavior.
-        """
-        return self._first_store_with(cdef) is not None
-
     def hydrate_from_stores(self):
         """
         Ask each store to enumerate all cdefs it has.
@@ -4240,7 +2194,7 @@ class Repo:
         Raises:
             TypeError: If ``alias`` or a supplied mode has the wrong type.
             ValueError: If ``alias`` is empty or a supplied mode is unsupported.
-            RepoSaveError: If routing, claims, capture, or publication fails.
+            RepoSaveError: If routing, capture, or publication fails.
             StoreAuthorityError: If Store publication rejects authoritative data.
             MetadataConflictError: If selected complete sources or destination
                 write-once snapshot evidence disagree.
@@ -4263,8 +2217,8 @@ class Repo:
             returned SavedNode through this Repo's fresh materialization boundary.
 
         Concurrency:
-            Retains one routing/default/Store-order view, preserves declaration
-            claim fencing, and reports partial cross-Store work rather than
+            Retains one routing/default/Store-order view and reports partial
+            cross-Store work rather than
             claiming transactional rollback. ``store=`` selects one complete
             closure even when routed modes were supplied.
         """
@@ -4283,7 +2237,7 @@ class Repo:
                 plan, nodes, object_ids = self._state_graph_evidence(obj)
                 from .state import reserve
 
-                reservation = reserve(obj.object_ref, nodes, object_ids)
+                reservation = reserve(obj._identity_node, nodes, object_ids)
                 reservation._save_plan = plan
             else:
                 plan = getattr(reservation, "_save_plan", None)
@@ -4294,7 +2248,7 @@ class Repo:
 
                     validate_retained_save_plan(plan, obj)
                     if reservation.object_ref != plan.object_ref:
-                        raise RepoSaveError("State graph reservation does not cover this exact ObjectRef.")
+                        raise RepoSaveError("State graph reservation does not cover this exact identity Node.")
                     nodes, object_ids = plan.nodes, plan.object_ids
                 reservation._covers(nodes, object_ids)
             context_scope = (
@@ -4305,39 +2259,27 @@ class Repo:
                 context = self._save_context_with_overrides(
                     context, match_mode=match_mode, graph_mode=graph_mode,
                 )
-                lease = None
-                try:
-                    lease = getattr(obj, "_claim_lease", None)
-                    from .repo_plan import (
-                        build_routed_save_plan,
-                        execute_routed_save_plan,
-                        _register_retained_save_plan,
-                    )
+                from .repo_plan import (
+                    build_routed_save_plan,
+                    execute_routed_save_plan,
+                    _register_retained_save_plan,
+                )
 
-                    _register_retained_save_plan(self, plan)
-                    routed = build_routed_save_plan(
-                        self, plan, context, store=selected_store,
-                    )
-                    result = execute_routed_save_plan(
-                        self,
-                        routed,
-                        states=states, main=main, alias=alias,
-                        deep_capture=deep_capture,
-                        report_stores=True,
-                        snapshot_observer=_snapshot_observer,
-                        annotations=annotations, source_store=source_store,
-                        source_stores=source_stores,
-                    )
-                except BaseException:
-                    for pending_lease in reversed(
-                            getattr(obj, "_claim_leases", (lease,) if lease else ())):
-                        self._abandon_claim(pending_lease)
-                    raise
+                _register_retained_save_plan(self, plan)
+                routed = build_routed_save_plan(
+                    self, plan, context, store=selected_store,
+                )
+                result = execute_routed_save_plan(
+                    self,
+                    routed,
+                    states=states, main=main, alias=alias,
+                    deep_capture=deep_capture,
+                    report_stores=True,
+                    snapshot_observer=_snapshot_observer,
+                    annotations=annotations, source_store=source_store,
+                    source_stores=source_stores,
+                )
                 state_ref, report = result
-                if isinstance(lease, _ClaimLease):
-                    obj._claim_lease = None
-                obj._pending_claim_dependencies = ()
-                obj._claim_leases = ()
                 if main:
                     self.main_def = obj.definition
                 return (state_ref, report) if report_stores else state_ref
@@ -4540,12 +2482,12 @@ class Repo:
                 only the remaining distinct live stateful nodes capture.
             main: Whether to update the target Store's main-definition reference.
             store: Explicit whole-graph closure Store or Store specification.
-            alias: Optional Store-local ObjectRef alias to update after publication.
+            alias: Optional Store-local name for the saved graph.
             deep_capture: Whether to serialize every owned live Serializable node.
             match_mode: Optional ``"first"`` or ``"all"`` routing override.
             graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
                 override local to this save.
-            report_stores: Whether to pair the StateRef with a StoreReport.
+            report_stores: Whether to pair the SavedNode with a StoreReport.
             source_store: Optional connected Store for explicit local-state sources.
             source_stores: Optional full-StateKey/connected-Store source overrides.
             annotations: Optional SaveAnnotations replacing supplied current object
@@ -4556,7 +2498,7 @@ class Repo:
             ``report_stores`` is true.
 
         Raises:
-            RepoSaveError: If graph bindings, claims, codecs, or hooks fail.
+            RepoSaveError: If graph bindings, reservations, codecs, or hooks fail.
             StoreAuthorityError: If Store preflight or publication fails.
             MetadataConflictError: If selected sources or immutable destination
                 snapshot evidence disagree.
@@ -4569,8 +2511,8 @@ class Repo:
             StoreCapabilityError before capture.
 
         Concurrency:
-            Store publication and initial-claim completion use writer locks and
-            the exact claim lease carried by this save.
+            Store publication uses short writer fences; native live reservations
+            and full-key leases protect the save's ownership and payload use.
         """
         from dryml.runtime import materialization_admission
 
@@ -4591,22 +2533,6 @@ class Repo:
                 state_ref, report = result
                 report = _commit_save_report(self, state_ref, report, stores=context.stores)
             return (state_ref, report) if report_stores else state_ref
-
-    def _first_store_with(self, cdef):
-        from .store.records import DefinitionRecord
-
-        digest = DefinitionRecord(cdef).digest
-        if self.stores and all(getattr(store, "_can_reuse_exact_validation", lambda: False)()
-                               for store in self.stores):
-            with self._read_cut() as cut:
-                for store in cut.stores:
-                    if store._definition_record_for_cut(cut, digest) is not None:
-                        return store
-            return None
-        for st in self.stores:
-            if st.read_definition_record(digest) is not None:
-                return st
-        return None
 
     def _candidate_cdefs(self) -> set[ConcreteDefinition]:
         cdefs = {obj.definition for _, obj in self.strong_obj_cache.items()}
@@ -4645,9 +2571,8 @@ class Repo:
             )
 
     def materialize_boundary(self, roots, *, cache=None, reuse_live=None,
-                             reservation=None, reserved_live=None,
                              declaration_stores=None):
-        """Realize selected materializing boundary roots under one admission cut.
+        """Realize selected Node boundary roots after aggregate state admission.
 
         Args:
             roots: Ordered selected values from one signature argument or return
@@ -4656,15 +2581,8 @@ class Repo:
                 are forwarded unchanged to structural realization.
             reuse_live: ``None`` preserves exact-load ``"matching"``; supplied
                 values are forwarded unchanged to exact realization.
-            reservation: Optional active state-graph reservation retained by an
-                outer lifecycle that owns overlapping live state.
-            reserved_live: Optional mapping from exact StateRef or ObjectRef
-                digests to live Objects covered by ``reservation``. These entries
-                are admitted only after complete aggregate authority preflight.
-            declaration_stores: Optional mapping from selected ObjectRef digests
-                to exact connected declaration Stores. A selected Store is
-                revalidated with its declaration and ClaimRecord before effects.
-                For Node roots, exact Node digests pin saved metadata and all
+            declaration_stores: Optional mapping from exact Node digests to
+                connected Stores, pinning saved metadata and all
                 selected full StateKeys to that connected source with no replica
                 fallback. Conflicting source demands fail before hooks.
 
@@ -4675,44 +2593,22 @@ class Repo:
 
         Raises:
             RepoLoadError: If exact authority is incomplete or incompatible,
-                a selected declaration Store is disconnected, stale, or
-                incompatible, claim admission fails, or construction/restore
-                fails.
+                a selected Store is disconnected, stale, or incompatible, or
+                construction/restore fails.
             TypeError: If ``roots`` or ``declaration_stores`` is malformed.
 
         Side Effects:
-            May acquire first-construction claims, reserve/reuse live objects,
-            construct, restore, and populate caches.  It never saves or creates
-            declaration authority.  A failed call abandons only its own acquired
-            claim generations in reverse order.
+            May reserve/reuse live objects, construct, restore, and populate
+            caches. Selected full keys are validated under native reader leases.
+            A post-hook failure invalidates affected live graphs; no rollback is
+            claimed. This method publishes no Store authority.
         """
 
-        from .cdef_graph import EdgeKind
-        from .canonical import (
-            NodeKind,
-            is_value_container_kind,
-            node_kind,
-            rebuild_dict_kind,
-            rebuild_sequence_kind,
-            to_canonical,
-        )
-        from .cdef_identity import cdef_node_key
-        from .definition import Definition
-        from .links import DefLink
-        from .materialization import (
-            build_exact_state_load_plan,
-            execute_exact_state_load_plan,
-            preflight_materialization_classes,
-        )
-        from .reference_values import ObjectRef, StateRef
-        from .repo_plan import AggregateMaterializationPlan, _NodeBindings, realization_scope
-        from .utils.graph.value import iter_value_edges
+        from dryml.runtime import materialization_admission
+        from .materialization import materialize_nodes, preflight_symbolic_materialization
 
         if not isinstance(roots, (tuple, list)):
             raise TypeError("materialize_boundary roots must be an ordered sequence.")
-        if reserved_live is not None and (reservation is None or not isinstance(reserved_live, Mapping)):
-            raise TypeError("reserved live materialization requires a reservation and mapping.")
-        reserved_live = {} if reserved_live is None else dict(reserved_live)
         if declaration_stores is None:
             declaration_stores = {}
         if not isinstance(declaration_stores, Mapping):
@@ -4724,434 +2620,11 @@ class Repo:
             if not any(store is connected for connected in self.stores):
                 raise RepoLoadError("Selected declaration Store is not connected to this Repo.")
 
-        # Role-aware symbolic admission must complete before canonicalization can
-        # seed live-object caches or this method can acquire claims.
-        from .materialization import preflight_symbolic_materialization
-
         preflight_symbolic_materialization(*roots, repo=self)
-
-        from .quoted import QuotedDef, SelectorSpec
-
-        def has_legacy(value):
-            if isinstance(value, (Object, QuotedDef, SelectorSpec)):
-                return False
-            if isinstance(value, (ObjectRef, StateRef)):
-                return True
-            if isinstance(value, DefLink) and value.kind is EdgeKind.REF:
-                return False
-            return any(has_legacy(edge.value) for edge in iter_value_edges(value))
-
-        if reservation is None and not reserved_live and not any(has_legacy(root) for root in roots):
-            from dryml.runtime import materialization_admission
-            from .materialization import materialize_nodes
-            with materialization_admission(operation="repo_node_boundary"):
-                return materialize_nodes(self, roots, cache="weak" if cache is None else cache,
-                                         reuse_live="matching" if reuse_live is None else reuse_live,
-                                         declaration_stores=declaration_stores)
-
-        canonical_memo = {}
-
-        def concretize_definitions(value, memo):
-            """Lower materializing Definition values before authority admission."""
-
-            key = id(value)
-            if key in memo:
-                return memo[key]
-            if isinstance(value, Definition):
-                result = to_canonical(value, repo=self, memo=canonical_memo)
-            else:
-                kind = node_kind(value)
-                if kind is NodeKind.LIST:
-                    result = []
-                    memo[key] = result
-                    result.extend(concretize_definitions(item, memo) for item in value)
-                elif kind is NodeKind.DICT:
-                    result = {}
-                    memo[key] = result
-                    result.update(
-                        (item, concretize_definitions(child, memo))
-                        for item, child in value.items()
-                    )
-                elif kind is NodeKind.SET:
-                    result = set()
-                    memo[key] = result
-                    result.update(concretize_definitions(item, memo) for item in value)
-                elif type(value) is frozenset:
-                    result = frozenset(concretize_definitions(item, memo) for item in value)
-                elif is_value_container_kind(kind):
-                    if kind is NodeKind.FROZEN_DICT:
-                        result = rebuild_dict_kind(
-                            kind,
-                            {
-                                item: concretize_definitions(child, memo)
-                                for item, child in value.items()
-                            },
-                        )
-                    else:
-                        result = rebuild_sequence_kind(
-                            kind,
-                            (concretize_definitions(item, memo) for item in value),
-                        )
-                elif isinstance(value, frozenset):
-                    result = frozenset(concretize_definitions(item, memo) for item in value)
-                else:
-                    result = value
-            memo[key] = result
-            return result
-
-        concretization_memo = {}
-        roots = tuple(concretize_definitions(root, concretization_memo) for root in roots)
-        plan = AggregateMaterializationPlan(
-            tuple(roots), "weak" if cache is None else cache,
-            "matching" if reuse_live is None else reuse_live,
-        )
-        if plan.reuse_live not in {"matching", "greedy", "never"}:
-            raise ValueError("reuse_live must be 'matching', 'greedy', or 'never'.")
-
-        # The visitor uses object identity for private CDef nodes, while exact
-        # reference identities deliberately deduplicate by digest.
-        object_refs, state_refs = {}, {}
-        visited = set()
-
-        def visit(value):
-            if isinstance(value, StateRef):
-                state_refs.setdefault(value.digest(), value)
-                object_refs.setdefault(value.object.digest(), value.object)
-                return
-            if isinstance(value, ObjectRef):
-                object_refs.setdefault(value.digest(), value)
-                return
-            if isinstance(value, ConcreteDefinition):
-                key = cdef_node_key(value)
-                if key in visited:
-                    return
-                visited.add(key)
-                for edge in iter_value_edges(value):
-                    visit(edge.value)
-                return
-            if isinstance(value, DefLink):
-                if value.kind is EdgeKind.MATERIALIZE:
-                    visit(value.target)
-                return
-            for edge in iter_value_edges(value):
-                visit(edge.value)
-
-        for root in plan.roots:
-            visit(root)
-
-        from .store.records import ClaimRecord
-
-        def validate_declaration_store(reference, store):
-            """Revalidate one exact selected declaration and claim authority."""
-
-            declaration = store.read_declaration_record(reference.digest())
-            claim = store.read_claim_record(reference.digest())
-            if declaration is None or declaration.object_ref != reference:
-                raise RepoLoadError("Selected Store does not contain this ObjectRef declaration.")
-            if not isinstance(claim, ClaimRecord) or claim.object_digest != reference.digest():
-                raise RepoLoadError("Selected Store lacks matching declaration claim authority.")
-
-        for digest, store in declaration_stores.items():
-            reference = object_refs.get(digest)
-            if reference is None:
-                raise RepoLoadError("Selected declaration Store does not match a materializing ObjectRef.")
-            validate_declaration_store(reference, store)
-
-        # An ObjectRef shares any exact root selected for the same identity.  For
-        # the remaining identities, choose live first, then one saved authority,
-        # and only then the registered construction claim.
-        state_for_object = {
-            reference.object.digest() for reference in state_refs.values()
-        }
-        results, claim_roots = {}, []
-        pending_refs = list(object_refs)
-        queued_refs = set(pending_refs)
-        processed_refs = set()
-        pending_index = 0
-        while pending_index < len(pending_refs):
-            digest = pending_refs[pending_index]
-            pending_index += 1
-            if digest in processed_refs:
-                continue
-            processed_refs.add(digest)
-            reference = object_refs[digest]
-            if digest in state_for_object:
-                continue
-            reserved = reserved_live.get(digest)
-            if reserved is not None:
-                if not isinstance(reserved, Object) or reserved.object_ref != reference:
-                    raise RepoLoadError("Reserved live materialization does not match ObjectRef authority.")
-                _, nodes, object_ids = self._state_graph_evidence(reserved)
-                reservation._covers(nodes, object_ids)
-                results[digest] = reserved
-                continue
-            live = tuple(
-                candidate for candidate in self._all_live_candidates()
-                if getattr(candidate, "object_ref", None) == reference
-            )
-            if len(live) == 1:
-                results[digest] = live[0]
-                continue
-            if len(live) > 1:
-                raise RepoLoadError("Materializing ObjectRef has ambiguous live authority.")
-            evidence = self.reference_evidence(reference.definition)
-            matches = [item.state_ref for item in evidence.states if item.state_ref.object == reference]
-            if len(matches) > 1:
-                raise RepoLoadError("Materializing ObjectRef has ambiguous saved StateRef authority.")
-            if matches:
-                state_refs.setdefault(matches[0].digest(), matches[0])
-                state_for_object.add(digest)
-            else:
-                claim_roots.append(reference)
-                visit(reference.definition)
-                state_for_object.update(
-                    state.object.digest() for state in state_refs.values()
-                )
-                for discovered in object_refs:
-                    if discovered not in queued_refs:
-                        pending_refs.append(discovered)
-                        queued_refs.add(discovered)
-
-        # Build every direct or ObjectRef-selected exact closure before aggregate
-        # conflict admission. Enclosing exact plans own their embedded reference
-        # topology, so the visitor deliberately stops at each exact boundary.
-        exact_plans = {
-            digest: build_exact_state_load_plan(self, reference, _defer_payload=True)
-            for digest, reference in state_refs.items()
-        }
-        # Exact plans hydrate persisted CDefs with new private node keys. Retain
-        # classes for those execution nodes and their synthesized child plans,
-        # not only for the caller's structural roots.
-        class_manifest = preflight_materialization_classes(
-            *plan.roots,
-            *(exact.state_ref for exact in exact_plans.values()),
-            *(
-                action.definition
-                for exact in exact_plans.values()
-                for action in exact.actions
-            ),
-        )
-
-        # Every exact state closure, including snapshots selected from ObjectRefs,
-        # is complete before conflict admission. Compare each enclosing snapshot's
-        # effective local actions rather than its overridden embedded seed actions.
-        state_actions = {}
-        for exact in exact_plans.values():
-            effective_actions = {}
-            for action in exact.actions:
-                if action.reference == exact.state_ref or action.object_id not in effective_actions:
-                    effective_actions[action.object_id] = action
-            for action in effective_actions.values():
-                previous = state_actions.setdefault(action.object_id, action)
-                if previous.state_hash != action.state_hash:
-                    raise RepoLoadError(
-                        "Materializing boundary has incompatible effective StateRef demands."
-                    )
-
-        # Managed lifecycle ownership may retain the receiver while this generic
-        # boundary preflights its checkpoint beside ordinary Mat roots. Validate
-        # that every admitted overlap is genuinely covered before bypassing the
-        # generic candidate search, which correctly excludes reserved live state.
-        for exact in exact_plans.values():
-            reserved = reserved_live.get(exact.state_ref.digest())
-            if reserved is None:
-                continue
-            if not isinstance(reserved, Object) or reserved.object_ref != exact.state_ref.object:
-                raise RepoLoadError("Reserved live materialization does not match exact StateRef authority.")
-            _, nodes, object_ids = self._state_graph_evidence(reserved)
-            reservation._covers(nodes, object_ids)
-
-        # Establish the complete dependency closure and acquire each live claim
-        # before the first root executes.  The DFS is deterministic and retains
-        # child-before-parent ordering required by current completion semantics.
-        claim_order, claim_stores, seen_claims = [], {}, set()
-        claim_roots = [
-            reference for reference in claim_roots
-            if reference.digest() not in state_for_object
-            and reference.digest() not in results
-        ]
-        claim_digests = {reference.digest() for reference in claim_roots}
-
-        def add_claim(reference):
-            if reference.digest() in seen_claims:
-                return
-            seen_claims.add(reference.digest())
-            for _, dependency in self._pending_declaration_references(
-                reference, validate_stores=False
-            ):
-                dependency_digest = dependency.digest()
-                if dependency_digest not in claim_digests:
-                    if dependency_digest not in state_for_object and dependency_digest not in results:
-                        raise RepoLoadError(
-                            "Materializing ObjectRef dependency escaped aggregate authority preflight."
-                        )
-                    continue
-                add_claim(dependency)
-            matches = [
-                store for store in self.stores
-                if (record := store.read_declaration_record(reference.digest())) is not None
-                and record.object_ref == reference
-            ]
-            if not matches:
-                raise RepoLoadError("Materializing ObjectRef lacks registered declaration authority.")
-            selected = declaration_stores.get(reference.digest())
-            if selected is not None:
-                validate_declaration_store(reference, selected)
-            else:
-                by_domain = {}
-                for store in matches:
-                    by_domain.setdefault(store.authority_fence_key(), store)
-                if len(by_domain) != 1:
-                    raise RepoLoadError(
-                        "Materializing ObjectRef requires an explicit declaration Store or one unambiguous Store domain."
-                    )
-                selected = next(iter(by_domain.values()))
-                validate_declaration_store(reference, selected)
-            claim_stores[reference.digest()] = selected
-            claim_order.append(reference)
-
-        for reference in sorted(claim_roots, key=lambda item: item.digest()):
-            add_claim(reference)
-
-        with realization_scope() as scope:
-            leases = {}
-            try:
-                for reference in claim_order:
-                    lease = self._acquire_claim(reference, claim_stores[reference.digest()])
-                    if lease is None:
-                        raise RepoLoadError("Declared ObjectRef completed during aggregate admission.")
-                    scope.add_claim_cleanup(
-                        lambda acquired_lease=lease: self._abandon_claim(acquired_lease)
-                    )
-                    leases[reference.digest()] = lease
-                for lease in leases.values():
-                    self._renew_claim(lease)
-
-                reference_memo = {}
-                for exact in exact_plans.values():
-                    reserved = reserved_live.get(exact.state_ref.digest())
-                    result = (
-                        reserved if reserved is not None else execute_exact_state_load_plan(
-                            self, exact, reuse_live=plan.reuse_live, cache=plan.cache,
-                            _reference_memo=reference_memo, class_manifest=class_manifest,
-                        )
-                    )
-                    # Every exact aggregate root keeps the StateRef that selected
-                    # it, even when the shared memo preserves aliases across roots.
-                    result._last_state_ref = exact.state_ref
-                    results[exact.state_ref.object.digest()] = result
-
-                cdef_memo = _NodeBindings()
-                for digest, obj in results.items():
-                    reference = object_refs.get(digest)
-                    if reference is not None:
-                        cdef_memo[reference.definition] = obj
-
-                def build_claim(reference):
-                    known = results.get(reference.digest())
-                    if known is not None:
-                        return known
-                    lease = leases[reference.digest()]
-                    active = _active_object_ref_builds.get()
-                    token = _active_object_ref_builds.set(
-                        active
-                        | {(id(self), item.object_ref.digest()) for item in leases.values()}
-                        | {(id(self), digest) for digest in results}
-                    )
-                    active_results = _active_object_ref_results.get() or {}
-                    results_token = _active_object_ref_results.set({
-                        **active_results,
-                        **{(id(self), digest): obj for digest, obj in results.items()},
-                    })
-                    try:
-                        obj = self._materialize_cdef(
-                            reference.definition, cache="none", memo=cdef_memo,
-                            class_manifest=class_manifest,
-                        )
-                    finally:
-                        _active_object_ref_results.reset(results_token)
-                        _active_object_ref_builds.reset(token)
-                    from .repo_plan import apply_exact_reference_identity
-
-                    apply_exact_reference_identity(
-                        obj, reference, lineage_facts=self._lineage_candidates,
-                    )
-                    self._cache_exact_graph(obj, plan.cache)
-                    obj._store_affinity = lease.store
-                    obj._claim_lease = lease
-                    obj._claim_leases = tuple(leases[item.digest()] for item in claim_order)
-                    results[reference.digest()] = obj
-                    return obj
-
-                for reference in claim_roots:
-                    build_claim(reference)
-
-                def realize(value, memo):
-                    key = id(value)
-                    if key in memo:
-                        return memo[key]
-                    if isinstance(value, Object):
-                        return value
-                    if isinstance(value, ConcreteDefinition):
-                        result = self._materialize_cdef(
-                            value, cache=plan.cache, memo=cdef_memo,
-                            class_manifest=class_manifest,
-                        )
-                    elif isinstance(value, StateRef):
-                        result = results[value.object.digest()]
-                    elif isinstance(value, ObjectRef):
-                        digest = value.digest()
-                        if digest in results:
-                            result = results[digest]
-                        elif digest in reserved_live:
-                            result = reserved_live[digest]
-                        else:
-                            result = build_claim(value)
-                    elif isinstance(value, DefLink):
-                        result = value.target if value.kind is EdgeKind.REF else realize(value.target, memo)
-                    else:
-                        kind = node_kind(value)
-                        if kind is NodeKind.LIST:
-                            result = []
-                            memo[key] = result
-                            result.extend(realize(item, memo) for item in value)
-                        elif kind is NodeKind.DICT:
-                            result = {}
-                            memo[key] = result
-                            result.update(
-                                (item, realize(child, memo))
-                                for item, child in value.items()
-                            )
-                        elif kind is NodeKind.SET:
-                            result = set()
-                            memo[key] = result
-                            result.update(realize(item, memo) for item in value)
-                        elif type(value) is frozenset:
-                            result = frozenset(realize(item, memo) for item in value)
-                        elif is_value_container_kind(kind):
-                            if kind is NodeKind.FROZEN_DICT:
-                                result = rebuild_dict_kind(
-                                    kind,
-                                    {item: realize(child, memo) for item, child in value.items()},
-                                )
-                            else:
-                                result = rebuild_sequence_kind(
-                                    kind, (realize(item, memo) for item in value)
-                                )
-                        elif isinstance(value, frozenset):
-                            result = frozenset(realize(item, memo) for item in value)
-                        else:
-                            result = value
-                    memo[key] = result
-                    return result
-
-                memo = {}
-                return tuple(realize(root, memo) for root in plan.roots)
-            except BaseException:
-                # ``realization_scope`` runs this same cleanup after any nested
-                # construction failure; retain it here for failures before scope
-                # exit and keep reverse generation-safe abandonment authoritative.
-                raise
+        with materialization_admission(operation="repo_node_boundary"):
+            return materialize_nodes(self, roots, cache="weak" if cache is None else cache,
+                                     reuse_live="matching" if reuse_live is None else reuse_live,
+                                     declaration_stores=declaration_stores)
 
     # -------------------------------------------------------------------------
     # Core: turn a ConcreteDefinition into a live Object under load knobs
@@ -5203,83 +2676,11 @@ class Repo:
                 class_manifest=class_manifest,
             )
 
-    def _materialize_object_ref(
-            self, reference, *, cache: CachePolicy = "weak", memo=None,
-            path=None):
-        """Materialize an ObjectRef only through its declaration claim.
-
-        Nested ObjectRefs whose claims were acquired by ``build_object_ref`` or
-        whose live/saved results were pinned by aggregate admission use that
-        enclosing operation's context-local authorization and memo. Every other
-        call enters the public declaration-and-claim path.
-
-        Args:
-            reference: Exact ObjectRef requested by a materializing CDef edge.
-            cache: Cache policy for an already-authorized nested realization.
-            memo: Current private-node realization memo.
-            path: Current constructor path used for diagnostics.
-
-        Returns:
-            A live graph carrying the supplied exact ObjectIds.
-
-        Raises:
-            TypeError: If ``reference`` is not an ObjectRef.
-            RepoLoadError: If declaration or claim authority is unavailable.
-
-        Side Effects:
-            May acquire declaration claims, construct Objects, and update caches.
-            Aggregate-preflight results are reused without reacquiring claims.
-        """
-        from .reference_values import ObjectRef
-        from .repo_plan import apply_exact_reference_identity
-
-        if not isinstance(reference, ObjectRef):
-            raise TypeError("ObjectRef materialization requires an ObjectRef.")
-        key = (id(self), reference.digest())
-        active_results = _active_object_ref_results.get()
-        preflight_result = None if active_results is None else active_results.get(key)
-        if preflight_result is not None:
-            if not isinstance(preflight_result, Object) or preflight_result.object_ref != reference:
-                raise RepoLoadError(
-                    "Aggregate-preflight ObjectRef result does not match requested authority."
-                )
-            return preflight_result
-        if key not in _active_object_ref_builds.get():
-            realized = self.build_object_ref(reference)
-            from .repo_plan import current_realization_scope
-
-            scope = current_realization_scope()
-            if scope is not None:
-                def abandon_realized_claims():
-                    first_error = None
-                    leases = getattr(realized, "_claim_leases", ())
-                    for lease in reversed(leases):
-                        try:
-                            self._abandon_claim(lease)
-                        except BaseException as error:
-                            if first_error is None:
-                                first_error = error
-                    if first_error is not None:
-                        raise first_error
-
-                scope.add_claim_cleanup(abandon_realized_claims)
-            return realized
-        realized = self._materialize_cdef(
-            reference.definition, cache="none", memo=memo, path=path
-        )
-        apply_exact_reference_identity(
-            realized, reference, lineage_facts=self._lineage_candidates,
-        )
-        self._cache_exact_graph(realized, cache)
-        return realized
-
-
     def _load_structural(
         self,
         x: object,
         *,
         cache: CachePolicy = "weak",
-        require_store: bool = False,
     ):
         from dryml.runtime import materialization_admission
 
@@ -5288,8 +2689,6 @@ class Repo:
 
             with realization_scope():
                 memo = _NodeBindings()
-                if isinstance(x, ConcreteDefinition) and require_store and self._first_store_with(x) is None:
-                    raise RepoLoadError("No connected Store contains this structural CDef; use load_or_build to construct it.")
                 return self._realize(
                     x,
                     cache=cache,
@@ -5297,11 +2696,11 @@ class Repo:
                     memo=memo,
                 )
 
-    def load_object(self, x: Definition | ConcreteDefinition | Object, *, cache: CachePolicy = "weak") -> Object:
-        """Load SavedNode state, or use the legacy plain-CDef structural adapter.
+    def load_object(self, x, *, cache: CachePolicy = "weak") -> Object:
+        """Load a SavedNode with fresh full-key validation and reader leases.
 
         Args:
-            x: A complete SavedNode, or a legacy plain CDef/Object structural input.
+            x: A complete SavedNode, including stateless saved graphs.
             cache: Cache tier for the resulting realization.
 
         Returns:
@@ -5309,30 +2708,14 @@ class Repo:
 
         Raises:
             ValueError: If a Node lacks saved completeness.
-            TypeError: If ``x`` is an exact reference or unsupported root type.
-            RepoLoadError: If no connected Store has the structural authority.
+            TypeError: If ``x`` is not a Node.
+            RepoLoadError: If selected state is unavailable or cannot be restored.
 
         Side Effects:
             May construct, restore and cache live objects. Each Node use freshly
             validates selected full keys before hooks and holds active leases.
         """
-        from .reference_values import ObjectRef, StateRef, StateSelectorRef
-
-        from .node import Node
-        if isinstance(x, Node):
-            return self.load(x, cache=cache)
-
-        if isinstance(x, (ObjectRef, StateRef, StateSelectorRef)):
-            raise TypeError("Repo.load_object is structural; use build_object_ref or load_state_ref for exact references.")
-        if isinstance(x, Object):
-            x = x.definition
-        if isinstance(x, Definition):
-            x = x.concretize(repo=self)
-        if not isinstance(x, ConcreteDefinition):
-            raise TypeError("Repo.load_object requires a Definition, ConcreteDefinition, or Object.")
-        if self._first_store_with(x) is None:
-            raise RepoLoadError("No connected Store contains this structural CDef; use load_or_build to construct it.")
-        return self._load_structural(x, require_store=True, cache=cache)
+        return self.load(x, cache=cache)
 
     def load_state_ref(
             self,
@@ -5429,9 +2812,9 @@ class Repo:
                 identity disagree with selected captured lineage evidence,
                 including an uncached supplied target.
             TypeError: If ``source_store`` is not a Store, ``source_stores`` is
-                not a mapping, or a mapping key/value is not a StateRef/Store.
+                not a mapping, or a mapping key/value is not a StateKey/Store.
             ValueError: If a selected Store is disconnected, root selectors
-                differ, or a mapping names a StateRef outside the exact closure.
+                differ, or a mapping names a StateKey outside the exact closure.
 
         Side Effects:
             Runs local hooks once dependency-first under active key leases, without
@@ -5441,154 +2824,8 @@ class Repo:
             not rollback. Validation failure before hooks leaves it usable.
         """
 
-        from .materialization import build_exact_state_load_plan
-        from .reference_values import StateRef
-
-        from .node import Node
-        if isinstance(state_ref, Node):
-            return self.restore(obj, state_ref, reservation=reservation,
-                                source_store=source_store, source_stores=source_stores)
-        if not isinstance(obj, Object):
-            raise TypeError("restore_state_ref_into requires a live Object target.")
-        if not isinstance(state_ref, StateRef):
-            raise TypeError("restore_state_ref_into requires a StateRef.")
-        if getattr(obj, "_restore_failed", False):
-            raise RepoLoadError("Cannot restore an invalidated live target; load a fresh exact graph.")
-
-        # Authority validation, retained binding validation, and reservation all
-        # complete before the first user restore hook can run.
-        plan = build_exact_state_load_plan(
-            self, state_ref, source_store=source_store,
-            source_stores=source_stores, _defer_payload=True,
-        )
-        from .materialization import preflight_materialization_classes
-
-        preflight_materialization_classes(state_ref)
-        _, nodes, object_ids = self._state_graph_evidence(obj)
-        if obj.object_ref != state_ref.object:
-            raise RepoLoadError("Target object does not carry the requested exact ObjectRef.")
-        owns_reservation = reservation is None
-        if owns_reservation:
-            reservation = self.reserve_state_graph(obj)
-        else:
-            reservation._covers(nodes, object_ids)
-
-        locks = []
-        hooks_started = False
-        try:
-            targets = {}
-            for path, object_id in state_ref.object.objects.items():
-                try:
-                    target = obj.graph_at(path)
-                except Exception as error:
-                    raise RepoLoadError(
-                        f"Target graph lacks retained binding at {path!s}."
-                    ) from error
-                if not isinstance(target, Object) or target.object_id != object_id:
-                    raise RepoLoadError(
-                        f"Target graph identity does not match ObjectRef at {path!s}."
-                    )
-                targets[object_id] = target
-            if set(targets) != set(object_ids):
-                raise RepoLoadError("Target graph has incomplete stateful ObjectId bindings.")
-
-            # The supplied target can be intentionally uncached, so exact-load
-            # preflight cannot rely on the Repo cache scan to protect its active
-            # creation evidence. Check every fact before changing any of them.
-            lineage_updates = []
-            for object_id, target in targets.items():
-                expected = plan.lineage_facts_by_object_id.get(object_id)
-                if expected is None:
-                    continue
-                if getattr(target, "_lineage_fact_object_id", None) == object_id:
-                    if getattr(target, "_lineage_created_at", None) != expected.created_at:
-                        raise MetadataConflictError(
-                            "Target live identity disagrees with selected lineage evidence."
-                        )
-                else:
-                    lineage_updates.append((target, object_id, expected.created_at))
-
-            # Existing per-instance exclusion remains meaningful for code outside
-            # the graph-token protocol. Acquire every lock before invalidation or
-            # hook entry so a failure here leaves the target usable.
-            for object_id in sorted(targets, key=str):
-                lock = getattr(targets[object_id], "_save_load_reservation", None)
-                if lock is None or not lock.acquire(blocking=False):
-                    raise RepoLoadError("Target local state is already reserved by save or restore.")
-                locks.append(lock)
-
-            if lineage_updates:
-                from .snapshot_capture import install_lineage_fact
-
-                for target, object_id, created_at in lineage_updates:
-                    install_lineage_fact(target, object_id, created_at)
-
-            # A StateRef embeds materializing StateRefs below ordinary CDef graph
-            # edges. Keep the full preflight closure, selecting the outer action
-            # where it explicitly supersedes a seed state for the same ObjectId.
-            actions = {}
-            for action in plan.actions:
-                if action.object_id not in targets:
-                    raise RepoLoadError("Exact StateRef closure has an unbound live ObjectId.")
-                if action.object_id not in actions or action.reference == state_ref:
-                    actions[action.object_id] = action
-            if set(actions) != set(object_ids):
-                raise RepoLoadError("Exact StateRef preflight did not retain every live state action.")
-
-            reference_depths = {state_ref.digest(): 0}
-
-            def visit_reference_values(value, depth):
-                from .cdef_graph import EdgeKind
-                from .links import DefLink
-                from .reference_values import StateRef
-                from .utils.graph.value import iter_value_edges
-
-                if isinstance(value, StateRef):
-                    digest = value.digest()
-                    reference_depths[digest] = max(reference_depths.get(digest, 0), depth)
-                    for parameter in value.definition.parameters.values():
-                        visit_reference_values(parameter, depth + 1)
-                    return
-                if isinstance(value, DefLink):
-                    if value.kind is EdgeKind.MATERIALIZE:
-                        visit_reference_values(value.target, depth)
-                    return
-                for edge in iter_value_edges(value):
-                    visit_reference_values(edge.value, depth)
-
-            for parameter in state_ref.definition.parameters.values():
-                visit_reference_values(parameter, 1)
-            ordered = sorted(
-                actions.values(),
-                key=lambda action: (
-                    -reference_depths.get(action.reference.digest(), 0),
-                    -len(action.path), str(action.path), str(action.object_id),
-                ),
-            )
-            obj._last_state_ref = None
-            for action in ordered:
-                target = targets[action.object_id]
-                codec = action.state_hash.split("-", 1)[0]
-                hooks_started = True
-                target.restore_state_from_dir(
-                    os.path.join(os.fspath(action.payload.handle), "data"), codec=codec
-                )
-                target._last_state_hash = action.state_hash
-            obj._last_state_ref = state_ref
-            return state_ref
-        except RepoLoadError:
-            if hooks_started:
-                self._invalidate_restoration_target(nodes)
-            raise
-        except BaseException as error:
-            if hooks_started:
-                self._invalidate_restoration_target(nodes)
-            raise RepoLoadError(f"Targeted exact restore failed: {error}") from error
-        finally:
-            for lock in reversed(locks):
-                lock.release()
-            if owns_reservation:
-                reservation.release()
+        return self.restore(obj, state_ref, reservation=reservation,
+                            source_store=source_store, source_stores=source_stores)
 
     def _invalidate_restoration_target(self, nodes) -> None:
         """Conservatively retire live instances after an in-place hook failure."""
@@ -5613,16 +2850,12 @@ class Repo:
         raise TypeError/ValueError before effects. Missing/incompatible/corrupt
         selected state raises RepoLoadError without initialization or fallback.
         Selected hooks run once dependency-first under active leases and outside
-        writer fences, even on eligible cache reuse. Plain legacy structural CDefs
-        retain their separate structural adapter and cannot select new state.
+        writer fences, even on eligible cache reuse. Construction-only recipes
+        belong to build(), rather than a saved-state load.
         """
-        from dryml.runtime import materialization_admission
-        from .node import Node, require_saved
+        from .node import require_saved
 
-        if isinstance(cdef, Node):
-            return self.load_state_ref(require_saved(cdef), cache=cache)
-        with materialization_admission(operation="repo_load"):
-            return self.load_object(cdef, cache=cache)
+        return self.load_state_ref(require_saved(cdef), cache=cache)
 
     def load_or_build(self, x: Definition | ConcreteDefinition | Object, *, cache: CachePolicy = "weak") -> Object:
         from dryml.runtime import materialization_admission
@@ -5698,18 +2931,12 @@ class Repo:
         """
 
         from .generator import GeneratorSelector
-        from .query.model import QueryDomainError
         from .query.query import IdentityQuery
         from .query.result import ObjectResultSet
-        from .reference_values import ObjectRef, StateRef
-        from .selector import Selector, _contains_state_selector, selector as prepare_selector
+        from .selector import Selector
 
         if isinstance(selector, Object):
             selector = selector.definition
-        if isinstance(selector, (ObjectRef, StateRef)):
-            raise QueryDomainError(
-                "Exact-reference containment queries can only select nested(), not known()."
-            )
         if selector is not None and not isinstance(
             selector, (Definition, ConcreteDefinition, Selector, GeneratorSelector),
         ):
@@ -5717,19 +2944,6 @@ class Repo:
                 "Query source must be Selector, Definition, ConcreteDefinition, Object, "
                 f"or None, not {type(selector).__name__}."
             )
-        if isinstance(selector, Selector) and _contains_state_selector(selector.root):
-            selector = prepare_selector(
-                selector.root,
-                scope=self,
-                strict=selector.strict,
-                cls_policy=selector.cls_policy,
-                exact_root=selector.exact_root,
-            )
-        elif (
-                selector is not None
-                and not isinstance(selector, GeneratorSelector)
-                and _contains_state_selector(selector)):
-            selector = prepare_selector(selector, scope=self).root
         candidates = (
             IdentityQuery.from_retained_repo_lookup(self)
             .sel(selector)
@@ -5941,34 +3155,6 @@ class Repo:
 
         with materialization_admission(operation="repo_apply_graph"):
             return apply_graph_objects(self, root, func, graph_options)
-
-    def set_main_def(self, main_def: ConcreteDefinition, store=None):
-        """Stage a concrete main definition in this Repo and selected Store.
-
-        Args:
-            main_def: ``ConcreteDefinition`` to make the default root.
-            store: Optional Store to receive the staged reference; defaults to
-                this Repo's default Store.
-
-        Raises:
-            TypeError: If ``main_def`` is not a concrete definition.
-            ValueError: If no Store is available.
-
-        Side Effects:
-            Changes the Repo cache only after validation and marks the Store for
-            its explicit reference-publication path.
-        """
-        if not isinstance(main_def, ConcreteDefinition):
-            raise TypeError("Main definition must be a ConcreteDefinition.")
-        if store is None:
-            store = self.default_store
-        if store is None:
-            raise ValueError("No store available to set main definition!")
-        from .store.records import DefinitionRecord, MainRefRecord
-
-        record = store.write_definition_record(DefinitionRecord(main_def))
-        store.write_main_ref(MainRefRecord(record.digest))
-        self.main_def = main_def
 
     def add_objects(self, *args, store=None):
         from dryml.runtime import materialization_admission
@@ -6341,15 +3527,15 @@ def save_object(
         states: Optional partial StateSpec or rooted LocalState assignments;
             explicit selections skip capture and other distinct nodes capture once.
         repo: Optional Repo or Store authority used for publication.
-        main: Whether to update the target Store's main definition after StateRef
+        main: Whether to update the target Store's main definition after saved Node
             authority is complete.
         store: Optional explicit whole-graph target Store.
-        alias: Optional object alias written after StateRef publication.
+        alias: Optional Store-local name for the saved graph.
         deep_capture: Whether to serialize every owned Serializable node.
         match_mode: Optional ``"first"`` or ``"all"`` routing override.
         graph_mode: Optional ``"per-object"`` or ``"closure"`` placement
             override local to this save.
-        report_stores: Whether to return a StoreReport with the StateRef.
+        report_stores: Whether to return a StoreReport with the SavedNode.
         source_store: Optional connected Store for explicit local-state sources.
         source_stores: Optional full-StateKey/connected-Store source overrides.
         annotations: Optional SaveAnnotations replacing supplied current object
@@ -6359,7 +3545,7 @@ def save_object(
         The complete SavedNode, or ``(SavedNode, StoreReport)`` when requested.
 
     Raises:
-        RepoSaveError: If bindings, claims, local state, or StateRef publication
+        RepoSaveError: If bindings, reservations, local state, or saved Node publication
             cannot complete.
         StoreAuthorityError: If the selected Store rejects authoritative writes.
         TypeError: If a supplied mode has the wrong type.

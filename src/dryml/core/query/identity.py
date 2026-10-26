@@ -10,12 +10,17 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 import hashlib
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 from ..definition import ConcreteDefinition
-from ..reference_values import ObjectRef, StateRef
+from ..node import Node
+from ..state_values import LocalState
 from ..utils.graph.path import GraphPath, graph_path_sort_key, normalize_path
 from .model import QueryCardinalityError, QueryDiagnostic
+
+if TYPE_CHECKING:
+    from .relationships import RelationshipPath
+    from .query import IdentityQuery, OccurrenceQuery
 
 
 IdentityKind = Literal["cdef", "object_ref", "state_ref", "local_state"]
@@ -98,16 +103,12 @@ def _identity_kind(value: object) -> IdentityKind:
         return "cdef"
     if isinstance(value, ConcreteDefinition):
         return "cdef"
-    if isinstance(value, ObjectRef):
-        return "object_ref"
-    if isinstance(value, StateRef):
-        return "state_ref"
     raise TypeError(
-        "Query V3 identity members must be ConcreteDefinition, ObjectRef, or StateRef."
+        "Query identity members must be Nodes, concrete definitions, or LocalStates."
     )
 
 
-def _identity_digest(value: ConcreteDefinition | ObjectRef | StateRef) -> str:
+def _identity_digest(value: ConcreteDefinition | Node | LocalState) -> str:
     from ..state_values import LocalState, StateKey
     if isinstance(value, (LocalState, StateKey)):
         key = value.key if isinstance(value, LocalState) else value
@@ -118,10 +119,10 @@ def _identity_digest(value: ConcreteDefinition | ObjectRef | StateRef) -> str:
     if isinstance(value, ConcreteDefinition):
         from ..node import _as_node_view
         return _as_node_view(value).exact_digest()
-    return value.digest()
+    raise TypeError("Unsupported query identity value.")
 
 
-def _canonical_tie(value: ConcreteDefinition | ObjectRef | StateRef) -> str:
+def _canonical_tie(value: ConcreteDefinition | Node | LocalState) -> str:
     """Return a token-free stable tie-breaker independent of the fast digest."""
 
     from ..node import Node
@@ -134,9 +135,7 @@ def _canonical_tie(value: ConcreteDefinition | ObjectRef | StateRef) -> str:
         from ..cdef_codec import cdef_graph_hash
 
         return cdef_graph_hash(value)
-    if isinstance(value, ObjectRef):
-        return value.definition.graph_hash() + ":" + value.digest()
-    return value.object.definition.graph_hash() + ":" + value.digest()
+    raise TypeError("Unsupported query identity value.")
 
 
 @dataclass(frozen=True, slots=True, repr=False, eq=False)
@@ -149,10 +148,10 @@ class IdentityKey:
 
     kind: IdentityKind
     digest: str
-    _value: ConcreteDefinition | ObjectRef | StateRef
+    _value: ConcreteDefinition | Node | LocalState
 
     @classmethod
-    def for_value(cls, value: ConcreteDefinition | ObjectRef | StateRef) -> "IdentityKey":
+    def for_value(cls, value: ConcreteDefinition | Node | LocalState) -> "IdentityKey":
         """Construct a complete key without changing ordinary value identity."""
 
         return cls(_identity_kind(value), _identity_digest(value), value)
@@ -184,7 +183,7 @@ class IdentityKey:
         return f"IdentityKey(kind={self.kind!r}, digest={self.digest[:16]!r})"
 
 
-def identity_key(value: ConcreteDefinition | ObjectRef | StateRef) -> IdentityKey:
+def identity_key(value: ConcreteDefinition | Node | LocalState) -> IdentityKey:
     """Return the complete private Query V3 key for one supported identity."""
 
     return IdentityKey.for_value(value)
@@ -206,17 +205,17 @@ class Occurrence:
     """One typed root-to-target occurrence retained independently of evidence.
 
     Args:
-        owner: Complete CDef, ObjectRef, or StateRef occurrence root.
+        owner: Node or concrete definition occurrence root.
         path: Immutable typed path from ``owner`` to ``target``.
-        target: Complete CDef, ObjectRef, or StateRef terminal.
+        target: Node or concrete definition terminal.
 
     Source provenance and traversal-hop details are evidence owned by
     :class:`OccurrenceSet`, not occurrence membership.
     """
 
-    owner: ConcreteDefinition | ObjectRef | StateRef
+    owner: ConcreteDefinition | Node
     path: GraphPath | "RelationshipPath"
-    target: ConcreteDefinition | ObjectRef | StateRef
+    target: ConcreteDefinition | Node
 
     def __post_init__(self) -> None:
         from .relationships import RelationshipPath
@@ -309,7 +308,7 @@ class IdentitySet:
     single combined prefix size.
 
     Args:
-        members: Complete CDefs, ObjectRefs, StateRefs, or values paired with
+        members: Nodes, concrete definitions, LocalStates, or values paired with
             detached source evidence.
         bounded: Whether an explicit terminal bound limits completeness.
         requested_limit: The terminal prefix limit when ``bounded`` is true.
@@ -331,8 +330,8 @@ class IdentitySet:
     def __init__(
         self,
         members: Iterable[
-            ConcreteDefinition | ObjectRef | StateRef
-            | tuple[ConcreteDefinition | ObjectRef | StateRef, SourceEvidence]
+            ConcreteDefinition | Node | LocalState
+            | tuple[ConcreteDefinition | Node | LocalState, SourceEvidence]
         ] = (),
         *,
         bounded: bool = False,
@@ -351,7 +350,7 @@ class IdentitySet:
             raise ValueError("IdentitySet requested_limit requires bounded=True.")
         entries: dict[
             IdentityKey,
-            tuple[ConcreteDefinition | ObjectRef | StateRef, IdentityEvidence],
+            tuple[ConcreteDefinition | Node | LocalState, IdentityEvidence],
         ] = {}
         for member in members:
             value, evidence = self._member_and_evidence(member)
@@ -390,7 +389,7 @@ class IdentitySet:
         result._entries = entries
         return result
 
-    def __iter__(self) -> Iterator[ConcreteDefinition | ObjectRef | StateRef]:
+    def __iter__(self) -> Iterator[ConcreteDefinition | Node | LocalState]:
         for key in _ordered_keys(self._entries):
             yield self._entries[key][0]
 
@@ -500,48 +499,29 @@ class IdentitySet:
 
         return IdentityQuery.from_set(self)
 
-    def object_projection(self) -> "ObjectSelectorSet":
+    def object_projection(self) -> "IdentitySet":
         """Project captured graph identities without reading external authority.
 
         Returns:
-            Node members produce a fixed IdentitySet of state-weakened Node
-            object projections. Retained fixed ObjectRef/StateRef adapters produce
-            ObjectSelectorSet. Recipe-only members are omitted; evidence from
+            A fixed IdentitySet of state-weakened Node object projections.
+            Recipe-only members are omitted; evidence from
             projections that collapse to one identity is merged.
 
         Side Effects:
             None. Projection reads no source and does not mutate authority.
         """
 
-        from ..reference_values import ObjectRef, StateRef
         from ..node import Node
 
-        if any(isinstance(value, Node) for value, _ in self._entries.values()):
-            members = {}
-            for source_key, (value, evidence) in self._entries.items():
-                if isinstance(value, Node) and source_key.kind in {"object_ref", "state_ref"}:
-                    projection = value.object_view()
-                    key = IdentityKey("object_ref", projection.exact_digest(), projection)
-                    old = members.get(key)
-                    members[key] = (projection, evidence) if old is None else (old[0], old[1].merged_with(evidence))
-            return IdentitySet._from_entries(members, bounded=self.bounded, requested_limit=self.requested_limit,
-                                             query_work=self._query_work)
-
-        entries = {}
-        for value, evidence in self._entries.values():
-            if not isinstance(value, (ObjectRef, StateRef)):
-                continue
-            selector = value.object_projection()
-            existing = entries.get(selector)
-            entries[selector] = (
-                selector,
-                evidence if existing is None else existing[1].merged_with(evidence),
-            )
-        return ObjectSelectorSet._from_entries(
-            entries,
-            bounded=self.bounded,
-            requested_limit=self.requested_limit,
-        )
+        members = {}
+        for source_key, (value, evidence) in self._entries.items():
+            if isinstance(value, Node) and source_key.kind in {"object_ref", "state_ref"}:
+                projection = value.object_view()
+                key = IdentityKey("object_ref", projection.exact_digest(), projection)
+                old = members.get(key)
+                members[key] = (projection, evidence) if old is None else (old[0], old[1].merged_with(evidence))
+        return IdentitySet._from_entries(members, bounded=self.bounded, requested_limit=self.requested_limit,
+                                         query_work=self._query_work)
 
     def union(self, other: "IdentitySet") -> "IdentitySet":
         """Merge fixed identities, evidence, bounds, and prior work provenance.
@@ -648,128 +628,6 @@ class IdentitySet:
 
     def __repr__(self) -> str:
         return repr(self.diagnostic())
-
-
-class ObjectSelectorSet:
-    """Fixed distinct object-graph selectors with detached source evidence.
-
-    Args:
-        members: ObjectSelectors, optionally paired with SourceEvidence.
-        bounded: Whether the source identity result was explicitly bounded.
-        requested_limit: Source identity prefix bound when present.
-
-    ObjectSelectorSet is a projected result domain rather than Store authority;
-    it cannot be turned back into an IdentityQuery.
-    """
-
-    __slots__ = ("_entries", "bounded", "requested_limit")
-
-    def __init__(
-        self,
-        members=(),
-        *,
-        bounded: bool = False,
-        requested_limit: int | None = None,
-    ):
-        from ..selector import ObjectSelector
-
-        if type(bounded) is not bool:
-            raise TypeError("ObjectSelectorSet bounded must be an exact bool.")
-        if requested_limit is not None and (
-                type(requested_limit) is not int or requested_limit < 0
-        ):
-            raise ValueError(
-                "ObjectSelectorSet requested_limit must be a non-negative exact int or None."
-            )
-        if requested_limit is not None and not bounded:
-            raise ValueError("ObjectSelectorSet requested_limit requires bounded=True.")
-        entries = {}
-        for member in members:
-            value, evidence = IdentitySet._member_and_evidence(member)
-            if not isinstance(value, ObjectSelector):
-                raise TypeError("ObjectSelectorSet members must be ObjectSelector values.")
-            existing = entries.get(value)
-            entries[value] = (
-                value,
-                evidence if existing is None else existing[1].merged_with(evidence),
-            )
-        self._entries = entries
-        self.bounded = bounded
-        self.requested_limit = requested_limit
-
-    @classmethod
-    def _from_entries(
-        cls, entries, *, bounded: bool, requested_limit: int | None = None,
-    ) -> "ObjectSelectorSet":
-        result = cls((), bounded=bounded, requested_limit=requested_limit)
-        result._entries = entries
-        return result
-
-    def __iter__(self):
-        yield from (
-            self._entries[key][0]
-            for key in sorted(
-                self._entries,
-                key=lambda selector: (
-                    selector.digest(), selector.reference.digest(),
-                ),
-            )
-        )
-
-    def __len__(self) -> int:
-        return len(self._entries)
-
-    def __contains__(self, selector: object) -> bool:
-        return selector in self._entries
-
-    def count(self) -> int:
-        """Return the number of distinct projected object graphs."""
-
-        return len(self)
-
-    def collect(self) -> "ObjectSelectorSet":
-        """Return this already fixed selector collection."""
-
-        return self
-
-    def exists(self) -> bool:
-        """Return whether this collection contains a selector."""
-
-        return bool(self)
-
-    def one(self):
-        """Return one selector or raise QueryCardinalityError otherwise."""
-
-        if len(self) != 1:
-            raise QueryCardinalityError(
-                f"Expected exactly one object selector, found {len(self)}."
-            )
-        return next(iter(self))
-
-    def one_or_none(self):
-        """Return zero or one selector while rejecting ambiguity."""
-
-        if len(self) > 1:
-            raise QueryCardinalityError(
-                f"Expected zero or one object selector, found {len(self)}."
-            )
-        return next(iter(self), None)
-
-    def evidence_for(self, selector):
-        """Return merged detached evidence for one projected selector."""
-
-        return self._entries[selector][1]
-
-    def sources(self, selector) -> frozenset[SourceEvidence]:
-        """Return detached sources contributing to one projected selector."""
-
-        return self.evidence_for(selector).sources
-
-    def __repr__(self) -> str:
-        return (
-            f"ObjectSelectorSet(count={len(self)}, bounded={self.bounded}, "
-            f"requested_limit={self.requested_limit!r})"
-        )
 
 
 class OccurrenceSet:

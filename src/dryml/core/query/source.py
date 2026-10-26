@@ -12,7 +12,6 @@ this layer owns neither request synchronization nor cross-terminal completion.
 
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Iterable
 
@@ -20,11 +19,8 @@ from ...paths import local_path_key
 from ..object import Object
 from ..definition import ConcreteDefinition
 from ..errors import ParameterizationLimitError
-from ..reference_values import ObjectRef, StateRef
-from ..store.records import DefinitionRecord
 from ..store.store import Store, StoreCapabilityError
 from .authority import (
-    CapturedStoreFacts,
     IdentityValue,
     _derive_identities,
     validate_captured_reference_authority,
@@ -220,10 +216,8 @@ class SourceCapture:
         self.refresh_action = "none"
         self.index_presentations: tuple[_IndexPresentation, ...] = ()
         self.scan_warning_emitted = False
-        self._facts: dict[str, CapturedStoreFacts] = {}
+        self._facts: dict[str, _NodeFacts] = {}
         self._node_stored_keys = {}
-        self._exact_states: dict[str, dict[str, StateRef | None]] = {}
-        self._exact_stored_cdefs: dict[str, set[object]] = {}
         self._topologies: dict[int, tuple[Store, ...]] = {}
         self._cache_knowledge: dict[tuple[int, bool], IdentitySet] = {}
         self._retained_cache_cdefs: dict[tuple[int, bool], tuple] = {}
@@ -368,7 +362,7 @@ class SourceCapture:
         Values may repeat across replicas and stages. Budget exhaustion raises
         QueryVerifyBudgetExceeded before any new candidate is admitted. Replacement
         cuts clear reusable admissions, never the cumulative spent count.
-        ``values`` supplies detached CDefs/ObjectRefs/StateRefs; unsupported values
+        ``values`` supplies detached Nodes and local states; unsupported values
         raise TypeError. Returns None and updates only terminal-local work state,
         without Store or index IO.
         """
@@ -413,33 +407,6 @@ class SourceCapture:
         """
 
         self.invalidate_admissions()
-        for store in stores:
-            key = store.authority_fence_key()
-            self._exact_states.pop(key, None)
-            self._exact_stored_cdefs.pop(key, None)
-
-    def inspect_index_main(self, store: Store) -> None:
-        """Validate current main's direct-root completeness inside a held fence.
-
-        ``store`` is a bounded producer whose authority fence the caller retains.
-        Main inspection is coverage IO, not identity admission. Missing/malformed
-        authoritative targets fail visibly; a valid main outside direct-root
-        coverage raises QueryIndexUnavailable for post-release fallback/refusal.
-        No inventory, payload read, or mutation occurs; returns None.
-        """
-
-        from .model import QueryIndexUnavailable
-
-        self._record_cut(store.authority_fence_key())
-        main = store.read_main_ref()
-        if main is None:
-            return
-        record = store.read_definition_record(main.definition_digest)
-        if record is None:
-            raise InventoryCapabilityError("Main-reference authority targets a missing definition record.")
-        if (type(store).read_stored_root_record is Store.read_stored_root_record
-                or store.read_stored_root_record(main.definition_digest) is None):
-            raise QueryIndexUnavailable("Current main-reference authority lacks direct stored-root authority proof.")
 
     def witness_budget(self):
         """Return the shared terminal-local GeneratorSelector witness counter.
@@ -489,7 +456,7 @@ class SourceCapture:
 
     def capture_store(
         self, source: StoreSource | Store, *, metadata_scopes: frozenset[str] = frozenset()
-    ) -> CapturedStoreFacts:
+    ) -> _NodeFacts:
         """Capture inventory and requested metadata under one authority fence.
 
         Growing metadata demand replaces earlier facts with a complete new cut;
@@ -509,63 +476,13 @@ class SourceCapture:
                 from .model import QueryError
                 raise QueryError("Store changed during complete query capture; start a new query.")
             return cached
-        if hasattr(store, "store_uuid"):
-            return self._capture_node_facts(store, metadata_scopes)
-        selective = cached is None and key in self._cut_domains
-        self.require_scan()
-        self._require_complete_inventory(store)
-        requested_scopes = metadata_scopes | (cached.metadata_scopes if cached else frozenset())
-        with store.authority_read_fence():
-            self.store_scan_count += 1
-            self._record_cut(key)
-            if cached is not None:
-                self.demand_recaptures += 1
-            main = store.read_main_ref()
-            definitions, stored_roots = store._validated_definition_root_inventory()
-            definition_by_digest = {record.digest: record.definition for record in definitions}
-            if main is not None:
-                main_definition = definition_by_digest.get(main.definition_digest)
-                if main_definition is None:
-                    raise InventoryCapabilityError("Main-reference authority targets a missing definition record.")
-            else:
-                main_definition = None
-            facts = CapturedStoreFacts.build(
-                definitions=definitions,
-                stored_roots=stored_roots,
-                declarations=store.iter_declaration_records(),
-                state_refs=store.iter_state_ref_records(),
-                object_aliases=store.iter_object_alias_records(),
-                state_aliases=store.iter_state_alias_records(),
-                main_definition=main_definition,
-                source=SourceEvidence.from_source(store.authority_fence_key()),
-            )
-            if requested_scopes:
-                facts = facts.with_metadata(
-                    self._capture_metadata(store, facts, requested_scopes),
-                    scopes=requested_scopes,
-                )
-        exact = self._exact_states.pop(key, {})
-        exact_cdefs = self._exact_stored_cdefs.pop(key, set())
-        if cached is not None or selective:
-            self.invalidate_admissions()
-        exact_changed = False
-        if exact:
-            current_states = {record.digest: record.state_ref for record in facts.state_refs}
-            exact_changed = any(
-                previous != current_states.get(digest) for digest, previous in exact.items()
-            )
-        self._facts[key] = facts
-        if self.active and (exact_changed or any(
-            not facts.is_stored(identity._value) for identity in exact_cdefs
-        )):
-            raise _SourceRecapture(True)
-        if cached is not None and self.active:
-            raise _SourceRecapture(_cut_invalidated(cached, facts))
-        return facts
+        if not hasattr(store, "store_uuid"):
+            raise StoreCapabilityError("Query capture requires a Node Store authority.")
+        return self._capture_node_facts(store, metadata_scopes)
 
     def capture_stores(
         self, sources: Iterable[StoreSource | Store], *, metadata_scopes: frozenset[str] = frozenset()
-    ) -> tuple[CapturedStoreFacts, ...]:
+    ) -> tuple[_NodeFacts, ...]:
         """Capture and validate the complete selected authority combination.
 
         Duplicate fence domains share facts. Sorted domain/token keys reuse only
@@ -589,138 +506,6 @@ class SourceCapture:
             validate_captured_reference_authority(facts)
             self._validated_combinations.add(combination)
         return facts
-
-    def read_exact_state(self, source: StoreSource | Store, target: StateRef) -> StateRef | None:
-        """Read one complete exact StateRef without requiring broad inventory.
-
-        A digest-addressed positive proves independent saved-state membership
-        for this source only. A miss does not exclude embedded or projected
-        knowledge: callers need complete capture before a negative live answer.
-        This selective proof is separate from complete captured inventory.
-        The target is admitted to the effective verification budget before the
-        direct check, including a miss; replicas share the same identity charge.
-        Budget exhaustion raises QueryVerifyBudgetExceeded before record IO.
-        """
-
-        store = source.store if isinstance(source, StoreSource) else source
-        if not isinstance(store, Store):
-            raise TypeError("Exact state lookup requires a Store or StoreSource.")
-        if not isinstance(target, StateRef):
-            raise TypeError("Exact state lookup requires a StateRef.")
-        key = store.authority_fence_key()
-        digest = target.digest()
-        self.reserve((target,))
-        if key in self._facts:
-            record = next(
-                (item for item in self._facts[key].state_refs if item.digest == digest), None
-            )
-        elif digest in self._exact_states.get(key, {}):
-            value = self._exact_states[key][digest]
-            if value is not None and value != target:
-                raise InventoryCapabilityError("Exact StateRef authority is incompatible with its digest.")
-            return value
-        else:
-            with store.authority_read_fence():
-                self._record_cut(key)
-                record = store.read_state_ref_record(digest)
-        if record is None:
-            if key not in self._facts:
-                self._exact_states.setdefault(key, {})[digest] = None
-            return None
-        if record.state_ref != target:
-            raise InventoryCapabilityError("Exact StateRef authority is incompatible with its digest.")
-        if key not in self._facts:
-            self._exact_states.setdefault(key, {})[digest] = record.state_ref
-        return record.state_ref
-
-    def read_exact_stored_cdef(
-        self, source: StoreSource | Store, target: ConcreteDefinition,
-    ) -> ConcreteDefinition | None:
-        """Use complete direct root authority for a positive exact CDef hit.
-
-        Args:
-            source: Store authority to inspect under its read fence.
-            target: Graph-exact CDef whose direct root marker is requested.
-
-        Returns:
-            The validated stored root or ``None`` if direct proof is unavailable.
-
-        Raises:
-            TypeError: If source or target has an unsupported type.
-            InventoryCapabilityError: If direct marker and definition disagree.
-            QueryVerifyBudgetExceeded: Before a new target exceeds the effective
-                cumulative admission budget, without direct record IO.
-
-        A missing direct marker is not a negative V3 answer: declarations,
-        snapshots, aliases, and main references may establish stored authority,
-        so callers must fall back to complete inventory. Backends inheriting the
-        optional iterator-based direct reader also use that fallback. This
-        method reads only direct authority and never changes the Store.
-        """
-
-        store = source.store if isinstance(source, StoreSource) else source
-        if not isinstance(store, Store) or not isinstance(target, ConcreteDefinition):
-            raise TypeError("Exact stored CDef lookup requires a Store and CDef.")
-        if type(store).read_stored_root_record is Store.read_stored_root_record:
-            return None
-        self.reserve((target,))
-        key = store.authority_fence_key()
-        if key in self._facts:
-            return target if self._facts[key].is_stored(target) else None
-        digest = DefinitionRecord(target).digest
-        with store.authority_read_fence():
-            self._record_cut(key)
-            marker = store.read_stored_root_record(digest)
-            if marker is None:
-                return None
-            record = store.read_definition_record(digest)
-            if record is None or not record.definition.graph_equal(target):
-                raise InventoryCapabilityError("Exact stored CDef authority is incompatible.")
-        self._exact_stored_cdefs.setdefault(key, set()).add(identity_key(record.definition))
-        return record.definition
-
-    def has_exact_stored_cdef(self, source: StoreSource | RepoSource, value: ConcreteDefinition) -> bool:
-        """Return whether this cut already verified an exact stored root.
-
-        Args:
-            source: Normalized Store or Repo scope for prior direct reads.
-            value: Candidate CDef to check by complete graph identity.
-
-        Returns:
-            Whether a matching positive marker was verified in this terminal.
-            Repo scopes require a nonempty topology and proof from every Store.
-
-        Side Effects:
-            None. This does not reread or change Store authority.
-        """
-
-        if isinstance(source, RepoSource):
-            return self.has_exact_stored_cdef_for_repo(source.repo, value)
-        return identity_key(value) in self._exact_stored_cdefs.get(
-            source.store.authority_fence_key(), set(),
-        )
-
-    def has_exact_stored_cdef_for_repo(self, repo, value: ConcreteDefinition) -> bool:
-        """Return whether every selected Store directly proved this stored CDef.
-
-        Args:
-            repo: Repo whose first terminal topology was retained.
-            value: Complete CDef identity selected for stored membership.
-
-        Returns:
-            True only when at least one Store is connected and every selected
-            authority fence has a verified positive root marker.
-
-        Side Effects:
-            None. This checks terminal-local evidence without Store access.
-        """
-
-        stores = self.repo_stores(repo)
-        return bool(stores) and all(
-            identity_key(value) in self._exact_stored_cdefs.get(
-                store.authority_fence_key(), set(),
-            ) for store in stores
-        )
 
     def capture_repo(
         self, source: RepoSource, *, metadata_scopes: frozenset[str] = frozenset()
@@ -777,11 +562,6 @@ class SourceCapture:
                     continue
                 seen.add(key)
                 evidence = SourceEvidence.from_source(key)
-                if exact_cdef is not None:
-                    value = self.read_exact_stored_cdef(store, exact_cdef)
-                    if value is not None:
-                        members.append((value, evidence))
-                        continue
                 facts = self.capture_store(store)
                 for value in facts._authoritative_root_definitions():
                     if exact_cdef is None or value.graph_equal(exact_cdef):
@@ -797,81 +577,6 @@ class SourceCapture:
                 for value in (*strong, *weak)
             )
         return IdentitySet(members)
-
-    @staticmethod
-    def _capture_metadata(store: Store, facts: CapturedStoreFacts, scopes: frozenset[str]):
-        """Detach requested fields for eligible targets while the fence is held."""
-
-        holders = {identity_key(record.object_ref) for record in facts.declarations}
-        stored_states = {identity_key(record.state_ref): record for record in facts.state_refs}
-        for record in facts.state_refs:
-            root = record.state_ref.object
-            holders.add(identity_key(root))
-            for path in root.objects:
-                holders.add(identity_key(root.at(path)))
-
-        snapshot_cache = {}
-
-        def snapshot_for(record):
-            if record.digest not in snapshot_cache:
-                try:
-                    snapshot_cache[record.digest] = store.read_snapshot_metadata(record.digest)
-                except Exception:
-                    snapshot_cache[record.digest] = _MetadataReadFailure()
-            return snapshot_cache[record.digest]
-
-        fallback_lineages = None
-
-        def snapshot_lineages():
-            nonlocal fallback_lineages
-            if fallback_lineages is None:
-                fallback_lineages = {}
-                for record in facts.state_refs:
-                    snapshot = snapshot_for(record)
-                    if isinstance(snapshot, _MetadataReadFailure):
-                        raise StoreCapabilityError("Query V3 snapshot lineage read failed.")
-                    if snapshot is not None:
-                        for lineage in snapshot.lineages.values():
-                            fallback_lineages.setdefault(identity_key(lineage.object_ref), lineage)
-            return fallback_lineages
-
-        captured = []
-        for value in facts.knowledge():
-            key = identity_key(value)
-            if isinstance(value, ObjectRef) and key in holders:
-                if "object" in scopes:
-                    try:
-                        captured.append((key, "object", deepcopy(store.read_metadata(value))))
-                    except Exception:
-                        captured.append((key, "object", _MetadataReadFailure()))
-                if "lineage" in scopes:
-                    try:
-                        lineage = store.read_lineage_metadata(value)
-                        if lineage is None:
-                            lineage = snapshot_lineages().get(key)
-                        from ..metadata import LineageMetadata
-
-                        captured.append((
-                            key, "lineage",
-                            LineageMetadata(value, "unknown", None) if lineage is None else lineage,
-                        ))
-                    except Exception:
-                        captured.append((key, "lineage", _MetadataReadFailure()))
-            if not isinstance(value, StateRef) or key not in stored_states:
-                continue
-            if "state" in scopes:
-                try:
-                    captured.append((key, "state", deepcopy(store.read_metadata(value))))
-                except Exception:
-                    captured.append((key, "state", _MetadataReadFailure()))
-            if "snapshot" in scopes:
-                snapshot = snapshot_for(stored_states[key])
-                captured.append((
-                    key, "snapshot",
-                    snapshot if snapshot is not None and not isinstance(snapshot, _MetadataReadFailure)
-                    and snapshot.state_ref == value else _MetadataReadFailure(),
-                ))
-        return tuple(captured)
 
     def _capture_node_facts(self, store, metadata_scopes):
         """Use the same current-format consumer for complete algebra/scope facts."""
@@ -949,56 +654,10 @@ class SourceCapture:
                 raise _SourceRecapture(changed)
         return facts
 
-    @staticmethod
-    def _require_complete_inventory(store: Store) -> None:
-        capabilities = store._query_v3_inventory_capabilities()
-        missing = [
-            name for name in capabilities.__dataclass_fields__
-            if getattr(capabilities, name) == "unsupported"
-        ]
-        if missing:
-            raise InventoryCapabilityError(
-                "Store cannot provide complete Query V3 inventory for required authority families."
-            )
-
-
-def _cut_invalidated(old: CapturedStoreFacts, new: CapturedStoreFacts) -> bool:
-    """Compare earlier authoritative facts and mutable demand without rendering data."""
-
-    def record_keys(facts):
-        return (
-            tuple(record.digest for record in facts.definitions),
-            tuple(record.definition_digest for record in facts.stored_roots),
-            tuple(record.digest for record in facts.declarations),
-            tuple(record.digest for record in facts.state_refs),
-            tuple((record.alias, record.object_ref.digest()) for record in facts.object_aliases),
-            tuple((record.alias, record.object_ref.digest(), record.state_ref_digest)
-                  for record in facts.state_aliases),
-            None if facts.main_definition is None else facts.main_definition.graph_hash(),
-        )
-
-    if record_keys(old) != record_keys(new):
-        return True
-    from ..metadata import encode_metadata_mapping
-
-    def comparable(value):
-        if isinstance(value, dict):
-            return encode_metadata_mapping(value)
-        return value
-
-    for key, scope, value in old.metadata:
-        try:
-            current = new.captured_metadata(key._value, scope)
-        except KeyError:
-            return True
-        if type(value) is not type(current) or comparable(value) != comparable(current):
-            return True
-    return False
-
-
 def _cache_values(repo, *, weak: bool) -> tuple[IdentityValue, ...]:
     """Read retained cache facts without constructing, saving, or capturing state."""
 
+    from ..node import Node
     caches = (repo.strong_obj_cache, repo.weak_obj_cache) if weak else (repo.strong_obj_cache,)
     values: list[IdentityValue] = []
     for cache in caches:
@@ -1006,13 +665,9 @@ def _cache_values(repo, *, weak: bool) -> tuple[IdentityValue, ...]:
             if not isinstance(value, Object):
                 continue
             values.append(value.definition)
-            reference = value.object_ref
-            if isinstance(reference, ObjectRef):
-                from ..node import _as_node_view
-                values.append(_as_node_view(value.definition).with_realization(identities=reference.objects))
+            values.append(value._identity_node)
             receipt = value.last_state_ref
-            from ..node import Node
-            if isinstance(receipt, Node) or isinstance(receipt, StateRef) and receipt.object == reference:
+            if isinstance(receipt, Node):
                 values.append(receipt)
     return tuple(values)
 

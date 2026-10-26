@@ -2,9 +2,7 @@ import pytest
 
 from dryml.core import Definition, Object, Repo, Serializable, SKIP_ARGS
 from dryml.core.query import EdgePolicy
-from dryml.core.query.sqlite.index import SQLiteQueryIndexReadView
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import DefinitionRecord, MainRefRecord
 
 pytestmark = pytest.mark.usefixtures("fixed_snapshot_environment")
 
@@ -25,23 +23,18 @@ class CountingStore(DirStore):
     def __init__(self, store):
         super().__init__(store.base_dir, query_index=store.query_index)
         self.definition_read_count = 0
-        self.hydrate_count = 0
         self.restore_count = 0
 
-    def read_definition_record(self, digest):
+    def read_node(self, digest, *, kind="recipe"):
         self.definition_read_count += 1
-        return super().read_definition_record(digest)
+        return super().read_node(digest, kind=kind)
 
     def catalog_key(self):
         return f"{DirStore.__module__}.{DirStore.__qualname__}:{self.base_dir}"
 
-    def iter_definition_records(self):
-        self.hydrate_count += 1
-        return super().iter_definition_records()
-
-    def open_local_state(self, graph_hash, state_hash):
+    def read_states(self, *args, **kwargs):
         self.restore_count += 1
-        return super().open_local_state(graph_hash, state_hash)
+        return super().read_states(*args, **kwargs)
 
 
 def test_equivalent_broad_v3_workload_captures_each_query_cut_once(tmp_path):
@@ -55,7 +48,6 @@ def test_equivalent_broad_v3_workload_captures_each_query_cut_once(tmp_path):
     for _ in range(2):
         stats = repo2.query().cdefs().stored().explain(analyze=True)
         assert stats.result_count == stats.store_scan_count == 1
-    assert counting.hydrate_count == 0  # no legacy DefinitionRecord inventory
 
 
 def test_u2_completed_exact_positive_has_no_maintenance_inventory(tmp_path, monkeypatch):
@@ -68,11 +60,11 @@ def test_u2_completed_exact_positive_has_no_maintenance_inventory(tmp_path, monk
     counting = CountingStore(store)
     query = counting.query().refresh(True)
     query.count()
-    counting.hydrate_count = counting.definition_read_count = 0
+    counting.definition_read_count = 0
     monkeypatch.setattr(counting.open_query_index(), "refresh", lambda *a, **kw: pytest.fail("completed request refreshed"))
     stats = query.sel(root).cdefs().stored().explain(analyze=True)
     assert stats.result_count == 1 and stats.store_scan_count == 0
-    assert stats.cdef_blobs_decoded == 1 and counting.hydrate_count == counting.definition_read_count == 0
+    assert stats.cdef_blobs_decoded == 1 and counting.definition_read_count == 0
 
 
 def test_v3_broad_query_does_not_restore_payloads(tmp_path):
@@ -117,7 +109,6 @@ def test_indexed_concrete_recipe_lookup_avoids_broad_hydration(tmp_path):
     assert stats.result_count == 1 and stats.cdef_blobs_decoded == 1 and stats.store_scan_count == 0
     assert stats.candidate_rows_read == 1
     assert counting.definition_read_count == 0
-    assert counting.hydrate_count == 0
 
 
 def test_exact_v3_query_reads_only_direct_definition_authority(tmp_path):
@@ -132,7 +123,6 @@ def test_exact_v3_query_reads_only_direct_definition_authority(tmp_path):
     stats = repo2.query().sel(obj.definition).cdefs().stored().explain(analyze=True)
     assert stats.result_count == 1 and stats.cdef_blobs_decoded == 1 and stats.store_scan_count == 0
     assert counting.definition_read_count == 0
-    assert counting.hydrate_count == 0
     assert counting.restore_count == 0
 
 
@@ -165,7 +155,6 @@ def test_v3_broad_save_query_records_its_expanded_inventory_cost(tmp_path):
 
     stats = repo.query().cdefs().stored().explain(analyze=True)
     assert stats.result_count == 1 and stats.store_scan_count == 0
-    assert counting.hydrate_count == 0
 
 
 def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
@@ -185,14 +174,8 @@ def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
     first.rebuild_query_index()
     second.rebuild_query_index()
     monkeypatch.setattr(
-        first,
-        "iter_definition_records",
-        lambda: pytest.fail("bounded query scanned first Store authority"),
-    )
-    monkeypatch.setattr(
-        second,
-        "iter_definition_records",
-        lambda: pytest.fail("bounded query scanned second Store authority"),
+        "dryml.core.query.authority.capture_store_projection",
+        lambda *a, **kw: pytest.fail("bounded query scanned Store authority"),
     )
     result = Repo((first, second)).query().cdefs().stored().require_indexed().max_verify(3).take(3)
 
@@ -218,10 +201,8 @@ def test_reference_validation_visits_roots_linearly_per_selected_cut(
         tmp_path, monkeypatch, root_count):
     """Candidate filtering does not repeatedly validate the selected root set."""
 
-    from dryml.core import ObjectId, ObjectRef
-    from dryml.core.query import authority, source
-    from dryml.core.store.records import DeclarationRecord
-    from dryml.core.utils.graph.path import GraphPath
+    from dryml.core import ObjectId
+    from dryml.core.query import source
 
     store = DirStore(tmp_path / "store", query_index="sqlite")
     for index in range(root_count):

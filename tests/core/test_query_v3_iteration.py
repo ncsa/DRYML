@@ -9,14 +9,13 @@ import weakref
 
 import pytest
 
-from dryml.core import Definition, Object, ObjectId, ObjectRef, Repo, SaveAnnotations, Serializable, StateRef
+from dryml.core import Definition, LocalState, Object, ObjectId, Repo, SaveAnnotations, Serializable, StateKey
 from dryml.core.query import IdentitySet, QueryError, QueryIndexUnavailable, QueryVerifyBudgetExceeded, QueryWouldScanError, field
 from dryml.core.query import query as query_module
 from dryml.core.query.identity import identity_key
 from dryml.core.query.query import IdentityQuery
 from dryml.core.query.source import SourceCapture, _SourceRecapture
 from dryml.core.store.dir import DirStore
-from dryml.core.utils.graph.path import GraphPath
 
 
 class IterationLeaf(Serializable):
@@ -150,9 +149,9 @@ def test_identity_iterator_explicitly_closes_its_delegated_matching_generator(mo
 def test_iterator_keeps_complete_identity_order_deduplication_and_reference_values():
     """All identity kinds retain the same deterministic order as fixed collection."""
     cdef = _values()[0]
-    first = ObjectRef(cdef, {GraphPath(): ObjectId()})
-    second = ObjectRef(cdef, {GraphPath(): ObjectId()})
-    state = StateRef(first, {GraphPath(): 'pkl-' + '1' * 64})
+    first = cdef.with_identity(ObjectId())
+    second = cdef.with_identity(ObjectId())
+    state = first.with_state(LocalState(StateKey(cdef.creation_digest(), 'pkl-' + '1' * 64), cdef.creation_view()))
     query = IdentitySet((state, second, cdef, first, first)).query()
     assert tuple(query.iter()) == tuple(query.collect())
     assert set(map(identity_key, query.object_refs().iter())) == {identity_key(first), identity_key(second)}

@@ -9,10 +9,9 @@ content writes, readiness checks, and staged validation remain required.
 
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from collections import defaultdict
-from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import os
@@ -22,12 +21,11 @@ import sys
 import time
 from uuid import uuid4
 
-from ...cdef_graph import ConcreteDefinitionGraph, EdgeKind, as_query_index_graph
+from ...cdef_graph import EdgeKind, as_query_index_graph
 from ...definition import ConcreteDefinition
 from ..codecs import (
     QueryIndexCodec,
     digest_blob,
-    encode_reference,
 )
 from ..fingerprint import canonical_class_key, target_local_fingerprint
 from ..model import (
@@ -58,7 +56,7 @@ from ..identity import identity_key
 from ..relationships import iter_direct_relationships, relationship_closure
 from ..utils import cdef_equal, chunked, feature_token_equal, stable_hash_from_blob, stable_hash_to_blob
 from . import SQLiteQueryIndexConfig, require_sqlite
-from .connection import SQLiteConnectionManager, _open_connection
+from .connection import SQLiteConnectionManager
 from .schema import (SQLITE_QUERY_INDEX_SCHEMA_VERSION, STORE_COVERAGE_VERSION,
                      STORE_PROJECTION_FAMILIES, STORE_UNAVAILABLE_FAMILIES,
                      initialize_schema, stored_compatibility_decision, validate_schema)
@@ -69,7 +67,6 @@ from ....locking import LockError, try_lock_file, unlock_file
 
 
 _CODEC = QueryIndexCodec()
-_REBUILD_BATCH_SIZE = 500
 _BUILD_CLAIM_STALE_SECONDS = 300.0
 _BUILD_CLAIM_WAIT_SECONDS = 30.0
 
@@ -97,18 +94,6 @@ def _store_intent_data_digest(data):
     data["status"] = "classified"
     data["persistence_confirmed"] = True
     return hashlib.sha256(b"dryml-store-projection-receipt/v1\0" + _json_bytes(data)).digest()
-
-
-@dataclass
-class _ReconcileProgress:
-    """Attempt-local phase evidence retained by the reporting wrapper on failure."""
-
-    stats: QueryStats
-    issues: list[ValidationIssue] = field(default_factory=list)
-    definitions_scanned: int = 0
-    validated: bool = False
-    activated: bool = False
-    generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -766,18 +751,6 @@ class SQLiteStoreQueryIndex:
                 return ValidationReport("sqlite", self.source_key, True, ())
             except Exception as error:
                 return ValidationReport("sqlite", self.source_key, False, (ValidationIssue("error", str(error)),))
-        if thorough and self.store is not None:
-            try:
-                self._assert_sidecar_rebuildable()
-                return self._validate_ready_authority(_ReconcileProgress(QueryStats()))
-            except (QueryIndexDirty, QueryIndexIncompatible) as error:
-                return ValidationReport("sqlite", self.source_key, False, (
-                    ValidationIssue("error", str(error)),
-                ))
-            except Exception as error:
-                return ValidationReport("sqlite", self.source_key, False, (
-                    ValidationIssue("error", "SQLite query index validation failed.", repr(error)),
-                ))
         issues: list[ValidationIssue] = []
         diagnostics = {}
         if self._is_dirty():
@@ -807,7 +780,6 @@ class SQLiteStoreQueryIndex:
             if thorough:
                 self._validate_decodable_rows(con, issues)
                 self._validate_stored_roots(con, issues)
-                self._validate_store_roots(con, issues)
                 if not _v3_projection_is_complete(con):
                     issues.append(ValidationIssue("error", "Query V3 projection coverage is incomplete."))
             counts = _row_counts(con)
@@ -939,8 +911,8 @@ class SQLiteStoreQueryIndex:
         Args:
             policy: False for no work, auto for readiness recovery, or True/always
                 for an explicit validation cycle. Ready Store-4 cycles check compact
-                authority/coverage certificates; standalone legacy indexes retain
-                their strict graph-exact reconciliation cycle.
+                authority/coverage certificates. Explicit reconciliation requires
+                an owning format-4 Store; standalone indexes are populated manually.
             stats: Optional QueryStats retaining started inventories even on error.
             scan_admission: Optional zero-argument inventory admission callback for
                 the current-format query consumer; refusal precedes rebuild IO.
@@ -967,8 +939,7 @@ class SQLiteStoreQueryIndex:
                 stats.refresh_action = "sqlite-validate"
             return
         if policy is True or policy == "always":
-            self._reconcile_cycle(_ReconcileProgress(stats if stats is not None else QueryStats()))
-            return
+            raise QueryIndexUnavailable("Explicit reconciliation requires an owning format-4 Store.")
         self._assert_sidecar_rebuildable()
         status = self.status()
         if status.state in {"missing", "dirty", "building", "incompatible", "corrupt"}:
@@ -977,17 +948,15 @@ class SQLiteStoreQueryIndex:
         self._ensure_ready()
 
     def rebuild(self, *, stats: QueryStats | None = None, quarantine_existing: bool = False, force: bool = True) -> None:
-        """Recreate this SQLite index from the owning Store's root definitions.
+        """Recreate this SQLite index from the owning format-4 Store's authority.
 
         Rebuilds acquire a sidecar build claim so concurrent callers do not all
         scan the Store. They preflight all authoritative roots, validate a
         complete sibling sidecar while it is `building`, then atomically replace
         the active sidecar. Store roots are never changed by rebuild or recovery.
-        Authority capture shares validated definitions with root-marker and
-        reference projection consumers. Subsequent standalone index validation
-        retains its complete checks rather than a cross-cut authority cache.
-        Empty captured dirty-token sets skip cleanup-only authority reads without
-        skipping root-row metadata checks or staged validation.
+        Standalone manually populated indexes have no authoritative source and
+        cannot be rebuilt. Authority capture validates current Node memberships,
+        state buckets and lifecycle records without payload IO.
 
         Args:
             stats: QueryStats or None, updated before authority capture,
@@ -1018,13 +987,7 @@ class SQLiteStoreQueryIndex:
         if self._store_projection:
             self.maintain_store(rebuild=force, stats=stats, quarantine_existing=quarantine_existing)
             return
-        self._assert_sidecar_rebuildable()
-        with self._build_claim(force=force) as acquired:
-            if not acquired:
-                if stats is not None:
-                    stats.refresh_action = "sqlite-rebuild-wait"
-                return
-            self._rebuild_owned(stats=stats, quarantine_existing=quarantine_existing)
+        raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning format-4 Store.")
 
     def reconcile(self) -> ReconcileReport:
         """Report one strict reconciliation attempt against Store authority.
@@ -1062,411 +1025,16 @@ class SQLiteStoreQueryIndex:
                 "rebuild" if stats.store_scan_count else "replay", before.generation, after.generation,
                 validated=not issues, issues=issues,
                 diagnostics={"store_scan_count": stats.store_scan_count, "refresh_action": stats.refresh_action})
-        before = None
-        progress = _ReconcileProgress(QueryStats())
-        try:
-            before = self.status()
-            self._reconcile_cycle(progress)
-        except Exception as exc:
-            progress.issues.append(ValidationIssue("error", "SQLite query-index reconciliation failed.", repr(exc)))
         return ReconcileReport(
             backend="sqlite",
             store_key=self.source_key,
-            changed=progress.activated,
-            action=("rebuild" if progress.stats.refresh_action == "sqlite-rebuild"
-                    else "validate" if progress.stats.refresh_action == "sqlite-validate"
-                    else "none"),
-            generation_before=None if before is None else before.generation,
-            generation_after=(progress.generation if progress.generation is not None
-                              else None if before is None else before.generation),
-            definitions_scanned=progress.definitions_scanned,
-            validated=progress.validated,
-            issues=tuple(progress.issues),
-            diagnostics={"store_scan_count": progress.stats.store_scan_count,
-                         "refresh_action": progress.stats.refresh_action},
+            changed=False,
+            action="none",
+            generation_before=None,
+            generation_after=None,
+            validated=False,
+            issues=(ValidationIssue("error", "Reconciliation requires an owning format-4 Store."),),
         )
-
-    def _reconcile_cycle(self, progress: _ReconcileProgress) -> None:
-        """Validate a stable candidate or own a fully acknowledged replacement."""
-        self._assert_sidecar_rebuildable()
-        before = self.status()
-        if before.state == "ready":
-            try:
-                report = self._validate_ready_authority(progress)
-            except (QueryIndexDirty, QueryIndexCorrupt, QueryIndexIncompatible) as error:
-                progress.issues.append(ValidationIssue("error", "SQLite candidate validation failed.", repr(error)))
-            else:
-                if report.ok:
-                    return
-        # No fence or reader may survive into claim acquisition or waiting.
-        with self._build_claim(force=True) as acquired:
-            self._assert_sidecar_rebuildable()
-            if acquired:
-                self._rebuild_owned(stats=progress.stats, progress=progress,
-                                    quarantine_existing=before.state in {"corrupt", "incompatible"})
-                return
-        try:
-            report = self._validate_ready_authority(progress)
-        except (QueryIndexDirty, QueryIndexCorrupt) as error:
-            raise QueryIndexBusy("Current SQLite candidate is not stable after a declined build claim; retry reconciliation.") from error
-        if not report.ok:
-            raise QueryIndexBusy("Current SQLite candidate still diverges under another build claimant; retry reconciliation.")
-
-    def _validate_ready_authority(self, progress: _ReconcileProgress) -> ValidationReport:
-        """Compare one fenced inventory with a leased non-repairing transaction."""
-        if self.store is None:
-            raise QueryIndexUnavailable("Explicit SQLite reconciliation requires an owning Store.")
-        from ..source import SourceCapture
-
-        with self.store.authority_read_fence(), self._retained_read_view() as view:
-            progress.stats.store_scan_count += 1
-            progress.stats.refresh_action = "sqlite-validate"
-            facts = SourceCapture().capture_store(self.store)
-            roots = self._preflight_store_roots(facts=facts)
-            progress.definitions_scanned += len(roots)
-            progress.validated = True
-            progress.generation = view.generation
-            con = view._con
-            issues: list[ValidationIssue] = []
-            try:
-                self._validate_candidate_contents(con, issues, roots=roots)
-                counts = _row_counts(con)
-                # A WAL writer can advance metadata behind the retained snapshot.
-                # Inspect the active destination without releasing our cut/view.
-                with _open_connection(self.config, readonly=True) as active:
-                    current = active.execute(
-                        "SELECT index_uuid, generation, build_state, dirty, store_key "
-                        "FROM catalog_state WHERE singleton = 1"
-                    ).fetchone()
-                if (current != (view.index_uuid, view.generation, "ready", 0, self.source_key)
-                        or view.file_identity != self._connections._path_identity()
-                        or self._is_dirty()):
-                    raise QueryIndexDirty("SQLite destination changed during reconciliation validation.")
-            except require_sqlite().Error as error:
-                if is_sqlite_busy_error(error):
-                    raise QueryIndexBusy("SQLite reconciliation validation is busy; retry.") from error
-                raise QueryIndexCorrupt("SQLite reconciliation validation failed.") from error
-            finally:
-                progress.issues.extend(issues)
-            return ValidationReport("sqlite", self.source_key,
-                                    not any(issue.severity == "error" for issue in issues),
-                                    tuple(issues), row_counts=counts)
-
-    def _rebuild_owned(self, *, stats: QueryStats | None = None, quarantine_existing: bool = False,
-                       progress: _ReconcileProgress | None = None) -> None:
-        if self.store is None or not hasattr(self.store, "iter_definition_records"):
-            raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store with iter_definition_records().")
-        compatibility = self._assert_sidecar_rebuildable()
-
-        generation_seed = self._replacement_generation_seed()
-        if stats is not None:
-            stats.store_scan_count += 1
-            stats.refresh_action = "sqlite-rebuild"
-        try:
-            roots, reference_rows, metadata_rows, dirty_markers = self._capture_authority_cut()
-        except Exception:
-            self._mark_dirty()
-            raise
-        if progress is not None:
-            progress.definitions_scanned += len(roots)
-
-        replacement_path = self._replacement_path()
-        replacement = SQLiteStoreQueryIndex(
-            source_key=self.source_key,
-            path=replacement_path,
-            config=replace(self.config, path=replacement_path),
-            canonical_version=self.canonical_version,
-            store=self.store,
-        )
-        scanned = 0
-        visible_progress = compatibility == "rebuild"
-        if visible_progress:
-            print("DRYML query index metadata is older; rebuilding derived index from Store authority.", file=sys.stderr, flush=True)
-        try:
-            replacement.initialize_empty(build_state="building", generation=generation_seed)
-            for cdefs in chunked(roots, _REBUILD_BATCH_SIZE):
-                scanned += len(cdefs)
-                if visible_progress:
-                    print(f"DRYML query index rebuild progress: {scanned}/{len(roots)} roots", file=sys.stderr, flush=True)
-                graph = ConcreteDefinitionGraph.for_query_index_roots(cdefs)
-                replacement._register_stored_roots(graph, cdefs, require_ready=False)
-            replacement._register_reference_rows(
-                reference_rows, require_ready=False, replace=True,
-            )
-            replacement._register_metadata_rows(
-                metadata_rows, require_ready=False, replace=True,
-            )
-            replacement.close()
-            self._checkpoint_and_cleanup_sidecars(replacement_path, label="staged")
-            if progress is not None:
-                progress.validated = True
-            replacement._validate_rebuild_before_ready(roots=roots)
-            replacement._set_build_state("ready")
-            con = replacement._connections.connection(readonly=False)
-            con.execute("PRAGMA optimize")
-            replacement_generation = _read_generation(con)
-            replacement.close()
-            self._checkpoint_and_cleanup_sidecars(replacement_path, label="staged")
-            SQLiteConnectionManager._close_idle_current_process_for_path(self.path)
-            self._checkpoint_and_cleanup_sidecars(
-                self.path,
-                label="canonical",
-                allow_corrupt=quarantine_existing,
-            )
-            replacement_identity = replacement._connections._path_identity()
-            try:
-                self._activate_replacement(replacement_path, quarantine_existing=quarantine_existing)
-            finally:
-                if progress is not None and self._connections._path_identity() == replacement_identity:
-                    progress.activated = True
-                    progress.generation = replacement_generation
-            self._cleanup_replacement(replacement_path)
-        except BaseException:
-            try:
-                replacement.close()
-            finally:
-                self._cleanup_replacement(replacement_path)
-            raise
-        self._clear_dirty(
-            dirty_markers, roots=roots, clear_unscoped=True,
-            clear_scoped=True,
-        )
-        if stats is not None:
-            stats.refresh_action = "sqlite-rebuild"
-            stats.result_count = scanned
-
-    def _preflight_store_roots(self, *, facts=None) -> tuple[ConcreteDefinition, ...]:
-        """Read and type-check authoritative root membership before rebuild."""
-
-        roots: list[ConcreteDefinition] = []
-        by_hash: dict[str, list[ConcreteDefinition]] = defaultdict(list)
-
-        def add(cdef) -> None:
-            if not isinstance(cdef, ConcreteDefinition):
-                raise QueryIndexError(
-                    f"Store {self.store!r} yielded {type(cdef).__name__}, "
-                    "not ConcreteDefinition."
-                )
-            bucket = by_hash[cdef.graph_hash()]
-            if any(existing.graph_equal(cdef) for existing in bucket):
-                return
-            bucket.append(cdef)
-            roots.append(cdef)
-
-        definitions = (
-            self.store.authoritative_root_definitions()
-            if facts is None else facts._authoritative_root_definitions()
-        )
-        for definition in definitions:
-            add(definition)
-        return tuple(roots)
-
-    def _capture_authority_cut(self):
-        """Capture rebuild inputs and dirty tokens under one Store read fence.
-
-        Returns:
-            ``(roots, reference_rows, metadata_rows, dirty_markers)`` detached
-            from a stable Store authority cut. Metadata rows retain source record
-            IDs and scope, including current authoritative absence.
-
-        Raises:
-            QueryIndexUnavailable: If the owning Store cannot supply a stable
-            authority fence.
-            QueryIndexError: If validated Store authority cannot be projected.
-
-        Side Effects:
-            Briefly acquires the Store reader fence. It does not open payloads,
-            materialize Objects, run collectors, or mutate Store authority.
-        """
-
-        if self.store is None:
-            raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store.")
-        from ..source import SourceCapture
-
-        with self.store.authority_read_fence():
-            facts = SourceCapture().capture_store(self.store)
-            roots = self._preflight_store_roots(facts=facts)
-            reference_rows = tuple(_reference_authority_rows(self.store, definitions=facts.definitions))
-            metadata_rows = tuple(_metadata_authority_rows(self.store))
-            dirty_markers = self._dirty_markers()
-        return roots, reference_rows, metadata_rows, dirty_markers
-
-    def _register_reference_authority(self, *, require_ready: bool) -> None:
-        """Cache immutable reference facts while leaving Store records authoritative.
-
-        The rows are rebuilt as one replacement-sidecar unit. They accelerate no
-        terminal yet: reference queries re-read Store authority so a stale or
-        corrupted derived projection can never omit a result or hide a conflict.
-        """
-
-        self._register_reference_rows(
-            tuple(_reference_authority_rows(self.store)),
-            require_ready=require_ready,
-            replace=True,
-        )
-
-    def _register_metadata_rows(self, rows, *, require_ready: bool, replace: bool) -> None:
-        """Register advisory metadata projections from detached Store authority.
-
-        Args:
-            rows: Complete ``metadata_records`` rows including source record IDs.
-            require_ready: Require an active ready sidecar for incremental writes.
-            replace: Replace all metadata projections when rebuilding a sidecar.
-
-        Raises:
-            QueryIndexError: If the SQLite sidecar cannot accept the projection.
-
-        Side Effects:
-            Changes only the derived SQLite sidecar. Query terminals still inspect
-            Store metadata authority and do not evaluate predicates from these rows.
-        """
-
-        def operation(con):
-            validate_schema(
-                con,
-                store_key=self.source_key,
-                canonical_version=self.canonical_version,
-                require_ready=require_ready,
-            )
-            if replace:
-                con.execute("DELETE FROM metadata_records")
-            else:
-                con.executemany(
-                    "DELETE FROM metadata_records WHERE source_kind = 'current' "
-                    "AND scope = ? AND reference_kind = ? AND reference_digest = ?",
-                    (row[2:5] for row in rows if row[0] == "current"),
-                )
-            con.executemany(
-                """
-                INSERT OR REPLACE INTO metadata_records (
-                    source_kind, source_record_id, scope, reference_kind,
-                    reference_digest, present, projection_blob
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-
-        self._run_write_transaction(operation)
-
-    def _register_reference_rows(
-            self, rows, *, require_ready: bool, replace: bool) -> None:
-        """Register complete or incremental advisory reference projections."""
-
-        def operation(con):
-            validate_schema(
-                con,
-                store_key=self.source_key,
-                canonical_version=self.canonical_version,
-                require_ready=require_ready,
-            )
-            if replace:
-                con.execute("DELETE FROM reference_object_ids")
-                con.execute("DELETE FROM reference_records")
-            for row in rows:
-                con.execute(
-                    """
-                    INSERT OR IGNORE INTO reference_records (
-                        source_kind, source_digest, owner_kind, owner_digest,
-                        path_blob, reference_kind, reference_digest,
-                        reference_blob, state_hashes_blob, alias
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    row[:10],
-                )
-                reference = row[10]
-                state_hashes = row[11]
-                object_ref = reference.object if hasattr(reference, "object") else reference
-                for path, object_id in object_ref.objects.items():
-                    state_hash = None if state_hashes is None else state_hashes.get(path)
-                    con.execute(
-                        """
-                        INSERT OR IGNORE INTO reference_object_ids (
-                            reference_kind, reference_digest, object_id_blob,
-                            namespace_blob, path_blob, state_hash
-                        ) VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            row[5], row[6], encode_reference(object_id),
-                            "/".join(object_id.namespace).encode("ascii"),
-                            _CODEC.encode_graph_path(path), state_hash,
-                        ),
-                    )
-
-        self._run_write_transaction(operation)
-
-    def reference_candidate_sources(
-            self, *, object_id=None, namespace=None, object_ref=None,
-            state_hash=None):
-        """Return indexed authority sources for selective reference filters.
-
-        Args:
-            object_id: Optional complete ObjectId containment filter.
-            namespace: Optional ObjectId namespace-prefix filter.
-            object_ref: Optional exact ObjectRef filter.
-            state_hash: Optional local-state hash containment filter.
-
-        Returns:
-            Sorted ``(source_kind, source_digest)`` candidates, or ``None`` when
-            no supplied filter can narrow authority safely.
-
-        Raises:
-            QueryIndexError: If the ready derived sidecar cannot be queried.
-
-        Side Effects:
-            None. Callers must verify every candidate against Store authority.
-        """
-        if self._store_projection:
-            raise QueryIndexUnavailable("Legacy reference candidates do not cover format-4 Node authority.")
-        namespace_filter = namespace if namespace else None
-        if (
-                object_id is None and namespace_filter is None
-                and object_ref is None and state_hash is None
-        ):
-            return None
-        joins = ""
-        conditions = [
-            "rr.source_kind IN ('definition', 'declaration', 'state-ref')"
-        ]
-        parameters = []
-        if object_id is not None or namespace_filter is not None or state_hash is not None:
-            joins = " JOIN reference_object_ids oi USING (reference_kind, reference_digest)"
-        if object_id is not None:
-            conditions.append("oi.object_id_blob = ?")
-            parameters.append(encode_reference(object_id))
-        if namespace_filter is not None:
-            encoded = "/".join(namespace_filter)
-            conditions.append(
-                "(CAST(oi.namespace_blob AS TEXT) = ? "
-                "OR CAST(oi.namespace_blob AS TEXT) LIKE ?)"
-            )
-            parameters.extend((encoded, f"{encoded}/%"))
-        if object_ref is not None:
-            conditions.append("rr.reference_kind = 'object'")
-            conditions.append("rr.reference_digest = ?")
-            parameters.append(object_ref.digest())
-        if state_hash is not None:
-            conditions.append("oi.state_hash = ?")
-            parameters.append(state_hash)
-        try:
-            con = self._connections.connection(readonly=True)
-            validate_schema(
-                con,
-                store_key=self.source_key,
-                canonical_version=self.canonical_version,
-                require_ready=True,
-            )
-            rows = con.execute(
-                "SELECT DISTINCT rr.source_kind, rr.source_digest "
-                f"FROM reference_records rr{joins} WHERE "
-                + " AND ".join(conditions)
-                + " ORDER BY rr.source_kind, rr.source_digest",
-                tuple(parameters),
-            )
-        except Exception as error:
-            raise QueryIndexError(
-                f"Reference candidate lookup failed: {error}"
-            ) from error
-        return tuple((row[0], row[1]) for row in rows)
 
     def _assert_sidecar_rebuildable(self) -> str:
         """Reject future sidecars before scanning Store authority or index rows."""
@@ -1537,56 +1105,6 @@ class SQLiteStoreQueryIndex:
         authority, contention, or mutation failure.
         """
         return self._register_stored_roots(graph, roots, require_ready=True)
-
-    def register_saved_graph(self, graph, roots, state_refs=()):
-        """Incrementally register roots and StateRefs from one completed save.
-
-        Args:
-            graph: Complete query graph for the publication.
-            roots: Definitions made independently queryable as stored roots.
-            state_refs: Newly published exact StateRefs whose reference rows are
-                advisory acceleration only.
-
-        Returns:
-            IndexWriteResult describing graph and root changes.
-
-        Raises:
-            QueryIndexError: If the ready sidecar cannot accept the update.
-
-        Side Effects:
-            Mutates the SQLite sidecar and clears captured publication markers
-            only for indexed targets. Unrelated and unscoped mutations require
-            a full rebuild rather than being acknowledged by this save. Holds
-            the Store authority fence through metadata projection and token
-            clearing; ordinary clean saves do not scan older snapshots.
-            Empty captured tokens require no cleanup-only authority reads.
-        """
-        roots, state_refs = tuple(roots), tuple(state_refs)
-        fence = self.store.authority_read_fence() if self.store is not None else nullcontext()
-        with fence:
-            result = self.register_stored_roots(graph, roots)
-            rows = tuple(
-                row
-                for state_ref in state_refs
-                for row in _state_reference_authority_rows(state_ref)
-            )
-            if rows:
-                self._register_reference_rows(
-                    rows, require_ready=True, replace=False
-                )
-            if self.store is not None:
-                metadata_rows = tuple(_metadata_authority_rows(self.store, state_refs=state_refs))
-                dirty_markers = self._dirty_markers()
-                self._register_metadata_rows(metadata_rows, require_ready=True, replace=False)
-                self._clear_dirty(
-                    dirty_markers, roots=(), metadata_keys={
-                        f"metadata:{row[3]}:{row[4]}"
-                        for row in metadata_rows if row[0] == "current"
-                    },
-                )
-        if self.store is not None and self._is_dirty():
-            self.rebuild()
-        return result
 
     def _register_stored_roots(self, graph, roots, *, require_ready: bool):
         if self._store_projection:
@@ -1736,21 +1254,7 @@ class SQLiteStoreQueryIndex:
             )
 
         result = self._run_write_transaction(operation)
-        indexed_definitions = roots
-        if dirty_markers and self.store is not None and hasattr(self.store, "read_stored_root_record"):
-            from ...store.records import DefinitionRecord as StoreDefinitionRecord
-
-            # Only direct definitions can have scoped closure-node tokens;
-            # fallback authority uses unscoped or metadata tokens instead.
-            indexed_definitions = (*roots, *(
-                node.definition for node in graph_nodes
-                if (record := self.store.read_definition_record(
-                    StoreDefinitionRecord(node.definition).digest,
-                )) is not None
-                and record.definition.graph_equal(node.definition)
-                and self.store.read_stored_root_record(record.digest) is None
-            ))
-        self._clear_dirty(dirty_markers, roots=indexed_definitions)
+        self._clear_dirty(dirty_markers, roots=roots)
         return result
 
     def _preflight_graph_nodes(self, graph_nodes, node_hash_blobs, *, require_ready: bool):
@@ -1868,6 +1372,12 @@ class SQLiteStoreQueryIndex:
         return self._run_write_transaction(operation)
 
     def ensure_exact_stored(self, cdef, *, stats=None) -> bool:
+        """Check manually registered CDef membership without consulting Store authority.
+
+        Accepts a ConcreteDefinition and optional QueryStats; returns bool. May
+        initialize a standalone derived index and raises QueryIndexError on
+        readiness/read failures. Format-4 Stores use Node projection queries.
+        """
         self._ensure_ready()
         with self.read_view(include_cached=False) as view:
             if view.filter_stored_ids(view.exact_ids(cdef)):
@@ -1875,27 +1385,7 @@ class SQLiteStoreQueryIndex:
                     stats.fast_path = "exact-root-index"
                 return True
 
-        try:
-            is_stored_root = any(
-                root.graph_equal(cdef)
-                for root in self.store.authoritative_root_definitions()
-            )
-        except (AttributeError, NotImplementedError):
-            return False
-        if not is_stored_root:
-            return False
-
-        reader = getattr(self.store, "read_definition", None)
-        if reader is None:
-            return False
-        persisted = reader(cdef)
-        if persisted is None or not cdef_equal(persisted, cdef):
-            return False
-
-        self.register_stored_roots(ConcreteDefinitionGraph.from_root(persisted), [persisted])
-        if stats is not None:
-            stats.fast_path = "exact-root-store-has"
-        return True
+        return False
 
     def sync_caches(self, *, reuse_weak: bool = True) -> None:
         return None
@@ -1927,12 +1417,7 @@ class SQLiteStoreQueryIndex:
                     self.initialize_empty()
             return
         con = self._connections.connection(readonly=True)
-        try:
-            validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
-        except QueryIndexDirty:
-            if self.store is None or not hasattr(self.store, "iter_definition_records"):
-                raise
-            self.rebuild()
+        validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
 
     def _ensure_schema_in_transaction(self, con) -> None:
         initialize_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
@@ -2054,55 +1539,13 @@ class SQLiteStoreQueryIndex:
         return max(current + 1, time.time_ns())
 
     def _root_marker_key(self, cdef: ConcreteDefinition) -> str:
-        """Return the dirty-token identity for a stored root.
-
-        Current DirStores publish DefinitionRecords, so their token must name
-        that record rather than the retired object-root stable hash. Standalone
-        SQLite indexes retain the stable-hash key used by their public API.
-        """
-        metadata = getattr(self.store, "query_index_record_metadata", None)
-        if metadata is not None:
-            result = metadata(cdef)
-            if result is not None:
-                return result[0]
+        """Return the stable-hash token for a manually registered CDef root."""
         return cdef.stable_hash()
 
     def _root_record_metadata(self, cdef: ConcreteDefinition) -> tuple[bytes, str, int | None, int | None]:
         """Return derived root-row metadata without treating the row as authority."""
-        metadata = getattr(self.store, "query_index_record_metadata", None)
-        if metadata is not None:
-            result = metadata(cdef)
-            if result is None:
-                raise QueryIndexError("Stored root has no matching authoritative DefinitionRecord.")
-            record_digest, relative_path, size, mtime_ns = result
-            return stable_hash_to_blob(record_digest), relative_path, size, mtime_ns
         stable_hash = cdef.stable_hash()
         return stable_hash_to_blob(stable_hash), _relative_def_path(stable_hash), None, None
-
-    def _validate_rebuild_before_ready(self, *, roots: tuple[ConcreteDefinition, ...]) -> None:
-        con = self._connections.connection(readonly=True)
-        issues: list[ValidationIssue] = []
-        validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version, require_ready=False)
-        self._validate_candidate_contents(con, issues, roots=roots)
-        errors = tuple(issue for issue in issues if issue.severity == "error")
-        if errors:
-            detail = "; ".join(
-                f"{issue.message} ({issue.detail})"
-                if issue.detail else issue.message
-                for issue in errors[:3]
-            )
-            raise QueryIndexError(f"SQLite query-index rebuild validation failed before ready: {detail}")
-
-    def _validate_candidate_contents(self, con, issues, *, roots) -> None:
-        """Append substantive candidate issues in the same order for both cuts."""
-        _validate_sqlite_integrity(con, issues)
-        self._validate_decodable_rows(con, issues)
-        self._validate_stored_roots(con, issues)
-        self._validate_reference_rows(con, issues)
-        self._validate_metadata_rows(con, issues)
-        self._validate_store_roots(con, issues, roots=roots)
-        if not _v3_projection_is_complete(con):
-            issues.append(ValidationIssue("error", "Query V3 projection coverage is incomplete."))
 
     def _validate_decodable_rows(self, con, issues: list[ValidationIssue]) -> None:
         for did, cdef_blob in con.execute("SELECT def_id, cdef_blob FROM definitions"):
@@ -2159,114 +1602,6 @@ class SQLiteStoreQueryIndex:
                 issues.append(ValidationIssue("error", "Stored DefinitionRecord size mismatch.", f"{did}: stored={def_size}, actual={expected_size}"))
             if def_mtime_ns is not None and expected_mtime_ns is not None and def_mtime_ns != expected_mtime_ns:
                 issues.append(ValidationIssue("warning", "Stored DefinitionRecord mtime changed.", f"{did}: stored={def_mtime_ns}, actual={expected_mtime_ns}"))
-
-    def _validate_store_roots(
-            self,
-            con,
-            issues: list[ValidationIssue],
-            *,
-            roots: tuple[ConcreteDefinition, ...] | None = None) -> None:
-        if self.store is None or not hasattr(self.store, "iter_definition_records"):
-            return
-        if roots is None:
-            try:
-                roots = self._preflight_store_roots()
-            except Exception as exc:
-                issues.append(ValidationIssue("error", "Store root scan failed.", repr(exc)))
-                return
-        actual_roots = set()
-        expected_legacy_ids = set()
-        for cdef in roots:
-            if not isinstance(cdef, ConcreteDefinition):
-                issues.append(ValidationIssue("error", "Store scan yielded non-CDef root.", type(cdef).__name__))
-                continue
-            actual_roots.add((cdef.graph_hash(), _CODEC.encode_cdef(cdef)))
-            root_ids = _exact_ids_for_cdef(con, cdef)
-            expected_legacy_ids.update(root_ids)
-            if not root_ids:
-                issues.append(ValidationIssue("error", "Store root is missing from SQLite query index.", cdef.stable_hash()))
-                continue
-            stored = con.execute(
-                f"SELECT 1 FROM stored_roots WHERE def_id IN ({', '.join('?' for _ in root_ids)}) LIMIT 1",
-                root_ids,
-            ).fetchone()
-            if stored is None:
-                issues.append(ValidationIssue("error", "Store root is indexed but not active as a stored root.", cdef.stable_hash()))
-        if {row[0] for row in con.execute("SELECT def_id FROM stored_roots")} != expected_legacy_ids:
-            issues.append(ValidationIssue("error", "Legacy stored-root membership differs from Store roots."))
-        indexed_roots = {
-            (row[0], bytes(row[1]))
-            for row in con.execute(
-                "SELECT root_graph_hash, root_blob FROM v3_stored_root_projection"
-            )
-        }
-        for graph_hash, blob in indexed_roots:
-            try:
-                if _CODEC.decode_cdef(blob).graph_hash() != graph_hash:
-                    issues.append(ValidationIssue("error", "Stored root graph hash mismatch."))
-            except Exception as error:
-                issues.append(ValidationIssue("error", "Stored root projection failed to decode.", repr(error)))
-        if indexed_roots != actual_roots:
-            issues.append(ValidationIssue("error", "SQLite stored roots differ from authoritative Store roots."))
-
-    def _validate_reference_rows(self, con, issues: list[ValidationIssue]) -> None:
-        """Validate reference blobs before a staged index becomes ready."""
-
-        for row in con.execute("SELECT reference_kind, reference_digest, reference_blob, path_blob FROM reference_records"):
-            kind, digest, blob, path_blob = row
-            try:
-                reference = _CODEC.decode_reference(blob)
-                if kind == "object" and reference.digest() != digest:
-                    raise ValueError("ObjectRef digest mismatch")
-                if kind == "state" and reference.digest() != digest:
-                    raise ValueError("StateRef digest mismatch")
-                _CODEC.decode_graph_path(path_blob)
-            except Exception as exc:
-                issues.append(ValidationIssue("error", "Reference row failed to decode.", repr(exc)))
-
-    def _validate_metadata_rows(self, con, issues: list[ValidationIssue]) -> None:
-        """Validate advisory metadata identities before staged activation."""
-
-        from dryml.formats import canonical_json_load_bytes
-
-        rows = con.execute(
-            """
-            SELECT source_kind, source_record_id, scope, reference_kind,
-                   reference_digest, present, projection_blob
-            FROM metadata_records
-            """
-        )
-        for source_kind, source_id, scope, reference_kind, digest, present, blob in rows:
-            if source_kind == "current":
-                valid_shape = scope in {"object", "state"} and reference_kind == scope
-            elif source_kind == "snapshot":
-                valid_shape = (
-                    (scope == "snapshot" and reference_kind == "state")
-                    or (scope == "lineage" and reference_kind == "object")
-                )
-            else:
-                valid_shape = (
-                    source_kind == "lineage" and scope == "lineage"
-                    and reference_kind == "object"
-                )
-            if not valid_shape:
-                issues.append(ValidationIssue("error", "Metadata row has invalid source/scope association.", digest))
-            if present:
-                if not source_id or blob is None:
-                    issues.append(ValidationIssue("error", "Present metadata row lacks source record data.", digest))
-                    continue
-                try:
-                    envelope = canonical_json_load_bytes(
-                        blob, max_depth=64, max_nodes=131072,
-                        max_entries=65536, max_string=4096,
-                        max_int_bits=4096,
-                    )
-                    if envelope.get("id") != source_id:
-                        raise ValueError("source record ID mismatch")
-                except Exception as exc:
-                    issues.append(ValidationIssue("error", "Metadata projection failed to decode.", repr(exc)))
-            elif source_kind != "current" or source_id or blob is not None:
-                issues.append(ValidationIssue("error", "Absent metadata row has invalid source data.", digest))
 
     @contextmanager
     def _build_claim(self, *, force: bool = False):
@@ -3752,219 +3087,6 @@ def _bump_generation(con, generation: int) -> int:
 
 def _relative_def_path(stable_hash: str) -> str:
     return f"objects/{stable_hash[:2]}/{stable_hash}/def.pkl"
-
-
-def _reference_authority_rows(store, *, definitions=None):
-    """Yield complete derived reference rows from current Store authority.
-
-    Each row retains its authority source and canonical owner/path/reference
-    identity.  This extraction is intentionally shared by replacement rebuilds
-    only; callers must still verify query answers against Store records.
-    ``definitions`` may supply already validated records from the same fenced
-    rebuild cut to avoid decoding that authority a second time.
-    """
-
-    from ...store.records import DefinitionRecord
-    from ..model import ReferenceOccurrence
-    from ...reference_values import ObjectRef, StateRef
-    from ...utils.graph.path import GraphPath
-
-    def owner_key(value):
-        if isinstance(value, StateRef):
-            return "state", value.digest()
-        if isinstance(value, ObjectRef):
-            return "object", value.digest()
-        return "definition", DefinitionRecord(value).digest
-
-    def encode(source_kind, source_digest, occurrence, *, alias=""):
-        value = occurrence.value
-        kind = "state" if isinstance(value, StateRef) else "object"
-        owner_kind, owner_digest = owner_key(occurrence.owner)
-        states = value.states if isinstance(value, StateRef) else None
-        return (
-            source_kind, source_digest, owner_kind, owner_digest,
-            _CODEC.encode_graph_path(occurrence.path), kind, value.digest(),
-            encode_reference(value),
-            None if states is None else repr(tuple(sorted(states.items(), key=lambda item: str(item[0])))).encode("ascii"),
-            alias, value, states,
-        )
-
-    for record in (store.iter_definition_records() if definitions is None else definitions):
-        for occurrence in _iter_embedded_reference_occurrences(
-            record.definition, owner=record.definition,
-        ):
-            yield encode("definition", record.digest, occurrence)
-    for record in store.iter_declaration_records():
-        reference = record.object_ref
-        yield encode("declaration", record.digest, ReferenceOccurrence(reference, GraphPath(), reference))
-    for record in store.iter_state_ref_records():
-        state = record.state_ref
-        yield encode("state-ref", record.digest, ReferenceOccurrence(state, GraphPath(), state))
-        yield encode("state-ref", record.digest, ReferenceOccurrence(state, GraphPath(), state.object))
-    for record in store.iter_object_alias_records():
-        reference = record.object_ref
-        yield encode(
-            "object-alias", f"{record.alias}:{reference.digest()}",
-            ReferenceOccurrence(reference, GraphPath(), reference), alias=record.alias,
-        )
-    for record in store.iter_state_alias_records():
-        state_record = store.read_state_ref_record(record.state_ref_digest)
-        if state_record is None or state_record.state_ref.object != record.object_ref:
-            raise QueryIndexError("State alias points to missing or incompatible StateRef authority.")
-        state = state_record.state_ref
-        yield encode(
-            "state-alias", f"{record.alias}:{record.state_ref_digest}",
-            ReferenceOccurrence(state, GraphPath(), state), alias=record.alias,
-        )
-
-
-def _iter_embedded_reference_occurrences(value, *, owner, path=None, active=None):
-    """Yield exact embedded references for advisory legacy index projections."""
-
-    from ...definition import ConcreteDefinition
-    from ...links import DefLink
-    from ...reference_values import ObjectRef, StateRef
-    from ...utils.graph.path import GraphPath
-    from ...utils.graph.value import iter_value_edges
-    from ..model import ReferenceOccurrence
-
-    path = GraphPath() if path is None else path
-    active = set() if active is None else active
-    if isinstance(value, (ObjectRef, StateRef)):
-        yield ReferenceOccurrence(owner, path, value)
-        return
-    if isinstance(value, DefLink):
-        yield from _iter_embedded_reference_occurrences(
-            value.target, owner=owner, path=path, active=active,
-        )
-        return
-    if isinstance(value, ConcreteDefinition):
-        marker = id(value)
-        if marker in active:
-            return
-        active.add(marker)
-        try:
-            for edge in iter_value_edges(value):
-                yield from _iter_embedded_reference_occurrences(
-                    edge.value,
-                    owner=owner,
-                    path=path.child(edge.segment),
-                    active=active,
-                )
-        finally:
-            active.remove(marker)
-        return
-    for edge in iter_value_edges(value):
-        yield from _iter_embedded_reference_occurrences(
-            edge.value,
-            owner=owner,
-            path=path.child(edge.segment),
-            active=active,
-        )
-
-
-def _state_reference_authority_rows(state):
-    """Yield incremental advisory rows for one published StateRef."""
-    from ...reference_values import StateRef
-    from ...utils.graph.path import GraphPath
-
-    if not isinstance(state, StateRef):
-        raise TypeError("Incremental reference registration requires a StateRef.")
-    source_digest = state.digest()
-    for value in (state, state.object):
-        states = value.states if isinstance(value, StateRef) else None
-        kind = "state" if isinstance(value, StateRef) else "object"
-        yield (
-            "state-ref", source_digest, "state", source_digest,
-            _CODEC.encode_graph_path(GraphPath()), kind, value.digest(),
-            encode_reference(value),
-            None if states is None else repr(
-                tuple(sorted(states.items(), key=lambda item: str(item[0])))
-            ).encode("ascii"),
-            "", value, states,
-        )
-
-
-def _metadata_authority_rows(store, *, state_refs=None):
-    """Yield metadata projections from separate complete snapshot/current authority.
-
-    The projection is intentionally opaque canonical record data. SQLite retains
-    source record IDs, target identity, and scope for rebuild diagnostics, but it
-    never becomes predicate authority or reconstructs current mappings from a
-    snapshot's captured annotations.
-    An explicit StateRef iterable limits incremental work to those snapshots;
-    omitted references request the complete rebuild projection.
-    """
-
-    if not all(hasattr(store, name) for name in (
-            "_metadata_path", "_lineage_path", "_read_json")):
-        return
-
-    from dryml.formats import canonical_json_bytes
-    from ...reference_values import ObjectRef, StateRef
-
-    def record_blob(record):
-        if not isinstance(record, Mapping) or not isinstance(record.get("id"), str):
-            raise QueryIndexError("Metadata authority record has no valid record ID.")
-        return record["id"], canonical_json_bytes(
-            record, max_depth=64, max_nodes=131072, max_entries=65536,
-            max_string=4096, max_int_bits=4096,
-        )
-
-    object_targets: set[ObjectRef] = set()
-    state_targets: set[StateRef] = set()
-    if state_refs is None:
-        for record in store.iter_declaration_records():
-            object_targets.add(record.object_ref)
-        state_refs = (record.state_ref for record in store.iter_state_ref_records())
-    for state in state_refs:
-        state_targets.add(state)
-        object_targets.add(state.object)
-        object_targets.update(state.object.at(path) for path in state.object.objects)
-        metadata = store.read_snapshot_metadata(state.digest())
-        if metadata is None or metadata.state_ref != state:
-            raise QueryIndexError("Complete StateRef lacks matching captured metadata.")
-        # Read the validated source envelope only after complete-directory checks.
-        directory = store.get_snapshot_directory(state)
-        from dryml.formats import canonical_json_load_bytes
-        envelope = canonical_json_load_bytes(
-            (directory / "metadata.json").read_bytes(), max_depth=64,
-            max_nodes=131072, max_entries=65536, max_string=4096,
-            max_int_bits=4096,
-        )
-        record_id, blob = record_blob(envelope)
-        yield ("snapshot", record_id, "snapshot", "state", state.digest(), 1, blob)
-        for lineage in metadata.lineages.values():
-            yield (
-                "snapshot", record_id, "lineage", "object",
-                lineage.object_ref.digest(), 1, blob,
-            )
-
-    for target in sorted(object_targets, key=lambda value: value.digest()):
-        path = store._metadata_path(target)
-        envelope = store._read_json(path)
-        if envelope is None:
-            yield ("current", "", "object", "object", target.digest(), 0, None)
-        else:
-            # The Store reader performs the target and typed-value validation.
-            store.read_metadata(target)
-            record_id, blob = record_blob(envelope)
-            yield ("current", record_id, "object", "object", target.digest(), 1, blob)
-        lineage_path = store._lineage_path(target.digest())
-        lineage = store._read_json(lineage_path)
-        if lineage is not None:
-            store.read_lineage_metadata(target)
-            lineage_id, lineage_blob = record_blob(lineage)
-            yield ("lineage", lineage_id, "lineage", "object", target.digest(), 1, lineage_blob)
-
-    for target in sorted(state_targets, key=lambda value: value.digest()):
-        envelope = store._read_json(store._metadata_path(target))
-        if envelope is None:
-            yield ("current", "", "state", "state", target.digest(), 0, None)
-            continue
-        store.read_metadata(target)
-        record_id, blob = record_blob(envelope)
-        yield ("current", record_id, "state", "state", target.digest(), 1, blob)
 
 
 def _unique_graph_roots(roots) -> tuple[ConcreteDefinition, ...]:

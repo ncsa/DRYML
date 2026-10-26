@@ -14,7 +14,7 @@ from dryml.managed import ManagedConfigError, argument_digest, managed_operation
 
 
 class IdentityObject(Object):
-    """Small stateful Object used only to obtain an exact ObjectRef."""
+    """Small stateless Object used to obtain exact Node metadata."""
 
     def __init__(self, value):
         self.value = value
@@ -34,8 +34,6 @@ def test_operation_identity_uses_only_exact_object_ref_and_member(tmp_path):
     assert first == second
     assert len(first) == 64
     assert first != operation_digest(obj.definition, "other")
-    with pytest.raises(ManagedConfigError):
-        operation_digest(obj.object_ref, "calculate")
     with pytest.raises(ManagedConfigError):
         operation_digest(object(), "calculate")
 

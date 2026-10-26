@@ -450,13 +450,14 @@ def test_direct_memory_explicit_calls_repeat_hydration_and_retain_failures(tmp_p
     store.publish_node(ContractLeaf("first").definition)
     index = MemoryContractIndex(store)
     scans = []
-    original = store.hydrate_index
+    from dryml.core.query import authority
+    original = authority.capture_store_projection
 
-    def hydrate():
+    def hydrate(*args, **kwargs):
         scans.append(1)
-        return original()
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(store, "hydrate_index", hydrate)
+    monkeypatch.setattr(authority, "capture_store_projection", hydrate)
     for _ in range(2):
         stats = QueryStats()
         index.refresh(policy, stats=stats)
@@ -464,10 +465,10 @@ def test_direct_memory_explicit_calls_repeat_hydration_and_retain_failures(tmp_p
     assert scans == [1, 1]
     generation = index.current_generation()
 
-    def fail():
+    def fail(*args, **kwargs):
         raise OSError("injected hydration failure")
 
-    monkeypatch.setattr(store, "hydrate_index", fail)
+    monkeypatch.setattr(authority, "capture_store_projection", fail)
     stats = QueryStats()
     with pytest.raises(QueryIndexError, match="injected hydration failure"):
         index.refresh(policy, stats=stats)
@@ -610,7 +611,8 @@ def test_sqlite_variadic_selector_lowers_without_scanning_or_decoding_decoys(tmp
         batches = tuple(view.iter_candidate_cdef_batches(plan, batch_size=1000))
 
     assert not diagnostics.scan_required
-    assert tuple(cdef for batch in batches for cdef in batch.cdefs) == (wanted.definition,)
+    actual = tuple(cdef for batch in batches for cdef in batch.cdefs)
+    assert len(actual) == 1 and actual[0].graph_equal(wanted.definition)
     assert diagnostics.cdef_blobs_decoded == 1
 
 

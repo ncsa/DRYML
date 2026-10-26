@@ -16,23 +16,18 @@ class CountingStore(DirStore):
     def __init__(self, store):
         super().__init__(store.base_dir, query_index=store.query_index)
         self.definition_read_count = 0
-        self.hydrate_count = 0
         self.restore_count = 0
 
-    def read_definition_record(self, digest):
+    def read_node(self, digest, *, kind="recipe"):
         self.definition_read_count += 1
-        return super().read_definition_record(digest)
+        return super().read_node(digest, kind=kind)
 
     def catalog_key(self):
         return f"{DirStore.__module__}.{DirStore.__qualname__}:{self.base_dir}"
 
-    def iter_definition_records(self):
-        self.hydrate_count += 1
-        return super().iter_definition_records()
-
-    def open_local_state(self, graph_hash, state_hash):
+    def read_states(self, *args, **kwargs):
         self.restore_count += 1
-        return super().open_local_state(graph_hash, state_hash)
+        return super().read_states(*args, **kwargs)
 
 
 def test_identity_query_does_not_materialize_until_explicit_repo_load(tmp_path):
@@ -69,7 +64,7 @@ def test_exact_root_query_reads_definition_record_without_full_hydration(tmp_pat
     stats = repo2.query().sel(obj.definition).cdefs().stored().explain(analyze=True)
     assert stats.cdef_blobs_decoded == 1
     assert counting_store.definition_read_count == 0
-    assert counting_store.hydrate_count == 0
+    assert stats.store_scan_count == 1
 
 
 def test_query_has_a_producer_knowledge_domain_without_domain_selection():

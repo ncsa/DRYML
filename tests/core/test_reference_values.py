@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from dryml.core import Definition, ObjectId, ObjectRef, StateRef
+from dryml.core import Definition, ObjectId
 from dryml.core.object import Object, Serializable
 from dryml.core.utils.graph.path import GraphPath
 
@@ -24,21 +24,6 @@ def test_object_id_generates_nonce_and_trusted_decode_preserves_it():
     assert decoded == generated
     assert decoded.nonce == generated.nonce
     assert str(generated) == f"team/trial~{generated.nonce.hex[:12]}..."
-
-
-def test_reference_identity_keeps_trajectories_and_ephemeral_graphs_distinct():
-    first_ephemeral = ObjectRef(Definition(ReferenceEphemeral).concretize(), {})
-    second_ephemeral = ObjectRef(Definition(ReferenceEphemeral).concretize(), {})
-    assert first_ephemeral == second_ephemeral
-    assert hash(first_ephemeral) == hash(second_ephemeral)
-
-    definition = Definition(ReferenceStateful).concretize()
-    first = ObjectRef(definition, {GraphPath(): ObjectId()})
-    second = ObjectRef(definition.copy_graph(), {GraphPath(): ObjectId()})
-    first_state = StateRef(first, {GraphPath(): "pkl-" + "a" * 64})
-    second_state = StateRef(second, {GraphPath(): "pkl-" + "a" * 64})
-    assert first != second
-    assert first_state != second_state
 
 
 @pytest.mark.parametrize("namespace", ["team", ("",), ("has space",), ("x" * 65,)])

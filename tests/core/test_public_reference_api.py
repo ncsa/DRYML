@@ -1,4 +1,4 @@
-"""Lock the public CDef V2 reference and persistence surface."""
+"""Lock the public Node reference and persistence surface."""
 
 import inspect
 
@@ -12,7 +12,7 @@ def test_root_and_core_export_exact_reference_values_and_repo_apis():
     """Reference values and exact-load APIs are public while generic alias load is absent."""
 
     required = {
-        "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "ObjectSelector",
+        "ObjectId",
         "object_namespace", "Repo", "load_object", "load_state_ref",
         "save_object",
         "Node", "ConcreteNode", "SavedNode", "require_saved", "StateKey",
@@ -20,7 +20,6 @@ def test_root_and_core_export_exact_reference_values_and_repo_apis():
     }
     assert required <= set(dryml.__all__)
     assert required <= set(core.__all__)
-    assert "ObjectSelectorSet" in core.__all__
     assert "load_alias" not in core.__all__
     assert not hasattr(core, "load_alias")
     assert not hasattr(Repo, "load_alias")

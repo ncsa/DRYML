@@ -62,15 +62,13 @@ def _oracle(root):
     from dryml.core.canonical import container_family
     from dryml.core.links import DefLink
     from dryml.core.quoted import QuotedDef, SelectorSpec
-    from dryml.core.reference_values import ObjectRef, StateRef, StateSelectorRef
-    from dryml.core.selector import ObjectSelector
     from dryml.core.factory import FactorySpec
     from dryml.core.config import ConfigRef
     from dryml.core.state_values import LocalState, StateKey
     from dryml.core.template import Par, _BinaryExpr, _RepeatExpr
     from dryml.core.params import Match, SatisfiesMatcher
     from dryml.core.symbol import symbol_ref
-    from dryml.core.reference_json import _value_to_json
+    from dryml.core._value_json import _value_to_json
 
     nodes = []
     slots = {}
@@ -90,14 +88,6 @@ def _oracle(root):
             return ["quoted", walk(value.value, labels)]
         if isinstance(value, SelectorSpec):
             return ["selector", walk(value.selector.root, labels), value.selector.strict, value.selector.cls_policy]
-        if isinstance(value, StateSelectorRef):
-            return ["state-selector", walk(value.object, labels), value.alias]
-        if isinstance(value, StateRef):
-            return ["state-ref", walk(value.object, labels), sorted([[walk(value.object.objects[path], labels), item] for path, item in value.states.items()], key=_json)]
-        if isinstance(value, ObjectRef):
-            return ["object-ref", walk(value.definition, labels), sorted([[None if target is None else walk(target, labels), walk(identity, labels)] for target, identity in value._node_bindings], key=_json)]
-        if isinstance(value, ObjectSelector):
-            return ["object-selector", walk(value.definition, labels), walk(value.reference, labels)]
         if isinstance(value, FactorySpec):
             return ["factory", walk(value.target, labels), walk(value.args, labels), walk(value.kwargs, labels)]
         if isinstance(value, ConfigRef):
@@ -224,7 +214,7 @@ def test_digest_ties_do_not_select_shape_or_authorize_equality(monkeypatch):
 
 
 def test_full_value_grammar_and_retained_construction_round_trip(monkeypatch):
-    from dryml.core import Serializable, ObjectRef, StateRef
+    from dryml.core import Serializable
     from dryml.core.node_prepare import NodePreparation
     from dryml.core.node_codec import encode_node_graph, decode_node_graph
     from dryml.core.state_values import LocalState, StateKey
@@ -238,15 +228,15 @@ def test_full_value_grammar_and_retained_construction_round_trip(monkeypatch):
     from dryml.core.params import AnyValue, Missing, Present, Exact, Choice, IntRange, SubclassOf, Satisfies
     from dryml.core.links import DefLink
     from dryml.core.cdef_graph import EdgeKind
-    from dryml.core.utils.graph.path import GraphPath
 
     creation = Definition(KeyNode, 1).concretize()
     state = LocalState(StateKey("a" * 64, "pkl-" + "b" * 64), creation)
     pinned = creation.with_state(state)
     realized = pinned.with_realization(identities={"$": ObjectId(("realized",))}, states={"$": None})
     refdef = Definition(Serializable).concretize()
-    object_ref = ObjectRef(refdef, {GraphPath(): ObjectId(("embedded",))})
-    state_ref = StateRef(object_ref, {GraphPath(): "pkl-" + "c" * 64})
+    object_ref = refdef.with_identity(ObjectId(("embedded",)))
+    state_ref = object_ref.copy_graph().with_state(LocalState(
+        StateKey(refdef.creation_digest(), "pkl-" + "c" * 64), refdef))
     future = Definition(KeyNode, Par("n") * 2, omitted=repeat([Definition(KeyNode, 1)], Par("n")))
     values = [None, True, 13, -0.0, 1.25, b"bytes", "str", np.int16(3),
               np.arange(4, dtype=">i2"), np.array([(3, 4.)], dtype=[("x", "i2"), ("y", ">f8")]),
@@ -425,7 +415,7 @@ def test_array_padding_is_not_logical_constructor_content():
 
 
 def test_full_grammar_equality_partitions_against_flat_oracle():
-    from dryml.core import SKIP_ARGS, Serializable, ObjectRef, StateRef
+    from dryml.core import SKIP_ARGS, Serializable
     from dryml.core.node_prepare import NodePreparation
     from dryml.core.node_codec import encode_node_graph, decode_node_graph
     from dryml.core.template import Par, repeat, Shared
@@ -441,12 +431,12 @@ def test_full_grammar_equality_partitions_against_flat_oracle():
     from dryml.core.selector import Selector
     from dryml.core.links import DefLink
     from dryml.core.cdef_graph import EdgeKind
-    from dryml.core.utils.graph.path import GraphPath
 
     child = Definition(KeyNode, 1)
     creation = child.concretize()
     state = LocalState(StateKey("a" * 64, "pkl-" + "b" * 64), creation)
-    obj = ObjectRef(Definition(Serializable).concretize(), {GraphPath(): ObjectId(("oracle",))})
+    recipe = Definition(Serializable).concretize()
+    obj = recipe.with_identity(ObjectId(("oracle",)))
     values = [None, False, 0, -0.0, 0.0, b"", "", [1], (1,), {1}, frozenset({1}),
               {"x": 1, 2: "y"}, {2: "y", "x": 1},
               np.array([1], dtype="i2"), np.array([1], dtype=">i2"), np.int16(1),
@@ -457,8 +447,8 @@ def test_full_grammar_equality_partitions_against_flat_oracle():
               repeat([child], Par("n")), repeat((child,), Shared(Par("n"))),
               child, child.quote(), DefLink.assertion(EdgeKind.REF, child), DefLink.assertion(EdgeKind.MATERIALIZE, child),
               SelectorSpec(Selector(Definition(SKIP_ARGS, value=AnyValue()))),
-              obj, StateRef(obj, {GraphPath(): "pkl-" + "c" * 64}), obj.state("best"),
-              obj.object_projection(),
+              obj, obj.with_state(LocalState(StateKey(recipe.creation_digest(), "pkl-" + "c" * 64), recipe)),
+              obj.object_view(),
               AnyValue(), Missing(), Present(), Exact(child), Choice([child, 1]), IntRange(1, 2), SubclassOf(Object),
               Satisfies(_positive, name="sign"), Satisfies(_negative, name="sign"), Satisfies(_positive)]
     roots = [Definition(KeyNode, value) for value in values]
@@ -665,102 +655,6 @@ def test_legacy_handles_with_one_private_node_token_remain_aliases():
     assert len(prepared.nodes) == 3
 
 
-def test_reference_bindings_survive_new_unordered_path_context(monkeypatch):
-    from collections.abc import Mapping
-    from dryml.core import Serializable, ObjectRef, StateRef
-    from dryml.core.node_prepare import NodePreparation
-    from dryml.core.node_codec import encode_node_graph, decode_node_graph
-    from dryml.core import reference_values
-    from dryml.core.utils.graph import value as paths
-
-    left, right = Definition(Serializable), Definition(Serializable)
-    graph = Definition(KeyNode, {"alias": left, "members": {left, right}}).concretize()
-    alias = graph.parameters["value"]["alias"]
-    old_ordinal = next(segment.ordinal for segment, member in paths.iter_set_members(graph.parameters["value"]["members"]) if member is alias)
-    direct, _ = reference_values._expected_paths(graph)
-    id_a, id_b = ObjectId(("alias",)), ObjectId(("other",))
-    objects = {path: id_a if key == ("cdef", alias._node_id) else id_b for key, path in direct.items()}
-    ref = ObjectRef(graph, objects)
-    state = StateRef(ref, {path: "pkl-" + ("a" if identity == id_a else "b") * 64 for path, identity in objects.items()})
-    root = Definition(KeyNode, [ref, state, alias])
-    packet = encode_node_graph(NodePreparation((root,)))
-    flat = _oracle(root)
-    expected, members = reference_values._expected_paths, paths.iter_set_members
-
-    def changed_context(definition, **kwargs):
-        payload = definition.parameters.get("value")
-        if not isinstance(payload, Mapping) or set(payload) != {"alias", "members"}:
-            return expected(definition, **kwargs)
-        selected = payload["alias"]
-        def ordered(values):
-            original = members(values)
-            if len(original) != 2 or not any(member is selected for _, member in original):
-                return original
-            values = sorted((member for _, member in original), key=lambda member: (member is selected) == (old_ordinal == 0))
-            return tuple((segment, member) for (segment, _), member in zip(original, values))
-        with monkeypatch.context() as local:
-            local.setattr(paths, "iter_set_members", ordered)
-            return expected(definition, **kwargs)
-
-    monkeypatch.setattr(reference_values, "_expected_paths", changed_context)
-    restored = decode_node_graph(packet)
-    assert restored.exact_key() == root.exact_key()
-    assert _oracle(restored) == flat
-    restored_ref, restored_state, external = restored.args[0]
-    assert restored_ref.definition.parameters["value"]["alias"] is external
-    current, _ = reference_values._expected_paths(restored_ref.definition)
-    assert restored_ref.objects[current[("cdef", external._node_id)]] == id_a
-    assert restored_state.states[current[("cdef", external._node_id)]] == "pkl-" + "a" * 64
-
-
-def test_imported_reference_pins_remain_logical_object_bindings():
-    from dryml.core import Serializable, ObjectRef, StateRef
-    from dryml.core.node_prepare import NodePreparation
-    from dryml.core.node_codec import encode_node_graph, decode_node_graph
-    from dryml.core.utils.graph.path import GraphPath
-    from dryml.core import reference_values
-    identity = ObjectId(("imported",))
-    child = ObjectRef(Definition(Serializable).concretize(), {GraphPath(): identity})
-    selected = StateRef(child, {GraphPath(): "pkl-" + "a" * 64})
-    parent = Definition(KeyNode, [selected, selected]).concretize()
-    expected, _ = reference_values._expected_paths(parent)
-    reference = ObjectRef(parent, {path: identity for path in expected.values()})
-    assert reference._node_bindings == ((None, identity),)
-    state = StateRef(reference, {path: "pkl-" + "a" * 64 for path in reference.objects})
-    root = Definition(KeyNode, [reference, state])
-    restored = decode_node_graph(encode_node_graph(NodePreparation((root,))))
-    assert restored.exact_key() == root.exact_key()
-    assert _oracle(restored) == _oracle(root)
-    assert restored.args[0][0]._node_bindings == ((None, identity),)
-
-
-@pytest.mark.parametrize("mutation", ["version", "bool-version", "extra", "missing", "definition", "reference", "bindings"])
-def test_object_selector_codec_rejects_malformed_metadata_intact(mutation):
-    from dryml.core import Serializable, ObjectRef, ObjectSelector
-    from dryml.core.node_prepare import NodePreparation
-    from dryml.core.node_codec import encode_node_graph, decode_node_graph, NodeCodecError
-    from dryml.core.utils.graph.path import GraphPath
-
-    reference = ObjectRef(Definition(Serializable).concretize(), {GraphPath(): ObjectId(("selector",))})
-    packet = encode_node_graph(NodePreparation((Definition(KeyNode, ObjectSelector(reference)),)))
-    selector = next(record for record in packet["values"].values() if record.get("tag") == "object-selector")
-    if mutation == "version": selector["version"] = 2
-    elif mutation == "bool-version": selector["version"] = True
-    elif mutation == "extra": selector["unknown"] = None
-    elif mutation == "missing": del selector["reference"]
-    elif mutation in {"definition", "reference"}:
-        selector[mutation] = {"tag": "leaf", "value": {"type": "int", "value": "1"}}
-    elif mutation == "bindings":
-        bindings = next(record for record in packet["values"].values() if record.get("tag") == "object-ref")["bindings"]
-        packet["values"][bindings["key"]]["items"].append(
-            deepcopy(packet["values"][bindings["key"]]["items"][0]))
-    _reauthenticate(packet)
-    before = deepcopy(packet)
-    with pytest.raises(NodeCodecError):
-        decode_node_graph(packet)
-    assert packet == before
-
-
 def _legacy_key_root(value):
     from dryml.core.definition import ConcreteDefinition
     from dryml.core.bound_args import BoundArguments
@@ -794,37 +688,6 @@ def test_legacy_cdef_lookup_compares_recipes_across_fresh_node_handles(monkeypat
         monkeypatch.setattr(cls, "stable_hash", lambda self: "0" * 64)
     assert not same_cdef(root, wrong)
     assert not same_cdef(wrong, decoded)
-
-
-def test_legacy_reference_scopes_compare_exact_evidence_without_weakening_node_keys(monkeypatch):
-    from dryml.core import Serializable, ObjectRef, ObjectSelector
-    from dryml.core.freeze import FrozenTuple
-    from dryml.core.node import _as_node_view
-    from dryml.core.node_prepare import NodePreparation
-    from dryml.core.node_codec import encode_node_graph, decode_node_graph
-    from dryml.core.utils.graph.path import GraphPath
-    import dryml.core.node_prepare as preparation
-
-    child = Definition(Serializable).concretize()
-    copied = decode_node_graph(encode_node_graph(NodePreparation((child,))))
-    identity = ObjectId(("scoped",))
-    a, b = (ObjectRef(node, {GraphPath(): identity}) for node in (child, copied))
-    left = _legacy_key_root(FrozenTuple((a, a)))
-    right = _legacy_key_root(FrozenTuple((a, b)))
-    assert left.graph_equal(right)
-    assert not NodePreparation((left,)).exact_equal(left, NodePreparation((right,)), right)
-    assert not left.graph_equal(_as_node_view(right))
-    assert NodePreparation((left,)).exact_key(left) != NodePreparation((right,)).exact_key(right)
-
-    faceted = ObjectRef(child.with_identity(ObjectId(("facet",))), {GraphPath(): identity})
-    bound = _legacy_key_root(FrozenTuple((a, faceted)))
-    selectors = [_legacy_key_root(ObjectSelector(ref)) for ref in (a, faceted)]
-    monkeypatch.setattr(preparation, "_digest", lambda *args: "0" * 64)
-    assert left.graph_equal(right)
-    assert not left.graph_equal(bound)
-    assert not selectors[0].graph_equal(selectors[1])
-    assert not _legacy_key_root(FrozenTuple((child, child))).graph_equal(
-        _legacy_key_root(FrozenTuple((child, copied))))
 
 
 def test_legacy_scoped_comparison_backtracks_unordered_choices_through_external_aliases():

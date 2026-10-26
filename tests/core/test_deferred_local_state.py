@@ -16,7 +16,6 @@ from dryml.core import Repo, SaveRouting, Selector, Serializable
 from dryml.core.node_prepare import NodePreparation
 from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
-from dryml.core.store.records import LocalStateManifest
 from dryml.core.store.store import StoreCapabilityError, StoreAuthorityError
 from dryml.core.store.zip import ZipStore
 from dryml.core.materialization import build_exact_state_load_plan, execute_exact_state_load_plan
@@ -218,9 +217,10 @@ def test_current_reader_override_preserves_its_error(tmp_path, monkeypatch):
 def test_old_snapshot_manifests_are_rejected_intact_before_hooks(tmp_path, version):
     store = DirStore(tmp_path / "store", query_index="none")
     state = Repo(store).save_object(DeferredPayload())
-    current = _manifest(store, state)
     manifest_path = Path(store.state_data_path(state.state.key)).parent / "manifest.record"
-    old = LocalStateManifest("pkl", "0" * 64, "1" * 64, "2" * 64, current.files, version=version).to_bytes()
+    import dill
+    old = b"DRYML-STORE-RECORD/local-state-manifest/1\n" + dill.dumps(
+        {"schema": "local-state-manifest", "version": version}, protocol=5)
     manifest_path.write_bytes(old)
     DeferredPayload.reads = 0
     before = Path(store.base_dir, "authority.record").read_bytes()
