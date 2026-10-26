@@ -20,12 +20,14 @@ from dryml.locking import FileLock, LockError
 from .errors import ManagedConflictError, ManagedStoreError
 
 
-def _publish_checkpoint(repo, obj, *, states=None, store=None):
+def _publish_checkpoint(repo, obj, *, states=None, store=None, snapshot_observer=None):
     """Publish through Core's save batch with provisional, non-user retention.
 
     The returned (SavedNode, StoreReport) names every provisional token, including
     partial failures carried by Core exceptions. Reservations cover only state IO;
     the caller must transfer protection before retiring these publication roots.
+    snapshot_observer optionally supplies invocation-scoped environment evidence;
+    its result is never ownership, payload-availability, or publication evidence.
     """
     from dryml.core.state import reserve
     from dryml.core.repo_plan import build_routed_save_plan, execute_routed_save_plan
@@ -34,7 +36,7 @@ def _publish_checkpoint(repo, obj, *, states=None, store=None):
     with reserve(obj._identity_node, nodes, object_ids), repo._retain_save_context() as context:
         routed = build_routed_save_plan(repo, plan, context, store=store)
         return execute_routed_save_plan(repo, routed, states=states,
-            provisional=True, report_stores=True)
+            provisional=True, report_stores=True, snapshot_observer=snapshot_observer)
 
 
 def _validate_selection(repo, obj, original, selected, *, source_store=None):

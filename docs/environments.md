@@ -20,6 +20,14 @@ Inspection uses `importlib.metadata` for installed distributions. It does not im
 Each inspection reads fresh metadata. File inventories used to infer distribution
 locations are read once per distribution during that inspection, not cached across
 calls; later inspections continue to observe installed-environment changes.
+For standard `PathDistribution` records on Python 3.12+, location discovery reads
+the machine-readable `RECORD` inventory directly, validates all row/hash/size
+syntax, and checks filesystem presence only until finding its first existing
+entry. This avoids the standard library's eager existence checks for every later
+file while retaining the same inferred location. Other providers, older Python
+versions, and missing/empty RECORD inventories retain the normal `files` fallback.
+Managed lifecycle capture shares one observation only within an executing
+invocation; this does not introduce a process-global environment cache.
 
 The distribution inventory follows the interpreter's installation directories,
 including enabled user and inherited system site directories in import-path

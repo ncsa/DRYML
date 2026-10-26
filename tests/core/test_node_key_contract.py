@@ -30,6 +30,31 @@ def test_graph_digest_includes_node_local_facets():
     assert root.exact_digest() != bound.exact_digest()
 
 
+def test_repeated_exact_comparisons_reuse_full_evidence_and_clear_recomputes(monkeypatch):
+    from dryml.core.node_prepare import NodePreparation
+
+    left = Definition(KeyNode, {Definition(KeyNode, 1), Definition(KeyNode, 2)})
+    right = left.copy_graph()
+    different = Definition(KeyNode, {Definition(KeyNode, 1), Definition(KeyNode, 3)})
+    a, b, c = (NodePreparation((node,)) for node in (left, right, different))
+    assert a.exact_equal(left, b, right)
+    assert not a.exact_equal(left, c, different)
+    original = NodePreparation._label_table
+    calls = []
+
+    def label(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(NodePreparation, "_label_table", label)
+    assert a.exact_equal(left, b, right)
+    assert not a.exact_equal(left, c, different)
+    assert not calls
+    a.clear()
+    assert a.exact_equal(left, b, right)
+    assert calls
+
+
 def test_one_contract_two_schedulers_and_warm_requests():
     from dryml.core.node_prepare import NodePreparation
 

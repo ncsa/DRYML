@@ -24,7 +24,7 @@ from ...paths import local_path_key
 from .records import (
     StoreFormatRecord, StoreRecordError,
     StateKeyRecord, NodeBlockRecord, NodeRootRecord, StateVariantManifest,
-    StateAvailabilityRecord, NodeMembershipRecord, DeclarationAnchorRecord,
+    StateAvailabilityRecord, NodeMembershipRecord, DeclarationAnchorRecord, NodeMetadataRecord,
     DeclarationRequirementRecord, _json_bytes, _digest_value, _digest, _MAX_RECORD_BYTES,
     AuthorityRecord, MutationIntentRecord, NodeNameRecord, RetiredDeclarationAnchorRecord,
 )
@@ -75,8 +75,10 @@ class DirStore(Store):
 
     Side Effects:
         May initialize the root and persistent Store UUID. Public metadata reads
-        validate current authority; same-bucket inspection shares interpretation
-        only within its explicit fenced batch. Existing incompatible Stores are
+        validate current authority. A caller-owned bounded content scope may share
+        interpretation of identical immutable bytes across detached batches; every
+        batch still reads and revalidates its own current cut and byte witnesses.
+        Existing incompatible Stores are
         refused without conversion, deletion or replacement.
     """
 
@@ -890,11 +892,22 @@ class DirStore(Store):
         return record
 
     def _expand_node_root(self, record):
+        from .._content_facts import _current_content_facts
+        from ..node_codec import decode_node_graph
+        block = self._read_node_block(record.block_digest)
+        facts = _current_content_facts()
+        if facts is None:
+            return self._decode_node_root(record, block)
+        return facts.decode(("store-node-root", record.view_bytes, record.root_kind,
+                             decode_node_graph, type(self)._validate_node_selections),
+                            block.content, lambda: self._decode_node_root(record, block))
+
+    def _decode_node_root(self, record, block):
+        """Interpret freshly read immutable bytes; no Store validity is retained."""
         from ..node_codec import decode_node_graph, NodeCodecError
         from ..node_prepare import NodePreparation
         from ..node_views import creation_cdef, object_projection
         from ..node import require_saved
-        block = self._read_node_block(record.block_digest)
         detached = authority.detached_owner(self)
         cache_key = block.content, record.view_bytes, record.root_kind
         if detached is not None and cache_key in detached.node_views:
@@ -1934,7 +1947,13 @@ class DirStore(Store):
             if record_type is DeclarationAnchorRecord and payload.startswith(
                     b"DRYML-METADATA/dryml-declaration-retired-anchor/1\n"):
                 record_type = RetiredDeclarationAnchorRecord
-            return record_type.from_bytes(payload)
+            from .._content_facts import _current_content_facts
+            facts = _current_content_facts()
+            reader = record_type.from_bytes
+            if facts is not None and record_type in (NodeBlockRecord, NodeRootRecord, NodeMetadataRecord):
+                return facts.decode((record_type, getattr(reader, "__func__", reader), record_type.max_bytes),
+                                    payload, lambda: reader(payload))
+            return reader(payload)
         except StoreRecordError as error:
             raise StoreAuthorityError(f"Malformed Store record {path!r}: {error}") from error
 

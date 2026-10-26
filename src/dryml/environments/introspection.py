@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.metadata as metadata
+import csv
 import os
 import platform
 import site
@@ -31,13 +32,29 @@ def _distribution_location(dist: metadata.Distribution) -> str | None:
     """Find the first file's parent with one inventory read, or return unknown."""
 
     try:
+        if type(dist) is metadata.PathDistribution and sys.version_info >= (3, 12):
+            record = dist.read_text("RECORD")
+            if record:
+                first = None
+                for row in csv.reader(record.splitlines()):
+                    if not 1 <= len(row) <= 3:
+                        raise ValueError("Malformed installed-file inventory.")
+                    if len(row) > 1 and row[1]:
+                        metadata.FileHash(row[1])
+                    if len(row) > 2 and row[2]:
+                        int(row[2])
+                    if first is None:
+                        located = dist.locate_file(metadata.PackagePath(row[0]))
+                        if located.exists():
+                            first = str(Path(located).parent)
+                return first
         files = dist.files
         if files:
             first = next(iter(files), None)
             if first is not None:
                 located = dist.locate_file(first)
                 return str(Path(located).parent)
-    except (OSError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError, csv.Error):
         return None
     return None
 
@@ -84,8 +101,10 @@ def inspect_current() -> EnvironmentRecord:
     inventory. Heavy modules such as TensorFlow, Torch, JAX, Ray, or Slurm
     integrations are never imported by this function.
 
-    Each call reads fresh metadata; a distribution's file inventory is read only
-    once to infer its location and is not retained across calls.
+    Each call reads fresh metadata; file inventories are not retained across calls.
+    Standard RECORD inventories on Python 3.12+ are scanned directly to infer the
+    first existing file's parent without statting every later file. Inventory row
+    syntax is still validated; other distributions retain their files interface.
     The DRYML version uses that same installed inventory, or is unknown when
     DRYML has no installed record; source-tree metadata cannot override it.
 
