@@ -11,6 +11,15 @@ only after both finish. The Store-owned prepared-batch seam applies the same
 protocol once per logical Store commit; Repo/managed owners supply prepared
 facts through that seam, rather than maintaining a second index themselves.
 
+Cooperating writers may advance authority while another worker prepares a detached
+projection. Maintenance retries that stale cut up to eight times, yielding between
+attempts outside Store writer fences (100ms exponential backoff, at most 12.7s of
+waiting). Each attempt recaptures and validates current metadata and acknowledges
+only the exact resulting receipts. It does not rerun the already-published
+authoritative mutation, state capture, callbacks or workload. Genuine IO/schema
+failures and cancellation are not retried as stale cuts; exhausted contention
+still returns explicit failure with pending publication/recovery evidence.
+
 `auto` enables usable SQLite. Only optional-backend unavailability admits its
 declared nonpersistent fallback. Explicit `sqlite` never falls back; detected
 unavailability, foreign/future ownership, and conflicting configuration fail before

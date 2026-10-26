@@ -306,24 +306,25 @@ def test_foreign_sidecar_query_is_refused_intact(tmp_path):
     assert (index.path.read_bytes(), _authority_bytes(store)) == before
 
 
-def test_metadata_rebuild_keeps_overlapping_dirty_token_without_payload_access(tmp_path, monkeypatch):
-    """A later metadata writer invalidates detached rebuild work before activation."""
+def test_metadata_rebuild_recaptures_overlapping_writer_without_payload_access(tmp_path, monkeypatch):
+    """A stale rebuild is discarded; a fresh capture includes the later writer."""
     import threading
     import dryml.core.query.authority as authority
-    from dryml.core.store.authority import StoreCutChanged
     store = DirStore(tmp_path / "store", query_index="sqlite")
     repo = Repo(store)
     saved = repo.save(ProjectionStateful(1, repo=repo), annotations=SaveAnnotations(object={"project": "before"}))
     index = store.open_query_index()
     original = authority.capture_store_projection
     waiting, resume = threading.Event(), threading.Event()
-    errors = []
+    errors, cuts = [], []
 
     def capture(*args, **kwargs):
         prepared = original(*args, **kwargs)
         if threading.current_thread().name == "old-metadata-rebuild":
-            waiting.set()
-            assert resume.wait(30)
+            cuts.append(prepared.cut)
+            if len(cuts) == 1:
+                waiting.set()
+                assert resume.wait(30)
         return prepared
 
     def rebuild():
@@ -346,9 +347,11 @@ def test_metadata_rebuild_keeps_overlapping_dirty_token_without_payload_access(t
     finally:
         resume.set()
         worker.join(30)
-    assert not worker.is_alive() and len(errors) == 1 and isinstance(errors[0], StoreCutChanged)
-    assert _authority_bytes(store) == before and index.status().state == "dirty"
-    assert repo.query().object_refs().where(field("object", "project").eq("after")).one().graph_equal(saved.object_view())
+    assert not worker.is_alive() and not errors
+    assert len(cuts) == 2 and cuts[0].epoch < cuts[1].epoch
+    assert cuts[1] == store.authority_cut()
+    assert repo.query().object_refs().refresh(False).require_indexed().where(
+        field("object", "project").eq("after")).one().graph_equal(saved.object_view())
     assert _authority_bytes(store) == before and index.status().state == "ready"
 
 

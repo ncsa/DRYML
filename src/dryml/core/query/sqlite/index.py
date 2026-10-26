@@ -361,8 +361,10 @@ class SQLiteStoreQueryIndex:
         Replays classified journal records without application capture or payload
         IO. A missing/stale/owned incompatible index uses visible staged metadata-
         only rebuild; ``rebuild=True`` requests unconditional replacement. Returns
-        None only after captured work is acknowledged. Later writers cause bounded
-        retry or StoreCutChanged and are never acknowledged by an earlier cut.
+        None only after captured work is acknowledged. Later writers cause up to
+        eight fresh metadata-only attempts, then StoreCutChanged; they are never
+        acknowledged by an earlier cut. Retry never republishes the caller's
+        authoritative mutation or reruns capture, hooks or the managed workload.
         A declined rebuild claim is revalidated against its captured authority
         cut; a claimant's subsequent publication is retryable cut drift, not a
         claim-contention failure for the completed replacement.
@@ -378,6 +380,19 @@ class SQLiteStoreQueryIndex:
         Its refusal propagates before inventory; explicit maintenance without a
         callback retains its ordinary rebuild permission.
         """
+        from ...store.authority import StoreCutChanged, _pause_cut_retry
+
+        for attempt in range(8):
+            try:
+                return self._maintain_store_once(rebuild=rebuild, stats=stats,
+                    quarantine_existing=quarantine_existing, scan_admission=scan_admission)
+            except StoreCutChanged:
+                if attempt == 7:
+                    raise
+                _pause_cut_retry(attempt)
+
+    def _maintain_store_once(self, *, rebuild, stats, quarantine_existing, scan_admission):
+        """Prepare and confirm one fresh projection cut, releasing scopes on drift."""
         from ..authority import capture_store_projection
         from ...store import authority as a
         if type(rebuild) is not bool or type(quarantine_existing) is not bool:

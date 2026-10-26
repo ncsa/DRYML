@@ -148,6 +148,16 @@ runs, but no authority epoch or SQL write is added. Disabled/memory indexing
 creates no persistent sidecar. Initial/stale-index maintenance is separate setup
 work, admitted before capture.
 
+Independent workers can publish into one Store. Unrelated writers invalidate
+detached metadata observations, not completed capture or publication. Store
+preparation, SQLite completion, selected-state preflight, retention-receipt reads,
+and save read-back use bounded fresh-cut retries with exponential yielding rather
+than immediate busy retries. Prior-capture and recovery-probe reads retry before
+continuing the existing save. Each eight-attempt loop waits at most 12.7s total,
+outside Store writer fences, and never repeats capture/restore hooks or training.
+Corrupt authority, real IO failure and cancellation remain explicit; exhaustion
+preserves publication evidence rather than claiming success or rollback.
+
 Ordinary saves currently require the durable DirStore retained-batch seam.
 ZipStore still supports buffered low-level primitives, but its lack of durable
 owner grants makes ordinary retained save explicitly unsupported **before

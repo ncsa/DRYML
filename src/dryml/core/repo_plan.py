@@ -1129,7 +1129,7 @@ def _save_graph_records(saved, roots, origins, previous):
 
 def _retry_save_readback(read):
     """Retry only detached read evidence after cut drift, at most eight times."""
-    from .store.authority import StoreCutChanged
+    from .store.authority import StoreCutChanged, _pause_cut_retry
 
     for attempt in range(8):
         try:
@@ -1137,6 +1137,7 @@ def _retry_save_readback(read):
         except StoreCutChanged:
             if attempt == 7:
                 raise
+            _pause_cut_retry(attempt)
 
 
 def _confirmed_batch_keys(target, batch):
@@ -1245,7 +1246,7 @@ def execute_routed_save_plan(
         from .store.authority import StoreCutChanged
         for target in targets:
             try:
-                repo.get_snapshot_metadata(prior, store=target)
+                _retry_save_readback(lambda: repo.get_snapshot_metadata(prior, store=target))
             except KeyError:
                 pass
             except StoreCutChanged:
@@ -1292,7 +1293,7 @@ def execute_routed_save_plan(
         for source in _unique_stores(s for stores in candidates.values() for s in stores):
             requested = [key for key, stores in candidates.items() if source in stores and key not in source_by_key]
             if requested:
-                borrowed = lifetime.enter_context(source.read_states(requested))
+                borrowed = _retry_save_readback(lambda: lifetime.enter_context(source.read_states(requested)))
                 source_by_key.update(borrowed)
         for state in selected_map.values():
             if state.key not in source_by_key:
@@ -1402,7 +1403,8 @@ def execute_routed_save_plan(
             errors = []
             lease_targets = [(target, manifest.key) for target, batch, _ in batches for manifest, _ in batch.states]
             from .store.retention import state_leases
-            recovery = any(target.save_batch_needs_recovery(batch) for target, batch, _ in batches)
+            recovery = any(_retry_save_readback(lambda: target.save_batch_needs_recovery(batch))
+                           for target, batch, _ in batches)
             lease_scope = state_leases(lease_targets, exclusive=True, blocking=False) if recovery else state_use_leases(lease_targets)
             with lease_scope as acquired:
                 if not acquired:

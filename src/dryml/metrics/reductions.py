@@ -99,10 +99,9 @@ def _validate_known_f1_controls(average: object, positive_index: object) -> None
 
 
 def _evaluation_pair_specs(input_spec: SpecTree) -> tuple[TensorSpec, TensorSpec]:
-    """Return the prediction and target leaves from one metric evaluation spec."""
+    """Return named prediction/target leaves independently of mapping order."""
 
-    if not isinstance(input_spec, Mapping) or tuple(input_spec) != (
-            "prediction", "target"):
+    if not isinstance(input_spec, Mapping) or set(input_spec) != {"prediction", "target"}:
         raise TypeError("Metric evaluation requires prediction and target fields.")
     prediction, target = input_spec["prediction"], input_spec["target"]
     if not isinstance(prediction, TensorSpec) or not isinstance(target, TensorSpec):
@@ -168,6 +167,8 @@ class _AlignEvaluationTarget(Method):
 
     The original private name remains stable because authored Artifact graphs
     persist its import reference.
+    Pair fields are selected by name; their mapping insertion order is not part
+    of the metric contract and may change during graph transport.
     """
 
     def __call__(self, item):

@@ -245,6 +245,12 @@ its result from its own StateRef without source/model payloads or managed contro
 records; a later rerun still requires the retained input references and fails
 when that authority is unavailable.
 
+Metric evaluation pairs are mappings with exactly the named `prediction` and
+`target` fields. Insertion order is irrelevant: graph transport can reorder
+mapping entries without changing their meaning. Both leaves must still be
+TensorSpecs with declared backends and matching batch modes. Missing/extra fields
+or incompatible leaves fail implementation selection before evaluation.
+
 `ConfusionCounts` uses fixed ordered, unique, homogeneous exact `int` or `str`
 classes. It consumes scalar labels or matching non-empty one-dimensional label
 batches, uses truth rows and prediction columns, and keeps native int64 carry

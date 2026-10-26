@@ -508,7 +508,7 @@
              "test_sidecar_policy_and_derived_only_recovery",
              "test_foreign_sidecar_query_is_refused_intact",
              "test_future_sidecar_is_refused_intact",
-            "test_metadata_rebuild_keeps_overlapping_dirty_token_without_payload_access",
+            "test_metadata_rebuild_recaptures_overlapping_writer_without_payload_access",
             "test_incremental_v3_publication_does_not_rescan_historical_projection_rows",
              "test_clean_incremental_save_and_metadata_do_not_inventory_history",
              "test_indexed_admissions_share_replicas_and_do_not_charge_ordering_lookahead",

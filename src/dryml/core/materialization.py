@@ -48,7 +48,7 @@ def _node_metadata_evidence(repo, node, owned, sources, prepared, *, source_stor
     Unrelated cooperating publications may invalidate a detached cut; retry only
     this metadata preparation, at most eight times, never constructors or hooks.
     """
-    from .store.authority import StoreCutChanged
+    from .store.authority import StoreCutChanged, _pause_cut_retry
     for attempt in range(8):
         try:
             return _read_node_metadata_evidence(repo, node, owned, sources, prepared,
@@ -56,6 +56,7 @@ def _node_metadata_evidence(repo, node, owned, sources, prepared, *, source_stor
         except StoreCutChanged:
             if attempt == 7:
                 raise
+            _pause_cut_retry(attempt)
 
 
 def _read_node_metadata_evidence(repo, node, owned, sources, prepared, *, source_store, source_stores, reservation):
@@ -176,13 +177,14 @@ def _selected_state_sources(repo, associations, *, source_store=None, source_sto
                 keys = [key for key, stores in candidates.items() if store in stores and key not in sources]
                 if keys:
                     try:
-                        from .store.authority import StoreCutChanged
+                        from .store.authority import StoreCutChanged, _pause_cut_retry
                         for attempt in range(8):
                             try:
                                 selected_sources = lifetime.enter_context(store.read_states(keys))
                             except StoreCutChanged:
                                 if attempt == 7:
                                     raise
+                                _pause_cut_retry(attempt)
                             else:
                                 sources.update(selected_sources)
                                 break

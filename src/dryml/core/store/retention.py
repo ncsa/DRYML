@@ -483,7 +483,20 @@ class RetentionAuthority:
 
         token is a UUID. Malformed/misplaced authority raises StoreAuthorityError;
         disconnected/closed owners fail. Reads no target payload or operation history.
+        A top-level detached read retries unrelated cut drift at most eight times,
+        yielding between attempts. Nested reads leave retries to their outer owner.
         """
+        from .authority import StoreCutChanged, detached_owner, _pause_cut_retry
+        for attempt in range(8):
+            try:
+                return self._read(token)
+            except StoreCutChanged:
+                if attempt == 7 or detached_owner(self.store) is not None:
+                    raise
+                _pause_cut_retry(attempt)
+
+    def _read(self, token):
+        """Read one detached owner record without mutating retention authority."""
         self.store._assert_state_owner_open()
         with self.store._metadata_read():
             value = self.store._read_file(self._path(token), RetentionIntentRecord)

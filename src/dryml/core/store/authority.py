@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 import os
 import stat
+import time
 from uuid import uuid4
 
 from ... import filesystem
@@ -23,6 +24,17 @@ __all__ = ["PreparedChange", "PreparedMutation", "StoreCutChanged", "StoreMutati
 
 class StoreCutChanged(StoreAuthorityError):
     """Detached facts lost their cut/byte witnesses; explicitly retry preparation."""
+
+
+def _pause_cut_retry(attempt):
+    """Yield outside read/writer scopes so a cooperating publisher can finish.
+
+    Eight-attempt metadata loops pass only zero-based attempts 0..6, adding at
+    most 12.7 seconds total. The window lets an ordinary concurrent multi-phase
+    publisher finish even on a loaded host. Interruption propagates; no authority
+    is retained.
+    """
+    time.sleep(0.1 * 2 ** attempt)
 
 
 class StoreMutationError(StoreAuthorityError, OSError):

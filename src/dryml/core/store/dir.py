@@ -502,7 +502,7 @@ class DirStore(Store):
     def _prepare_and_apply(self, prepare, *, retry_stale=True, return_receipt=False):
         # The preparation callable is strictly outside the Store writer fence.
         # A bounded retry admits concurrent siblings without merging stale CAS.
-        for _ in range(8):
+        for attempt in range(8):
             try:
                 self.recover_authority()
                 index = self.open_query_index()
@@ -521,6 +521,8 @@ class DirStore(Store):
             except StoreCutChanged:
                 if not retry_stale:
                     raise
+                if attempt < 7:
+                    authority._pause_cut_retry(attempt)
                 continue
         raise StoreCutChanged("Store changed repeatedly; retry publication explicitly.")
 
@@ -2222,14 +2224,18 @@ class DirStore(Store):
         """Read capture after an owning active-source destination preflight.
 
         The private caller has validated every selected StateKey/destination.
-        Decode fresh captured block bytes, compare exact graph evidence with that
-        prepared target, and check every declaration contribution. This reuses the
+        Read fresh captured block bytes, compare exact graph evidence with that
+        prepared target, and check every declaration contribution. An active
+        bounded content scope may reuse pure decoding of identical block/view
+        bytes, but no membership, declaration, capture or cut check is skipped.
+        This reuses the
         destination validation instead of repeating it for an equal saved graph.
         The detached owner/final cut witness remains operation-local. Custom root
         readers retain their public validation path.
         """
         import json
         from ..node_codec import _decode_node_graph_views
+        from .._content_facts import _current_content_facts
         from ..metadata import _node_snapshot_metadata
         from .records import NodeMetadataRecord
         if (getattr(self.read_node, "__func__", None) is not DirStore.read_node
@@ -2247,9 +2253,16 @@ class DirStore(Store):
             if record is None or record.root_kind != "saved" or record.digest != digest:
                 raise StoreAuthorityError("Missing or mismatched selected saved-graph authority.")
             block = self._read_node_block(record.block_digest)
-            packet = block.blocks
-            packet["views"] = [record.view]
-            (root,), owner = _decode_node_graph_views(packet, with_owner=True)
+            def decode():
+                packet = block.blocks
+                packet["views"] = [record.view]
+                return _decode_node_graph_views(packet, with_owner=True)
+            facts = _current_content_facts()
+            if facts is None:
+                (root,), owner = decode()
+            else:
+                (root,), owner = facts.decode(("store-selected-root", record.view_bytes, _decode_node_graph_views),
+                                              block.content, decode)
             if not owner.exact_equal(root, prepared, target):
                 raise StoreAuthorityError("Selected saved graph conflicts with captured authority.")
             nodes = self._publication_identities(root)
