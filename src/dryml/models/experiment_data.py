@@ -339,10 +339,21 @@ class ExperimentData(Serializable):
 
     @classmethod
     def _load_current(cls, experiment: Node, *, repo, store):
-        name = store.read_node_name(cls._current_name(experiment))
-        if name is None:
-            return None, None
-        current = store.read_node(name.root_digest, kind="saved")
+        """Read a coherent name/Node pair before loading history private state."""
+        from dryml.core.store.authority import StoreCutChanged, _pause_cut_retry
+
+        for attempt in range(8):
+            try:
+                with store._metadata_read():
+                    name = store.read_node_name(cls._current_name(experiment))
+                    if name is None:
+                        return None, None
+                    current = store.read_node(name.root_digest, kind="saved")
+                break
+            except StoreCutChanged:
+                if attempt == 7:
+                    raise
+                _pause_cut_retry(attempt)
         loaded = repo.load_state_ref(current, reuse_live="never", cache="none", source_store=store)
         if not isinstance(loaded, cls) or not loaded.experiment.graph_equal(experiment):
             raise StoreAuthorityError("Current ExperimentData alias has incompatible history authority.")
@@ -354,12 +365,23 @@ class ExperimentData(Serializable):
 
     @classmethod
     def _save_current(cls, history, *, repo, store, expected):
+        """Publish once, then retry only cut-invalidated name read-back metadata."""
+        from dryml.core.store.authority import StoreCutChanged, _pause_cut_retry
+
         saved = repo.save_object(history, store=store)
         name = cls._current_name(history.experiment)
         record = NodeNameRecord(name, "saved", NodePreparation((saved,)).digest(saved, domain="dryml-saved-root/v1"))
         previous = None if expected is None else NodeNameRecord(name, "saved", NodePreparation((expected,)).digest(expected, domain="dryml-saved-root/v1"))
         store.compare_and_set_node_name(record, expected=previous)
-        if store.read_node_name(name) != record:
+        for attempt in range(8):
+            try:
+                current = store.read_node_name(name)
+                break
+            except StoreCutChanged:
+                if attempt == 7:
+                    raise
+                _pause_cut_retry(attempt)
+        if current != record:
             raise StoreAliasConflictError("ExperimentData current name changed after publication.")
         return saved
 
@@ -374,13 +396,19 @@ class ExperimentData(Serializable):
                 topology and restricts loading to that authority.
 
         Returns:
-            A fresh uncached ExperimentData object, or ``None`` only when no
-            matching declaration or snapshot identity exists.
+            A fresh uncached ExperimentData object, or ``None`` when the subject
+            has no current history name.
 
         Raises:
             TypeError: If the subject is not a Node.
-            StoreAuthorityError: If matching history is incomplete, corrupt, or
-            ambiguous. Repo load errors remain explicit.
+            StoreAuthorityError: If named history is incomplete or corrupt, or
+                its metadata cut changes throughout eight attempts. Repo load
+                errors remain explicit.
+
+        Side Effects:
+            Reads a coherent current name/Node pair with bounded cut retries, then
+            restores that history once without caching it or loading referenced
+            checkpoints. Malformed authority is never treated as missing history.
         """
 
         experiment = cls._subject_reference(experiment)
@@ -396,6 +424,9 @@ class ExperimentData(Serializable):
         A new history uses a format-4 absent-name CAS. Recovery
         can adopt only one validated empty initial snapshot; a populated or
         ambiguous alias-less history remains an authority error.
+        Candidate discovery buffers one complete query result, allowing bounded
+        fresh-cut retries before construction, restoration or publication. It never
+        combines a partial candidate prefix with a later query snapshot.
 
         Args:
             experiment: Experiment Node, projected to its object view for lookup.
@@ -412,6 +443,8 @@ class ExperimentData(Serializable):
                 populated, malformed, or ambiguous.
             RepoSaveError: If Store selection or initial immutable publication
                 cannot complete.
+            QueryError: If candidate discovery fails validation or exhausts its
+                bounded cut retries, before creating or adopting a history.
 
         Side Effects:
             May construct/publish an empty history or CAS-adopt one recovered
@@ -423,7 +456,7 @@ class ExperimentData(Serializable):
         loaded, _ = cls._load_current(experiment, repo=repo, store=selected)
         if loaded is not None:
             return loaded
-        candidates = tuple(selected.query().saved().sel(cls._definition(experiment)).iter())
+        candidates = tuple(selected.query().saved().sel(cls._definition(experiment)).collect())
         if candidates:
             if len(candidates) != 1:
                 raise StoreAuthorityError("ExperimentData recovery requires one empty snapshot.")

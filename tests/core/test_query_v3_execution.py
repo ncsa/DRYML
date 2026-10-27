@@ -7,7 +7,7 @@ from dryml.core.query import field
 from dryml.core.query.identity import IdentitySet, OccurrenceSet
 from dryml.core.query.model import QueryCardinalityError, QueryDomainError, QueryIndexUnavailable
 from dryml.core.query.query import IdentityQuery
-from dryml.core.query.source import SourceCapture, _SourceRecapture
+from dryml.core.query.source import SourceCapture, _SourceRecapture, _SourceCutChanged
 from dryml.core.store.dir import DirStore
 from dryml.core.query.model import QueryError
 from dryml.core.store.records import NodeNameRecord
@@ -325,8 +325,7 @@ def test_u5_late_demand_restarts_both_algebra_branches_after_mutation(tmp_path, 
 
     monkeypatch.setattr(IdentityQuery, "_evaluated_entries", mutate_after_left)
 
-    with pytest.raises(QueryError, match="changed"):
-        left.intersection(right).count()
+    assert left.intersection(right).count() == 0
     assert mutated
 
 
@@ -415,19 +414,21 @@ def test_u5_repo_attachment_does_not_enter_an_existing_terminal(tmp_path, monkey
         left.union(right).count()
 
 
-def test_u5_exact_miss_then_publication_does_not_mix_with_broad_cut(tmp_path):
+@pytest.mark.parametrize("active", (False, True))
+def test_u5_exact_miss_then_publication_does_not_mix_with_broad_cut(tmp_path, active):
     first = DirStore(tmp_path / "first")
     second = DirStore(tmp_path / "second")
     repo = Repo((first, second))
     value = ExecutionLeaf("candidate", repo=repo)
     state = repo.save_object(value, store=second)
     capture = SourceCapture()
-    capture.active = True
+    capture.active = active
     assert not capture.capture_store(first).knowledge()
     assert repo.save_object(value, store=first, source_store=second).graph_equal(state)
-    with pytest.raises(QueryError, match="changed"):
+    with pytest.raises(_SourceCutChanged if active else QueryError):
         capture.capture_store(first)
-    assert state in SourceCapture().capture_store(first).knowledge()
+    capture.discard_store_cuts()
+    assert state in capture.capture_store(first).knowledge()
 
 
 def test_v3_exact_stored_cdef_positive_does_not_enumerate_definitions(tmp_path, monkeypatch):
@@ -699,17 +700,15 @@ def test_u6_recapture_retains_spent_admissions(tmp_path, monkeypatch, unstable):
 
         return base.max_verify(limit)._run_terminal(evaluate, return_capture=True)
 
-    if unstable:
-        with pytest.raises(QueryError, match="changed"):
-            terminal(6)
-        return
-    result, capture = terminal(6)
-    assert capture.verified_count == 6
-    assert capture.capture_rounds == 5 and capture.demand_recaptures == 1
+    budget = 9 if unstable else 6
+    result, capture = terminal(budget)
+    assert capture.verified_count == budget
+    assert capture.capture_rounds == (8 if unstable else 5)
+    assert capture.demand_recaptures == (2 if unstable else 1)
     assert capture.instability_retries == int(unstable)
-    assert capture.store_scan_count == 1
+    assert capture.store_scan_count == (2 if unstable else 1)
     with pytest.raises(QueryVerifyBudgetExceeded):
-        terminal(5)
+        terminal(budget - 1)
 
 
 def test_u6_operand_policy_conflicts_and_outer_overrides(tmp_path, monkeypatch):
@@ -799,7 +798,7 @@ def test_u6_selective_cdef_miss_readmits_complete_inventory(tmp_path):
 
 
 def test_u7_bounded_stage_reuses_existing_complete_cut(tmp_path, monkeypatch):
-    """A later bounded stage must not inspect newer authority than retained facts."""
+    """Cut drift restarts both stages; bounded work then reuses fresh admissions."""
 
     from dataclasses import replace
 
@@ -811,13 +810,18 @@ def test_u7_bounded_stage_reuses_existing_complete_cut(tmp_path, monkeypatch):
     store.rebuild_query_index()
     query = store.query().cdefs().stored().refresh(False)
     bounded = replace(query, take_limit=1)
+    attempts = []
 
     def evaluate(capture):
-        assert query._collect_with_capture(capture).one().graph_equal(root)
-        _name(store, "main", main)
+        attempts.append(query._collect_with_capture(capture))
+        if len(attempts) == 1:
+            _name(store, "main", main)
         return bounded._collect_with_capture(capture)
 
     monkeypatch.setattr(store.open_query_index(), "_retained_read_view",
                         lambda: pytest.fail("bounded stage reopened an existing complete cut"))
-    with pytest.raises(QueryError, match="changed"):
-        query.max_verify(2)._run_terminal(evaluate, return_capture=True)
+    result, capture = query.max_verify(3)._run_terminal(evaluate, return_capture=True)
+    assert [len(values) for values in attempts] == [1, 2]
+    assert attempts[0].one().graph_equal(root)
+    assert result.one().graph_equal(attempts[1].query().take(1).one())
+    assert capture.verified_count == 3 and capture.instability_retries == 1

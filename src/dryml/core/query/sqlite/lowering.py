@@ -1,4 +1,65 @@
+"""Lower query predicates to conservative SQLite candidate relations.
+
+Source authority and exact residual matching establish accepted results. These
+prefilters retain occurrence correlation and enforce the caller's scan policy.
+"""
+
 from __future__ import annotations
+
+
+def _quoted_root_identity_paths(node):
+    """Yield encoded ordered paths and required identity pins at quotation roots.
+
+    The Node codec supplies the same typed value paths as existing edge/facet
+    rows. Only the immediate quoted root is inspected; quotation does not become
+    discovery traversal. Unordered positions are not portable correlation keys.
+    These necessary constraints never replace exact quoted-graph matching.
+    """
+    from ...node_codec import _describe_node
+    from ...node import Node
+    from ...links import DefLink
+    from ...quoted import QuotedDef
+    from ...freeze import FrozenSet
+    from ...template import _template_children
+
+    def has_pin(value):
+        if isinstance(value, QuotedDef):
+            return getattr(value.value, "object_id", None) is not None
+        if isinstance(value, (Node, set, frozenset, FrozenSet)):
+            return False
+        if isinstance(value, DefLink):
+            return has_pin(value.target)
+        return any(has_pin(child) for child in _template_children(value))
+
+    # Most exact recipes contain no quoted identity constraints. Avoid encoding
+    # their arrays and complete constructor metadata just to discover that fact.
+    if not any(has_pin(value) for value in node.parameters.values()):
+        return
+    nodes = []
+
+    def remember(value):
+        nodes.append(value)
+        return len(nodes) - 1
+
+    def walk(value, path=()):
+        if isinstance(value, dict):
+            tag = value.get("tag")
+            if tag in {"set", "frozenset", "leaf", "array", "numpy-scalar"}:
+                return
+            if tag == "quote":
+                target = value["value"]
+                if target.get("tag") == "node":
+                    identity = getattr(nodes[target["slot"]], "object_id", None)
+                    if identity is not None:
+                        yield path + (("field", "value"),), identity
+                return
+            for key, child in value.items():
+                yield from walk(child, path + (("field", key),))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                yield from walk(child, path + (("index", index),))
+
+    yield from walk(_describe_node(node, remember))
 
 
 def _store_discovery_relation(query, *, scan_admission=None):
@@ -11,6 +72,9 @@ def _store_discovery_relation(query, *, scan_admission=None):
     scan admission before source inventory or index recovery.
     """
     from ...selector import QueryPredicate, Selector
+    from ...definition import ConcreteDefinition
+    from ...symbol import ImportRef, maybe_symbol_ref
+    from ..._value_json import _value_to_json
     from ...node import Node
     from ..relationships import _local_discovery_tokens, _local_discovery_edges
     from ...store.records import _json_bytes
@@ -131,6 +195,33 @@ def _store_discovery_relation(query, *, scan_admission=None):
             relation = pattern(restriction.value)
             if relation is not None:
                 relations.append(relation)
+            selected = restriction.value
+            if isinstance(selected, Selector):
+                selected = selected.root
+            if isinstance(selected, QueryPredicate) and selected.kind == "node":
+                selected = selected.value
+            if (relation is None and isinstance(selected, ConcreteDefinition) and kinds
+                    and all(kind in {"object_ref", "state_ref"} for kind in kinds)):
+                block = field("p", "root.block_digest")
+                source = "'definitions/blocks/' || substr(" + block + ",1,2) || '/' || " + block + " || '.record'"
+                locator = field("p", "locator.table") + " || ':' || " + field("p", "locator.slot")
+                symbol = maybe_symbol_ref(selected.cls, functions=False)
+                if isinstance(symbol, ImportRef):
+                    # Existing facet rows bind the exact class to this occurrence.
+                    # Soft class selectors still admit subclasses, so cannot use
+                    # this filter. It reduces decoding, not physical scan policy.
+                    terms.append("EXISTS (SELECT 1 FROM store_projection_rows cls WHERE cls.family='facet' AND "
+                        "cls.source=" + source + " AND "
+                        "cls.row_key=" + locator + " || ':[[\"field\",\"cls\"]]' AND " + field("cls", "value") + "=json(?))")
+                    params.append(_json_bytes({"tag": "leaf", "value": _value_to_json(symbol, grammar=3)}).decode("ascii"))
+                for path, identity in _quoted_root_identity_paths(selected):
+                    terms.append("EXISTS (SELECT 1 FROM store_projection_rows e JOIN store_projection_rows pin ON "
+                        "pin.family='facet' AND pin.source=e.source AND pin.row_key=" + field("e", "table") +
+                        " || ':' || " + field("e", "target") + " || ':[[\"field\",\"identity\"]]' "
+                        "WHERE e.family='edge' AND e.source=" + source + " AND e.row_key=" + locator +
+                        " || ':' || ? AND " + field("e", "role") + "='quote' AND " + field("pin", "value") + "=json(?))")
+                    params.extend((_json_bytes(path).decode("ascii"),
+                        _json_bytes({"tag": "leaf", "value": _value_to_json(identity, grammar=3)}).decode("ascii")))
         elif restriction.kind == "object_id":
             from ...definition import Definition
             relations.append(node_relation(Definition().with_identity(restriction.value)))

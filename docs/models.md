@@ -531,15 +531,23 @@ supported canonical Definition values and frozen dense constructor arrays
 losslessly without opening the referenced checkpoint payload.
 
 `ExperimentData.find(experiment, repo=..., store=...)` returns a fresh current
-history object or `None` when the subject has no current history name. Corrupt,
-ambiguous, incomplete, or alias-less published authority raises an authority/load
-error. `get_or_create(...)` selects one writable Store, creates the first empty
-snapshot through the Store-local `experiment_data_current_v4-<projection-digest>`
-Node-name CAS, and may
+history object or `None` when the subject has no current history name. Corrupt or
+incomplete named authority raises an authority/load error. `get_or_create(...)`
+selects one writable Store, creates the first empty snapshot through the
+Store-local `experiment_data_current_v4-<projection-digest>` Node-name CAS, and may
 recover only one valid empty alias-less initial snapshot. It never chooses an
-arbitrary matching query result. `find(...)`, `get_or_create(...)`, and the private
-definition lookup also accept an `ObjectSelector` and use its explicit `reference`
-association; direct construction uses `Ref[Node]`.
+arbitrary matching query result. Both helpers accept the Experiment Node and use
+its object projection as the association; direct construction uses `Ref[Node]`.
+
+Current-name lookup reads the name and its saved Node under one metadata cut,
+with at most eight attempts and bounded backoff on concurrent cut changes, before
+restoring history private state. Initial/recovery discovery uses one buffered
+query terminal so a changed Store restarts the complete candidate selection before
+construction, restoration or publication. Partial candidate prefixes are never
+combined across cuts. Exhausted retries and malformed authority remain failures;
+these metadata retries do not replay training, checkpoint capture, restoration
+hooks or Artifact computation. Independent Experiment workers may publish to the
+same local Store under its normal publication and history CAS contracts.
 
 `add_row(...)` validates an exact checkpoint and optional predecessor projection,
 then returns an opaque row key. Supplying a callback occurrence key makes identical
@@ -553,6 +561,9 @@ is present.
 Call `publish(repo=..., store=...)` after local row changes. It fresh-loads the
 current history, reapplies idempotent changes, saves an immutable snapshot, and
 CAS-advances the selected Store name, retrying stale writers at most eight times.
+After a successful name CAS, cut-invalidated read-back retries only the metadata
+read, without saving another snapshot or repeating that CAS. A genuinely changed
+name still enters the existing stale-writer recovery path.
 Failed publication preserves local queued changes and can leave a safe immutable
 orphan snapshot. An enabled-index failure after the current-name CAS still raises:
 the installed name remains authoritative, but does not prove acknowledged index

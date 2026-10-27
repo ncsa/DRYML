@@ -230,8 +230,20 @@ transaction, rereads committed receipts, then acknowledges exact captured work.
 Preparation, graph encode/decode/equality, compatibility validation and payload
 authentication run outside the Store writer fence. A detached batch carries the
 Store cut and exact byte/directory witnesses, revalidated under that fence before
-effects. Stale write preparation retries a bounded number of times, then explicitly
-refuses instability. The fence covers bounded byte/association checks, prepared
+effects. Store-owned retryable preparation may rebase across an independently
+advanced epoch only when **every** observed record, directory listing and prepared
+transition still matches under the fence. Explicit reads of `authority.record`
+remain dependencies; they cannot be discarded to permit a rebase. Reused selected-
+state metadata contributes its complete byte/directory witnesses to the new batch.
+The journal's `base_epoch` is the actual validated commit base, including when the
+cut changes between preparation and writer acquisition. Journal frame budgets are
+checked again before effects if that base changes. No graph reconstruction or
+application callback runs under the writer fence.
+
+Public `apply_prepared_mutation()` and exact recovery/replay retain strict cut CAS;
+query continuation certificates also retain their original Store/index cut.
+An actual dependency change still invalidates preparation, with bounded retries
+and explicit refusal on exhaustion. The fence covers bounded byte/association checks, prepared
 installs, cut publication, the short prepared SQL transaction and exact
 acknowledgement. Key protection must precede it when added;
 callers must not retain an external writer/read fence around high-level graph APIs.

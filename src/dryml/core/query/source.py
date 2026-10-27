@@ -51,6 +51,13 @@ class _SourceRecapture(Exception):
         self.invalidated = invalidated
 
 
+class _SourceCutChanged(_SourceRecapture):
+    """Restart unpublished results after physical authority/index cut drift."""
+
+    def __init__(self):
+        super().__init__(True)
+
+
 @dataclass(frozen=True, slots=True)
 class _MetadataReadFailure:
     """Record a failed read without retaining its exception or private message."""
@@ -387,6 +394,20 @@ class SourceCapture:
 
         self._admitted.clear()
 
+    def discard_store_cuts(self) -> None:
+        """Drop invalidated Store proofs without changing controls or spent work.
+
+        Returns None. All dependent complete and paged Store knowledge is discarded
+        together; immutable query plans, initial Repo topology/cache membership,
+        cumulative budgets, refresh requests and diagnostics remain terminal-owned.
+        Performs no IO or mutation of authority.
+        """
+        self._facts.clear()
+        self._node_stored_keys.clear()
+        self._validated_combinations.clear()
+        self.__dict__.pop("_node_query_tokens", None)
+        self.__dict__.pop("_node_scan_projections", None)
+
     def has_complete_store_cut(self, store: Store) -> bool:
         """Return whether this terminal already retains complete facts for a Store.
 
@@ -473,12 +494,20 @@ class SourceCapture:
         cached = self._facts.get(key)
         if cached is not None and metadata_scopes <= cached.metadata_scopes:
             if hasattr(cached, "cut") and store.authority_cut() != cached.cut:
+                if self.active:
+                    raise _SourceCutChanged()
                 from .model import QueryError
                 raise QueryError("Store changed during complete query capture; start a new query.")
             return cached
         if not hasattr(store, "store_uuid"):
             raise StoreCapabilityError("Query capture requires a Node Store authority.")
-        return self._capture_node_facts(store, metadata_scopes)
+        try:
+            return self._capture_node_facts(store, metadata_scopes)
+        except _SourceCutChanged as error:
+            if self.active:
+                raise
+            from .model import QueryError
+            raise QueryError("Store changed during complete query capture; start a new query.") from error
 
     def capture_stores(
         self, sources: Iterable[StoreSource | Store], *, metadata_scopes: frozenset[str] = frozenset()
@@ -587,8 +616,7 @@ class SourceCapture:
         if previous is not None:
             self.demand_recaptures += 1
             if previous.cut != before:
-                from .model import QueryError
-                raise QueryError("Store changed during query metadata demand; start a new query.")
+                raise _SourceCutChanged()
             metadata_scopes = metadata_scopes | previous.metadata_scopes
         entries = dict(iter_node_query(query, self, (store,), admit=False))
         facts = _NodeFacts(IdentitySet._from_entries(entries, bounded=False), self._node_stored_keys.get(store.authority_fence_key(), set()),
@@ -630,8 +658,7 @@ class SourceCapture:
                     facts.metadata[identity_key(value), scope] = data
                     metadata_cache[cached_key] = data
         if store.authority_cut() != before:
-            from .model import QueryError
-            raise QueryError("Store changed during complete query capture.")
+            raise _SourceCutChanged()
         self._facts[store.authority_fence_key()] = facts
         if previous is not None:
             self.invalidate_admissions()
@@ -953,7 +980,7 @@ class _NodePage:
 
     def validate(self):
         import os
-        from .model import QueryError
+        from .model import QueryIndexDirty
         for store in self.stores:
             domain = store.authority_fence_key()
             with store.authority_read_fence():
@@ -961,17 +988,19 @@ class _NodePage:
                 try:
                     self.witnesses[domain].validate()
                 except StoreCutChanged as error:
-                    raise QueryError("Store changed during query continuation; start a new query.") from error
+                    raise _SourceCutChanged() from error
                 for (owner, key), present in self.presence.items():
                     if owner == domain and os.path.isdir(store.state_data_path(key)) != present:
-                        raise QueryError("State availability changed during query continuation.")
+                        raise _SourceCutChanged()
                 index = self.indexes.get(domain)
                 if index is not None:
                     with index._connections._read_lease() as (con, identity):
                         con.execute("BEGIN")
                         try:
                             if _node_index_token(index, con, identity, store.authority_cut()) != self.tokens[domain]:
-                                raise QueryError("Query continuation changed; start a new query.")
+                                raise _SourceCutChanged()
+                        except QueryIndexDirty as error:
+                            raise _SourceCutChanged() from error
                         finally:
                             con.execute("ROLLBACK")
 
@@ -1080,6 +1109,8 @@ def iter_node_query(query, capture, stores, *, admit=True):
                     con.execute("BEGIN")
                     try:
                         tokens[domain] = _node_index_token(index, con, identity, cut)
+                    except QueryIndexDirty as error:
+                        raise _SourceCutChanged() from error
                     finally:
                         con.execute("ROLLBACK")
             capture._record_cut(domain)
@@ -1087,7 +1118,7 @@ def iter_node_query(query, capture, stores, *, admit=True):
                 capture._node_query_tokens = {}
             previous = capture._node_query_tokens.setdefault(domain, tokens[domain])
             if previous != tokens[domain]:
-                raise QueryError("Store changed during query evaluation; start a new query.")
+                raise _SourceCutChanged()
 
     def topology():
         sources = (query.source, *(item.scope for item in query.restrictions))
@@ -1100,7 +1131,7 @@ def iter_node_query(query, capture, stores, *, admit=True):
 
     def check_cut(store):
         if store.authority_cut() != tokens[store.authority_fence_key()][0]:
-            raise QueryError("Store changed during query continuation; start a new query.")
+            raise _SourceCutChanged()
 
     metadata_scopes = query._metadata_scopes()
     aliases = tuple(r for r in query.restrictions if r.kind == "alias")
@@ -1227,8 +1258,10 @@ def iter_node_query(query, capture, stores, *, admit=True):
                         con.execute("BEGIN")
                         try:
                             if _node_index_token(index, con, identity, store.authority_cut()) != tokens[domain]:
-                                raise QueryError("Index changed during query continuation.")
+                                raise _SourceCutChanged()
                             rows = con.execute(*_store_discovery_page_sql(discovery_plan, after=after, page_size=page_size)).fetchall()
+                        except QueryIndexDirty as error:
+                            raise _SourceCutChanged() from error
                         finally:
                             con.execute("ROLLBACK")
                 capture.pages_fetched += 1

@@ -117,9 +117,10 @@ class PreparedMutation:
         _preflight_journal(_intent(self, str(uuid4())))
 
 
-def _intent(batch, identity):
+def _intent(batch, identity, *, cut=None):
+    cut = batch.cut if cut is None else cut
     return MutationIntentRecord(_json_bytes({
-        "mutation_id": identity, "store_uuid": batch.cut.store_uuid, "base_epoch": batch.cut.epoch,
+        "mutation_id": identity, "store_uuid": cut.store_uuid, "base_epoch": cut.epoch,
         "scopes": list(batch.scopes), "transitions": [c.to_data() for c in batch.changes],
         "confirmed": [], "projection": [], "epoch": None, "status": "pending",
         "persistence_confirmed": False}))
@@ -200,17 +201,47 @@ class _DetachedRead:
         self.directories[relative] = names
         return names
 
-    def validate(self):
+    def include_witnesses(self, other):
+        """Retain all dependencies of same-Store facts reused during preparation.
+
+        The caller freshly validates ``other`` before reusing its interpretation;
+        this capture must revalidate those dependencies again before publication.
+        Conflicting observations or another Store owner fail without effects.
+        """
+        if other.store is not self.store:
+            raise StoreAuthorityError("Detached witnesses belong to another Store owner.")
+        for path, payload in other.files.items():
+            self.file(os.path.join(self.store.base_dir, path), payload)
+        for path, names in other.directories.items():
+            if path in self.directories and self.directories[path] != names:
+                raise StoreCutChanged("Reused authority directory changed during capture.")
+            self.directories[path] = names
+
+    def validate(self, *, rebase=False):
+        """Revalidate all dependencies under a caller-held authority fence.
+
+        The default requires the original cut. Private read-set consumers may
+        rebase to a newer cut only after every observed byte and directory still
+        matches. Explicit authority-record reads remain dependencies. Validation
+        itself must not add epoch dependencies to an otherwise independent read.
+        """
         self.store._assert_state_owner_open()
-        if read_cut(self.store) != self.cut:
-            raise StoreCutChanged("Store cut changed; retry detached preparation.")
-        for path, value in self.files.items():
-            if raw(self.store, path) != value:
-                raise StoreCutChanged("Authority byte witness changed; retry preparation.")
-        for path, names in self.directories.items():
-            current = os.path.join(self.store.base_dir, path)
-            if (tuple(sorted(os.listdir(current))) if os.path.exists(current) else ()) != names:
-                raise StoreCutChanged("Authority directory witness changed; retry preparation.")
+        token = _READ.set(None)
+        try:
+            cut = read_cut(self.store)
+            if (cut.store_uuid != self.cut.store_uuid or cut.epoch < self.cut.epoch
+                    or (not rebase and cut != self.cut)):
+                raise StoreCutChanged("Store cut changed; retry detached preparation.")
+            for path, value in self.files.items():
+                if raw(self.store, path) != value:
+                    raise StoreCutChanged("Authority byte witness changed; retry preparation.")
+            for path, names in self.directories.items():
+                current = os.path.join(self.store.base_dir, path)
+                if (tuple(sorted(os.listdir(current))) if os.path.exists(current) else ()) != names:
+                    raise StoreCutChanged("Authority directory witness changed; retry preparation.")
+            self.cut = cut
+        finally:
+            _READ.reset(token)
 
     def batch(self, changes, scopes):
         return PreparedMutation(self.cut, tuple(self.files.items()), tuple(self.directories.items()),
@@ -237,7 +268,13 @@ def read_cut(store):
 
 
 @contextmanager
-def detached_read(store):
+def detached_read(store, *, rebase=False):
+    """Capture metadata and validate its cut or exact read set before returning.
+
+    Private ``rebase=True`` consumers depend only on observed records/directories
+    and accept an independently advanced epoch after fresh fenced validation.
+    Nested reads retain the outer owner's policy; they cannot relax a strict cut.
+    """
     current = _READ.get()
     if current is not None and current.store is store:
         yield current
@@ -253,12 +290,12 @@ def detached_read(store):
             # a cooperating writer advances the cut. Retry as instability rather
             # than certifying those transient bytes as stable corruption.
             with store.authority_read_fence():
-                current.validate()
+                current.validate(rebase=rebase)
             raise
         else:
             # No preparation/expansion is allowed in this short scope.
             with store.authority_read_fence():
-                current.validate()
+                current.validate(rebase=rebase)
     finally:
         _READ.reset(token)
 
@@ -410,13 +447,16 @@ def acknowledge(store, identity, epoch):
         return updated
 
 
-def apply(store, batch, *, _acknowledge_nonpersistent=False):
+def apply(store, batch, *, _acknowledge_nonpersistent=False, _rebase_unchanged=False):
     """Apply prepared facts with cut/byte CAS and intent-before-effects ordering.
 
     Returns (mutation UUID or None, AuthorityRecord), with new work still pending
     exact projection acknowledgement. Empty/no-op batches do not churn epochs.
     StoreMutationError preserves partial evidence on IO failure;
     cancellation propagates with mutation/cut evidence attached. No callbacks run.
+    Store-private ``_rebase_unchanged`` admits an independent newer epoch only
+    after fresh validation of all read-set and transition witnesses. Its journal
+    uses that actual base cut. Public prepared facts retain strict cut CAS.
     """
     if type(batch) is not PreparedMutation:
         raise TypeError("Store mutations require PreparedMutation facts.")
@@ -428,18 +468,23 @@ def apply(store, batch, *, _acknowledge_nonpersistent=False):
     with store.writer_lock():
         witness = _DetachedRead(store, batch.cut)
         witness.files, witness.directories = dict(batch.witnesses), dict(batch.directories)
-        witness.validate()
+        witness.validate(rebase=_rebase_unchanged)
+        cut = witness.cut
+        if cut != batch.cut:
+            record = _intent(batch, identity, cut=cut)
+            _preflight_journal(record)
+            payload = record.to_bytes()
         if store._read_file(_path(store, identity), MutationIntentRecord) is not None:
             raise StoreAuthorityError("Mutation identity collision; existing intent is preserved.")
         if store._read_file(os.path.join(store.base_dir, "mutation-prepare.record"), MutationIntentRecord) is not None:
             raise StoreCutChanged("Intent registration is pending; recover authority and reprepare.")
-        for pending_id in batch.cut.pending:
+        for pending_id in cut.pending:
             pending = store._read_file(_path(store, pending_id), MutationIntentRecord)
             if (pending is None or pending.intent["mutation_id"] != pending_id
-                    or pending.intent["store_uuid"] != batch.cut.store_uuid):
+                    or pending.intent["store_uuid"] != cut.store_uuid):
                 raise StoreAuthorityError("Missing or mismatched pending mutation evidence.")
             if (pending.intent["status"] == "pending" or not pending.intent["persistence_confirmed"]
-                    or pending.intent["epoch"] > batch.cut.epoch):
+                    or pending.intent["epoch"] > cut.epoch):
                 raise StoreCutChanged("Unclassified or persistence-pending publication; recover authority and reprepare.")
         predicted, initial = {}, {}
         for change in batch.changes:
@@ -454,8 +499,7 @@ def apply(store, batch, *, _acknowledge_nonpersistent=False):
         # filesystem/SQL churn, even if they contain intermediate transitions.
         recovery = any(scope.startswith("replay:") for scope in batch.scopes)
         if not batch.changes or (predicted == initial and not recovery):
-            return None, batch.cut
-        cut = batch.cut
+            return None, cut
         try:
             bridge = os.path.join(store.base_dir, "mutation-prepare.record")
             store._atomic_write(bridge, payload)

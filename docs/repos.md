@@ -33,9 +33,14 @@ no automatic conversion. The Store-owned APIs currently available are:
   data source. When supplied together, destination/codec/positive codec version are admitted before
   payload IO. Only `source.data_directory` is lent to a codec; framework metadata
   siblings are outside it. Context exit or Store closure expires the source.
-   Detached metadata remains inspectable. A native shared full-key lease spans
-   fresh validation and borrowing, preventing cooperating cleanup until context
-   exit. A read creates no durable retained root.
+    Detached metadata remains inspectable. A native shared full-key lease spans
+    fresh validation and borrowing, preventing cooperating cleanup until context
+    exit. A read creates no durable retained root. Concurrent cut drift permits
+    eight metadata attempts with bounded backoff before payload authentication or
+    caller code. After a coherent metadata read, authentication runs once under
+    the same full-key lease; unrelated Store writes do not restart payload hashing.
+    Exhaustion, invalid metadata, payload corruption and caller failures remain
+    explicit errors. A yielded reader's caller body is never retried.
 - `publish_node(root, kind="recipe"|"saved")` / `read_node(digest, kind=...)`:
   explicit independent metadata publication/read. Saved roots require complete
   facets. Required ObjectId anchors compare canonical projections, so state-pin
@@ -195,6 +200,11 @@ ambiguity constructs fresh. Fresh loads attach only the requested root receipt,
 while reused children preserve any independently established historical receipt.
 Every missing full key is reported before construction or live-node reservation;
 malformed selected capture/declaration metadata remains an explicit authority error.
+Checkpoint selection and load-plan capture/lineage checks freshly revalidate their
+observed metadata bytes under short Store fences. They may accept an independently
+advanced Store epoch when all those dependencies are unchanged. A changed selected
+record still retries bounded metadata preparation or raises its authority/conflict
+error; constructors and restoration hooks are never replayed by this mechanism.
 
 `repo.apply_state(obj, states)` applies only the supplied StateSpec/typed path map,
 preserving unspecified state, identities and sharing. It captures/publishes nothing.
@@ -235,6 +245,15 @@ token; a new attempt never resurrects an abandoned/retired token. The Core batch
 seam also admits provisional publication for a later lifecycle owner, without
 creating an adopted permanent user-save reason. Managed association policy is
 not implemented by this seam.
+
+Retryable Store-owned publication revalidates its exact read set and transition CAS
+under the writer fence. Independent publications need not restart graph or journal
+preparation merely because the global epoch advanced. Matching dependencies permit
+rebasing onto that current cut, which becomes the persisted journal base; changed
+dependencies still require fresh preparation and never overwrite a winning CAS.
+Reused state-source evidence retains all its underlying metadata witnesses. Public
+prepared-mutation application and exact replay remain strict-cut operations. This
+does not cache authority, change query snapshot semantics, or retry authored work.
 
 `report_stores=True` returns `(saved, StoreReport)`. `RepoSaveError.report`
 preserves partial cross-Store outcomes. Each combined batch publication reports
@@ -379,6 +398,9 @@ an index. Provisional and adopted grants protect equally.
 - `protect(token, connected_stores)` may incrementally protect prepared targets.
   `adopt(token, connected_stores)` requires every named target and grant. Both
   serialize with owner dispositions; neither establishes a managed association.
+  Adoption retries only cut-invalidated target grant metadata, up to eight
+  attempts under shared full-key leases, before writing the adopted owner intent.
+  Missing grants, IO errors, cancellation and exhausted contention remain failures.
 - `abandon(token)` is an explicit owner-fenced tombstone for prepared work. It
   permanently rejects later protection/adoption. Death, elapsed time, missing
   index entries and disconnected/unreadable owners never call it automatically.

@@ -64,7 +64,12 @@ The order is:
    locks acquired inside them and no overlapping SQL/control transactions.
 
 Store writers never wait for key leases or perform graph preparation, payload
-authentication or application hooks. A read validates bytes while holding its
+authentication or application hooks. Store-private publication may rebase an
+unchanged exact read set onto a newer epoch under the writer fence: all observed
+bytes/directories and transition CAS witnesses are rechecked, and the bounded
+journal envelope is rebound to that actual base before effects. Explicit epoch
+dependencies, public prepared mutations, exact replay and query continuation
+certificates remain strict. A read validates bytes while holding its
 lease, then yields without a writer fence. Native key acquisition also rechecks
 the Store owner's liveness after waiting. Same-operation deletion while a shared
 or exclusive recovery lease is held returns in-use; cleanup uses an independent

@@ -376,9 +376,7 @@ def test_v3_occurrence_late_metadata_demand_restarts_root_evidence(tmp_path, mon
         field("lineage", "creation_status").eq(lineage.creation_status)
     )
 
-    from dryml.core.query.model import QueryError
-    with pytest.raises(QueryError, match="changed"):
-        nested.count()
+    assert nested.count() == 0
     assert mutated
 
 

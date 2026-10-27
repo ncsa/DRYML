@@ -1797,6 +1797,11 @@ class IdentityQuery:
             Reads source authority and caches under retryable cuts and may refresh
             derived indexes according to the plan. Exact live selection completes
             relevant contributors, including embedded and retained-cache evidence.
+            Physical cut changes discard all buffered rows and Store proofs and
+            permit at most eight cut attempts with bounded backoff. Spent
+            verification work is not refunded; scan/index controls and initial
+            Repo topology remain in force. Exhaustion raises QueryError without a
+            partial result.
         """
 
         return self._run_terminal(self._collect_with_capture)
@@ -1816,6 +1821,8 @@ class IdentityQuery:
                 validation fails, or a started iterator changes process/thread.
                 Pre-output cut changes retain normal retries; later cut changes
                 fail without replaying values already delivered.
+                Physical cut drift permits at most eight attempts before first
+                output. No source proof from a discarded attempt survives.
 
         Side Effects:
             First advancement may read complete candidate/metadata inventories
@@ -1848,6 +1855,7 @@ class IdentityQuery:
         """Prime retryable validation before output and own suspended cleanup."""
         from .model import QueryError
         from .source import _SourceRecapture
+        from ..store.authority import StoreCutChanged
 
         def prepare(capture):
             items = create_iterator(capture)
@@ -1865,7 +1873,7 @@ class IdentityQuery:
                 if _iterator_owner() != owner:
                     raise QueryError("Query iterator must stay in its starting process and thread.")
                 current = next(items, None)
-        except _SourceRecapture:
+        except (_SourceRecapture, StoreCutChanged):
             raise QueryError("Query source changed after iteration began; start a new iterator.") from None
         finally:
             items.close()
@@ -1996,7 +2004,8 @@ class IdentityQuery:
         """Restart all dependent stages on demand growth or an invalidated cut."""
 
         from .model import QueryError
-        from .source import SourceCapture, _SourceRecapture, node_query_stores
+        from .source import SourceCapture, _SourceRecapture, _SourceCutChanged, node_query_stores
+        from ..store.authority import StoreCutChanged, _pause_cut_retry
 
         capture = SourceCapture(self)
         if (
@@ -2054,15 +2063,23 @@ class IdentityQuery:
                             capture.merge_maintenance_stats(stats)
                 capture.refresh_policy = "auto"
         capture.active = True
+        cut_retries = 0
         while True:
             try:
                 answer = evaluate(capture)
                 return (answer, capture) if return_capture else answer
-            except _SourceRecapture as recapture:
+            except (_SourceRecapture, StoreCutChanged) as recapture:
                 capture.invalidate_admissions()
-                if recapture.invalidated:
+                if isinstance(recapture, (_SourceCutChanged, StoreCutChanged)):
+                    capture.discard_store_cuts()
                     capture.instability_retries += 1
-                    if capture.instability_retries >= 3:
+                    cut_retries += 1
+                    if cut_retries >= 8:
+                        raise QueryError("Query source changed repeatedly during evaluation; start a new query.") from recapture
+                    _pause_cut_retry(cut_retries - 1)
+                elif recapture.invalidated:
+                    capture.instability_retries += 1
+                    if capture.instability_retries - cut_retries >= 3:
                         raise QueryError("Query V3 source changed during evaluation.") from None
 
     def _index_presentations(self, capture, *, occurrence=None):

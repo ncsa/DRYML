@@ -127,6 +127,19 @@ Enumerating an explicitly requested complete domain without a selector still use
 its certified ordered relation. Exact-origin manifests seek their bucket source
 range; compatibility-only discovery currently admits a derived-family scan.
 
+Otherwise unanchored concrete recipe predicates in object-projection/saved domains use
+the existing occurrence-correlated `facet` class row as a necessary filter when
+the exact class is an `ImportRef`. Its block source and table/slot locator must
+match the discovery occurrence. This avoids decoding unrelated classes, including
+for quoted-input recipes without scalar anchors. Immediate quoted-root ObjectId
+pins also join the existing `edge` row at the codec's ordered typed value path to
+that quoted occurrence's `facet` identity row in the same block/table. Unordered
+positions are excluded. This is necessary metadata filtering, not traversal into
+quoted discovery children or a substitute for exact quoted graph equality.
+Soft/subclass selectors and creation/local-state domains are excluded. These
+filters retain residual matching and scan admission; they do not themselves
+qualify as selective indexed seeks or change schema/coverage versions.
+
 All discovery families, guards and seek indexes participate in readiness, including
 empty/count queries. Exact residuals and direct authority validate acceptance.
 Legacy Query V3 read views and
@@ -203,8 +216,16 @@ contributions retain their measured costs; no universal linear DAG bound is clai
 
 Tokens retain Store UUID/epoch/pending evidence, index file identity/UUID,
 schema/coverage/generation, producer and external-scope Repo topology, and keyset
-ordering position. A changed continuation fails explicitly without replaying the
-delivered prefix. Per-Store cuts are not a global transaction. Full-StateKey exact
+ordering position. Before external output, physical cut changes discard all
+dependent buffered rows, complete facts, combination proofs, page tokens and scan
+projections. The terminal recaptures on up to eight attempts with bounded backoff
+outside Store fences and SQLite readers. Spent admissions and other budgets,
+initial Repo topology/cache membership and effective refresh/scan policies remain
+in force. Eight invalidated attempts raise `QueryError`; genuine validation/IO
+errors and cancellation are not retried as drift. After output begins, a changed
+continuation fails explicitly without replaying the delivered prefix. Repo
+topology changes still refuse rather than admitting newly attached sources.
+Per-Store cuts are not a global transaction. Full-StateKey exact
 lookup is an authority-only plan, including a negative lookup, and does not open
 SQLite. Ready selective queries do not inventory unrelated Store contents.
 

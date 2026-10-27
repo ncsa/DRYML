@@ -134,7 +134,12 @@ declared Methods.
 immutable recipe-state and managed completion authority without constructing a
 candidate. It returns one exact completed receipt or `None`; multiple distinct
 completed results for the same recipe raise `ArtifactRecoveryError` rather than
-choosing arbitrarily. `Artifact.load_completed(...)` then restores that one ready
+choosing arbitrarily. Candidate discovery uses one buffered `collect()` terminal:
+concurrent Store changes can restart discovery before any candidates are used,
+with the query's bounded cut-retry policy. Completion records are checked freshly
+after that coherent candidate selection. Retry exhaustion or invalid authority
+remains an error, not a cache miss or a request to rerun computation.
+`Artifact.load_completed(...)` then restores that one ready
 result, reusing an exact matching live object by default. `Artifact.recover(
 initial_state_ref, ...)` uses the initial receiver's immutable identity to return
 its completed result when available, or restores the initial receiver so the same

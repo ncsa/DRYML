@@ -56,15 +56,20 @@ class Artifact(Serializable):
                 valid for the recipe, or completion authority names another recipe.
             dryml.managed.ManagedError: If retained completion authority is corrupt
                 or its exact Node metadata closure is invalid.
+            dryml.core.query.QueryError: If candidate discovery fails validation
+                or exhausts its bounded cut retries.
 
         Side Effects:
             Reads Repo reference evidence and managed control records only. It does
             not construct candidates, load payloads, or materialize input refs.
+            Candidate discovery is one buffered query terminal, so concurrent cut
+            changes can restart it before any candidates are used. Completion
+            records are subsequently checked freshly for those selected candidates.
         """
 
         definition = _recipe_definition(recipe)
         completed = {}
-        for state_ref in repo.query().saved().sel(definition).iter():
+        for state_ref in repo.query().saved().sel(definition).collect():
             completed_state = _completed_state_for_reference(
                 state_ref, repo=repo, control_store=control_store,
             )

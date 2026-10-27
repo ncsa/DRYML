@@ -281,7 +281,10 @@ def test_indexed_admissions_share_replicas_and_do_not_charge_ordering_lookahead(
     assert result.diagnostic().candidate_rows_read == 4
 
 
-def test_schema10_current_consumer_does_not_admit_legacy_read_views_or_lifecycle(tmp_path):
+def test_schema10_current_consumer_does_not_admit_legacy_read_views_or_lifecycle(tmp_path, monkeypatch):
+    """Explicit lifecycle reads require an owner, regardless of prior imports."""
+    from dryml.core.query import authority
+    monkeypatch.setattr(authority, "_CONTROL_PROJECTIONS", {})
     store, _, _ = _ready(tmp_path, 1)
     assert store.query().cdefs().stored().refresh(False).require_indexed().count() == 1
     index = store.open_query_index()

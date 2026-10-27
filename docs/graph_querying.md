@@ -73,22 +73,41 @@ refresh/recovery inventory. Explicit domain enumeration without a selector remai
 available from its complete certified relation. Compatibility-only local-state
 discovery currently needs scan admission; exact-origin discovery seeks its bucket.
 
+For otherwise unanchored concrete recipe selection in the object-projection and
+saved-Node domains, SQLite checks the occurrence's exact importable class and any immediate
+quoted-root ObjectId pins using existing `facet`/`edge` rows before decoding
+candidate graphs. Quoted pins stay correlated to their ordered encoded field
+paths; unordered positions are excluded, and quotation does not become discovery
+traversal. This reduces unrelated graph decoding for recipes whose quoted inputs
+have no scalar postings. These are necessary prefilters with exact residual
+validation, not new selective seeks: an otherwise unanchored recipe still requires
+scan admission. Soft class selectors retain subclass matching, and
+creation/local-state domains do not use these filters.
+
 `page_size(n)` bounds candidate pages. A short Store/SQLite cut captures candidate
 keys and immutable authority bytes. Connections/transactions and writer-blocking
 fences are released before shared block preparation, metadata expansion, residual
 evaluation, and yielding. The page is accepted only after revalidating that same
 cut. Continuation retains Store UUID/epoch/pending disposition, index file/UUID,
 schema/coverage/generation, source topology, and a deterministic keyset cursor.
-Alias, membership, availability, sidecar, coverage, or Repo topology changes cause
-explicit `QueryError`/index instability, preserving an already-delivered partial
-prefix; iteration does not silently restart. Federation uses per-Store cuts.
+Before external output, a changed Store/index cut discards buffered results and
+all dependent Store proofs, then recaptures the terminal's stages together.
+Physical cut drift permits eight attempts, with exponential backoff from 100ms
+outside readers/fences (at most 12.7s total waiting). This applies to buffered
+terminals such as `collect()` and `count()`, and to an iterator before its first
+value. Exhaustion raises `QueryError` without returning partial results. Once an
+iterator has delivered a value, a changed cut raises `QueryError` without replaying
+its prefix. Repo topology changes still fail explicitly. Federation uses per-Store
+cuts, not a global transaction.
 
-Composed stages sharing a terminal also reject a changed Store/index cut rather
-than combining earlier and later evidence. Growing metadata demand on an
-unchanged cut replaces detached facts and readmits candidates without refunding
-work already charged to the terminal's verification budget. Requested metadata
-scope validation precedes selector narrowing and scalar early stopping: a later
-invalid populated field or conflicting holder cannot be hidden by a positive
+Recapture preserves initial Repo topology/cache membership, refresh obligations,
+scan/index controls, and cumulative verification and witness budgets. Stages never
+combine earlier and later Store evidence. Growing metadata demand on an unchanged
+cut also replaces detached facts and readmits candidates without refunding work
+already charged to the terminal's verification budget. Genuine validation/IO
+failures and cancellation propagate rather than being retried as cut drift.
+Requested metadata scope validation precedes selector narrowing and scalar early
+stopping: a later invalid populated field or conflicting holder cannot be hidden by a positive
 match or an empty candidate set. Scope-holder evidence does not itself consume
 candidate admissions or become part of the result universe.
 
