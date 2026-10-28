@@ -53,6 +53,57 @@ def _parameters(node):
         return result
 
 
+def _projection_invariant_chain(root):
+    """Prove a conservative plain Node chain is unchanged by state weakening.
+
+    Each Node has at most one Node-valued descendant among its constructor
+    values, no state constraint, and no quotation, matcher, callback, factory or
+    symbolic adapter. Branching/alias-sensitive shapes deliberately fall back:
+    weakening can merge views of one occurrence and change their assignments.
+    This inspects supplied metadata only; it never concretizes or resolves it.
+    """
+    from ..links import DefLink
+    from ..quoted import QuotedDef, SelectorSpec
+    from ..params import Match
+    from ..factory import FactorySpec
+    from ..config import ConfigRef
+    from ..template import Expr
+    from ..symbol import ImportRef, SourceSpec
+    from ..canonical import container_family
+
+    seen, inspected = set(), 0
+    while root is not None:
+        if (not isinstance(root, Node) or root.state is not None or root._view in seen
+                or (root.cls is not None and not isinstance(root.cls, (type, ImportRef, SourceSpec)))):
+            return False
+        seen.add(root._view)
+        pending = list(root.parameters.values()) if isinstance(root, ConcreteDefinition) else [root.args, root.kwargs]
+        children = []
+        while pending:
+            inspected += 1
+            if inspected > 1024:
+                return False
+            value = pending.pop()
+            if isinstance(value, Node):
+                children.append(value)
+                if len(children) > 1:
+                    return False
+            elif isinstance(value, DefLink):
+                pending.append(value.target)
+            elif isinstance(value, (QuotedDef, SelectorSpec, Match, FactorySpec, ConfigRef, Expr)):
+                return False
+            elif isinstance(value, Mapping):
+                pending.extend(value.values())
+            elif (family := container_family(value)) is not None:
+                if family not in {"list", "tuple"}:
+                    return False
+                pending.extend(value)
+            elif callable(value) and not isinstance(value, type):
+                return False
+        root = children[0] if children else None
+    return True
+
+
 class _PreparedPredicate:
     """Operation-owned semantic facts; mutable witness state is per match only."""
 

@@ -140,6 +140,27 @@ Soft/subclass selectors and creation/local-state domains are excluded. These
 filters retain residual matching and scan admission; they do not themselves
 qualify as selective indexed seeks or change schema/coverage versions.
 
+Eligible object-only pages additionally carry an optional identity-facet hint from
+the existing occurrence-correlated `facet` row. Consumers use it only as an address:
+the ObjectId must occur in the current source membership, the current declaration
+must name that contribution, its exact canonical projection must match the derived
+digest and selector, and every identified dependency must have consistent required
+declarations across all participating Stores. The projection is authoritative;
+unrelated containing snapshot graphs need not be reconstructed for that object
+view. Missing/unidentified hints fall back to full discovery. Alias and scoped
+metadata paths retain their source-root validation. This is a read-plan change,
+with no coverage or persistent-schema version change. Page-local expansion reuse
+does not retain authority proofs across terminal cuts.
+
+The object-projection terminal may fuse a default-domain, unbounded ordinary
+Repo/Store selection into that object domain only for proved state-independent
+plain Node chains. The bounded metadata proof rejects state pins, branching or
+repeated Node slots, quoted/matcher/callback/symbolic adapters and other execution
+restrictions. Source evidence and fixed membership remain equivalent to explicit
+collect-then-project; explicit domains, state-sensitive selection, bounds and
+composed sources retain that original ordering. This is terminal planning, not a
+change to the source domain or saved-Node matching contract.
+
 All discovery families, guards and seek indexes participate in readiness, including
 empty/count queries. Exact residuals and direct authority validate acceptance.
 Legacy Query V3 read views and

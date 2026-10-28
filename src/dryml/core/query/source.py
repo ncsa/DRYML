@@ -829,6 +829,9 @@ class _NodePage:
         self.state_memberships = {}
         self.validated_declarations = set()
         self.discovery_preparations, self.discovery_members = {}, {}
+        self.expanded = {}
+        self.declared_identities = set()
+        self.publication_nodes = {}
 
     def read(self, store, path, reader, required=False):
         import os
@@ -869,9 +872,13 @@ class _NodePage:
         from ..store.records import DeclarationAnchorRecord, DeclarationRequirementRecord
         for identity in dict.fromkeys(identities):
             for store in self.stores:
+                declaration_key = store.authority_fence_key(), identity
+                if declaration_key in self.declared_identities:
+                    continue
                 key = store._anchor_key(identity)
                 anchor = self.read(store, store._relative(store._node_path("declarations/anchors", key)), DeclarationAnchorRecord)
                 required = self.read(store, store._relative(store._node_path("declarations/required", key)), DeclarationRequirementRecord)
+                self.declared_identities.add(declaration_key)
                 if anchor is None and required is None:
                     continue
                 if (anchor is None or required is None or anchor.object_id != identity or required.object_id != identity
@@ -888,7 +895,7 @@ class _NodePage:
             # Owners contain pure metadata only. Their lifetime is this terminal;
             # fresh bytes and final witnesses are mandatory even for a reuse hit.
             key = block.content
-            previous = owners.get(key)
+            previous = self.expanded.get(key) or owners.get(key)
             cacheable = False
             if previous is None:
                 packet = block.blocks
@@ -917,7 +924,8 @@ class _NodePage:
             from .authority import validate_node_root_views
             validate_node_root_views(((record, by_view[record.view_bytes])
                                       for record in self.root_kinds[domain, digest].values()), prepared,
-                                     validated_views=validated_views, validated_slots=validated_slots)
+                                      validated_views=validated_views, validated_slots=validated_slots)
+            self.expanded[key] = previous
             if cacheable:
                 owners[key] = previous
             for record in selected.values():
@@ -936,6 +944,13 @@ class _NodePage:
 
     def preparation(self, store, record):
         return self.preparations[store.authority_fence_key(), record.block_digest]
+
+    def publication_identities(self, store, record):
+        """Enumerate one decoded root's identities once within this captured page."""
+        key = store.authority_fence_key(), record
+        if key not in self.publication_nodes:
+            self.publication_nodes[key] = store._publication_identities(self.value(store, record))
+        return self.publication_nodes[key]
 
     def discovery_value(self, store, record, item):
         """Resolve a block/table/overlay locator and prove source-root reachability."""
@@ -1012,6 +1027,10 @@ def iter_node_query(query, capture, stores, *, admit=True):
     candidates, capture bounded immutable bytes, release cuts for preparation and
     exact residuals, then revalidate before output. Federation has per-Store cuts;
     no global filesystem/SQLite transaction or cache-based authority is claimed.
+    Eligible object-only candidates use an identity hint to address authoritative
+    declarations, proving source membership and all selected projection identities
+    without reconstructing unrelated containing snapshots. Unidentified values
+    and source-root-dependent restrictions retain full graph discovery.
     ``admit=False`` is reserved for terminal-owned authority scope capture, whose
     holder identities are evidence rather than producer/residual candidates.
     """
@@ -1046,6 +1065,10 @@ def iter_node_query(query, capture, stores, *, admit=True):
             from ..node import _as_node_view
             recipe = _as_node_view(selectors[0])
     direct = exact is not None or recipe is not None
+    object_hints = (any(r.kind == "kind" and r.value == "object_ref" for r in query.restrictions)
+                    and any(r.kind in {"sel", "object_id"} for r in query.restrictions)
+                    and all(r.kind in {"kind", "sel", "object_id", "namespace", "stored"}
+                            for r in query.restrictions))
     if not local and any(item.kind in {"origin", "compatible", "state_key", "available", "retained"} for item in query.restrictions):
         raise QueryDomainError("StateKey, origin, compatibility, availability and retention require the local-state domain.")
     if exact is not None:
@@ -1259,14 +1282,25 @@ def iter_node_query(query, capture, stores, *, admit=True):
                         try:
                             if _node_index_token(index, con, identity, store.authority_cut()) != tokens[domain]:
                                 raise _SourceCutChanged()
-                            rows = con.execute(*_store_discovery_page_sql(discovery_plan, after=after, page_size=page_size)).fetchall()
+                            rows = con.execute(*_store_discovery_page_sql(discovery_plan, after=after, page_size=page_size,
+                                                                        object_hints=object_hints)).fetchall()
                         except QueryIndexDirty as error:
                             raise _SourceCutChanged() from error
                         finally:
                             con.execute("ROLLBACK")
                 capture.pages_fetched += 1
                 capture.candidate_rows_read += len(rows)
-                for path, row_key, payload in rows:
+                hint_groups = {}
+                for candidate_row in rows:
+                    if len(candidate_row) == 4:
+                        hint_groups.setdefault(candidate_row[0], set()).add(candidate_row[3])
+                # When many selected objects share a source root, decoding that
+                # root once preserves shared traversal work better than separate
+                # declaration projections. Repeated one-object contributions use
+                # the declaration path instead.
+                projected_sources = {path for path, hints in hint_groups.items() if len(hints) == 1}
+                for candidate_row in rows:
+                    path, row_key, payload = candidate_row[:3]
                     if local:
                         manifest = page.read(store, path, r.StateVariantManifest, True)
                         key = manifest.key
@@ -1304,7 +1338,7 @@ def iter_node_query(query, capture, stores, *, admit=True):
                                     raise InventoryCapabilityError("Retention grant names an incompatible full key.")
                                 grants.append(grant)
                             page.grants[key] = bool(grants)
-                        candidates.append((manifest, header))
+                        candidates.append((manifest, header, header))
                     else:
                         row = json.loads(payload)
                         record = r.NodeRootRecord.from_data(row["root"])
@@ -1314,28 +1348,65 @@ def iter_node_query(query, capture, stores, *, admit=True):
                         actual_path = store._relative(store._node_path("graphs" if record.root_kind == "saved" else "definitions/roots", record.digest))
                         if page.read(store, actual_path, r.NodeRootRecord, True) != record:
                             raise InventoryCapabilityError("Derived candidate disagrees with current root authority.")
+                        hint = candidate_row[3] if path in projected_sources else None
+                        if hint is not None:
+                            from .._value_json import _value_from_json
+                            from ..reference_values import ObjectId
+                            value_hint = json.loads(hint)
+                            identity = (_value_from_json(value_hint["value"], grammar=3)
+                                        if type(value_hint) is dict and value_hint.get("tag") == "leaf" else None)
+                            if identity is not None:
+                                if not isinstance(identity, ObjectId) or identity not in membership.identities:
+                                    raise InventoryCapabilityError("Object candidate has no matching source identity membership.")
+                                page.declarations((identity,))
+                                anchor = page.anchors.get((domain, identity))
+                                if anchor is None or (record.root_kind, record.digest) not in anchor.sources:
+                                    raise InventoryCapabilityError("Object candidate has no matching declaration contribution.")
+                                # The declaration owns this exact object view;
+                                # its referring snapshot is not needed to decode it.
+                                identities.append(identity)
+                                candidates.append((row, anchor.projection, record))
+                                continue
                         identities.extend(membership.identities)
                         capture_membership(page, row)
                         page.root(store, record)
-                        candidates.append((row, record))
+                        candidates.append((row, record, record))
                 page.declarations(identities)
             page.expand(capture, owners, max_cached_bytes=owner_budget)
-            for item, header in candidates:
+            seen_identities = set(identities)
+            # A selected projection can itself contain other identified Nodes.
+            # Admit those declarations under fresh short cuts before any output.
+            while True:
+                needed = {node.object_id for _, header, source in candidates if source is not header
+                          for node in page.publication_identities(store, header)} - seen_identities
+                if not needed:
+                    break
+                with ExitStack() as scopes:
+                    for selected in stores:
+                        scopes.enter_context(selected.authority_read_fence())
+                        check_cut(selected)
+                    page.declarations(needed)
+                seen_identities.update(needed)
+                page.expand(capture, owners, max_cached_bytes=owner_budget)
+            for item, header, source_header in candidates:
                 node = page.value(store, header)
                 if local:
                     value = LocalState(item.key, node)
                 else:
                     from ..node_views import OBJECT_PROJECTION_VIEW, view_equal
-                    declaration_key = domain, header
+                    declaration_key = (domain, header) if source_header is header else (domain, header, source_header)
                     if declaration_key not in page.validated_declarations:
-                        for declared in store._publication_identities(node):
+                        for declared in page.publication_identities(store, header):
                             anchor = page.anchors.get((domain, declared.object_id))
-                            if anchor is None or (header.root_kind, header.digest) not in anchor.sources:
+                            if anchor is None or (source_header.root_kind, source_header.digest) not in anchor.sources:
                                 raise InventoryCapabilityError("Candidate has no required declaration contribution.")
                             if not view_equal(declared, page.value(store, anchor.projection), OBJECT_PROJECTION_VIEW):
                                 raise InventoryCapabilityError("Candidate conflicts with its declaration anchor.")
                         page.validated_declarations.add(declaration_key)
-                    value, owner = page.discovery_value(store, header, item)
+                    if source_header is header:
+                        value, owner = page.discovery_value(store, header, item)
+                    else:
+                        value, owner = node, page.preparation(store, header)
                     if item["projection"] == "object":
                         anchor = page.anchors.get((domain, value.object_id))
                         if anchor is not None:

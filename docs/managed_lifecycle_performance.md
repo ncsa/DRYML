@@ -207,6 +207,130 @@ group passed, and the final routine gate passed without changing timeouts or
 selection policy. Full GPU, exhaustive and installed-package verification was
 not run.
 
+## Snapshot-heavy cached-object discovery
+
+A subsequent owner-reported cache lookup spent more than four minutes before its
+first result message. The supplied expression ended in `object_projection()`, an
+eager collect-and-project terminal; the later fixed-set `count()` calls were not
+rerunning the query. Its default domain included recipe and saved-state histories.
+
+Read-only diagnosis of the supplied Store found 192 saved roots, 32 recipe roots,
+10,049 discovery contributions, current schema-11/coverage-3 certification, and no
+pending mutations. The selected cache appeared in 140 containing snapshot blocks.
+SQL candidate selection took about 0.13s; repeated graph hydration and validation
+dominated. Almost all first-page blocks exceeded the existing decoded-owner cache
+entry budget, so increasing the number of retries or reusing a query variable
+would not solve the work amplification.
+
+Identified-object discovery now addresses authoritative declaration projections
+using optional derived identity hints. Acceptance still checks source membership,
+declaration contributions, exact projection digests, all identified dependencies,
+cross-Store consistency, fresh cuts/bytes and residual predicates. Stateless
+objects and source-root-dependent restrictions retain ordinary graph discovery.
+The selected object no longer requires reconstructing every unrelated containing
+model snapshot. The decoder also proves already-identical typed syntax directly,
+using a DAG-aware comparison and canonical fallback for reordered representations.
+
+For a root-identity-pinned Artifact recipe, completion lookup first seeks one
+matching independently stored snapshot and reads that receiver's unique managed
+`compute` record. Embedded-only saved knowledge still has its complete fallback;
+unpinned recipes retain full ambiguity checking.
+
+The explicit object-identity form is:
+
+```python
+matches = repo.query().object_refs().sel(cached_test_ds_def).collect()
+if matches.count() == 1:
+    completed = CachedDataset.find_completed_state_ref(matches.one(), repo=repo)
+```
+
+An isolated `9f1336d2` source export and the patched worktree queried the same
+unchanged ready Store using the cache recipe reconstructed from its metadata.
+The comparison below uses the object-only expression for
+both implementations, so it excludes the original expression's extra recipe and
+saved-domain work. Fresh-process wall measurements used warm filesystem metadata:
+
+| Operation | `9f1336d2` | Patched | Decoded blocks before → after |
+| --- | --- | --- | --- |
+| Cached object lookup | 78.076s | 2.414s | 206 → 1 |
+| Pinned completion lookup | 80.199s | 0.420s | 205 → 2 |
+| Combined | 158.275s | 2.834s | — |
+
+An earlier patched lookup took 29s during filesystem/host contention, so the warm
+timings are not a cold-IO or service-latency guarantee. The stable improvement is
+the eliminated graph work: the same 159 object contributions are validated while
+decoding one canonical object projection. No private dataset payload was opened,
+and no Store migration, rebuild or authoritative mutation was performed.
+
+Use this credential-free opt-in reproduction with synthetic containing snapshots:
+
+```bash
+TMPDIR=/tmp/dryml CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu \
+  python -m tests.tools.benchmark_cached_lookup \
+  --snapshots 20 --padding 32 --repeats 3
+```
+
+It builds one NumPy cache item, publishes multiple containing snapshots, reopens a
+fresh Repo per sample, and verifies the recovered completed state. Timings and
+candidate/decode counts are emitted as JSON. Routine tests enforce work counts and
+authority/fallback behavior rather than machine-dependent timing thresholds.
+
+The original cache-compute benchmark was also rerun with three fresh processes
+per implementation/depth, alternating baseline/current order. Median compute wall
+and CPU times remained lower than `9f1336d2`:
+
+| Cache recipe | `9f1336d2` wall / CPU | Patched wall / CPU |
+| --- | --- | --- |
+| One-item source | 2.646s / 2.623s | 2.506s / 2.484s |
+| Same source plus five Take wrappers | 4.083s / 4.051s | 3.826s / 3.795s |
+
+Snapshot-query verification: **4,510 passed, 29 skipped** in the final
+`good-enough` run, **12m09s** complete wall time across both interpreter phases.
+Focused codec/query/artifact checks, the synthetic benchmark, changed Python
+F/E9 lint and whitespace checks passed. Existing shared-root traversal tests
+caught redundant identity enumeration during development; page-local memoization
+and the shared-root fallback retain those work bounds. No test-selection or
+timeout policy was weakened. Exhaustive, installed-package and full GPU workloads
+were not run for this metadata-only change.
+
+### Follow-up: the unchanged projection expression
+
+The owner retried the original `.sel(recipe).object_projection()` expression and
+still observed about three minutes. The preceding measurements had exercised a
+rewritten object-only query; they did not establish that the original default-
+domain terminal was fast. The terminal now conservatively proves when discovery
+and projection can be fused: an ordinary unbounded Repo/Store selection by plain
+state-independent Node chains, with no branching or repeated Node children,
+quotations, matchers, callbacks, symbolic adapters or other restrictions. The
+proof inspects at most 1,024 constructor values. Unproved patterns, state pins,
+explicit domains, bounds and composed sources retain collect-then-project.
+Regression tests compare results and source evidence to that unfused operation
+and retain state-sensitive, quoted, stateless, embedded and bounded behavior.
+
+The **unchanged** expression was compared against the isolated `9f1336d2` export
+on the same ready user Store, reconstructing the selected cached test recipe from
+authority (Take count 20,000; source seed 42):
+
+| Original default-domain projection | `9f1336d2` | Patched |
+| --- | --- | --- |
+| Wall time | 230.958s | 2.170s |
+| Candidate contributions | 478 | 159 |
+| Decoded graph blocks | 617 | 1 |
+| Returned object identities | 1 | 1 |
+
+In that paired run, fresh managed completion lookup added 0.404s after the patched
+projection. Another original-expression run took 2.318s plus 0.449s for completion.
+These are warm-filesystem fresh-process measurements, not cold-IO latency bounds.
+The test Store remained at epoch 3076, without pending mutation or derived-index
+rebuild. The synthetic lookup benchmark now defaults to this original expression;
+pass `--expression object-domain` to measure the explicit domain instead.
+
+Original-expression verification: **293 affected query checks passed**, followed
+by **4,514 passed, 29 skipped** in the final representative `good-enough` gate,
+**12m39s** complete wall time across both interpreter phases. Changed Python F/E9
+lint and whitespace checks passed. The original-expression synthetic benchmark
+also returned the expected completed state with one lookup graph decode.
+
 ## Original performance-pass verification
 
 - Affected subsystem selection: **702 passed** under the representative policy.

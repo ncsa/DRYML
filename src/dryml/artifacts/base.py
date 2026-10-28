@@ -62,12 +62,28 @@ class Artifact(Serializable):
         Side Effects:
             Reads Repo reference evidence and managed control records only. It does
             not construct candidates, load payloads, or materialize input refs.
-            Candidate discovery is one buffered query terminal, so concurrent cut
-            changes can restart it before any candidates are used. Completion
-            records are subsequently checked freshly for those selected candidates.
+            Candidate discovery uses buffered query terminals, so concurrent cut
+            changes can restart it before candidates are used. A recipe pinning
+            its root ObjectId first seeks one matching independent saved root,
+            which establishes its single canonical compute receiver. If absent,
+            complete discovery still supports embedded-only saved knowledge.
+            Unpinned recipes retain complete ambiguity checking. Completion
+            records are checked freshly after candidate selection.
         """
 
         definition = _recipe_definition(recipe)
+        if isinstance(definition, Node) and definition.object_id is not None:
+            # A pinned receiver has one canonical object projection and one
+            # compute operation. A matching independently published snapshot
+            # establishes that receiver without scanning its containing graphs.
+            direct = repo.query().saved().stored().sel(definition).take(1)
+            if direct:
+                completed = _completed_state_for_reference(
+                    direct.one(), repo=repo, control_store=control_store,
+                )
+                if completed is None:
+                    return None
+                return completed
         completed = {}
         for state_ref in repo.query().saved().sel(definition).collect():
             completed_state = _completed_state_for_reference(

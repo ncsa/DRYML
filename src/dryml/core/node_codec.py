@@ -3,6 +3,8 @@
 This is the identity-3 family for current graph transport and Store authority.
 Values use explicit codecs; neither pickle nor repr is semantic authority.
 Detached projection owners can retain all validated views from one shared decode.
+Exact typed syntax comparison avoids re-folding unchanged overlay values while
+retaining canonical fallback for reordered syntax and shared-value DAG bounds.
 """
 
 import base64
@@ -17,6 +19,40 @@ NODE_GRAPH_VERSION = "dryml-node-graph/v1"
 
 class NodeCodecError(ValueError):
     """Malformed, incompatible or unauthenticated Node graph metadata."""
+
+
+def _same_value_syntax(left, right):
+    """Prove identical typed JSON syntax without expanding shared value DAGs.
+
+    False leaves canonical comparison to the caller, including reordered sets.
+    Container sharing is immaterial here; Node aliases remain explicit slots.
+    """
+    pending, seen = [(left, right)], set()
+    while pending:
+        a, b = pending.pop()
+        kind = type(a)
+        if kind is not type(b):
+            return False
+        if kind in (dict, list):
+            pair = id(a), id(b)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            if kind is dict:
+                if (a.keys() != b.keys() or any(type(key) is not str for key in a)
+                        or any(type(key) is not str for key in b)):
+                    return False
+                pending.extend((value, b[key]) for key, value in a.items())
+            else:
+                if len(a) != len(b):
+                    return False
+                pending.extend(zip(a, b))
+        elif kind is float:
+            if struct.pack("!d", a) != struct.pack("!d", b):
+                return False
+        elif kind not in (str, int, bool, type(None)) or a != b:
+            return False
+    return True
 
 
 class _PredicateImport(ImportRef):
@@ -697,11 +733,18 @@ def _decode(packet, selected, expected_view, *, _all_views=False, _with_owner=Fa
                 object.__setattr__(result, "_construction", target)
             # Re-description is the closed grammar validator, not digest equality.
             described = _describe_node(result, lambda node: reverse[id(node)])
-            if _canonical_values([described], lambda label: label, semantic=False) != _canonical_values([row], lambda label: label, semantic=False):
+            # Identical typed JSON already proves equality. Only changed syntax
+            # (for example, reordered unordered members) needs canonical folding.
+            if (not _same_value_syntax(described, row) and
+                    _canonical_values([described], lambda label: label, semantic=False) !=
+                    _canonical_values([row], lambda label: label, semantic=False)):
                 raise NodeCodecError("Noncanonical or unsupported Node value fields.")
             structural = {name: value for name, value in row.items() if name not in {"identity", "state"}}
             structural = _map(structural, lambda child: {"tag": "node", "slot": overlays[child]["occurrence"]})
-            if _canonical_values([structural], lambda label: label, semantic=False) != _canonical_values([block(record["structure"])], lambda label: label, semantic=False):
+            expected_structure = block(record["structure"])
+            if (not _same_value_syntax(structural, expected_structure) and
+                    _canonical_values([structural], lambda label: label, semantic=False) !=
+                    _canonical_values([expected_structure], lambda label: label, semantic=False)):
                 raise NodeCodecError("Overlay disagrees with authenticated occurrence structure.")
             built[slot] = result
             reverse[id(result)] = slot

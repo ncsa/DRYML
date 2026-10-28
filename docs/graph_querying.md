@@ -46,6 +46,37 @@ compatible = repo.query().local_states(compatible_with=destination_node).take(10
 saved = repo.query().saved().stored().sel(node_pattern).collect()
 ```
 
+For an object-identity lookup, select that domain before evaluating the recipe:
+
+```python
+matches = repo.query().object_refs().sel(cached_dataset_recipe).collect()
+if matches.count() == 1:
+    cached_object = matches.one()
+```
+
+`query.object_projection()` is an eager terminal with selection-before-projection
+semantics. Its subsequent `count()` calls read only the fixed result. For ordinary
+unbounded default-domain selections by plain state-independent Node chains, the
+planner fuses discovery and projection, avoiding unrelated recipe/saved-history
+hydration. Each pattern Node must have at most one constructor Node child, without
+state pins, quoted data, matchers, callbacks, branching aliases or symbolic
+adapters; the proof is metadata-only and has bounded planning work. Explicit
+domains, bounds, composed sources and unproved patterns retain the original
+collect-then-project path. This preserves state-sensitive selection rather than
+silently running such predicates on already-weakened object views.
+
+`object_refs()` remains useful to state an object-domain question explicitly, but
+eligible original `.sel(recipe).object_projection()` expressions also use the
+optimized object discovery path without a caller rewrite.
+
+Eligible identified-object plans read the authoritative declaration projection,
+checking its source membership/contribution and all identified dependencies across
+participating Stores. Repeated containing snapshots do not require repeatedly
+decoding their unrelated model graphs. SQLite identity facets supply lookup hints
+only; canonical projection validation, fresh byte/cut checks and exact selector
+matching still establish each result. Stateless/unidentified objects and
+source-root-dependent restrictions such as aliases retain ordinary discovery.
+
 Exact full-key hit **and miss** use direct authority without opening SQLite or
 enumerating buckets/graphs/cache knowledge. This proves only the installed-variant
 domain. A hit reads and validates creation evidence separately. Exact-origin

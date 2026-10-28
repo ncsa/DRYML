@@ -235,11 +235,14 @@ def _store_discovery_relation(query, *, scan_admission=None):
     return family, " AND ".join(terms) or "1", tuple(params), "store_discovery_fact" if relations else None
 
 
-def _store_discovery_page_sql(plan, *, after=None, page_size):
+def _store_discovery_page_sql(plan, *, after=None, page_size, object_hints=False):
     """Build a bounded keyset page, forcing the selective contribution seek.
 
     SQLite otherwise prefers its ordering index and scans every contribution,
     even when the independently evaluated posting relation is empty.
+    ``object_hints=True`` adds the occurrence's derived identity facet as an
+    optional fourth column. It is only a lookup address; the consumer must prove
+    source membership, declaration contribution and canonical projection itself.
     """
     family, where, params, seek_index = plan
     order = ("p.source,p.row_key" if family == "manifest" else
@@ -247,7 +250,15 @@ def _store_discovery_page_sql(plan, *, after=None, page_size):
     clause, arguments = ("", ()) if after is None else (
         " AND (" + order + ") > (" + ",".join("?" for _ in after) + ")", after)
     table = "store_projection_rows p" + (" INDEXED BY " + seek_index if seek_index else "")
-    return ("SELECT p.source,p.row_key,p.payload FROM " + table + " WHERE p.family=? AND (" + where + ")" +
+    hint = ""
+    if object_hints:
+        root = "json_extract(CAST(p.payload AS TEXT),'$.root.block_digest')"
+        locator = ("json_extract(CAST(p.payload AS TEXT),'$.locator.table') || ':' || "
+                   "json_extract(CAST(p.payload AS TEXT),'$.locator.slot')")
+        hint = (",(SELECT json_extract(CAST(i.payload AS TEXT),'$.value') FROM store_projection_rows i "
+                "WHERE i.family='facet' AND i.source='definitions/blocks/' || substr(" + root + ",1,2) || '/' || " + root +
+                " || '.record' AND i.row_key=" + locator + " || ':[[\"field\",\"identity\"]]')")
+    return ("SELECT p.source,p.row_key,p.payload" + hint + " FROM " + table + " WHERE p.family=? AND (" + where + ")" +
             clause + " ORDER BY " + order + " LIMIT ?", (family, *params, *arguments, page_size))
 
 import warnings

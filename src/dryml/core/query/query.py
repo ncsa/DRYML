@@ -1891,9 +1891,22 @@ class IdentityQuery:
 
         Side Effects:
             Executes this query under the same authority cuts as ``collect()``.
+            Unbounded default-domain selection by plain state-independent Node
+            chains may fuse discovery with projection. State-sensitive, branching,
+            quoted, bounded and composed plans retain selection before projection.
         """
 
-        return self.collect().object_projection()
+        from .source import RepoSource, StoreSource
+        from .node_pattern import _projection_invariant_chain
+        from ..node import Node
+
+        query = self
+        if (type(self.source) in {RepoSource, StoreSource} and self.take_limit is None
+                and self.restrictions
+                and all(r.kind == "sel" and isinstance(r.value, Node)
+                        and _projection_invariant_chain(r.value) for r in self.restrictions)):
+            query = self.object_refs()
+        return query.collect().object_projection()
 
     def count(self) -> int:
         """Return the distinct identity count after all validation.
