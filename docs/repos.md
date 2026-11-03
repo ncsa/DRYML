@@ -153,15 +153,19 @@ runs, but no authority epoch or SQL write is added. Disabled/memory indexing
 creates no persistent sidecar. Initial/stale-index maintenance is separate setup
 work, admitted before capture.
 
-Independent workers can publish into one Store. Unrelated writers invalidate
-detached metadata observations, not completed capture or publication. Store
-preparation, SQLite completion, selected-state preflight, retention-receipt reads,
-and save read-back use bounded fresh-cut retries with exponential yielding rather
-than immediate busy retries. Prior-capture and recovery-probe reads retry before
-continuing the existing save. Each eight-attempt loop waits at most 12.7s total,
-outside Store writer fences, and never repeats capture/restore hooks or training.
-Corrupt authority, real IO failure and cancellation remain explicit; exhaustion
-preserves publication evidence rather than claiming success or rollback.
+Independent workers can publish into one Store. Save prior-capture checks,
+recovery probes, retention-owner checks and post-publication key/grant/root
+confirmation validate their exact observed bytes and directories under a short
+fence. They accept a newer Store cut when all those dependencies remain unchanged,
+so unrelated publication does not require a quiet Store-wide window. Changed
+dependencies still retry at most eight times with exponential yielding, outside
+Store writer fences, adding at most 12.7s of backoff per loop. These metadata
+retries never repeat capture/restore hooks, publication or training. Explicit cut
+dependencies, public prepared mutations and query continuation cuts remain strict.
+SQLite completion and selected-state readers retain their own bounded validation
+and retry policies. Corrupt authority, real IO failure and cancellation remain
+explicit; exhaustion preserves publication evidence rather than claiming success
+or rollback. A prior-capture failure occurs before new capture or publication.
 
 Ordinary saves currently require the durable DirStore retained-batch seam.
 ZipStore still supports buffered low-level primitives, but its lack of durable
@@ -276,12 +280,12 @@ successful completion. Cancellation retains its original exception identity and
 partial report, including when an earlier independent target already failed;
 remaining targets are unattempted.
 
-An unrelated cooperating writer can invalidate a detached read-back cut after
-the save has published. Save confirmation retries that metadata observation at
-most eight times, without repeating capture, state hooks, or publication. Every
-attempt validates a fresh cut; invalid authority is not retried as contention.
-Exhausted read-back remains an unconfirmed save failure with its partial report,
-and does not advance the live root's receipt.
+After publication, save confirmation may rebase onto a newer Store cut only when
+every observed key, grant, owner, root and declaration dependency still matches.
+A changed dependency retries only that metadata observation at most eight times,
+without repeating capture, state hooks or publication. Invalid authority is not
+retried as contention. Exhausted read-back remains an unconfirmed save failure
+with its partial report, and does not advance the live root's receipt.
 
 Repair a failed index with `store.open_query_index().maintain_store()`. For an
 authority-partial save, reconnect the exact Store and call

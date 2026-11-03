@@ -50,16 +50,18 @@ def test_store_report_is_ephemeral_complete_and_not_state_identity(tmp_path):
 
 
 @pytest.mark.parametrize("boundary", ("keys", "snapshot"))
-@pytest.mark.parametrize("changes", (1, 8), ids=("settled", "exhausted"))
+@pytest.mark.parametrize("interference", ("independent", "unstable-once", "unstable-repeated"))
 def test_save_readback_retries_cut_drift_without_recapture_or_republication(
-        tmp_path, monkeypatch, boundary, changes):
-    """Unrelated writers invalidate read evidence, not the completed save itself."""
+        tmp_path, monkeypatch, boundary, interference):
+    """Independent writes make progress; unstable dependencies retain bounded retries."""
     from dryml.core import Definition
+    from dryml.core.store import authority
 
     store = DirStore(tmp_path / "store", query_index="none")
     peer = DirStore.open_existing(store.base_dir, query_index="none")
     repo = Repo(store)
-    captures, publications, moves = [], [], []
+    independent = peer.publish_node(Definition(ReportState, value=100).concretize())
+    captures, publications, moves, pauses = [], [], [], []
     capture = ReportState.save_state_to_dir_imp
     publish = store.publish_save_batch
     reader_name = "_read_variant" if boundary == "keys" else "_read_membership"
@@ -76,27 +78,37 @@ def test_save_readback_retries_cut_drift_without_recapture_or_republication(
 
     def changed_read(*args, **kwargs):
         result = reader(*args, **kwargs)
-        if publications and len(moves) < changes:
+        if publications:
             moves.append(len(moves))
-            peer.publish_node(Definition(ReportState, value=100 + len(moves)).concretize())
+            if interference == "independent":
+                from dryml.core.store.records import NodeNameRecord
+                peer.compare_and_set_node_name(NodeNameRecord("peer-" + str(len(moves)), "recipe", independent.digest), expected=None)
+            elif interference == "unstable-repeated" or len(moves) == 1:
+                raise authority.StoreCutChanged("selected read dependencies changed")
         return result
 
     monkeypatch.setattr(ReportState, "save_state_to_dir_imp", counted_capture)
     monkeypatch.setattr(store, "publish_save_batch", counted_publish)
     monkeypatch.setattr(store, reader_name, changed_read)
+    monkeypatch.setattr(authority, "_pause_cut_retry", pauses.append)
     obj = ReportState(repo=repo)
-    if changes == 8:
+    if interference == "unstable-repeated":
         with pytest.raises(RepoSaveError, match="read-back"):
             repo.save_object(obj)
         assert obj.last_state_ref is None
+        assert len(moves) == 8 and pauses == list(range(7))
     else:
         saved, report = repo.save_object(obj, report_stores=True)
         assert saved is obj.last_state_ref
         assert report.required_stores == (store,)
         assert report.publications[0].protected_state_keys == (saved.state.key,)
         assert peer.read_node(_saved_digest(saved), kind="saved").graph_equal(saved)
+        assert len(moves) == (1 if interference == "independent" else 2)
+        assert pauses == ([] if interference == "independent" else [0])
     assert captures == [obj]
-    assert len(publications) == 1 and len(moves) == changes
+    assert len(publications) == 1
+    peer.close()
+    repo.close(flush=False)
 
 
 def test_unconfigured_repo_save_commits_each_store_once_with_completed_report(tmp_path):

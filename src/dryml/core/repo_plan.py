@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 import copy
@@ -1127,13 +1127,22 @@ def _save_graph_records(saved, roots, origins, previous):
     return block, records, prepared
 
 
-def _retry_save_readback(read):
-    """Retry only detached read evidence after cut drift, at most eight times."""
+def _retry_save_readback(read, *, store=None):
+    """Retry a save observation at most eight times without replaying effects.
+
+    Supplying its Store scopes metadata-only observations to exact read-set
+    validation, accepting independent cut changes only when all witnessed bytes
+    and directories still match. Explicit cut dependencies and an existing outer
+    reader remain strict. Omit Store for readers owning their own context/lifetime.
+    Changed dependencies exhaust visibly; IO errors and interruption propagate.
+    """
     from .store.authority import StoreCutChanged, _pause_cut_retry
 
     for attempt in range(8):
         try:
-            return read()
+            scope = nullcontext() if store is None else store._metadata_read(rebase=True)
+            with scope:
+                return read()
         except StoreCutChanged:
             if attempt == 7:
                 raise
@@ -1147,7 +1156,7 @@ def _confirmed_batch_keys(target, batch):
     def read():
         result = []
         protected = []
-        with target._metadata_read():
+        with target._metadata_read(rebase=True):
             origins = {r.digest: n for r, n in batch.creations}
             for manifest, _ in batch.states:
                 descriptor = target._read_variant(manifest.key, origins[manifest.key.cdef_digest])
@@ -1219,9 +1228,12 @@ def execute_routed_save_plan(
     A live root's existing saved receipt is checked for malformed destination
     capture metadata before hooks. Absent associations remain admissible; this
     validation neither proves current payload availability nor infers state reuse.
-    Unrelated cooperating mutations retry only detached read-back evidence, at
-    most eight times per observation; capture and publication are not repeated.
-    Exhaustion or invalid authority leaves the save unconfirmed with its report.
+    Prior-capture, recovery-probe, retention-owner and confirmation reads accept
+    independent cut changes only after fenced validation of their exact read sets.
+    Changed dependencies retry detached evidence at most eight times per
+    observation; capture and publication are not repeated. Exhaustion or invalid
+    authority after publication leaves the save unconfirmed with its report;
+    prior-capture failure propagates before capture or publication begins.
     """
     from contextlib import ExitStack
     import shutil
@@ -1246,7 +1258,7 @@ def execute_routed_save_plan(
         from .store.authority import StoreCutChanged
         for target in targets:
             try:
-                _retry_save_readback(lambda: repo.get_snapshot_metadata(prior, store=target))
+                _retry_save_readback(lambda: repo.get_snapshot_metadata(prior, store=target), store=target)
             except KeyError:
                 pass
             except StoreCutChanged:
@@ -1389,7 +1401,7 @@ def execute_routed_save_plan(
                 user_root = _json_bytes([root_record.digest, sorted((k.cdef_digest, k.codec_hash) for k in local_keys),
                                          sorted((r.root_kind, r.digest) for r, _ in chosen)]).decode("ascii")
                 token = str(uuid.uuid4()) if provisional else str(uuid.uuid5(uuid.UUID(target.store_uuid), "dryml-user-root/v1:" + user_root))
-                old_intent = target.retention.read(token)
+                old_intent = _retry_save_readback(lambda: target.retention.read(token), store=target)
                 if old_intent is not None and old_intent.disposition != "adopted":
                     token = str(uuid.uuid4())
                 batch = NodeSaveBatch(block, tuple(chosen), tuple(creation_records), tuple(projection_records),
@@ -1403,7 +1415,7 @@ def execute_routed_save_plan(
             errors = []
             lease_targets = [(target, manifest.key) for target, batch, _ in batches for manifest, _ in batch.states]
             from .store.retention import state_leases
-            recovery = any(_retry_save_readback(lambda: target.save_batch_needs_recovery(batch))
+            recovery = any(_retry_save_readback(lambda: target.save_batch_needs_recovery(batch), store=target)
                            for target, batch, _ in batches)
             lease_scope = state_leases(lease_targets, exclusive=True, blocking=False) if recovery else state_use_leases(lease_targets)
             with lease_scope as acquired:
@@ -1446,7 +1458,7 @@ def execute_routed_save_plan(
                             continue
                         try:
                             confirmed = _retry_save_readback(
-                                lambda: target.read_node(record.digest, kind="saved"))
+                                lambda: target.read_node(record.digest, kind="saved"), store=target)
                         except Exception:
                             confirmed = None
                         if confirmed is not None:

@@ -136,6 +136,120 @@ def test_checkpoint_metadata_validation_keeps_progress_with_independent_writers(
         repo.close(flush=False)
 
 
+@pytest.mark.parametrize("interference", ("independent", "dependency-once", "dependency-repeated"))
+def test_prior_checkpoint_preflight_validates_dependencies_without_recapturing(
+        tmp_path, monkeypatch, fixed_snapshot_environment, interference):
+    from tests.core.test_store_report import ReportState
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    peer = DirStore.open_existing(repo.default_store.base_dir)
+    try:
+        store = repo.default_store
+        obj = ReportState(7, repo=repo)
+        prior = repo.save(obj)
+        root = peer.publish_node(Definition(IndependentValue, "peer").concretize())
+        metadata, capture, publish = store._read_node_metadata, ReportState.save_state_to_dir_imp, store.publish_save_batch
+        reads, captures, publications, pauses = [], [], [], []
+
+        def metadata_and_move(target, scope=None):
+            result = metadata(target, scope)
+            if scope == "capture" and target.graph_equal(prior):
+                reads.append(True)
+                if interference == "independent":
+                    peer.compare_and_set_node_name(NodeNameRecord("peer-" + str(len(reads)), "recipe", root.digest), expected=None)
+                elif interference == "dependency-repeated" or len(reads) == 1:
+                    peer.publish_node(Definition(IndependentValue, (prior, len(reads))).concretize())
+            return result
+
+        def counted_capture(self, *args, **kwargs):
+            captures.append(self)
+            return capture(self, *args, **kwargs)
+
+        def counted_publish(batch):
+            publications.append(batch)
+            return publish(batch)
+
+        monkeypatch.setattr(store, "_read_node_metadata", metadata_and_move)
+        monkeypatch.setattr(ReportState, "save_state_to_dir_imp", counted_capture)
+        monkeypatch.setattr(store, "publish_save_batch", counted_publish)
+        monkeypatch.setattr(authority, "_pause_cut_retry", pauses.append)
+        obj.value = 8
+        if interference == "dependency-repeated":
+            with pytest.raises(authority.StoreCutChanged, match="byte witness changed"):
+                repo.save(obj)
+            assert len(reads) == 8 and pauses == list(range(7))
+            assert not captures and not publications and obj.last_state_ref is prior
+        else:
+            current = repo.save(obj)
+            assert current is obj.last_state_ref and current.state.key != prior.state.key
+            assert captures == [obj] and len(publications) == 1
+            assert len(reads) == (1 if interference == "independent" else 2)
+            assert pauses == ([] if interference == "independent" else [0])
+        monkeypatch.setattr(store, "_read_node_metadata", metadata)
+        assert repo.load_state_ref(prior, reuse_live="never").value == 7
+    finally:
+        peer.close()
+        repo.close(flush=False)
+
+
+@pytest.mark.parametrize("boundary", ("retention-owner", "recovery-probe"))
+def test_save_preflight_keeps_progress_with_independent_writers(
+        tmp_path, monkeypatch, fixed_snapshot_environment, boundary):
+    from dryml.core.store.retention import RetentionIntentRecord
+    from tests.core.test_store_report import ReportState
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    peer = DirStore.open_existing(repo.default_store.base_dir)
+    try:
+        store = repo.default_store
+        root = peer.publish_node(Definition(IndependentValue, "peer").concretize())
+        reads, captures, publications = [], [], []
+        capture, publish = ReportState.save_state_to_dir_imp, store.publish_save_batch
+
+        def advance():
+            reads.append(True)
+            peer.compare_and_set_node_name(NodeNameRecord("peer-" + str(len(reads)), "recipe", root.digest), expected=None)
+
+        if boundary == "retention-owner":
+            reader = store._read_file
+
+            def read(path, record_type):
+                result = reader(path, record_type)
+                if record_type is RetentionIntentRecord:
+                    advance()
+                return result
+
+            monkeypatch.setattr(store, "_read_file", read)
+        else:
+            probe = store.save_batch_needs_recovery
+
+            def check(batch):
+                result = probe(batch)
+                advance()
+                return result
+
+            monkeypatch.setattr(store, "save_batch_needs_recovery", check)
+
+        def counted_capture(self, *args, **kwargs):
+            captures.append(self)
+            return capture(self, *args, **kwargs)
+
+        def counted_publish(batch):
+            publications.append(batch)
+            return publish(batch)
+
+        monkeypatch.setattr(ReportState, "save_state_to_dir_imp", counted_capture)
+        monkeypatch.setattr(store, "publish_save_batch", counted_publish)
+        monkeypatch.setattr(authority, "_pause_cut_retry", lambda attempt: pytest.fail("independent save read retried"))
+        obj = ReportState(9, repo=repo)
+        saved, report = repo.save(obj, report_stores=True)
+        assert reads and captures == [obj] and len(publications) == 1
+        assert saved is obj.last_state_ref and report.required_stores == (store,)
+    finally:
+        peer.close()
+        repo.close(flush=False)
+
+
 def test_internal_publication_does_not_overwrite_a_changed_cas_dependency(tmp_path, monkeypatch):
     with closing(DirStore(tmp_path / "store")) as store, closing(DirStore.open_existing(tmp_path / "store")) as peer:
         root = store.publish_node(Definition(IndependentValue, "target").concretize())
