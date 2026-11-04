@@ -165,6 +165,15 @@ the original template's loose selector. Use a partial `Definition` to constrain
 only the experiment fields of interest, or
 `Definition(Experiment, SKIP_ARGS)` to select all Experiment definitions.
 
+Loose projection inspects role annotations on supplied live constructor classes
+so Template parameters, including `Experiment.artifacts` mappings, use the same
+quotation shape as their admitted definitions. It preserves positional spelling,
+variadic buckets, sharing and omitted defaults; it does not resolve symbolic class
+targets, construct Objects, bind an Artifact's `this`, or access Stores. A symbolic
+Template recipe can become a local wildcard rather than an impossible unquoted
+constraint. Resolved recipes and explicitly quoted configuration remain exact
+constraints, so use explicit quotation when the recipe itself must be fixed.
+
 The retained V3 query contract counts by the selected identity domain. `.cdefs().count()` counts
 distinct definitions, `.state_refs().count()` counts saved snapshots, and
 `.state_refs().object_projection().count()` counts distinct realized object

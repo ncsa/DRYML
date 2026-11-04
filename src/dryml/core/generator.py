@@ -537,7 +537,8 @@ def _project_selector_definition_roles(
     Exact support compares authored Definitions with admitted CDefs. Ref-held
     Definitions and values received by Template slots persist as quotations, so
     this effect-free projection applies those barriers before matching without
-    changing Generator samples or materializing Objects.
+    changing Generator samples or materializing Objects. Preserve raw call
+    spelling so positional and variadic buckets are bound only once by matching.
     """
 
     from .cdef_graph import EdgeKind
@@ -546,10 +547,13 @@ def _project_selector_definition_roles(
     from .quoted import QuotedDef
     from .signatures import compile_signature
     from .node import _clone
+    from inspect import Parameter
 
     memo: dict[int, object] = {}
 
     def quote_definition(current: object) -> object:
+        if isinstance(current, QuotedDef):
+            return DefLink.finalized(EdgeKind.REF, current)
         if isinstance(current, DefLink):
             if (
                 current.kind is EdgeKind.REF
@@ -588,36 +592,41 @@ def _project_selector_definition_roles(
             )
         elif isinstance(current, Definition):
             try:
-                values = current.parameters
-                slots = (
-                    compile_signature(current.cls, constructor=True).slots
-                    if isinstance(current.cls, type)
-                    else {}
-                )
+                plan = compile_signature(current.cls, constructor=True) if isinstance(current.cls, type) else None
             except (TypeError, ValueError):
-                values, slots = current.kwargs, {}
-            projected = []
-            for name, item in values.items():
-                slot = slots.get(name)
+                plan = None
+            slots = {} if plan is None else plan.slots
+            positional, varargs, varkw = [], None, None
+            for name, parameter in (() if plan is None else plan.signature.parameters.items()):
+                if parameter.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD):
+                    positional.append(slots[name])
+                elif parameter.kind is Parameter.VAR_POSITIONAL:
+                    varargs = slots[name]
+                elif parameter.kind is Parameter.VAR_KEYWORD:
+                    varkw = slots[name]
+
+            def project_argument(item, slot):
                 if slot is not None and slot.role == "template":
                     if slot.mode == "mapping" and isinstance(item, Mapping):
-                        normalized = FrozenDict(
+                        return FrozenDict(
                             (key, quote_definition(member))
                             for key, member in item.items()
                         )
-                    else:
-                        normalized = quote_definition(item)
-                else:
-                    normalized = project(item)
-                projected.append((name, normalized))
-            kwargs = FrozenDict(projected)
+                    return quote_definition(item)
+                return project(item)
+
+            args = None if current.args is None else FrozenTuple(
+                project_argument(item, positional[index] if index < len(positional) else varargs)
+                for index, item in enumerate(current.args)
+            )
+            kwargs = FrozenDict((name, project_argument(item, slots.get(name, varkw)))
+                                for name, item in current.kwargs.items())
             unchanged = (
-                current.args is None
+                (args is None or all(new is old for new, old in zip(args, current.args)))
                 and all(kwargs[name] is item for name, item in current.kwargs.items())
-                and len(kwargs) == len(current.kwargs)
             )
             result = current if unchanged else _clone(
-                current, None, kwargs, current._facets, reset_construction=True
+                current, args, kwargs, current._facets, reset_construction=True
             )
         elif isinstance(current, FactorySpec):
             projected_args = tuple(project(item) for item in current.args)
