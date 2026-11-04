@@ -308,8 +308,12 @@ class GeneratorSelector:
 
         Raises:
             ParameterizationError: If a provider is not portable built-in data.
+            TemplateCodecError: If implicit quotation hides active roots. Bind
+                those roots before capturing portable support.
 
-        Arbitrary providers and Generator itself are deliberately nonportable.
+        Encoding inspects supplied live-class role annotations without resolving
+        symbolic targets, constructing Objects or invoking providers. Arbitrary
+        providers and Generator itself are deliberately nonportable.
         """
 
         from .template_codec import selector_to_data
@@ -534,42 +538,24 @@ def _project_selector_definition_roles(
 ) -> Definition:
     """Project Definition roles to their persisted selector representation.
 
-    Exact support compares authored Definitions with admitted CDefs. Ref-held
-    Definitions and values received by Template slots persist as quotations, so
-    this effect-free projection applies those barriers before matching without
-    changing Generator samples or materializing Objects. Preserve raw call
-    spelling so positional and variadic buckets are bound only once by matching.
+    Authored predicates and exact support compare with admitted CDefs. Data roles
+    persist quotations while graph-reference roles retain edges; the owning
+    signature determines that distinction. This projection selects metadata only,
+    without changing Generator samples or materializing Objects. Preserve raw
+    call spelling so positional and variadic buckets are bound only once.
     """
 
     from .cdef_graph import EdgeKind
     from .factory import FactorySpec
     from .links import DefLink
-    from .quoted import QuotedDef
-    from .signatures import compile_signature
+    from .quoted import QuotedDef, SelectorSpec
+    from .selector import Selector
+    from .signatures import compile_signature, _normalize_value, _Controls
     from .node import _clone
+    from dataclasses import replace
     from inspect import Parameter
 
     memo: dict[int, object] = {}
-
-    def quote_definition(current: object) -> object:
-        if isinstance(current, QuotedDef):
-            return DefLink.finalized(EdgeKind.REF, current)
-        if isinstance(current, DefLink):
-            if (
-                current.kind is EdgeKind.REF
-                and isinstance(current.target, Definition)
-            ):
-                if loose and not current.target.is_resolved:
-                    return _UNKNOWN
-                return DefLink.finalized(
-                    EdgeKind.REF, QuotedDef(current.target)
-                )
-            return current
-        if isinstance(current, Definition):
-            if loose and not current.is_resolved:
-                return _UNKNOWN
-            return DefLink.finalized(EdgeKind.REF, QuotedDef(current))
-        return current
 
     def project(current: object) -> object:
         if current is _UNKNOWN:
@@ -580,12 +566,7 @@ def _project_selector_definition_roles(
         if marker in memo:
             return memo[marker]
         if isinstance(current, DefLink):
-            if current.kind is EdgeKind.REF and isinstance(current.target, Definition):
-                target = QuotedDef(current.target)
-            elif current.kind is EdgeKind.MATERIALIZE:
-                target = project(current.target)
-            else:
-                return current
+            target = project(current.target)
             result = (
                 current if target is current.target else
                 DefLink.finalized(current.kind, target) if current.is_finalized else DefLink.assertion(current.kind, target)
@@ -596,10 +577,12 @@ def _project_selector_definition_roles(
             except (TypeError, ValueError):
                 plan = None
             slots = {} if plan is None else plan.slots
-            positional, varargs, varkw = [], None, None
+            positional, keywords, varargs, varkw = [], {}, None, None
             for name, parameter in (() if plan is None else plan.signature.parameters.items()):
                 if parameter.kind in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD):
                     positional.append(slots[name])
+                if parameter.kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY):
+                    keywords[name] = slots[name]
                 elif parameter.kind is Parameter.VAR_POSITIONAL:
                     varargs = slots[name]
                 elif parameter.kind is Parameter.VAR_KEYWORD:
@@ -609,17 +592,34 @@ def _project_selector_definition_roles(
                 if slot is not None and slot.role == "template":
                     if slot.mode == "mapping" and isinstance(item, Mapping):
                         return FrozenDict(
-                            (key, quote_definition(member))
+                            (key, project_argument(member, replace(slot, mode="exact")))
                             for key, member in item.items()
                         )
-                    return quote_definition(item)
+                    if loose and isinstance(item, Definition) and not item.is_resolved:
+                        return _UNKNOWN
+                bare = item.target if isinstance(item, DefLink) else item
+                if slot is not None and slot.role in {"ref", "template"}:
+                    if isinstance(item, DefLink) and item.kind is not EdgeKind.REF:
+                        return item
+                    target = slot.targets[0] if slot.mode == "exact" else None
+                    # Exact data roles only select already supplied metadata. Do
+                    # not strengthen a partial reference pattern by concretizing
+                    # it or opening a Repo while preparing a query.
+                    if target in (Node, Definition, QuotedDef, Selector, SelectorSpec) or slot.role == "template":
+                        if isinstance(bare, (Node, QuotedDef, Selector, SelectorSpec)) or bare is None:
+                            if loose and isinstance(bare, Definition) and not bare.is_resolved:
+                                return _UNKNOWN
+                            return _normalize_value(item, slot, "<selector>", _Controls(None, None, None, {}),
+                                                    persist_role=True)[1]
+                    if isinstance(bare, (Node, ConcreteDefinition)):
+                        return DefLink.finalized(EdgeKind.REF, project(bare))
                 return project(item)
 
             args = None if current.args is None else FrozenTuple(
                 project_argument(item, positional[index] if index < len(positional) else varargs)
                 for index, item in enumerate(current.args)
             )
-            kwargs = FrozenDict((name, project_argument(item, slots.get(name, varkw)))
+            kwargs = FrozenDict((name, project_argument(item, keywords.get(name, varkw)))
                                 for name, item in current.kwargs.items())
             unchanged = (
                 (args is None or all(new is old for new, old in zip(args, current.args)))
@@ -664,6 +664,23 @@ def _project_selector_definition_roles(
     if not isinstance(result, Node):
         raise AssertionError("Generator selector projection must retain its Node root")
     return result
+
+
+def _portable_generator_definition(generator):
+    """Freeze receiving roles before live signature authority leaves a codec.
+
+    Export cannot silently change which roots participate in substitution.
+    Quotations are inert even under reference traversal, so roots inside implicit
+    Template quotation must be bound before portable exact support is captured.
+    """
+    from .template_codec import TemplateCodecError
+    from .query.node_pattern import _portable_pattern
+
+    result = _project_selector_definition_roles(generator.definition)
+    names = {parameter.name for parameter in _snapshot_parameters(result, traverse_refs=generator._traverse_refs)}
+    if names != set(generator.distributions):
+        raise TemplateCodecError("Template-role projection hides active roots; bind them before exporting exact support.")
+    return result if result is generator.definition else _portable_pattern(result)
 
 
 def _provider_bounds(provider: Distribution, root: str) -> tuple[int | float, int | float] | None:

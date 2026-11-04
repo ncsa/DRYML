@@ -192,7 +192,7 @@ def _store_discovery_relation(query, *, scan_admission=None):
     relations = []
     for restriction in query.restrictions:
         if restriction.kind == "sel":
-            relation = pattern(restriction.value)
+            relation = pattern(restriction.prepared.predicate if restriction.prepared is not None else restriction.value)
             if relation is not None:
                 relations.append(relation)
             selected = restriction.value

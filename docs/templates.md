@@ -174,6 +174,26 @@ Template recipe can become a local wildcard rather than an impossible unquoted
 constraint. Resolved recipes and explicitly quoted configuration remain exact
 constraints, so use explicit quotation when the recipe itself must be fixed.
 
+Ordinary Definition predicates use the same receiving-role interpretation at
+preparation, without loose wildcard substitution. A width-specific filter can
+therefore be conjoined directly with the template's loose selector:
+
+```python
+universe = repo.query().sel(mdl_experiment.loose_selector())
+width_32 = universe.sel(mdl_experiment.sub(width=32))
+```
+
+This applies to direct `Selector.matches`, compiled/boolean `QueryPredicate`
+values, occurrence targets and memory/SQLite execution. Supplied live constructor
+annotations determine Template quotation, typed Ref edges, and Definition/Node/
+Selector-as-data carriers. Width, fixed capabilities, exact identity/state facets
+and alias partitions remain constraints; quotation contents are neither bound nor
+interpreted as executable predicates. Preparation applies no omitted defaults,
+constructs no Objects, resolves no symbolic targets and reads no private state.
+Portable predicates and Repo routing snapshots retain those interpreted carriers
+before live signatures are discarded; decoding remains inert. A purely symbolic
+class reference does not implicitly import its constructor to discover annotations.
+
 The retained V3 query contract counts by the selected identity domain. `.cdefs().count()` counts
 distinct definitions, `.state_refs().count()` counts saved snapshots, and
 `.state_refs().object_projection().count()` counts distinct realized object
@@ -187,6 +207,13 @@ witness enumeration rather than process-local handle membership. Conservative pr
 prove membership. An unavailable finite proof raises
 `UnsupportedGeneratorVerificationError`; bounded grid and proof operations
 raise `ParameterizationLimitError` rather than returning partial results.
+
+Portable exact support also snapshots role carriers. If an active Generator root
+would become hidden inside implicit Template quotation, export raises
+`TemplateCodecError` rather than silently changing support. Bind such roots before
+exporting the resulting predicates. `traverse_refs=True` does not enter quotation
+data, so it does not bypass this restriction. Runtime generation and support
+verification remain available for the original unexported Generator.
 
 `QueryPredicate.support(generator, max_assignments=...)` captures this same
 exact proof as an explicit predicate. Compose it with Node patterns, `&`, `|`,

@@ -123,8 +123,10 @@ class QueryPredicate:
                 local-state queries, including masked boolean branches.
             TypeError: For unsupported graph leaves or unavailable parameter names.
         Side Effects:
-            Pure metadata preparation only. No defaults, target construction,
-            identity allocation, capture or state IO.
+            Inspects trusted receiving-role annotations on supplied live classes.
+            Template/Ref constraints use their persisted carriers without binding
+            defaults, resolving symbolic targets, constructing Objects, allocating
+            identities, capturing state or accessing Stores. Quotations stay exact.
         """
         from .query.node_pattern import _PreparedPredicate
         return _PreparedPredicate(self, domain=domain)
@@ -152,7 +154,10 @@ class QueryPredicate:
         Returns a mapping using the shared Node codec, preserving aliases, roles,
         exact facets, Match leaves and built-in domains. Runtime providers raise
         ParameterizationError; unsupported values raise TypeError/ValueError.
-        Encoding never invokes a provider, resolves targets or accesses a Store.
+        Encoding snapshots supplied live-class receiving roles before discarding
+        signature authority. It never invokes a provider, resolves symbolic
+        targets or accesses a Store. Support export raises TemplateCodecError if
+        implicit quotation would hide active Generator roots; bind those first.
         """
         from .query.node_pattern import _predicate_to_data
         return _predicate_to_data(self)
@@ -235,11 +240,36 @@ class Selector:
             ) from error
 
     def compile(self, ctx=None):
+        """Prepare a posting plan with the shared exact metadata residual.
+
+        Args:
+            ctx: Retained compatibility argument; unused.
+        Returns:
+            SelectorGraph, or None for a legacy unsupported input.
+        Raises:
+            TypeError, ValueError: For malformed or unsupported pattern metadata.
+        Side Effects:
+            Inspects supplied live-class annotations, without construction,
+            omitted defaults, symbolic target resolution or Store access.
+        """
         from .query.selector_graph import compile_selector_graph
 
         return compile_selector_graph(self, class_match=self.cls_policy)
 
     def matches(self, target: Any, *, verbose: bool = False) -> bool:
+        """Match supplied constraints using shared receiving-role interpretation.
+
+        Args:
+            target: Node or Object metadata to inspect.
+            verbose: Retained compatibility flag; no diagnostics are emitted.
+        Returns:
+            bool: Whether all supplied structural and exact constraints match.
+        Raises:
+            TypeError, ValueError: For unsupported or malformed metadata.
+        Side Effects:
+            As for compile; no construction, default binding or Store access.
+            Quoted recipe and selector data retain exact payload semantics.
+        """
         from .query.query import _query_match
 
 

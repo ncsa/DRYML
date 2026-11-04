@@ -18,6 +18,30 @@ from ..selector import QueryPredicate
 from .model import QueryDomainError
 
 
+def _project_predicate_roles(predicate):
+    """Interpret supplied live-role metadata at preparation, never at authoring.
+
+    Quotations and concrete anchors remain opaque. Boolean branches share this
+    interpretation; captured Generator support retains its own assignment policy.
+    """
+    from ..definition import Definition
+    from ..generator import _project_selector_definition_roles
+
+    memo = {}
+    def project(current):
+        if id(current) in memo:
+            return memo[id(current)]
+        value = current.value
+        if current.kind == "node" and isinstance(value, Definition):
+            value = _project_selector_definition_roles(value)
+        operands = tuple(project(operand) for operand in current.operands)
+        result = current if value is current.value and all(a is b for a, b in zip(operands, current.operands)) else QueryPredicate._make(
+            current.kind, value, operands)
+        memo[id(current)] = result
+        return result
+    return project(predicate)
+
+
 def _runtime_pattern_view(root):
     """Retain runtime matcher code outside canonical pure graph facts."""
     from ..node import _rewrite
@@ -110,6 +134,7 @@ class _PreparedPredicate:
     def __init__(self, predicate, *, domain="node", class_match="selector", strict=False):
         if domain not in {"node", "local_state", "occurrence"}:
             raise QueryDomainError("Unsupported Node query domain.")
+        predicate = _project_predicate_roles(predicate)
         self.predicate, self.domain = predicate, domain
         self.class_match, self.strict = class_match, strict
         roots, seen = [], set()
@@ -141,6 +166,8 @@ class _PreparedPredicate:
             validate(predicate)
 
     def matches(self, target, *, generator_budget=None, prepared=None):
+        from ..definition import Definition
+        from ..generator import _project_selector_definition_roles
         from ..state_values import LocalState
         if self.domain == "local_state":
             if not isinstance(target, LocalState):
@@ -152,10 +179,13 @@ class _PreparedPredicate:
         elif not isinstance(target, Node):
             from ..node import _as_node_view
             target = _as_node_view(target)
-        if prepared is None:
+        original = target
+        if isinstance(target, Definition):
+            target = _project_selector_definition_roles(target)
+        if prepared is not None:
+            prepared._slot(original)
+        if prepared is None or target is not original:
             NodePreparation((target,), view=self.prepared.view)
-        else:
-            prepared._slot(target)
         candidate_parameters = {}
 
         def evaluate(current):
@@ -352,12 +382,48 @@ def _node_matches(pattern, target, pattern_parameters=None, target_parameters=No
 _PREDICATE_SCHEMA = "dryml-node-query-predicate"
 
 
-def _predicate_to_data(predicate):
-    """Encode closed records inside one shared Node table, never opaque blobs."""
-    from ..domains import UniformFromSet, UniformIntRange
-    from ..template_codec import _encode_node_value, TemplateCodecError
+def _portable_pattern(root, *, memo=None, opaque=None):
+    """Name active live-class arguments before inert codecs erase signatures."""
     from ..node import _rewrite, _clone
     from ..freeze import FrozenDict
+    from ..symbol import maybe_symbol_ref
+
+    if opaque is None:
+        from ..links import DefLink
+        from ..quoted import QuotedDef
+        from ..template import _template_children
+
+        opaque, seen = set(), set()
+        def mark(value, quoted=False):
+            key = id(value), quoted
+            if key in seen:
+                return
+            seen.add(key)
+            if isinstance(value, QuotedDef):
+                mark(value.value, True)
+            elif isinstance(value, DefLink):
+                mark(value.target, quoted)
+            else:
+                if quoted and isinstance(value, Node):
+                    opaque.add(value._view)
+                for child in _template_children(value):
+                    mark(child, quoted)
+        mark(root)
+    def normalize(old, node):
+        if (not isinstance(node, ConcreteDefinition) and isinstance(node.cls, type)
+                and node._view not in opaque and old._view not in opaque):
+            result = _clone(node, None, FrozenDict(_parameters(node)), node._facets)
+            object.__setattr__(result, "_cls", maybe_symbol_ref(node.cls, functions=False))
+            return result
+        return node
+    return _rewrite(root, node_transform=normalize, enter_quoted=False, memo=memo)
+
+
+def _predicate_to_data(predicate):
+    """Encode closed records inside one shared Node table, never opaque blobs."""
+    predicate = _project_predicate_roles(predicate)
+    from ..domains import UniformFromSet, UniformIntRange
+    from ..template_codec import _encode_node_value, TemplateCodecError
     from ..quoted import QuotedDef
     from ..links import DefLink
     from ..template import _template_children
@@ -389,12 +455,7 @@ def _predicate_to_data(predicate):
             inspect(operand)
     inspect(predicate)
     def named_pattern(root):
-        def normalize(old, node):
-            if (not isinstance(node, ConcreteDefinition) and isinstance(node.cls, type)
-                    and node._view not in opaque and old._view not in opaque):
-                return _clone(node, None, FrozenDict(_parameters(node)), node._facets)
-            return node
-        return _rewrite(root, node_transform=normalize, enter_quoted=False, memo=memo)
+        return _portable_pattern(root, memo=memo, opaque=opaque)
     records = {}
     def record(current):
         if id(current) not in records:
@@ -408,6 +469,7 @@ def _predicate_to_data(predicate):
         if current.kind == "support":
             selector, domains = current.value, {}
             generator = selector._generator
+            from ..generator import _portable_generator_definition
             for name, domain in generator.distributions.items():
                 if type(domain) is UniformIntRange:
                     domains[name] = {"kind": "int-range", "lo": domain.lo, "hi": domain.hi}
@@ -415,7 +477,7 @@ def _predicate_to_data(predicate):
                     domains[name] = {"kind": "set", "values": tuple(named_pattern(item) for item in domain.values)}
                 else:
                     raise TemplateCodecError("query predicate has a nonportable runtime provider")
-            return {"kind": "support", "definition": named_pattern(generator.definition), "domains": domains,
+            return {"kind": "support", "definition": named_pattern(_portable_generator_definition(generator)), "domains": domains,
                     "traverse_refs": generator._traverse_refs, "max_assignments": selector._max_assignments}
         return {"kind": current.kind, "operands": tuple(record(item) for item in current.operands)}
     try:

@@ -1038,6 +1038,8 @@ class IdentityQuery:
         established meanings. Exact live references include embedded identities,
         materializing projections, and retained cache receipts; they do not imply
         independent storage or metadata eligibility. ``None`` is a no-op.
+        Supplied live-class Template/Ref roles are interpreted using their
+        persisted carriers, without loosening fixed fields or quoted payloads.
 
         Args:
             value: Node, QueryPredicate, complete CDef, Selector,
@@ -1051,7 +1053,9 @@ class IdentityQuery:
             TypeError: If the selector type is unsupported.
 
         Side Effects:
-            None. Selection remains deferred until a terminal executes.
+            Prepares metadata and inspects trusted annotations on supplied live
+            classes. Matching and source/index access wait until a terminal; no
+            omitted defaults, symbolic target resolution or construction occurs.
         """
 
         if value is None:
@@ -2902,6 +2906,9 @@ class OccurrenceQuery:
 
     def sel(self, value=None) -> "OccurrenceQuery":
         """Conjoin a V3-compatible target selector without changing roots.
+
+        Target predicates use the same receiving-role interpretation as identity
+        queries, direct matching and compiled predicates; quotations remain exact.
 
         Args:
             value: Any selector accepted by :meth:`IdentityQuery.sel`, or
