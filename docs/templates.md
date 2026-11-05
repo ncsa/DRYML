@@ -194,6 +194,13 @@ Portable predicates and Repo routing snapshots retain those interpreted carriers
 before live signatures are discarded; decoding remains inert. A purely symbolic
 class reference does not implicitly import its constructor to discover annotations.
 
+Direct selector attributes expose their retained values. For a quoted Artifact
+entry, `exp_sel.artifacts["mse"].unwrap()` returns the recipe without the link or
+its quotation carrier. Bind it explicitly with
+`art.sub(this=exp_sel.root, traverse_refs=True)` to form a metric query pattern.
+Unwrapping neither evaluates the recipe nor selects a saved checkpoint; see
+[explicit link unwrapping](signatures.md#explicitly-unwrapping-links).
+
 The retained V3 query contract counts by the selected identity domain. `.cdefs().count()` counts
 distinct definitions, `.state_refs().count()` counts saved snapshots, and
 `.state_refs().object_projection().count()` counts distinct realized object
