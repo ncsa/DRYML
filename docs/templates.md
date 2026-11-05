@@ -194,7 +194,21 @@ Portable predicates and Repo routing snapshots retain those interpreted carriers
 before live signatures are discarded; decoding remains inert. A purely symbolic
 class reference does not implicitly import its constructor to discover annotations.
 
-Direct selector attributes expose their retained values. For a quoted Artifact
+Definition-valued selector attributes preserve Selector interpretation. For
+example, `model_sel = exp_sel.model` is a Selector rooted at the model component,
+carrying `exp_sel.strict` and `exp_sel.cls_policy`; chained access such as
+`exp_sel.model.encoder` works the same way. Use it directly in
+`repo.query().sel(model_sel)`, or retain experiment provenance with
+`repo.query().sel(exp_sel).nested(model_sel).targets()`. A corresponding retained
+exact child is rebased as the child selector's `.exact_root`, supporting
+`.restore()` and `.exact()` after categorical projection. Editing a child selector
+does not rewrite its parent or automatically add the parent's other constraints
+to a standalone child query.
+
+For a raw Definition handle, use `exp_sel.model.root` or
+`exp_sel.parameters["model"]`. Scalars and container-valued attributes still expose
+their supplied values: dictionary/list lookup does not automatically wrap entries.
+Ref and quotation boundaries likewise remain explicit. For a quoted Artifact
 entry, `exp_sel.artifacts["mse"].unwrap()` returns the recipe without the link or
 its quotation carrier. Bind it explicitly with
 `art.sub(this=exp_sel.root, traverse_refs=True)` to form a metric query pattern.

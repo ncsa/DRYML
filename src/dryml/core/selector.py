@@ -184,8 +184,26 @@ class QueryPredicate:
 class Selector:
     """Query interpretation wrapper around an immutable Definition root.
 
-    Supplied semantic parameters are exposed through ``parameters`` and direct
-    non-reserved attributes without changing selector omission semantics.
+    Args:
+        root: Definition, ConcreteDefinition, or live class to describe partially.
+        strict: Matching strictness propagated to child selectors.
+        cls_policy: ``"selector"`` for inherited class matching or ``"exact"``
+            for exact class references, subject to strictness and exact anchors.
+        exact_root: Optional retained ConcreteDefinition used by restore/exact
+            edits. A concrete root supplies its own authority when omitted.
+
+    Definition-valued attributes return child Selectors carrying this wrapper's
+    matching policy and the corresponding retained exact subtree, when available.
+    Other attributes expose their supplied values without entering containers,
+    reference links or quotations. ``parameters`` provides the raw semantic record;
+    navigation never fills omitted defaults or changes the parent selector.
+
+    Raises:
+        TypeError: If the root or retained exact authority has an unsupported type.
+
+    Side Effects:
+        None. Authoring and attribute navigation do not construct Objects, resolve
+        symbolic classes or access Stores. Matching has its own preparation policy.
     """
 
     root: Any
@@ -215,29 +233,49 @@ class Selector:
 
         Returns:
             The partial parameter record supplied to the wrapped Definition.
+            Definition values remain raw handles here, unlike direct attributes
+            which expose those values as child Selectors.
         """
 
         return self.root.parameters
 
     def __getattr__(self, name: str) -> Any:
-        """Delegate non-reserved semantic parameter access to ``root``.
+        """Navigate a retained attribute, preserving Selector interpretation.
 
         Args:
             name: Requested Python attribute name.
 
         Returns:
-            The supplied frozen semantic value from the wrapped Definition.
+            A child Selector for a Definition or ConcreteDefinition value, with
+            the same strictness and class policy. Its exact authority is the
+            corresponding ConcreteDefinition from this selector's retained exact
+            record when available; otherwise a concrete child is its own exact
+            authority. Scalars, containers, links, quotation data and other values
+            are returned directly. Child edits do not replace the parent subtree.
 
         Raises:
             AttributeError: If ``name`` is not supplied on the wrapped root.
+
+        Side Effects:
+            None. Retains the exact child handle and alias relationships without
+            resolving classes, applying defaults, constructing Objects, accessing
+            a Repo/Store or entering reference and quotation boundaries. Wrapper
+            fields and methods take precedence over delegated attributes.
         """
 
         try:
-            return getattr(self.root, name)
+            value = getattr(self.root, name)
         except AttributeError as error:
             raise AttributeError(
                 f"{type(self).__name__!s} object has no attribute {name!r}"
             ) from error
+        from .definition import ConcreteDefinition, Definition
+
+        if isinstance(value, (Definition, ConcreteDefinition)):
+            exact = None if self.exact_root is None else self.exact_root.parameters.get(name)
+            return Selector(value, strict=self.strict, cls_policy=self.cls_policy,
+                            exact_root=exact if isinstance(exact, ConcreteDefinition) else None)
+        return value
 
     def compile(self, ctx=None):
         """Prepare a posting plan with the shared exact metadata residual.
