@@ -241,7 +241,7 @@ def validate_node_root_views(selections, prepared, *, validated_views=None, vali
                 pending.append(prepared._construction[slot])
 
 
-def capture_store_projection(store, *, rebuild=False):
+def capture_store_projection(store, *, rebuild=False, certify_graphs=True):
     """Prepare changed-record replay or an explicit metadata-only Store inventory.
 
     ``store`` is an open format-4 DirStore; ``rebuild`` permits full metadata
@@ -252,9 +252,12 @@ def capture_store_projection(store, *, rebuild=False):
     payload reads, application capture or restore occur. Present control namespaces
     require complete owner readers even for incremental replay; absent namespaces
     contribute no rows regardless of process-local owner registration.
+    certify_graphs=False is reserved for nonpersistent scan consumers: it omits
+    reusable primitive graph certificates, never the underlying authority checks.
     """
     import json
     import os
+    import hashlib
     from ..store import authority as a, records as r
     from ..store import retention as t
     from ..node_codec import _decode_node_graph_views
@@ -323,6 +326,8 @@ def capture_store_projection(store, *, rebuild=False):
             else:
                 value = reader.from_bytes(raw)
             decoded[path] = value
+            if path in paths:
+                emit("record_bytes", path, "", {"sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)})
             return value
 
         def root_view(root):
@@ -458,6 +463,10 @@ def capture_store_projection(store, *, rebuild=False):
                 emit("name", path, value.name, value.to_data())
 
         for path, block in blocks.items():
+            if path not in paths:
+                emit("record", path, "", block.to_data())
+                raw = captured.files[path]
+                emit("record_bytes", path, "", {"sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)})
             packet = block.blocks
             selected = list(views.get(path, {}).values())
             if selected:
@@ -471,9 +480,11 @@ def capture_store_projection(store, *, rebuild=False):
                                           for header in root_records.get(path, {}).values()), decoded_owner)
                 from .relationships import _discovery_rows, _discovery_preparation
                 discovery_owner = _discovery_preparation(decoded_owner, block.digest)
-                if path in paths:
-                    for family, key, value in discovery_owner.facts():
-                        emit(family, path, key, value)
+                for family, key, value in discovery_owner.facts():
+                    emit(family, path, key, value)
+                if certify_graphs:
+                    from .postings import _build_graph
+                    emit("query_graph", path, "", _build_graph(discovery_owner))
                 for source, header in discovery.get(block.digest, ()):
                     for ordinal, row in enumerate(_discovery_rows(by_view[header.view_bytes], header,
                                                                  preparation=discovery_owner)):
@@ -490,8 +501,6 @@ def capture_store_projection(store, *, rebuild=False):
                              "compatibility_digest": prepared.digest(root, domain=COMPATIBILITY_VIEW.name)})
             # Postings correlate by authenticated block/table/overlay and typed
             # value path. Root membership joins to its own selected slot only.
-            if path not in paths:
-                continue
             values = packet["values"]
             for table_key, table in packet["tables"].items():
                 for slot, overlay in enumerate(table["overlays"]):
@@ -528,4 +537,4 @@ def capture_store_projection(store, *, rebuild=False):
                         emit("edge", path, prefix + ":construction", {"table": table_key,
                              "owner": slot, "path": (), "role": "construction",
                              "target": overlay["construction"]["slot"]})
-        return StoreProjection(captured.cut, tuple(sorted(paths)), tuple(rows), receipts, captured)
+        return StoreProjection(captured.cut, tuple(sorted(paths | blocks.keys())), tuple(rows), receipts, captured)

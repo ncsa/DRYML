@@ -3,7 +3,7 @@
 ## Current Node Sources and Local-State Discovery
 
 `Repo.query()` and `Store.query()` execute against Store 4 authority. Ready SQLite
-schema-11/coverage-3 indexes supply contribution-scoped discovery postings. Rows reference
+schema-12/coverage-4 indexes supply contribution-scoped discovery postings. Rows reference
 the existing authenticated root/block and portable table/overlay occurrence locator; they are derived
 postings, not another authoritative graph representation.
 
@@ -86,7 +86,8 @@ no donor identity: identity-constrained local-state predicates raise
 `QueryDomainError`; select an explicit owner/occurrence instead.
 
 Candidate predicates preserve typed paths, roles, and identity/state correlation.
-Necessary predicates never replace exact Node/Generator residuals. All applicable
+Necessary predicates never replace unproved Node/Generator residuals. The covered
+scalar count path below proves ordered patterns on certified primitive records. All applicable
 ObjectId anchors are checked in every participating Store, including Stores whose
 candidate relation is empty. Missing/incompatible established anchors refuse the
 query. Negative/count answers require the complete requested coverage and mutation
@@ -97,12 +98,19 @@ seek indexed local postings and direct occurrence-correlated edges, then join ro
 contributions. Local facts are stored once per block/view, not as each descendant's
 complete feature list. Tied-set ordinals are presentation paths, never persisted
 occurrence identity. Aliases, unordered assignment and quotations remain exact
-residual obligations. A predicate without a supported safe anchor (for example,
-class-only, negation-only or unsupported scalar/support-only selection) visibly
+matching obligations. A predicate without a supported safe anchor (for example,
+subclass-only, negation-only or unsupported scalar/support-only selection) visibly
 uses scan policy; `require_indexed()` and `scan_policy("forbid")` refuse before
 refresh/recovery inventory. Explicit domain enumeration without a selector remains
 available from its complete certified relation. Compatibility-only local-state
 discovery currently needs scan admission; exact-origin discovery seeks its bucket.
+
+An exact importable-class constraint can also seek the optional class-facet index.
+New indexes include this access path. On existing ready indexes, automatic refresh
+may install it after scan admission, without changing Store authority or coverage.
+`refresh(False)` never installs it; a missing access path retains ordinary scan
+fallback or refusal under no-scan/indexed-only controls. Soft subclass matching
+does not use an exact-class seek.
 
 For otherwise unanchored concrete recipe selection in the object-projection and
 saved-Node domains, SQLite checks the occurrence's exact importable class and any immediate
@@ -111,8 +119,9 @@ candidate graphs. Quoted pins stay correlated to their ordered encoded field
 paths; unordered positions are excluded, and quotation does not become discovery
 traversal. This reduces unrelated graph decoding for recipes whose quoted inputs
 have no scalar postings. These are necessary prefilters with exact residual
-validation, not new selective seeks: an otherwise unanchored recipe still requires
-scan admission. Soft class selectors retain subclass matching, and
+validation. Quoted pins alone do not establish a selective seek; without another
+supported anchor or the optional exact-class access path, scan admission remains
+required. Soft class selectors retain subclass matching, and
 creation/local-state domains do not use these filters.
 
 `page_size(n)` bounds candidate pages. A short Store/SQLite cut captures candidate
@@ -156,6 +165,43 @@ and contains no open reader or lease. Fresh authority bytes and cut checks remai
 mandatory on reuse. Pure caches never establish membership, names, availability,
 retention, or completeness. Collected results fix membership; later payload use
 requires its own fresh protected read.
+
+### Postings-first nested counts
+
+Unbounded `repo.query().nested().sel(pattern).count()` can use a certified compact
+graph plan instead of reconstructing containing snapshots. The compiler admits
+exact-class ordered Node patterns, alias assignments, identity pins, lists/tuples,
+partial mappings, scalar-valued factories, and supported pure Match leaves
+(`AnyValue`, `Present`, `Missing`, scalar `Choice` and `IntRange`). Boolean forms
+retain complete branch evaluation. Factory targets, nested scalar values and
+sequence shapes now supply occurrence-local necessary postings.
+
+The plan first selects possible target contributions, then reads only their
+contributing sources. Primitive graph records prove complete supported patterns
+and count typed paths arithmetically, retaining saved/object/creation associations
+and active-path guards. Repeated source contributions merge using complete exact
+graph evidence, never a digest alone. Counts do not materialize Nodes or Objects
+for the indexed portion. Captured in-memory Repo members retain ordinary matching
+and are merged with indexed identities without double counting.
+
+Fresh root/membership records and applicable declarations in **every** connected
+Store remain required. Immutable block bytes are checked against the exact-byte
+witness recorded during validated index publication. Final byte/cut validation
+also detects a missing or replaced file without an epoch change. Named-view and
+state-compatibility proofs can therefore be reused without repeating graph
+normalization on each search. These proofs do not authorize payload use.
+
+Quotes, unordered pattern assignments, state pins, Nodes inside exact factories,
+runtime callbacks, Generator support, unresolved candidate parameter bindings,
+explicit verification/depth/output bounds, metadata scopes and composed sources
+retain Node residual execution. LocalState sources retain their own consumer.
+Large compact graphs explicitly advertise residual-only execution. `collect()`
+and iterators retain their existing object/result and page semantics.
+
+Schema-11/coverage-3 indexes need a **one-time metadata-only rebuild** for the new
+proof and nested-posting families. Automatic refresh performs permitted recovery;
+`refresh(False)` refuses it. This upgrade changes derived SQLite only and can take
+substantially longer than subsequent indexed searches.
 
 ## Node Pattern Semantics
 
@@ -451,6 +497,29 @@ target projections remain existential. `max_depth()`, `max_verify()`,
 visible execution bounds and diagnostics across composition. `explain(analyze=True)`
 executes the plan; ordinary explanations report planned source cuts and residual
 work without evaluation.
+
+For eligible unbounded Repo/Store roots, exact class/recipe target constraints
+first select necessary ancestor candidates through occurrence-correlated SQLite
+postings. This avoids hydrating roots that cannot contain a match. Exact residual
+matching, typed edge policies, declaration checks across connected Stores and fresh
+authority/index cuts still establish the answer. Depth/verification bounds,
+bounded root prefixes, metadata scopes, facet-sensitive target patterns and
+unsupported source compositions retain their original capture path.
+
+Complete nested-root capture evaluates its necessary address relation once and
+groups bounded authority reads by immutable block. A disposable SQLite address
+table retains no source reader between pages. Repeated contributions merge only
+after comparing complete normalized graph evidence, including alias topology;
+digest equality alone never merges identities. Decoded metadata reuse remains
+terminal-local and byte-charged, including preparation fact budgets.
+
+Uncapped ordinary `nested(...).count()` counts shared DAG suffix paths
+arithmetically. It still counts every distinct owner/typed-path occurrence, rather
+than distinct targets: two links to one model contribute two occurrences. No full
+`OccurrenceSet` is built. Explicit raw caps, path/through filters, depth bounds,
+metadata, runtime matchers and Generator witness predicates keep streaming evaluation; nontrivial
+active-path cycles retain the established path-sensitive traversal. Root capture,
+exact matching and complex graph preparation still have their own costs.
 
 Direct occurrence terminals and both projections combine complete root-producer
 authority with external target metadata scopes before root or target filtering,

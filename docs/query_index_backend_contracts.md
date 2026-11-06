@@ -1,6 +1,6 @@
 # Query Index Backend Contracts
 
-## Format-4 Store Projection (Schema 11, Coverage Contract 3)
+## Format-4 Store Projection (Schema 12, Coverage Contract 4)
 
 Every supported query-visible built-in DirStore mutation owns its derived work:
 persist intent and authority, classify the committed Store cut, apply the coalesced
@@ -33,7 +33,7 @@ binding is not an API for maintaining independent sidecars over one domain.
 The closed relation families are `record`, `recipe_root`, `saved_root`,
 `declaration`, `creation`, `manifest`, `availability`, `node`, `edge`, `facet`,
 `name`, `requested_metadata`, `retention`, `lifecycle`, `discovery`,
-`discovery_feature`, and `discovery_link`. Compact root membership
+`discovery_feature`, `discovery_link`, `record_bytes`, and `query_graph`. Compact root membership
 joins to its authenticated block/table/overlay slot. Node, typed edge, and facet
 postings retain those correlations and typed value paths; they do not flatten
 different occurrences into one match. Manifests and availability retain the full
@@ -62,9 +62,9 @@ Core never imports managed to discover policy. A missing/incompatible required
 owner feed refuses visibly rather than certifying an empty relation. Unknown
 families and prepared paths are refused. Owner adapters must supply closed readers,
 transitions, projections and publication guards together. Managed lifecycle
-association policy remains separate from Core physical protection. Older schema-10
-or coverage-1/2 certificates require visible metadata-only derived recovery; they
-cannot claim coverage 3 or authorize stale negative/count results. Store 4 bytes
+association policy remains separate from Core physical protection. Older schemas
+or coverage-1/2/3 certificates require visible metadata-only derived recovery; they
+cannot claim coverage 4 or authorize stale negative/count results. Store 4 bytes
 and identity/Node encoding versions are unchanged by this derived-schema revision.
 
 Coverage support is local to the certified Store cut, not ambient imports. An
@@ -120,7 +120,7 @@ constrain joins; unordered assignment, aliases, quotation, class rules and remai
 facets retain the exact Node residual. Supported anchors are exact ObjectIds, full
 StateKeys and supplied local `str`/`int`/`bool`/`None` fields. Boolean conjunctions
 can use a safe anchored conjunct; disjunction requires an anchor on every branch.
-Class-only, absence/negation-only, unsupported scalar/support-only shapes without a
+Subclass-only, absence/negation-only, unsupported scalar/support-only shapes without a
 safe anchor visibly use scan policy, including refusal by `require_indexed()` or
 `scan_policy("forbid")`, **before** explicit refresh or recovery can inventory.
 Enumerating an explicitly requested complete domain without a selector still uses
@@ -139,6 +139,25 @@ quoted discovery children or a substitute for exact quoted graph equality.
 Soft/subclass selectors and creation/local-state domains are excluded. These
 filters retain residual matching and scan admission; they do not themselves
 qualify as selective indexed seeks or change schema/coverage versions.
+
+The optional `store_facet_class` expression index adds an exact importable-class
+seek over existing class facets. New indexes include it; ready current-schema
+sidecars can install it transactionally after scan admission under automatic
+refresh. Installation runs outside Store fences, changes no projection rows,
+coverage or authority generation, and is never performed by `refresh(False)`.
+Without it, class filtering remains scan-controlled. An installed exact-class
+seek may anchor an otherwise unanchored pattern; subclass matching cannot.
+Schema/coverage compatibility does not require this optional physical access path.
+
+Eligible exact, facet-independent nested target patterns recursively join existing
+typed discovery links to a necessary owner relation. Association-derived views
+remain conservative candidates and acceptance still uses retained relationship
+traversal. Complete unbounded root capture evaluates this relation once, stores
+only source/row-key addresses in a disposable SQLite table independent of the
+sidecar, and hydrates bounded pages in block order. There is no retained source
+reader or unmanaged sidecar handle between pages. Canonical rooted evidence, not
+digest equality, merges duplicate identity contributions. Final output returns to
+normal identity ordering after complete validation of the retained cut.
 
 Eligible object-only pages additionally carry an optional identity-facet hint from
 the existing occurrence-correlated `facet` row. Consumers use it only as an address:
@@ -220,7 +239,48 @@ ZipStore retains its extracted nonpersistent/buffered policy. Its journal cut
 becomes durable only after successful archive commit; no persistent SQLite claim
 is made for an uncommitted extraction.
 
-### Detached Query Pages and Continuation
+### Certified scalar-count execution
+
+Coverage 4 additionally certifies immutable semantic interpretation. Each
+`record_bytes` row records SHA-256 and byte length for the actual framed source
+bytes observed during detached preparation. A `query_graph` row belongs to its
+immutable block source and carries primitive Node descriptions, named parameter
+values, stable block locators, named-view keys, full normalized equality evidence,
+typed direct/association edges and operation-independent guard partitions.
+State selections are validated before a supported graph is certified. A graph
+that cannot supply this proof advertises residual-only execution.
+
+Graph envelopes use version 1, bounded zlib-compressed/base64 canonical JSON, and
+an explicit uncompressed byte count. Decompression is bounded at 64 MiB; evidence
+that exceeds the producer budget is not certified for compact execution. Primitive
+records do not contain live objects, callbacks, payloads or process-local tokens.
+Graph-local guard integers encode the equivalence partition, not token identities.
+Full rooted equality evidence distinguishes semantic digest collisions and sharing.
+This derived equality evidence is compressed together with the shared graph; it
+does not expand discovery contribution rows or replicate posting feature closures.
+
+The ordinary unbounded nested count planner compiles a closed exact program for
+ordered Node/factory patterns and supported pure matchers, retaining explicit
+residual disposition for other patterns. Local nested scalar/factory-target and
+sequence-shape tokens narrow targets before source contributions are requested.
+For covered programs, the scalar consumer authenticates current memberships/root
+headers, exact immutable block bytes and declarations in every participating
+Store, then interprets primitive records and counts typed paths without Node
+decoding. State availability and payload-use admission remain separate operations.
+Graph interpretation is byte-bounded and terminal-local; declaration checks are
+shared across the terminal but backed by retained fresh byte witnesses. All
+captured files and cuts are revalidated before the scalar answer escapes.
+
+Target contribution source addresses are buffered once; contribution records are
+read in bounded source batches and compact graphs by block. This complete scalar
+plan does not construct a fixed Node result set or expose an iterator continuation.
+Explicit verification/depth/output bounds, local-state domains, source algebra,
+metadata scopes and unsupported residuals use the existing page consumer instead.
+Index replacement, authority changes and cancellation retain the same retry and
+reader-cleanup rules as other unpublished terminals. Same-epoch source-byte damage
+is an authority error, not a cache hit or success.
+
+### Detached decoded pages
 
 The current consumer captures bounded keys and immutable record/block bytes under
 short Store/SQLite cuts. It releases both before preparation, exact matching and
@@ -234,6 +294,13 @@ child key budget; clear/eviction repeats pure work, never external authority che
 Oversized/nonresident blocks/views can repeat preparation. Exact hard cross-branch
 joins, bitset frontiers, unordered canonicalization and output-dependent root/source
 contributions retain their measured costs; no universal linear DAG bound is claimed.
+Nested complete captures can allocate an entry up to their terminal's total
+decoded-owner budget so one large current block can span several small pages.
+Charges include the decoded table and its reserved fact LRU. Smaller declaration
+projection preparations may be retained independently of unrelated snapshot
+graphs. Declaration reuse cannot evict the current clustered source block; all
+entries still share the same total byte limit. Neither cache supplies current
+membership or validation witnesses.
 
 Tokens retain Store UUID/epoch/pending evidence, index file identity/UUID,
 schema/coverage/generation, producer and external-scope Repo topology, and keyset

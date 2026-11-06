@@ -619,10 +619,13 @@ class NodePreparation:
         """
         if self.view.name != other.view.name:
             return False
+        left_slot, right_slot = self._slot(node), other._slot(other_node)
+        if node is other_node or self is other and left_slot == right_slot:
+            return True
         with self._lock:
-            left = self._flat(self._slot(node))
+            left = self._flat(left_slot)
         with other._lock:
-            right = other._flat(other._slot(other_node))
+            right = other._flat(right_slot)
         return left == right
 
     def _flat(self, root, *, retain=False):

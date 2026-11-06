@@ -589,16 +589,19 @@ def decode_node_graph(packet, *, view=0, expected_view="exact"):
         raise NodeCodecError("Malformed Node graph metadata.") from error
 
 
-def _decode_node_graph_views(packet, *, with_owner=False):
+def _decode_node_graph_views(packet, *, with_owner=False, max_cached_bytes=8 * 1024 * 1024):
     """Return advertised roots, optionally with their private shared preparation.
 
     with_owner retains only decoded immutable metadata and exact semantic facts;
     it is not Store authority. Callers must validate fresh bytes/cuts separately.
     Its private transport maps bind each decoded handle to the authenticated
     table/overlay address, independent of unordered presentation-path ordinals.
+    max_cached_bytes bounds the returned owner's pure fact LRU; eviction changes
+    preparation work only, never decoding or validation semantics.
     """
     try:
-        return _decode(packet, 0, packet["views"][0]["view"], _all_views=True, _with_owner=with_owner)
+        return _decode(packet, 0, packet["views"][0]["view"], _all_views=True, _with_owner=with_owner,
+                       _max_cached_bytes=max_cached_bytes)
     except NodeCodecError:
         raise
     except (KeyError, IndexError, TypeError, ValueError, AttributeError, OverflowError,
@@ -606,7 +609,8 @@ def _decode_node_graph_views(packet, *, with_owner=False):
         raise NodeCodecError("Malformed Node graph metadata.") from error
 
 
-def _decode(packet, selected, expected_view, *, _all_views=False, _with_owner=False):
+def _decode(packet, selected, expected_view, *, _all_views=False, _with_owner=False,
+            _max_cached_bytes=8 * 1024 * 1024):
     from .bound_args import BoundArguments
     from .definition import ConcreteNode, Definition
     from .freeze import FrozenDict
@@ -762,7 +766,8 @@ def _decode(packet, selected, expected_view, *, _all_views=False, _with_owner=Fa
         raise NodeCodecError("Unreachable value blocks.")
     # Validate every advertised key; unrelated storage roots do not enter any
     # selected semantic preimage. No policy is inferred from an untrusted name.
-    prepared = NodePreparation(node for table in built_tables.values() for node in table.values())
+    prepared = NodePreparation((node for table in built_tables.values() for node in table.values()),
+                               max_cached_bytes=_max_cached_bytes)
     # These addresses are scoped to authenticated transport bytes, unlike a
     # GraphPath's process-local ordinal among recipe-equal unordered members.
     prepared._transport_nodes = {(table, slot): node for table, nodes in built_tables.items()

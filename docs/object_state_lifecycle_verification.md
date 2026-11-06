@@ -35,7 +35,7 @@ notebook and class-redefinition limits remain in the
   Recovery dispositions are explicit non-success outcomes, with no execution fallthrough.
 - Current consumers use TrainState 2, Experiment wrapper 2, history 4, Fold progress
   3 and CachedDataset/work 3. Managed area/current/history/root-intent/pending are
-  2/4/2/3/2. SQLite is schema 11 / coverage 3. Qualification fixture manifests now
+  2/4/2/3/2. SQLite is schema 12 / coverage 4. Qualification fixture manifests now
   use version 3 with shared Node metadata; their fixed workload baseline remains 2.
 - Core's ordinary callable codec remains independent of managed imports. The
   managed-owned Execute adapter is distinct from the closed durable-result codec.

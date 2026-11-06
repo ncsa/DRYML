@@ -115,8 +115,11 @@ class LocalState(Generic[T]):
         return self
 
     def __eq__(self, other):
+        """Compare full keys and exact creation graphs; identical handles need no preparation."""
         from .node_prepare import NodePreparation
 
+        if self is other:
+            return True
         if not isinstance(other, LocalState) or self.key != other.key:
             return False
         a, b = NodePreparation((self.creation_cdef,)), NodePreparation((other.creation_cdef,))

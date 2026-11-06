@@ -2041,7 +2041,9 @@ class IdentityQuery:
             for producer in {id(item.producer): item.producer for item in capture.index_presentations}.values():
                 # Occurrence presentations bind metadata scopes, not discovery sources.
                 if isinstance(producer, IdentityQuery) and node_query_stores(producer, capture) is not None:
-                    _node_discovery_plan(producer, capture)
+                    # Physical availability is checked by the consumer before SQL;
+                    # preflight only determines whether the shape has a safe seek.
+                    _node_discovery_plan(producer, capture, class_seek=True)
             if capture.refresh_policy is True or capture.refresh_policy == "always":
                 # Configured SQLite can be refused before IO; optional targets must resolve first.
                 if not current_projection and any(
@@ -2577,6 +2579,9 @@ class IdentityQuery:
         from ..generator import GeneratorSelector
         from ..selector import Selector
 
+        if restriction.kind == "nested_candidates":
+            # This necessary SQL owner relation is never an acceptance proof.
+            return True
         if restriction.kind == "kind":
             from ..node import Node
             from ..state_values import LocalState
@@ -3226,7 +3231,7 @@ class OccurrenceQuery:
         )
 
     def count(self) -> int:
-        """Stream the distinct raw typed-occurrence count.
+        """Return the distinct raw typed-occurrence count.
 
         Returns:
             Number of retained occurrences after any explicit raw-output cap.
@@ -3235,10 +3240,66 @@ class OccurrenceQuery:
             QueryError: If root capture, metadata validation, or traversal fails.
 
         Side Effects:
-            Executes traversal without constructing a complete fixed result.
+            Executes metadata traversal without constructing a complete fixed
+            result. Covered indexed predicates use certified primitive graphs
+            with fresh source-byte/declaration checks, avoiding Node decoding.
+            Permitted refresh may rebuild older derived coverage once. Other
+            unbounded ordinary predicates use DAG suffix counts rather
+            than enumerating every shared path; explicit caps/path/depth controls
+            and Generator/runtime matcher predicates retain streaming evaluation.
         """
 
-        return self.roots._run_terminal(lambda cut: sum(1 for _ in self._iter_occurrences(cut)), occurrence=self)
+        return self.roots._run_terminal(self._count_occurrences, occurrence=self)
+
+    def _count_occurrences(self, capture):
+        from ..generator import GeneratorSelector
+        from ..selector import QueryPredicate
+        from .relationships import count_relationship_occurrences
+        from .indexed_count import _try_count
+
+        indexed = _try_count(self, capture)
+        if indexed is not None:
+            return indexed
+
+        def has_support(value):
+            return isinstance(value, GeneratorSelector) or isinstance(value, QueryPredicate) and (
+                value.kind == "support" or any(has_support(operand) for operand in value.operands))
+        selectors = ((self.selector,) if self.selector is not None else ()) + self.additional_selectors
+        prepared_selectors = tuple(_V3Restriction("sel", value).prepared for value in selectors)
+        if (self.fixed is not None or self.occurrence_limit is not None or self.path_filter is not None
+                or self.through_kinds or capture.max_depth_limit is not None
+                or self.metadata_restrictions or any(has_support(value) for value in selectors)
+                or any(item is None or item.runtime_matchers for item in prepared_selectors)):
+            return sum(1 for _ in self._iter_occurrences(capture))
+        roots = self._capture_roots(capture)
+        from ..definition import ConcreteDefinition
+        from ..node import Node
+        from ..node_prepare import NodePreparation
+        from .identity import identity_key
+
+        owners = []
+
+        def preparation(value):
+            if not isinstance(value, (Node, ConcreteDefinition)):
+                return None
+            for owner in reversed(owners):
+                if id(value) in owner._slots:
+                    return owner
+            owner = NodePreparation((value,), previous=owners[-1] if owners else None)
+            owners.append(owner)
+            return owner
+
+        matches = self._target_matcher(roots, capture, node_preparation=preparation)
+        count, seen = 0, set()
+        for root in roots:
+            key = identity_key(root)
+            if key in seen:
+                continue
+            seen.add(key)
+            owners.clear()
+            preparation(root)
+            count += count_relationship_occurrences((root,), matches, edges=self.edges)
+        return count
 
     def exists(self) -> bool:
         """Return whether one qualified occurrence exists.
@@ -3426,12 +3487,44 @@ class OccurrenceQuery:
 
         if self.metadata_restrictions:
             capture.capture_stores(self._preflight_complete_sources(capture))
-        roots = self.roots._collect_with_capture(capture)
+        roots = self._candidate_roots(capture)._collect_with_capture(capture)
         if self.metadata_restrictions:
             capture.capture_stores(self._preflight_complete_sources(capture, producer_captured=True))
         return roots
 
-    def _target_matcher(self, roots, capture):
+    def _candidate_roots(self, capture):
+        """Push only view-invariant exact target constraints into owner discovery.
+
+        Bounds, metadata validation, facet-sensitive and unsupported predicates
+        retain their original universe. SQL can only remove impossible owners;
+        ordinary relationship traversal still proves every returned occurrence.
+        """
+        from .source import node_query_stores
+        from ..definition import Definition
+        from ..node import _all_nodes
+
+        query = self.roots
+        if (self.fixed is not None or self.metadata_restrictions or self.max_depth_limit is not None
+                or capture.max_verify_limit is not None
+                or query.take_limit is not None or query.max_depth_limit is not None
+                or any(r.kind not in {"sel", "kind", "object_id", "namespace"} for r in query.restrictions)
+                or any(r.kind == "kind" and r.value == "local_state" for r in query.restrictions)
+                or node_query_stores(query, capture) is None):
+            return query
+        for selector in ((self.selector,) if self.selector is not None else ()) + self.additional_selectors:
+            prepared = _V3Restriction("sel", selector).prepared
+            if (prepared is None or prepared.runtime_matchers or prepared.predicate.kind != "node"
+                    or not (prepared.strict or prepared.class_match == "exact")):
+                continue
+            root = prepared.predicate.value
+            if (not isinstance(root, Definition) or root.cls is None
+                    or any(not isinstance(node, Definition) or node.object_id is not None or node.state is not None
+                           for node in _all_nodes(root, quoted=False))):
+                continue
+            query = replace(query, restrictions=(*query.restrictions, _V3Restriction("nested_candidates", (prepared, self.edges))))
+        return query
+
+    def _target_matcher(self, roots, capture, *, node_preparation=None):
         """Admit targets and validate metadata under the existing terminal owner."""
 
         from .identity import IdentitySet, identity_key
@@ -3442,12 +3535,66 @@ class OccurrenceQuery:
             for selector in ((self.selector,) if self.selector is not None else ()) + self.additional_selectors:
                 query = query.sel(selector)
 
-            def matches(value):
-                capture.reserve((value,))
-                if self.target_kind_filter is not None and identity_key(value).kind not in self.target_kind_filter:
-                    return False
-                return all(query._matches(item, value, None, capture, capture.witness_budget())
+            ordinary = all(item.prepared is not None and not item.prepared.runtime_matchers
+                           and item.prepared.predicate.kind == "node"
                            for item in query.restrictions)
+            matched = {}
+            from .source import _NodeOwnerCache
+            admissions = _NodeOwnerCache(8 * 1024 * 1024, 8 * 1024 * 1024)
+
+            def excludes_class(item, value):
+                from ..node import Node
+
+                prepared = item.prepared
+                if (prepared is not None and prepared.predicate.kind == "node" and isinstance(value, Node)
+                        and (prepared.strict or prepared.class_match == "exact")):
+                    root = prepared.predicate.value
+                    return root.cls is not None and not _query_match_class(
+                        root.cls, value.cls, strict=prepared.strict, class_match=prepared.class_match)
+                return False
+
+            def matches(value):
+                from ..node import Node
+
+                marker = value._view if ordinary and isinstance(value, Node) else None
+                if marker is not None and marker in matched:
+                    return matched[marker]
+                if (ordinary and node_preparation is not None and capture.max_verify_limit is None
+                        and any(excludes_class(item, value) for item in query.restrictions)):
+                    # A pure exact-class miss is not a target verification
+                    # candidate. Explicit admission bounds retain the original
+                    # per-target reservation before predicate evaluation.
+                    if marker is not None:
+                        matched[marker] = False
+                    return False
+                owner = node_preparation(value) if ordinary and node_preparation is not None else None
+                if owner is None:
+                    capture.reserve((value,))
+                    kind = identity_key(value).kind if self.target_kind_filter is not None else None
+                else:
+                    from .identity import IdentityKey, _identity_kind
+                    kind, digest = _identity_kind(value), owner.digest(value)
+                    certificate = kind, digest, owner._flat(owner._slot(value))
+                    key = admissions.get(certificate)
+                    if key is None:
+                        key = IdentityKey(kind, digest, value)
+                        capture.reserve_keys((key,))
+                        # The capture already owns every admitted value. This
+                        # lookup retains only additional normalized evidence.
+                        admissions.retain(certificate, key, 512 + 4 * len(certificate[2]))
+                if self.target_kind_filter is not None and kind not in self.target_kind_filter:
+                    return False
+                def accepts(item):
+                    prepared = item.prepared
+                    if excludes_class(item, value):
+                        return False
+                    if owner is not None:
+                        return prepared.matches(value, generator_budget=capture.witness_budget(), prepared=owner)
+                    return query._matches(item, value, None, capture, capture.witness_budget())
+                result = all(accepts(item) for item in query.restrictions)
+                if marker is not None:
+                    matched[marker] = result
+                return result
 
             return matches
 

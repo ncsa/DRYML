@@ -1,4 +1,4 @@
-"""Store-owned schema-11 projection completion, independent of Repo consumers."""
+"""Store-owned schema-12 projection completion, independent of Repo consumers."""
 
 from pathlib import Path
 from contextlib import closing, contextmanager
@@ -60,7 +60,7 @@ def test_publication_is_visible_without_query_refresh(tmp_path):
     store.compare_and_set_node_name(name, expected=None)
     index = store.open_query_index()
     index.refresh(False)
-    assert index.status().schema_version == SQLITE_QUERY_INDEX_SCHEMA_VERSION == 11
+    assert index.status().schema_version == SQLITE_QUERY_INDEX_SCHEMA_VERSION == 12
     assert index.status().state == "ready"
     assert not store.authority_cut().pending
     assert len(index.projection_rows("recipe_root", refresh=False)) == 1

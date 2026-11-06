@@ -241,6 +241,9 @@ def _local_discovery_tokens(node):
     for segment, value in _local_discovery_fields(node):
         if isinstance(segment, Parameter) and type(value) in (str, int, bool, type(None)):
             yield ["scalar", segment.name, type(value).__name__, value]
+        if isinstance(segment, Parameter):
+            from .postings import _nested_tokens
+            yield from _nested_tokens(value, [["parameter", segment.name]])
 
 
 class _DiscoveryPreparation:
@@ -493,6 +496,81 @@ def iter_relationship_occurrences(
             yield occurrence
             if max_occurrences is not None and len(seen_occurrences) >= max_occurrences:
                 return
+
+
+def count_relationship_occurrences(roots, matches, *, edges=None):
+    """Count unbounded, unfiltered typed paths without expanding DAG multiplicity.
+
+    Args:
+        roots: Detached identity roots; duplicate owner identities count once.
+        matches: Pure target predicate, evaluated on retained metadata only.
+        edges: Optional immutable relationship policy, defaulting to all kinds.
+    Returns:
+        int: Exactly the distinct raw occurrence cardinality. A root-local DAG
+        memo counts shared suffixes arithmetically. Nontrivial active-path cycles
+        fall back to the established path-sensitive walker.
+    Raises:
+        TypeError: For unsupported roots, matchers or policies. Predicate and
+            metadata failures propagate without returning a partial count.
+    Side Effects:
+        None beyond calling the supplied pure predicate. No source/Store access,
+        object construction or occurrence objects are needed for acyclic graphs.
+    """
+    from .identity import identity_key
+
+    policy = normalize_edge_policy(edges)
+    _validate_traversal_inputs(matches, frozenset(), None, None, None)
+    roots_seen, adjacency = set(), {}
+    total = 0
+    for root in roots:
+        _require_relationship_value(root, "Relationship roots")
+        owner_key = identity_key(root)
+        if owner_key in roots_seen:
+            continue
+        roots_seen.add(owner_key)
+        memo, active, guard_slots = {}, set(), {}
+        active_mask = 0
+        cyclic = False
+
+        def guard_bit(key):
+            return 1 << guard_slots.setdefault(key, len(guard_slots))
+
+        def count(node):
+            nonlocal cyclic, active_mask
+            marker = id(node)
+            if marker in memo:
+                # A suffix computed on another path may contain a guard that is
+                # already active here. Its cached cardinality is then contextual.
+                if memo[marker][1] & active_mask:
+                    cyclic = True
+                return memo[marker]
+            node_key = _node_key(node)
+            bit = guard_bit(node_key)
+            active.add(node_key)
+            active_mask |= bit
+            if marker not in adjacency:
+                adjacency[marker] = node, tuple(edge for edge in _ordered_direct_edges(node) if policy.permits(edge.kind))
+            result, dependencies = 0, 0
+            for edge in adjacency[marker][1]:
+                result += bool(matches(edge.target))
+                child_key = _node_key(edge.target)
+                dependencies |= guard_bit(child_key)
+                if child_key not in active:
+                    child_count, child_dependencies = count(edge.target)
+                    result += child_count
+                    dependencies |= child_dependencies
+                elif child_key != node_key:
+                    cyclic = True
+            active.remove(node_key)
+            active_mask &= ~bit
+            memo[marker] = result, dependencies
+            return memo[marker]
+
+        subtotal, _ = count(root)
+        if cyclic:
+            subtotal = sum(1 for _ in iter_relationship_occurrences((root,), matches, edges=policy))
+        total += subtotal
+    return total
 
 
 def iter_relationship_owners(

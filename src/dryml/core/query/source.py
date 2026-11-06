@@ -734,7 +734,7 @@ def node_query_stores(query, capture):
     return stores if all(hasattr(store, "store_uuid") for store in stores) else None
 
 
-def _node_discovery_plan(query, capture):
+def _node_discovery_plan(query, capture, *, class_seek=False):
     """Admit unsupported physical scans before explicit refresh can inventory.
 
     Only the pure compiled plan is terminal-local memoized. Direct authority and
@@ -744,7 +744,8 @@ def _node_discovery_plan(query, capture):
     plans = getattr(capture, "_node_discovery_plans", None)
     if plans is None:
         plans = capture._node_discovery_plans = {}
-    if id(query) not in plans:
+    key = id(query), class_seek
+    if key not in plans:
         direct = any(r.kind == "state_key" for r in query.restrictions)
         if isinstance(query.source, RetainedRepoLookupSource):
             selectors = [r.value for r in query.restrictions if r.kind == "sel"]
@@ -754,11 +755,11 @@ def _node_discovery_plan(query, capture):
                          for r in query.restrictions) and all(r.kind not in {"stored", "alias", "metadata"} for r in query.restrictions)
         def admit():
             capture.require_scan(reason="Node query has no supported selective posting anchor; derived-family scan required.")
-        plan = _store_discovery_relation(query, scan_admission=None if direct or cache_only else admit)
+        plan = _store_discovery_relation(query, scan_admission=None if direct or cache_only else admit, class_seek=class_seek)
         if len(plans) >= 64:
             plans.pop(next(iter(plans)))
-        plans[id(query)] = query, plan
-    return plans[id(query)][1]
+        plans[key] = query, plan
+    return plans[key][1]
 
 
 class _NodeFacts:
@@ -811,6 +812,41 @@ def _node_index_token(index, con, identity, cut):
             tuple(con.execute("SELECT index_uuid,generation,schema_version FROM catalog_state")))
 
 
+class _NodeOwnerCache:
+    """Terminal-local byte-charged LRU of immutable decoded content, not authority."""
+
+    def __init__(self, max_bytes, max_entry_bytes, *, protect_blocks=False):
+        from collections import OrderedDict
+        self.entries, self.max_bytes, self.bytes = OrderedDict(), max_bytes, 0
+        self.max_entry_bytes = max_entry_bytes
+        self.protect_blocks, self.protected = protect_blocks, None
+
+    def get(self, key):
+        item = self.entries.get(key)
+        if item is not None:
+            self.entries.move_to_end(key)
+            if self.protect_blocks and type(key) is bytes:
+                self.protected = key
+            return item[0]
+
+    def retain(self, key, value, charge):
+        if charge > self.max_bytes:
+            return
+        old = self.entries.pop(key, None)
+        if old is not None:
+            self.bytes -= old[1]
+        if self.protect_blocks and type(key) is bytes:
+            self.protected = key
+        while self.entries and self.bytes + charge > self.max_bytes:
+            victim = next((item for item in self.entries if item != self.protected), None)
+            if victim is None:
+                return
+            _, size = self.entries.pop(victim)
+            self.bytes -= size
+        self.entries[key] = value, charge
+        self.bytes += charge
+
+
 class _NodePage:
     """Detached bounded bytes and operation-local shared block interpretation.
 
@@ -823,6 +859,7 @@ class _NodePage:
         self.stores, self.tokens, self.indexes = stores, tokens, indexes
         self.witnesses = {s.authority_fence_key(): _DetachedRead(s, tokens[s.authority_fence_key()][0]) for s in stores}
         self.records, self.blocks, self.anchors, self.roots, self.preparations = {}, {}, {}, {}, {}
+        self.root_preparations = {}
         self.root_kinds = {}
         self.available, self.grants, self.presence = {}, {}, {}
         self.names, self.scoped_roots = {}, {}
@@ -861,9 +898,9 @@ class _NodePage:
         key = store.authority_fence_key(), record.block_digest
         path = store._relative(store._node_path("definitions/blocks", record.block_digest))
         block = self.read(store, path, NodeBlockRecord, True)
-        if block.digest != record.block_digest:
-            raise InventoryCapabilityError("Query block address disagrees with authenticated bytes.")
         if key not in self.blocks:
+            if block.digest != record.block_digest:
+                raise InventoryCapabilityError("Query block address disagrees with authenticated bytes.")
             self.blocks[key] = block, {}
         self.blocks[key][1][record.view_bytes] = record
         self.root_kinds.setdefault(key, {})[record.root_kind, record.view_bytes] = record
@@ -888,26 +925,35 @@ class _NodePage:
                 self.anchors[store.authority_fence_key(), identity] = anchor
 
     def expand(self, capture, owners, *, max_cached_bytes):
+        import json
         from ..node_codec import _decode_node_graph_views
-        from ..node_views import OBJECT_PROJECTION_VIEW, view_equal
         from .model import QueryError
         for (domain, digest), (block, selected) in self.blocks.items():
             # Owners contain pure metadata only. Their lifetime is this terminal;
             # fresh bytes and final witnesses are mandatory even for a reuse hit.
             key = block.content
+            projections_key = "projections", key
+            projections = owners.get(projections_key)
+            if (projections is not None and all(record.root_kind == "projection" and view in projections[0]
+                                                for view, record in selected.items())):
+                for view in selected:
+                    self.roots[domain, digest, view] = projections[0][view]
+                    self.root_preparations[domain, digest, view] = projections[1]
+                continue
             previous = self.expanded.get(key) or owners.get(key)
             cacheable = False
             if previous is None:
                 packet = block.blocks
                 packet["views"] = [r.view for r in selected.values()]
-                roots, prepared = _decode_node_graph_views(packet, with_owner=True)
+                roots, prepared = _decode_node_graph_views(packet, with_owner=True,
+                    max_cached_bytes=max(1, min(8 * 1024 * 1024, owners.max_entry_bytes // 4)))
                 previous = dict(zip(selected, roots)), prepared, set(), set()
                 capture.cdef_blobs_decoded += 1
                 # Bound detached pure ownership, rather than accumulating every
                 # page's graphs. Oversized blocks are never retained for reuse.
-                owners.clear()
                 from .._content_facts import _node_block_owner_size
-                if 3 * _node_block_owner_size(block.content, packet) <= max_cached_bytes:
+                charge = _node_block_owner_size(block.content, packet) + prepared.max_cached_bytes
+                if charge <= min(max_cached_bytes, owners.max_entry_bytes) and any(r.root_kind != "projection" for r in selected.values()):
                     cacheable = True
             by_view, prepared, validated_views, validated_slots = previous
             self.preparations[domain, digest] = prepared
@@ -927,23 +973,39 @@ class _NodePage:
                                       validated_views=validated_views, validated_slots=validated_slots)
             self.expanded[key] = previous
             if cacheable:
-                owners[key] = previous
+                owners.retain(key, previous, charge)
             for record in selected.values():
                 self.roots[domain, digest, record.view_bytes] = by_view[record.view_bytes]
+            projected_views = set(() if projections is None else projections[0])
+            projected_views.update(record.view_bytes for record in selected.values() if record.root_kind == "projection")
+            if projected_views and owners.max_bytes:
+                from ..node_prepare import NodePreparation, _metadata_size
+                projected = {}
+                for view_bytes in projected_views:
+                    view = json.loads(view_bytes)
+                    projected[view_bytes] = prepared._transport_nodes[view["table"], view["slot"]]
+                minimal = NodePreparation(projected.values(), previous=prepared,
+                                          max_cached_bytes=min(64 * 1024, owners.max_bytes))
+                charge = (4096 + len(key) + sum(map(len, projected)) + 4096 * len(minimal.nodes) + minimal.max_cached_bytes +
+                          4 * _metadata_size((minimal._rows, minimal._children, minimal._closures,
+                                              minimal._construction), owners.max_bytes))
+                owners.retain(projections_key, (projected, minimal), charge)
         projections = {}
         for (domain, identity), anchor in self.anchors.items():
             root = self.roots[domain, anchor.projection.block_digest, anchor.projection.view_bytes]
             if root.object_id != identity:
                 raise InventoryCapabilityError("Declaration projection names another ObjectId.")
-            old = projections.setdefault(identity, root)
-            if not view_equal(old, root, OBJECT_PROJECTION_VIEW):
+            prepared = self.preparation(next(store for store in self.stores if store.authority_fence_key() == domain), anchor.projection)
+            old, old_prepared = projections.setdefault(identity, (root, prepared))
+            if old is not root and not old_prepared.exact_equal(old, prepared, root):
                 raise QueryError("Query object-reference authority conflicts across connected Stores.")
 
     def value(self, store, record):
         return self.roots[store.authority_fence_key(), record.block_digest, record.view_bytes]
 
     def preparation(self, store, record):
-        return self.preparations[store.authority_fence_key(), record.block_digest]
+        key = store.authority_fence_key(), record.block_digest
+        return self.root_preparations.get((*key, record.view_bytes)) or self.preparations[key]
 
     def publication_identities(self, store, record):
         """Enumerate one decoded root's identities once within this captured page."""
@@ -951,6 +1013,21 @@ class _NodePage:
         if key not in self.publication_nodes:
             self.publication_nodes[key] = store._publication_identities(self.value(store, record))
         return self.publication_nodes[key]
+
+    def object_projection(self, store, record, node):
+        """Borrow shared pure projection evidence for a decoded publication Node."""
+        from .relationships import _discovery_preparation
+
+        owner = self.preparation(store, record)
+        if record.root_kind == "projection":
+            # Publication identities exclude quotations. A canonical projection
+            # has already removed state from each of these unquoted descendants.
+            return node, owner
+        key = store.authority_fence_key(), record.block_digest
+        if key not in self.discovery_preparations:
+            self.discovery_preparations[key] = _discovery_preparation(owner, record.block_digest)
+        prepared = self.discovery_preparations[key]
+        return prepared.objects[id(node)], prepared.owner
 
     def discovery_value(self, store, record, item):
         """Resolve a block/table/overlay locator and prove source-root reachability."""
@@ -1069,6 +1146,11 @@ def iter_node_query(query, capture, stores, *, admit=True):
                     and any(r.kind in {"sel", "object_id"} for r in query.restrictions)
                     and all(r.kind in {"kind", "sel", "object_id", "namespace", "stored"}
                             for r in query.restrictions))
+    clustered = capture.max_verify_limit is None and any(item.kind == "nested_candidates" for item in query.restrictions)
+    cluster_tables = {}
+    cluster_keys = {}
+    atomic_pages = clustered and all(item.kind in {"nested_candidates", "kind", "object_id", "namespace"}
+                                     for item in query.restrictions)
     if not local and any(item.kind in {"origin", "compatible", "state_key", "available", "retained"} for item in query.restrictions):
         raise QueryDomainError("StateKey, origin, compatibility, availability and retention require the local-state domain.")
     if exact is not None:
@@ -1081,9 +1163,12 @@ def iter_node_query(query, capture, stores, *, admit=True):
             if item.kind == "sel":
                 predicate = item.value if isinstance(item.value, QueryPredicate) else QueryPredicate(item.value)
                 prepared[id(item)] = _PreparedPredicate(predicate, domain="local_state")
-    indexes, tokens, owners = {}, {}, {}
+    indexes, tokens = {}, {}
     facility = getattr(getattr(query.source, "repo", None), "_validation_evidence", None)
-    owner_budget = 1024 * 1024 if facility is None else min(facility.max_bytes, facility.max_entry_bytes)
+    owner_budget = 8 * 1024 * 1024 if facility is None else facility.max_bytes
+    owners = _NodeOwnerCache(owner_budget, owner_budget if clustered else
+                             (1024 * 1024 if facility is None else facility.max_entry_bytes),
+                             protect_blocks=clustered)
     cached = capture.cache_knowledge(query.source.repo, weak=query.source.weak) if not local and isinstance(query.source, (RepoSource, RetainedRepoLookupSource)) else IdentitySet()
     cached_only = any(item.kind == "cached" and isinstance(item.scope, RepoSource)
                       and isinstance(query.source, RepoSource) and item.scope.repo is query.source.repo
@@ -1096,7 +1181,10 @@ def iter_node_query(query, capture, stores, *, admit=True):
             if all(query._matches(item, value, evidence, capture, capture.witness_budget()) for item in query.restrictions):
                 yield key, (value, evidence)
         return
-    discovery_plan = _node_discovery_plan(query, capture)
+    class_requested = not local and not direct and any(
+        item.kind == "nested_candidates" or item.kind == "sel" and item.prepared is not None and
+        (item.prepared.strict or item.prepared.class_match == "exact") for item in query.restrictions)
+    discovery_plan = _node_discovery_plan(query, capture, class_seek=class_requested)
     family = discovery_plan[0]
     if not direct:
         targets = capture.resolve_index_targets()
@@ -1117,9 +1205,15 @@ def iter_node_query(query, capture, stores, *, admit=True):
                         index.refresh("auto", stats=stats, scan_admission=capture.require_scan)
                     finally:
                         capture.merge_maintenance_stats(stats)
+                if (class_requested and capture.refresh_policy is not False
+                        and not capture.indexed_required and capture.scan_policy_mode != "forbid"):
+                    index._ensure_class_seek(scan_admission=capture.require_scan)
                 indexes[store.authority_fence_key()] = index
             else:
                 capture.require_scan()
+    class_available = class_requested and len(indexes) == len(stores) and all(index._has_class_seek() for index in indexes.values())
+    discovery_plan = _node_discovery_plan(query, capture, class_seek=class_available)
+    family = discovery_plan[0]
     for store in stores:
         domain = store.authority_fence_key()
         with store.authority_read_fence():
@@ -1237,7 +1331,7 @@ def iter_node_query(query, capture, stores, *, admit=True):
             projection = capture._node_scan_projections.get(scan_key)
             if projection is None:
                 capture.store_scan_count += 1
-                projection = capture_store_projection(store, rebuild=True)
+                projection = capture_store_projection(store, rebuild=True, certify_graphs=False)
                 capture._node_scan_projections[scan_key] = projection
             scanned = [(source, key, payload) for f, source, key, payload in projection.rows if f == family]
             scanned.sort(key=lambda row: (json.loads(row[2]).get("key_kind", "local_state"),
@@ -1282,12 +1376,31 @@ def iter_node_query(query, capture, stores, *, admit=True):
                         try:
                             if _node_index_token(index, con, identity, store.authority_cut()) != tokens[domain]:
                                 raise _SourceCutChanged()
-                            rows = con.execute(*_store_discovery_page_sql(discovery_plan, after=after, page_size=page_size,
-                                                                        object_hints=object_hints)).fetchall()
+                            if clustered:
+                                from .sqlite.lowering import _store_discovery_addresses_sql
+                                name, populated, addresses_con = cluster_tables[domain]
+                                if not populated:
+                                    sql, params = _store_discovery_addresses_sql(discovery_plan)
+                                    with addresses_con:
+                                        addresses_con.executemany("INSERT INTO " + name + "(source,row_key) VALUES (?,?)",
+                                                                  con.execute(sql, params))
+                                    cluster_tables[domain] = name, True, addresses_con
+                                addresses = addresses_con.execute("SELECT ordinal,source,row_key FROM " + name +
+                                                                  " WHERE ordinal>? ORDER BY ordinal LIMIT ?", (after or 0, page_size)).fetchall()
+                                rows = [con.execute("SELECT source,row_key,payload FROM store_projection_rows "
+                                                    "WHERE family=? AND source=? AND row_key=?", (family, source, key)).fetchone()
+                                        for _, source, key in addresses]
+                                if any(row is None for row in rows):
+                                    raise _SourceCutChanged()
+                                after = addresses[-1][0] if addresses else after
+                            else:
+                                rows = con.execute(*_store_discovery_page_sql(discovery_plan, after=after, page_size=page_size,
+                                                                            object_hints=object_hints)).fetchall()
                         except QueryIndexDirty as error:
                             raise _SourceCutChanged() from error
                         finally:
-                            con.execute("ROLLBACK")
+                            if con.in_transaction:
+                                con.execute("ROLLBACK")
                 capture.pages_fetched += 1
                 capture.candidate_rows_read += len(rows)
                 hint_groups = {}
@@ -1393,15 +1506,18 @@ def iter_node_query(query, capture, stores, *, admit=True):
                 if local:
                     value = LocalState(item.key, node)
                 else:
-                    from ..node_views import OBJECT_PROJECTION_VIEW, view_equal
                     declaration_key = (domain, header) if source_header is header else (domain, header, source_header)
                     if declaration_key not in page.validated_declarations:
                         for declared in page.publication_identities(store, header):
                             anchor = page.anchors.get((domain, declared.object_id))
                             if anchor is None or (source_header.root_kind, source_header.digest) not in anchor.sources:
                                 raise InventoryCapabilityError("Candidate has no required declaration contribution.")
-                            if not view_equal(declared, page.value(store, anchor.projection), OBJECT_PROJECTION_VIEW):
-                                raise InventoryCapabilityError("Candidate conflicts with its declaration anchor.")
+                            authoritative = page.value(store, anchor.projection)
+                            if declared is not authoritative:
+                                projection, prepared = page.object_projection(store, header, declared)
+                                anchor_owner = page.preparation(store, anchor.projection)
+                                if not prepared.exact_equal(projection, anchor_owner, authoritative):
+                                    raise InventoryCapabilityError("Candidate conflicts with its declaration anchor.")
                         page.validated_declarations.add(declaration_key)
                     if source_header is header:
                         value, owner = page.discovery_value(store, header, item)
@@ -1416,8 +1532,16 @@ def iter_node_query(query, capture, stores, *, admit=True):
                     if digest != item["digest"]:
                         raise InventoryCapabilityError("Candidate semantic digest disagrees with authority.")
                 key = identity_key(value) if local else IdentityKey(item["kind"], item["digest"], value)
+                if clustered:
+                    # This buffered membership already retains every distinct
+                    # root. Compare full normalized evidence once per immutable
+                    # owner/view, rather than rebuilding two graphs on each
+                    # duplicate contribution's dictionary/admission lookup.
+                    certificate = key.kind, key.digest, owner._flat(owner._slot(value))
+                    key = cluster_keys.setdefault(certificate, key)
                 evidence = IdentityEvidence(frozenset((query._source_evidence(store),)))
-                page.validate()
+                if not atomic_pages:
+                    page.validate()
                 # The federator peeks at ordering without admitting or evaluating
                 # a lookahead candidate. send(True) owns exact residual admission.
                 if not (yield key, (value, evidence)):
@@ -1470,16 +1594,57 @@ def iter_node_query(query, capture, stores, *, admit=True):
                         match &= restriction.prepared.matches(value, generator_budget=capture.witness_budget(), prepared=owner)
                     else:
                         match &= query._matches(restriction, value, IdentityEvidence(frozenset((query._source_evidence(store),))), capture, capture.witness_budget())
-                page.validate()
+                if not atomic_pages:
+                    page.validate()
                 yield (key, (value, evidence)) if match else None
             page.validate()
             topology()
             if not rows or direct:
                 return
-            if index is not None:
+            if index is not None and not clustered:
                 last = rows[-1]
                 data = None if local else json.loads(last[2])
                 after = last[:2] if local else (data["key_kind"], data["digest"], *last[:2])
+
+    if clustered:
+        # Nested root capture already requires complete fixed membership. Cluster
+        # contribution reads by immutable block, then merge complete identities;
+        # do not make a digest-ordered merge rehydrate that block for every view.
+        from .identity import _ordered_keys
+        entries = {}
+        for store in producers.values():
+            with ExitStack() as lifetime:
+                index = indexes.get(store.authority_fence_key())
+                if index is not None:
+                    from .sqlite import require_sqlite
+                    con = require_sqlite().connect(":memory:")
+                    lifetime.callback(con.close)
+                    name = "dryml_nested_addresses"
+                    con.execute("CREATE TEMP TABLE " + name + "(ordinal INTEGER PRIMARY KEY, source TEXT NOT NULL, row_key TEXT NOT NULL)")
+                    cluster_tables[store.authority_fence_key()] = name, False, con
+                iterator = stream(store)
+                try:
+                    while next(iterator, None) is not None:
+                        qualified = iterator.send(True)
+                        if qualified is not None:
+                            key, (value, evidence) = qualified
+                            old = entries.get(key)
+                            entries[key] = (value, evidence) if old is None else (old[0], old[1].merged_with(evidence))
+                finally:
+                    iterator.close()
+        for key, (value, evidence) in cached._entries.items():
+            if admit:
+                capture.reserve((value,))
+            if all(query._matches(item, value, evidence, capture, capture.witness_budget()) for item in query.restrictions):
+                source = IdentityEvidence(frozenset((query._source_evidence(query.source.repo),)))
+                old = entries.get(key)
+                entries[key] = (value, source) if old is None else (old[0], old[1].merged_with(source))
+        _NodePage(stores, tokens, indexes).validate()
+        cluster_keys.clear()
+        for key in _ordered_keys(entries):
+            yield key, entries[key]
+        _NodePage(stores, tokens, indexes).validate()
+        return
 
     streams, frontier = [], []
     try:

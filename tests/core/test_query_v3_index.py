@@ -22,6 +22,7 @@ from dryml.core.query.model import (
 )
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core.query.sqlite.schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION
 from dryml.core.store.dir import DirStore
 from dryml.core.store.records import NodeNameRecord
 from dryml.core.store.store import StoreAuthorityError
@@ -150,7 +151,7 @@ def test_sidecar_policy_and_derived_only_recovery(tmp_path, monkeypatch, damage)
     assert index.status().state == "ready" and _authority_bytes(store) == before
 
 
-@pytest.mark.parametrize("version", [12, 100])
+@pytest.mark.parametrize("version", [SQLITE_QUERY_INDEX_SCHEMA_VERSION + 1, 100])
 def test_future_sidecar_is_refused_intact(tmp_path, version):
     store, _, _ = _ready(tmp_path)
     index = store.open_query_index()

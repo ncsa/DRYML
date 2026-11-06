@@ -222,5 +222,6 @@ def test_u7_reversed_store_order_acquires_unique_sorted_retained_cuts(tmp_path, 
     for result, capture in results:
         assert result.one().graph_equal(values[0]) and len(result.sources(result.one())) == 2
         assert capture.verified_count == 1 and capture.store_scan_count == 0
-        assert capture.candidate_rows_read == capture.cdef_blobs_decoded == 4
+        assert capture.candidate_rows_read == 4
+        assert capture.cdef_blobs_decoded == 2
     assert all(not store.open_query_index()._connections._leases for store in stores)

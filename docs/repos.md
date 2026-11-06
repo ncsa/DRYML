@@ -49,7 +49,7 @@ no automatic conversion. The Store-owned APIs currently available are:
   Publishing saved metadata does not automatically publish a recipe root.
 
 Supported mutations are journaled under one Store authority cut and synchronously
-maintain enabled SQLite schema-11/coverage-3 projections before complete success.
+maintain enabled SQLite schema-12/coverage-4 projections before complete success.
 DirStore also supplies physical grants and active-use leases as described below.
 Ordinary Repo saves now use the format-4 Node/state-bucket pipeline described
 below. Node build/load/apply/restore use full-key state readers. Managed lifecycle
@@ -465,7 +465,7 @@ the canonical bucket header, manifest and graph history remain. Old retries may
 remove only those retired remnants, never the new public `data/` directory.
 
 All grant, owner-ledger and availability changes enter the Store journal and
-enabled schema-11/coverage-3 index. The `retention` relation exposes per-key grant
+enabled schema-12/coverage-4 index. The `retention` relation exposes per-key grant
 postings. Requested metadata has its own supported closed relation; managed
 lifecycle associations remain explicitly unsupported. Missing reverse indexes may be rebuilt from authoritative records;
 they never authorize removal. Low-level `apply_prepared_mutation()` acquires key

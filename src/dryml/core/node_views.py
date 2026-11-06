@@ -144,6 +144,8 @@ def view_equal(left, right, view):
     a = _owned_preparation(left)._prepared_view(left, view)
     b = _owned_preparation(right)._prepared_view(right, view)
     x, y = a.roots[0], b.roots[0]
+    if x is y:
+        return a.exact_equal(x, b, y)
     return a.exact_key(x) == b.exact_key(y) and a.exact_equal(x, b, y)
 
 

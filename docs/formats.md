@@ -322,14 +322,18 @@ refused; the reader does not invent an empty replacement. Old Store formats and
 pre-journal format-4 roots without the required cut are not converted.
 
 Legacy Repo snapshot writers and Query V3 views/coverage remain explicit format-4
-refusals. The Store-owned persistent projection uses **SQLite schema 11 / coverage
-contract 3**. It keeps source records, independent recipe/saved memberships,
+refusals. The Store-owned persistent projection uses **SQLite schema 12 / coverage
+contract 4**. It keeps source records, independent recipe/saved memberships,
 declarations, creation compatibility prefilters, full-StateKey manifests and
 availability, per-key retention grants, typed block/table/overlay postings, and names distinct. Capability
 entries require their owning adapters' authority and guards where their namespaces
 are populated. Discovery adds portable block/table/overlay locators, local token
-postings and direct occurrence links, without per-descendant subtree copies.
-Neither old schema 9/10 nor incomplete coverage is ready. Owned derived state can be
+postings and direct occurrence links, without per-contribution subtree copies.
+Coverage 4 adds nested value tokens, framed-source byte witnesses and compressed
+certified primitive graphs for exact ordered matching and occurrence counting.
+These preserve collision-independent equality, aliases and association edges;
+current membership, declaration and byte/cut checks remain mandatory. Neither old
+schema 9/10/11 nor incomplete coverage is ready. Owned derived state can be
 rebuilt from compatible metadata without payload reads or source-format changes;
 foreign/future sidecars are refused intact. A detected incomplete authority cut
 invalidates old derived coverage and fails rebuild rather than certify omissions.
@@ -734,7 +738,7 @@ mutation-intent v2 journal retains its 64 MiB preflight and read/write bound.
 One nonblocking operation-lifetime lock is independent of short same-host control
 locks. Journal invalidation precedes short CAS; classification, projection/SQL and
 acknowledgement follow control release. Generic current-record projection is
-integrated with schema-11/coverage-3 lifecycle relations.
+integrated with schema-12/coverage-4 lifecycle relations.
 Status validates historical metadata without opening private state. Pending
 intents and replacement snapshots are written as same-directory temporary files
 before publication. POSIX publication syncs the parent directory; the Windows

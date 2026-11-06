@@ -42,7 +42,7 @@ def _project_predicate_roles(predicate):
     return project(predicate)
 
 
-def _runtime_pattern_view(root):
+def _runtime_pattern_view(root, *, _runtime_matchers=None):
     """Retain runtime matcher code outside canonical pure graph facts."""
     from ..node import _rewrite
     from ..params import (Match, AnyValue, AnyMatcher, ChoiceMatcher, ExactMatcher,
@@ -52,6 +52,8 @@ def _runtime_pattern_view(root):
                  MissingMatcher, PresentMatcher, SubclassMatcher)
     def transform(value, visit):
         if isinstance(value, Match) and type(value.matcher) not in supported:
+            if _runtime_matchers is not None:
+                _runtime_matchers[0] = True
             return AnyValue()
         if isinstance(value, FactorySpec):
             return FactorySpec._from_symbolic_parts(value.target, tuple(visit(item) for item in value.args),
@@ -150,7 +152,13 @@ class _PreparedPredicate:
                 collect(operand)
         collect(predicate)
         from ..node_prepare import PreparationView
-        self.prepared = NodePreparation(roots, view=PreparationView("query-pattern", _runtime_pattern_view))
+        runtime_matchers = [False]
+
+        def runtime_view(root):
+            return _runtime_pattern_view(root, _runtime_matchers=runtime_matchers)
+
+        self.prepared = NodePreparation(roots, view=PreparationView("query-pattern", runtime_view))
+        self.runtime_matchers = runtime_matchers[0]
         self.parameters = {}
         if domain == "local_state":
             def validate(current):

@@ -183,16 +183,16 @@ def test_v3_multistore_take_uses_only_canonical_index_frontier_pages(
     assert result.bounded and result.requested_limit == 3
     assert result.diagnostic().pages_fetched == 2
     assert result.diagnostic().candidate_rows_read == 8
-    assert result.diagnostic().cdef_blobs_decoded == 8
+    assert result.diagnostic().cdef_blobs_decoded == 5
     assert all(len(result.sources(value)) == 2 for value in values[:3])
 
     refined = result.query().sel(values[0]).collect()
     combined = result.union(refined)
     assert refined.diagnostic().candidate_rows_read == 8
-    assert refined.diagnostic().cdef_blobs_decoded == 8
+    assert refined.diagnostic().cdef_blobs_decoded == 5
     assert refined.diagnostic().pages_fetched == 2
     assert combined.diagnostic().candidate_rows_read == 8
-    assert combined.diagnostic().cdef_blobs_decoded == 8
+    assert combined.diagnostic().cdef_blobs_decoded == 5
     assert combined.diagnostic().pages_fetched == 2
 
 
