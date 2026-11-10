@@ -166,17 +166,24 @@ mandatory on reuse. Pure caches never establish membership, names, availability,
 retention, or completeness. Collected results fix membership; later payload use
 requires its own fresh protected read.
 
-### Postings-first nested counts
+### Postings-first identity and nested counts
 
-Unbounded `repo.query().nested().sel(pattern).count()` can use a certified compact
-graph plan instead of reconstructing containing snapshots. The compiler admits
+Unbounded `repo.query().sel(pattern).count()` and
+`repo.query().nested().sel(pattern).count()` can use the same certified compact
+graph engine instead of reconstructing containing snapshots. The compiler admits
 exact-class ordered Node patterns, alias assignments, identity pins, lists/tuples,
 partial mappings, scalar-valued factories, and supported pure Match leaves
 (`AnyValue`, `Present`, `Missing`, scalar `Choice` and `IntRange`). Boolean forms
 retain complete branch evaluation. Factory targets, nested scalar values and
 sequence shapes now supply occurrence-local necessary postings.
 
-The plan first selects possible target contributions, then reads only their
+Direct identity counts select matching contribution candidates once, authenticate
+their source memberships and declarations, and match primitive records. Identity
+deduplication retains the explicit cdef/object/saved domain kind and complete
+normalized graph evidence: replicas do not multiply identities, but equivalent
+values presented in distinct requested domains remain distinct identities.
+
+Nested counts first select possible target contributions, then read only their
 contributing sources. Primitive graph records prove complete supported patterns
 and count typed paths arithmetically, retaining saved/object/creation associations
 and active-path guards. Repeated source contributions merge using complete exact
@@ -195,6 +202,8 @@ Quotes, unordered pattern assignments, state pins, Nodes inside exact factories,
 runtime callbacks, Generator support, unresolved candidate parameter bindings,
 explicit verification/depth/output bounds, metadata scopes and composed sources
 retain Node residual execution. LocalState sources retain their own consumer.
+Direct indexed counts currently admit only selection and kind restrictions;
+stored/alias/namespace and other scoped restrictions retain the ordinary consumer.
 Large compact graphs explicitly advertise residual-only execution. `collect()`
 and iterators retain their existing object/result and page semantics.
 
@@ -202,6 +211,8 @@ Schema-11/coverage-3 indexes need a **one-time metadata-only rebuild** for the n
 proof and nested-posting families. Automatic refresh performs permitted recovery;
 `refresh(False)` refuses it. This upgrade changes derived SQLite only and can take
 substantially longer than subsequent indexed searches.
+Direct identity counts reuse the same coverage-4 evidence and require no further
+index upgrade when that coverage is already ready.
 
 ## Node Pattern Semantics
 

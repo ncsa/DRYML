@@ -174,8 +174,7 @@ def _try_count(occurrence, capture):
     connected Stores.
     """
     from .query import _V3Restriction
-    from .source import node_query_stores, RepoSource, StoreSource, _node_discovery_plan
-    from .model import QueryIndexDirty, QueryIndexUnavailable, QueryStats
+    from .source import RepoSource, StoreSource
 
     query = occurrence.roots
     if (occurrence.fixed is not None or occurrence.occurrence_limit is not None
@@ -191,6 +190,49 @@ def _try_count(occurrence, capture):
     if any(item.residual is not None for item in predicates):
         return None
     candidates = replace(query, restrictions=tuple(_V3Restriction("sel", value) for value in selectors))
+    ready = _ready_indexes(query, candidates, capture)
+    if ready is None:
+        return None
+    stores, indexes = ready
+    try:
+        return _count(occurrence, capture, stores, indexes, candidates, predicates)
+    except _ResidualRequired:
+        return None
+
+
+def _try_identity_count(query, capture):
+    """Count covered unbounded identity selections without building Node results.
+
+    Unlike occurrences, identities retain their explicit discovery domain kind.
+    Every contributing source is authenticated before deduplication, including
+    replicated sources and declarations in nonmatching connected Stores. Scoped,
+    composed, bounded and unsupported predicates retain the ordinary consumer.
+    """
+    from .source import RepoSource, StoreSource
+
+    if (query.take_limit is not None or capture.max_depth_limit is not None or capture.max_verify_limit is not None
+            or not isinstance(query.source, (RepoSource, StoreSource))
+            or any(item.kind not in {"kind", "sel"} or item.kind == "kind" and item.value == "local_state"
+                   for item in query.restrictions)):
+        return None
+    predicates = [_compile(item.prepared) for item in query.restrictions if item.kind == "sel"]
+    if not predicates or any(item.residual is not None for item in predicates):
+        return None
+    ready = _ready_indexes(query, query, capture)
+    if ready is None:
+        return None
+    stores, indexes = ready
+    try:
+        return _count(None, capture, stores, indexes, query, predicates, identity_query=query)
+    except _ResidualRequired:
+        return None
+
+
+def _ready_indexes(query, candidates, capture):
+    """Apply shared scan/refresh policy and select current certified backends."""
+    from .source import node_query_stores, _node_discovery_plan
+    from .model import QueryIndexDirty, QueryIndexUnavailable, QueryStats
+
     stores = node_query_stores(query, capture)
     if stores is None:
         return None
@@ -215,19 +257,17 @@ def _try_count(occurrence, capture):
                 capture.merge_maintenance_stats(stats)
         if not index._has_class_seek():
             return None
-    try:
-        return _count(occurrence, capture, stores, indexes, candidates, predicates)
-    except _ResidualRequired:
-        return None
+    return stores, indexes
 
 
-def _count(occurrence, capture, stores, indexes, candidates, predicates):
+def _count(occurrence, capture, stores, indexes, candidates, predicates, *, identity_query=None):
     from ..store import records as r
     from .source import _node_index_token, _SourceCutChanged, _node_discovery_plan, RepoSource
     from .identity import _identity_kind
     from ..node_prepare import NodePreparation
     from .relationships import count_relationship_occurrences
 
+    query = identity_query if identity_query is not None else occurrence.roots
     tokens = {}
     for store in stores:
         domain = store.authority_fence_key()
@@ -246,30 +286,38 @@ def _count(occurrence, capture, stores, indexes, candidates, predicates):
     reader = _ProofReader(stores, indexes, tokens)
     family, where, args, seek = _node_discovery_plan(candidates, capture, class_seek=True)
     table = "store_projection_rows p" + (" INDEXED BY " + seek if seek else "")
-    sql = "SELECT DISTINCT p.source FROM " + table + " WHERE p.family=? AND (" + where + ")"
+    clause = " WHERE p.family=? AND (" + where + ")"
+    sql = "SELECT DISTINCT p.source FROM " + table + clause
     roots_seen, total = set(), 0
-    kinds = {kind.value for kind in occurrence.edges.kinds}
+    kinds = None if identity_query is not None else {kind.value for kind in occurrence.edges.kinds}
     for store in stores:
-        with reader.connection(store) as con:
-            sources = [row[0] for row in con.execute(sql, (family, *args))]
-        capture.pages_fetched += 1
         rows = []
-        for offset in range(0, len(sources), 128):
-            batch = sources[offset:offset + 128]
-            selected = []
+        if identity_query is not None:
             with reader.connection(store) as con:
-                cursor = con.execute("SELECT source,payload FROM store_projection_rows WHERE family='discovery' "
-                                     "AND source IN (" + ",".join("?" for _ in batch) + ")", batch)
-                while page := cursor.fetchmany(occurrence.roots.candidate_page_size):
-                    selected.extend(page)
+                cursor = con.execute("SELECT p.source,p.payload FROM " + table + clause, (family, *args))
+                while page := cursor.fetchmany(query.candidate_page_size):
+                    rows.extend((source, json.loads(payload)) for source, payload in page)
                     capture.pages_fetched += 1
-            rows.extend((source, json.loads(payload)) for source, payload in selected)
+        else:
+            with reader.connection(store) as con:
+                sources = [row[0] for row in con.execute(sql, (family, *args))]
+            capture.pages_fetched += 1
+            for offset in range(0, len(sources), 128):
+                batch = sources[offset:offset + 128]
+                selected = []
+                with reader.connection(store) as con:
+                    cursor = con.execute("SELECT source,payload FROM store_projection_rows WHERE family='discovery' "
+                                         "AND source IN (" + ",".join("?" for _ in batch) + ")", batch)
+                    while page := cursor.fetchmany(query.candidate_page_size):
+                        selected.extend(page)
+                        capture.pages_fetched += 1
+                rows.extend((source, json.loads(payload)) for source, payload in selected)
         rows.sort(key=lambda item: (item[1]["root"]["block_digest"], item[0]))
         capture.candidate_rows_read += len(rows)
         current_block, graph, memberships, matched = None, None, {}, {}
         records = {}
         for source, item in rows:
-            if any(restriction.value != item["kind"] for restriction in occurrence.roots.restrictions):
+            if any(restriction.value != item["kind"] for restriction in query.restrictions if restriction.kind == "kind"):
                 continue
             if source not in records:
                 records[source] = r.NodeRootRecord.from_data(item["root"])
@@ -289,7 +337,7 @@ def _count(occurrence, capture, stores, indexes, candidates, predicates):
             if node["digest"] != item["digest"]:
                 from .source import InventoryCapabilityError
                 raise InventoryCapabilityError("Candidate semantic digest disagrees with certified authority.")
-            key = node["kind"], node["digest"], node["exact"]
+            key = (item["kind"] if identity_query is not None else node["kind"]), node["digest"], node["exact"]
             if key in roots_seen:
                 continue
             roots_seen.add(key)
@@ -297,23 +345,27 @@ def _count(occurrence, capture, stores, indexes, candidates, predicates):
             def matches(target):
                 if target not in matched:
                     value = graph["nodes"][target]
-                    matched[target] = ((occurrence.target_kind_filter is None or value["kind"] in occurrence.target_kind_filter)
-                                       and all(predicate.matches(graph, target) for predicate in predicates))
+                    matched[target] = ((identity_query is not None or occurrence.target_kind_filter is None
+                                        or value["kind"] in occurrence.target_kind_filter)
+                                        and all(predicate.matches(graph, target) for predicate in predicates))
                 return matched[target]
 
-            total += _count_paths(graph, slot, matches, kinds)
-    if isinstance(occurrence.roots.source, RepoSource):
-        source = occurrence.roots.source
+            total += bool(matches(slot)) if identity_query is not None else _count_paths(graph, slot, matches, kinds)
+    if isinstance(query.source, RepoSource):
+        source = query.source
         cached = capture.cache_knowledge(source.repo, weak=source.weak)
         for value in cached:
             owner = NodePreparation((value,))
             key = _identity_kind(value), owner.digest(value), owner._flat(owner._slot(value)).decode("ascii")
-            if key in roots_seen or any(item.value != key[0] for item in occurrence.roots.restrictions):
+            if key in roots_seen or any(item.value != key[0] for item in query.restrictions if item.kind == "kind"):
                 continue
             roots_seen.add(key)
-            total += count_relationship_occurrences((value,), lambda target: (
-                (occurrence.target_kind_filter is None or _identity_kind(target) in occurrence.target_kind_filter)
-                and all(predicate.prepared.matches(target) for predicate in predicates)), edges=occurrence.edges)
+            if identity_query is not None:
+                total += all(predicate.prepared.matches(value) for predicate in predicates)
+            else:
+                total += count_relationship_occurrences((value,), lambda target: (
+                    (occurrence.target_kind_filter is None or _identity_kind(target) in occurrence.target_kind_filter)
+                    and all(predicate.prepared.matches(target) for predicate in predicates)), edges=occurrence.edges)
         with source.repo.retain_topology(allow_physical_duplicates=True):
             if tuple(map(id, source.repo.stores)) != tuple(map(id, capture.repo_stores(source.repo))):
                 from .model import QueryError

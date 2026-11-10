@@ -1924,11 +1924,22 @@ class IdentityQuery:
 
         Side Effects:
             Executes the query without constructing a complete fixed result.
+            Covered unbounded Store/Repo selections use certified primitive graph
+            evidence and fresh authority checks without decoding snapshot Nodes.
+            Other plans retain ordinary candidate verification and bounds.
         """
 
         if self.take_limit is not None:
             return self._run_terminal(lambda cut: len(self._bounded_terminal_entries(cut)[0]))
-        return self._run_terminal(lambda cut: sum(1 for _ in self._iter_terminal_members(cut)))
+        return self._run_terminal(self._count_identities)
+
+    def _count_identities(self, capture):
+        from .indexed_count import _try_identity_count
+
+        indexed = _try_identity_count(self, capture)
+        if indexed is not None:
+            return indexed
+        return sum(1 for _ in self._iter_terminal_members(capture))
 
     def exists(self) -> bool:
         """Return whether one fully valid identity remains.

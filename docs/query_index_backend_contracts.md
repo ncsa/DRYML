@@ -259,7 +259,7 @@ Full rooted equality evidence distinguishes semantic digest collisions and shari
 This derived equality evidence is compressed together with the shared graph; it
 does not expand discovery contribution rows or replicate posting feature closures.
 
-The ordinary unbounded nested count planner compiles a closed exact program for
+The ordinary unbounded identity and nested count planners share a closed exact program for
 ordered Node/factory patterns and supported pure matchers, retaining explicit
 residual disposition for other patterns. Local nested scalar/factory-target and
 sequence-shape tokens narrow targets before source contributions are requested.
@@ -270,6 +270,17 @@ decoding. State availability and payload-use admission remain separate operation
 Graph interpretation is byte-bounded and terminal-local; declaration checks are
 shared across the terminal but backed by retained fresh byte witnesses. All
 captured files and cuts are revalidated before the scalar answer escapes.
+
+Direct `IdentityQuery.count()` lowers its sel/kind restrictions to contribution
+candidates and reads those rows once in bounded fetches before block grouping.
+It uses the same proof reader and exact primitive matcher as nested counts, but
+counts matching identities instead of paths. Its key retains the contribution's
+explicit domain kind, semantic digest bucket, and full rooted equality evidence;
+the natural kind of the decoded graph cannot replace that domain tag. Initial
+Repo cache knowledge joins under the same complete identity key. A duplicate
+contribution is authenticated before being merged, including a nonmatching
+connected Store's relevant declarations. Unsupported restrictions/bounds keep
+the ordinary consumer. Coverage and authoritative formats are unchanged.
 
 Target contribution source addresses are buffered once; contribution records are
 read in bounded source batches and compact graphs by block. This complete scalar

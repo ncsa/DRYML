@@ -291,3 +291,243 @@ def test_nonpersistent_scan_does_not_build_unused_certificates(tmp_path, monkeyp
         assert store.query().nested(model(Par("width")).loose_selector()).count() == 1
     finally:
         store.close()
+
+
+def test_direct_factory_identity_count_uses_no_node_decoding(tmp_path, monkeypatch):
+    import dryml.core.node_codec as codec
+    from dryml.core.query.indexed_count import _ProofReader
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    try:
+        wanted_blocks, excluded_blocks = set(), set()
+        for number, (width, output) in enumerate(((8, 2), (8, 2), (16, 2), (32, 3))):
+            value = model(width, output).concretize()
+            record = store.publish_node(Definition(PostingOwner, [value, value], str(number)).concretize())
+            (wanted_blocks if output == 2 else excluded_blocks).add(record.block_digest)
+        selector = model(Par("width")).loose_selector()
+        query = repo.query().sel(selector)
+        expected = query.collect().count()
+        observed, original = [], _ProofReader.graph
+
+        def graph(reader, selected_store, digest):
+            observed.append(digest)
+            return original(reader, selected_store, digest)
+
+        monkeypatch.setattr(_ProofReader, "graph", graph)
+        monkeypatch.setattr(codec, "_decode_node_graph_views", lambda *a, **k: pytest.fail("identity count decoded a Node graph"))
+        assert query.refresh(False).require_indexed().count() == expected == 2
+        assert set(observed) == wanted_blocks
+        assert not set(observed).intersection(excluded_blocks)
+        assert repo._num_constructions == 0
+    finally:
+        repo.close(flush=False)
+
+
+@pytest.mark.parametrize("domain", ("default", "cdefs", "object_refs", "saved"))
+def test_direct_identity_count_preserves_saved_domain_presentations(tmp_path, monkeypatch, fixed_snapshot_environment, domain):
+    from tests.core.test_query_decode_work import DecodeState, DecodeValue
+    import dryml.core.node_codec as codec
+
+    repo = Repo(DirStore(tmp_path / "store", query_index="sqlite"))
+    try:
+        child = DecodeState(DecodeValue("target", repo=repo), repo=repo)
+        parent = DecodeState([child, child], repo=repo)
+        for progress in range(2):
+            child.progress, parent.progress = progress, progress
+            repo.save(parent)
+    finally:
+        repo.close(flush=False)
+    repo = Repo(DirStore.open_existing(tmp_path / "store"))
+    try:
+        selector = Selector(Definition(DecodeState, Definition(DecodeValue, "target")), cls_policy="exact")
+        query = repo.query() if domain == "default" else getattr(repo.query(), domain)()
+        query = query.sel(selector)
+        expected = query.collect().count()
+        monkeypatch.setattr(codec, "_decode_node_graph_views", lambda *a, **k: pytest.fail("direct domain count decoded a Node"))
+        assert query.refresh(False).count() == expected > 0
+    finally:
+        repo.close(flush=False)
+
+
+def test_direct_identity_count_merges_cached_and_stored_members(tmp_path, monkeypatch):
+    from tests.core.test_query_decode_work import DecodeValue
+    import dryml.core.node_codec as codec
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    try:
+        cached = [DecodeValue("duplicate", repo=repo), DecodeValue("cache-only", repo=repo)]
+        store.publish_node(Definition(DecodeValue, "duplicate").concretize())
+        selector = Selector(Definition(DecodeValue), cls_policy="exact")
+        query = repo.query().sel(selector)
+        expected = query.collect().count()
+        assert cached
+        monkeypatch.setattr(codec, "_decode_node_graph_views", lambda *a, **k: pytest.fail("cached identity count decoded Store Nodes"))
+        assert query.count() == expected
+    finally:
+        repo.close(flush=False)
+
+
+@pytest.mark.parametrize("damage", ("block", "membership", "declaration"))
+def test_direct_identity_count_retains_fresh_authority_validation(tmp_path, damage):
+    from pathlib import Path
+    from dryml.core import ObjectId
+    from dryml.core.query.model import QueryError
+    from dryml.core.store.store import StoreCapabilityError, StoreAuthorityError
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    try:
+        child = model().concretize().with_identity(ObjectId())
+        root = store.publish_node(Definition(PostingOwner, [child]).concretize())
+        query = store.query().refresh(False).sel(model(Par("width")).loose_selector())
+        assert query.count() > 0
+        path = (store._node_path("definitions/blocks", root.block_digest) if damage == "block" else
+                store._node_path("membership/recipe", root.digest) if damage == "membership" else
+                store._node_path("declarations/required", store._anchor_key(child.object_id)))
+        before = store.authority_cut()
+        Path(path).unlink()
+        assert store.authority_cut() == before
+        with pytest.raises((QueryError, StoreCapabilityError, StoreAuthorityError)):
+            query.count()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("change", ("authority", "index", "interrupt"))
+def test_direct_identity_count_recaptures_and_releases_readers(tmp_path, monkeypatch, change):
+    from dryml.core.query.indexed_count import _ProofReader
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    original, changed = _ProofReader.membership, []
+
+    def membership(reader, *args):
+        result = original(reader, *args)
+        if not changed:
+            changed.append(True)
+            if change == "authority":
+                store.publish_node(Definition(PostingOwner, [model(16)], "later").concretize())
+            elif change == "index":
+                store.rebuild_query_index()
+            else:
+                raise KeyboardInterrupt("controlled identity count interruption")
+        return result
+
+    try:
+        store.publish_node(Definition(PostingOwner, [model()]).concretize())
+        monkeypatch.setattr(_ProofReader, "membership", membership)
+        query = store.query().sel(model(Par("width")).loose_selector())
+        if change == "interrupt":
+            with pytest.raises(KeyboardInterrupt, match="controlled identity"):
+                query.count()
+        else:
+            assert query.count() == (2 if change == "authority" else 1)
+        assert not store.open_query_index()._connections.connection(readonly=True).in_transaction
+    finally:
+        store.close()
+
+
+def test_direct_identity_count_keeps_verification_bounds_and_callback_fallback(tmp_path, monkeypatch):
+    from dryml.core import Satisfies
+    from dryml.core.query.model import QueryVerifyBudgetExceeded
+    import dryml.core.query.indexed_count as indexed
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    try:
+        store.publish_node(model().concretize())
+        query = store.query().sel(model(Par("width")).loose_selector())
+        with pytest.raises(QueryVerifyBudgetExceeded):
+            query.max_verify(0).count()
+        monkeypatch.setattr(indexed, "_count", lambda *a, **k: pytest.fail("unsupported identity predicate used compact count"))
+        calls = []
+        runtime = Selector(Definition(PostingModel, label=Satisfies(lambda value: calls.append(value) or value == "model")), cls_policy="exact")
+        assert store.query().sel(runtime).count() == 1 and calls == ["model"]
+    finally:
+        store.close()
+
+
+def test_direct_identity_count_keeps_digest_collisions_separate(tmp_path, monkeypatch):
+    from dryml.core.node_prepare import NodePreparation
+    import dryml.core.node_codec as codec
+
+    original = NodePreparation.digest
+
+    def digest(prepared, node, *, domain="dryml-node-graph/v1"):
+        return "0" * 64 if domain == "dryml-node-graph/v1" else original(prepared, node, domain=domain)
+
+    monkeypatch.setattr(NodePreparation, "digest", digest)
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    try:
+        store.publish_node(model(8).concretize())
+        store.publish_node(model(16).concretize())
+        query = store.query().sel(model(Par("width")).loose_selector())
+        expected = query.collect().count()
+        monkeypatch.setattr(codec, "_decode_node_graph_views", lambda *a, **k: pytest.fail("collision count decoded Nodes"))
+        assert query.count() == expected == 2
+    finally:
+        store.close()
+
+
+def test_direct_identity_count_retains_distinct_stateless_presentation_kinds(tmp_path, monkeypatch):
+    import dryml.core.node_codec as codec
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    try:
+        store.publish_node(model().concretize(), kind="saved")
+        selector = model(Par("width")).loose_selector()
+        query = store.query().sel(selector)
+        expected = query.collect()
+        assert {key.kind for key in expected._entries} == {"cdef", "object_ref", "state_ref"}
+        monkeypatch.setattr(codec, "_decode_node_graph_views", lambda *a, **k: pytest.fail("presentation count decoded Nodes"))
+        assert query.count() == expected.count() == 3
+        assert store.query().cdefs().sel(selector).count() == 1
+        assert store.query().object_refs().sel(selector).count() == 1
+        assert store.query().saved().sel(selector).count() == 1
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("damage", ("none", "conflict", "missing"))
+def test_direct_identity_count_checks_declarations_in_nonmatching_stores(tmp_path, monkeypatch, damage):
+    from pathlib import Path
+    from dryml.core import ObjectId
+    from dryml.core.query.model import QueryError
+    from dryml.core.store.store import StoreCapabilityError
+    import dryml.core.node_codec as codec
+
+    first, second = [DirStore(tmp_path / name, query_index="sqlite") for name in ("first", "second")]
+    identity = ObjectId()
+    selected = model().concretize().with_identity(identity)
+    first.publish_node(selected)
+    other = model(output=3).concretize().with_identity(identity) if damage == "conflict" else selected
+    second.publish_node(other)
+    repo = Repo((first, second))
+    try:
+        if damage == "missing":
+            Path(second._node_path("declarations/anchors", second._anchor_key(identity))).unlink()
+        query = repo.query().sel(model(Par("width")).loose_selector())
+        if damage == "none":
+            expected = query.collect().count()
+            monkeypatch.setattr(codec, "_decode_node_graph_views", lambda *a, **k: pytest.fail("replicated count decoded Nodes"))
+            assert query.count() == expected
+        else:
+            with pytest.raises((QueryError, StoreCapabilityError), match="anchor|conflict"):
+                query.count()
+    finally:
+        repo.close(flush=False)
+
+
+def test_direct_empty_identity_count_checks_coverage_before_answering(tmp_path):
+    from dryml.core.query.model import QueryIndexDirty
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    try:
+        store.publish_node(model(output=3).concretize())
+        query = store.query().refresh(False).sel(model(Par("width")).loose_selector())
+        assert query.count() == 0
+        con = store.open_query_index()._connections.connection(readonly=False)
+        con.execute("DELETE FROM store_projection_rows WHERE family='query_graph'")
+        with pytest.raises(QueryIndexDirty):
+            query.count()
+    finally:
+        store.close()
