@@ -621,10 +621,9 @@ def status(descriptor, instance, *, state_repo=None, control_store=None):
     restore, payload read or lifetime-owner wait occurs; only owned wrappers close.
     """
     receiver = _receiver(instance)
-    operation_id = operation_digest(receiver, descriptor.member)
     stores = resolve_stores(receiver, state_repo=state_repo, control_store=control_store, require_writable=False)
     try:
-        return ManagedControlStore(stores.control_store, stores.state_repo).status(operation_id)
+        return ManagedControlStore(stores.control_store, stores.state_repo).status_for(receiver, descriptor.member)
     finally:
         stores.close()
 

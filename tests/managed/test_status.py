@@ -15,6 +15,178 @@ from tests.managed.test_control_codec import saved_receiver
 from tests.managed.test_u14_authority import Experiment, adapter, facts, receiver, running
 
 
+def test_public_reference_status_selects_repo_without_namespace_or_payload_io(tmp_path, monkeypatch):
+    """A query reference can be inspected directly without constructing its class."""
+    from dryml.core import Definition
+    from dryml.core.session import config
+    from dryml.managed import ManagedControlStore, status
+    from tests.managed.test_u14_authority import Dataset
+
+    control, node = adapter(tmp_path), receiver()
+    def forbidden(*args, **kwargs):
+        pytest.fail("inspection constructed, loaded, initialized, or closed a resource")
+    monkeypatch.setattr(Experiment, "__init__", forbidden)
+    monkeypatch.setattr(Dataset, "__init__", forbidden)
+    monkeypatch.setattr(control.control_store, "read_state", forbidden)
+    monkeypatch.setattr(control.control_store, "close", forbidden)
+    monkeypatch.setattr(control.state_repo, "close", forbidden)
+    monkeypatch.setattr(ManagedControlStore, "initialize", forbidden)
+    with config(repo=control.state_repo):
+        selected = ManagedControlStore.from_repo()
+        assert selected.state_repo is control.state_repo
+        assert selected.control_store is control.control_store
+        assert status(node, "run").state == "not_started"
+        assert status(node, "other_member").state == "not_started"
+    assert selected.status_for(node, "run").state == "not_started"
+    assert not Path(control.root).exists()
+    # Missing stateful identities cannot stand in for independent instances.
+    from dryml.managed import ManagedConfigError
+    with pytest.raises(ManagedConfigError):
+        status(Definition(Dataset).concretize(), "run", repo=control.state_repo)
+
+
+def test_public_status_store_selection_matches_invocation_and_never_federates(tmp_path):
+    from dryml.core import Repo
+    from dryml.core.store.dir import DirStore
+    from dryml.managed import ManagedControlStore, status
+    from dryml.managed.defaults import _control_store_defaults
+
+    control = adapter(tmp_path)
+    node = saved_receiver(control)
+    identity = facts(node)
+    with control.admission(identity) as owner:
+        current = replace(running(identity, owner), state="completed", final=node,
+                          producer_invocation_id=owner.invocation_id,
+                          result_reference=ResultReference("f" * 64))
+        control.create_initial(current, owner=owner)
+    first = DirStore(tmp_path / "empty")
+    repo = Repo((first, control.control_store))
+    assert status(node, "run", repo=repo).state == "not_started"
+    assert status(node, "run", repo=repo, control_store=control.control_store).state == "completed"
+    with _control_store_defaults(control.control_store):
+        assert ManagedControlStore.from_repo(repo).control_store is control.control_store
+        assert status(node, "run", repo=repo).state == "completed"
+        assert status(node, "run", repo=repo, control_store=first).state == "not_started"
+
+
+def test_public_status_complete_history_survives_reclamation_and_matches_live_view(tmp_path, monkeypatch):
+    from dryml.managed import status
+    from tests.managed.u16_fixtures import Value, setup
+
+    control, live = setup(tmp_path)
+    monkeypatch.setattr(Value, "action", lambda obj, managed: None)
+    result = live.run(managed=ManagedConfig(state_repo=control.state_repo))
+    saved = result.final_state_ref
+    control.cleanup_checkpoints(result.execution.operation_id)
+    assert not Path(control.control_store.state_data_path(saved.state.key)).exists()
+    def forbidden(*args, **kwargs):
+        pytest.fail("metadata inspection resolved or restored unavailable receiver")
+    monkeypatch.setattr(control.control_store, "read_state", forbidden)
+    monkeypatch.setattr(Value, "__init__", forbidden)
+    monkeypatch.setattr(Value, "restore_state_from_dir_imp", forbidden)
+    expected = live.run.status(state_repo=control.state_repo)
+    for ref in (saved, saved.object_view(), live):
+        actual = status(ref, "run", repo=control.state_repo)
+        assert actual.state == "completed"
+        assert (actual.operation_id, actual.run_id, actual.invocation_id, actual.generation,
+                actual.producer_invocation_id) == (
+                    expected.operation_id, expected.run_id, expected.invocation_id,
+                    expected.generation, expected.producer_invocation_id)
+        assert actual.final.graph_equal(saved)
+
+
+def test_public_status_running_failed_and_interrupted_are_not_completed(tmp_path):
+    from dryml.managed import status
+
+    control, node = adapter(tmp_path), receiver()
+    identity = facts(node)
+    with control.admission(identity) as owner:
+        current = control.create_initial(running(identity, owner), owner=owner)
+        assert status(node, "run", repo=control.state_repo).state == "running"
+        interrupted = control.transition(identity.operation_id,
+            replace(current, generation=2, state="interrupted"), owner=owner,
+            expected_generation=1, expected_run_id=owner.run_id,
+            expected_invocation_id=owner.invocation_id)
+        assert status(node, "run", repo=control.state_repo).state == "interrupted"
+        control.transition(identity.operation_id,
+            replace(interrupted, generation=3, state="failed", failure_code="body_error"),
+            owner=owner, expected_generation=2, expected_run_id=owner.run_id,
+            expected_invocation_id=owner.invocation_id)
+    actual = status(node, "run", repo=control.state_repo)
+    assert actual.state == "failed" and actual.failure_code == "body_error"
+
+
+def test_public_status_reports_owner_loss_and_propagates_pending_authority(tmp_path, monkeypatch):
+    from dryml.managed import ManagedControlError, status
+    from dryml.managed.control import ManagedControlStore
+
+    control, node = adapter(tmp_path), receiver()
+    with control.admission(facts(node)) as owner:
+        control.create_initial(running(facts(node), owner), owner=owner)
+    actual = status(node, "run", repo=control.state_repo)
+    assert (actual.state, actual.failure_code) == ("failed", "owner_lost")
+    def pending(*args):
+        raise ManagedControlError("pending_reconciliation", "controlled pending authority")
+    monkeypatch.setattr(ManagedControlStore, "inspect", pending)
+    with pytest.raises(ManagedControlError, match="pending_reconciliation"):
+        status(node, "run", repo=control.state_repo)
+
+
+def test_public_status_verifies_full_receiver_evidence_and_resource_types(tmp_path, monkeypatch):
+    from dryml.managed import ManagedConfigError, ManagedConflictError, ManagedControlStore, ManagedStoreError, status
+
+    control, node = adapter(tmp_path), receiver()
+    with control.admission(facts(receiver())) as owner:
+        different = running(owner.identity, owner)
+    monkeypatch.setattr(control, "observe_running_owner", lambda *args: (different, False, True))
+    with pytest.raises(ManagedConflictError, match="operation_collision"):
+        control.status_for(node, "run")
+    for invalid in (None, object(), "not metadata"):
+        with pytest.raises(ManagedConfigError):
+            status(invalid, "run", repo=control.state_repo)
+    with pytest.raises(ManagedConfigError):
+        status(node, "not a member", repo=control.state_repo)
+    with pytest.raises(ManagedStoreError, match="invalid_state_repo"):
+        ManagedControlStore.from_repo(control.control_store)
+    with pytest.raises(ManagedStoreError, match="invalid_control_store"):
+        status(node, "run", repo=control.state_repo, control_store=object())
+
+
+def test_query_candidate_can_restart_fresh_with_the_same_operation_identity(tmp_path, monkeypatch):
+    """Retry a failed independent object instead of creating a replacement copy."""
+    from dryml.core import Definition, Repo
+    from dryml.managed import status
+    from tests.managed.u16_fixtures import Value, setup
+
+    control, live = setup(tmp_path)
+    def fail_after_checkpoint(obj, context):
+        obj.value = 17
+        context.checkpoint()
+        raise ValueError("controlled first-attempt failure")
+    monkeypatch.setattr(Value, "action", fail_after_checkpoint)
+    with pytest.raises(ValueError):
+        live.run(managed=ManagedConfig(state_repo=control.state_repo))
+    candidate = control.state_repo.query().sel(Definition(Value)).object_projection().one()
+    failed = status(candidate, "run", repo=control.state_repo)
+    assert failed.state == "failed" and failed.checkpoint is not None
+    restart = Definition(Value).concretize().with_realization(identities=candidate.identity_spec())
+    assert restart.object_projection_equal(candidate)
+    fresh_repo = Repo(control.control_store)
+    try:
+        fresh = fresh_repo.build(restart, cache="none")
+        assert fresh.value == 0
+        monkeypatch.setattr(Value, "action", lambda obj, context: obj.value)
+        result = fresh.run(managed=ManagedConfig(state_repo=fresh_repo, rerun=True))
+        assert result.value == 0
+        assert result.execution.operation_id == failed.operation_id
+        assert result.execution.run_id != failed.run_id
+        assert result.final_state_ref.object_id == candidate.object_id
+        assert status(candidate, "run", repo=fresh_repo).state == "completed"
+        assert fresh_repo.query().sel(Definition(Value)).object_projection().count() == 1
+    finally:
+        fresh_repo.close(flush=False)
+
+
 def test_absent_status_read_only_and_selected_domain_specific(tmp_path):
     control, identity = adapter(tmp_path), facts(receiver())
     status = control.status(identity.operation_id)

@@ -22,7 +22,7 @@ assert set(dryml.managed.__all__) == {
         'ManagedConflictError', 'ManagedContextError', 'ManagedControlError',
         'ManagedDeclarationError', 'ManagedError', 'ManagedInterrupted',
         'ManagedPublicationError', 'ManagedRecoveryError', 'ManagedRerunRequiredError', 'ManagedStatus',
-    'ManagedStoreError', 'argument_digest', 'managed_operation', 'operation_digest',
+    'ManagedStoreError', 'ManagedControlStore', 'argument_digest', 'managed_operation', 'operation_digest', 'status',
 }
 forbidden = ('dryml.dispatch', 'dryml.execute', 'dryml.records', 'dryml.operations',
              'tensorflow', 'torch', 'jax', 'jaxlib', 'ray')

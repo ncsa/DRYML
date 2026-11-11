@@ -742,8 +742,15 @@
           ]
         },
         "tests/managed/test_status.py": {
-          "rationale": "U14 retains absent selected authority, metadata-only reclaimed checkpoints, producer/caller identity, targeted requests, explicit legacy refusal and unavailable lifecycle coverage.",
+          "rationale": "Retain public reference inspection, Repo/default control selection, same-identity restart, reclaimed checkpoints, owner-loss and pending authority, plus U14 identity/request and lifecycle coverage boundaries.",
           "functions": [
+            "test_public_reference_status_selects_repo_without_namespace_or_payload_io",
+            "test_public_status_store_selection_matches_invocation_and_never_federates",
+            "test_public_status_complete_history_survives_reclamation_and_matches_live_view",
+            "test_public_status_running_failed_and_interrupted_are_not_completed",
+            "test_public_status_reports_owner_loss_and_propagates_pending_authority",
+            "test_public_status_verifies_full_receiver_evidence_and_resource_types",
+            "test_query_candidate_can_restart_fresh_with_the_same_operation_identity",
             "test_absent_status_read_only_and_selected_domain_specific",
             "test_detached_status_and_replay_admission_after_checkpoint_reclamation",
             "test_external_request_preconditions_and_dead_owner_are_read_only",

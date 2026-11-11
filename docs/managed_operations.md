@@ -75,6 +75,104 @@ continues to apply.
 
 ## Caller configuration and start selection
 
+### Inspecting query results without loading Objects
+
+Use `dryml.managed.status(receiver, member, *, repo=None, control_store=None)`
+with any managed operation name. `receiver` is a detached concrete ObjectRef or
+SavedNode with its stateful ObjectIds bound, or a live Object:
+
+```python
+from dryml import managed
+
+objects = repo.query().sel(experiment_selector).object_projection()
+states = [(ref, managed.status(ref, "train", repo=repo)) for ref in objects]
+completed = [ref for ref, status in states if status.state == "completed"]
+unfinished = [(ref, status) for ref, status in states
+              if status.state in {"not_started", "failed", "interrupted"}]
+```
+
+Select the complete experiment configuration **before** projecting to objects:
+projection removes unquoted state selections, including input checkpoint pins.
+Object projection collapses repeated checkpoints of the same complete receiver.
+Count independent experiments by their root ObjectIds if your query admits more
+than one complete projection per root. A recipe without required stateful IDs is
+not an independent managed receiver and is rejected.
+
+The returned immutable `ManagedStatus` includes `state`, `failure_code`,
+`operation_id`, `run_id`, `invocation_id`, `generation`, `checkpoint`, and `final`.
+`not_started` means no current record; `completed` means managed completion,
+including the exact final SavedNode. A checkpoint alone does not imply success.
+`running` and `finalizing` are active work, not failed work to restart. Proven
+owner loss reports `failed` with `failure_code == "owner_lost"`, without changing
+authority. Missing/corrupt/pending control records are not converted into success
+or permission to restart; owning read errors propagate.
+
+No receiver class is imported or declaration resolved: `member` is an exact
+logical member-name lookup, so an unknown name also reports `not_started`. The
+lookup verifies full receiver evidence, not just its operation digest. It does
+not construct Objects, restore model/data payloads, initialize a managed area,
+repair records, wait for workload ownership, or certify payload availability.
+Completed metadata remains inspectable after private state is reclaimed.
+
+When `repo` is omitted the current session Repo is used. An explicit
+`control_store` wins; otherwise selection follows the active worker control
+default, then `repo.default_store`. A single-Store Repo needs no control argument.
+Multi-Store Repos use that same deterministic selection as invocation: inspection
+does not search other Stores and accidentally combine independent authorities.
+
+For repeated inspections or lower-level control access:
+
+```python
+control = managed.ManagedControlStore.from_repo(repo)
+status = control.status_for(object_ref, "train")
+# Low-level digest-based APIs remain available:
+snapshot = control.inspect(status.operation_id)
+```
+
+The adapter borrows the Repo and DirStore; keep them open and do not close the
+adapter separately. It creates no namespace. Existing live
+`experiment.train.status(state_repo=repo)` remains supported and shares the same
+identity validation and status projection.
+
+Status is an observation, not a workload reservation. A subsequent call performs
+fresh admission and conflict checks. Do not schedule active receivers as retry
+candidates or treat an earlier observation as authorization to overwrite a newer
+run. Explicit `rerun=True` deliberately requests a new run; it is not a
+compare-and-set "retry only this failed generation" operation.
+
+### Calling unfinished receivers
+
+Ordinary invocation resumes a declared resumable operation from its associated
+latest checkpoint. If a failed one-epoch run has no useful checkpoint, explicitly
+request a new run with `ManagedConfig(rerun=True)` on the **same identified
+receiver**. This preserves the experiment's operation identity while allocating
+a new run ID. It does not create another independent successful copy.
+
+Rerun uses its recorded initial state when present, otherwise the supplied live
+receiver state. Loading a partial checkpoint and passing `rerun=True` therefore
+does **not** universally mean fresh model weights. To restart from fresh model
+initialization, prepare the original recipe with the old identity assignments,
+retaining its explicit input-state pins:
+
+```python
+restart_node = original_recipe.concretize().with_realization(
+    identities=unfinished_ref.identity_spec(),
+)
+assert restart_node.object_projection_equal(unfinished_ref)
+```
+
+Materialize that node in the worker and call `train(managed=ManagedConfig(rerun=True))`.
+If the operation recorded an initial state, that initial remains the rerun default;
+use an explicit compatible `start_from` SavedNode to override it. Never use a
+state-weakened object projection alone as a substitute for saved input pins.
+
+In async orchestration, submit unfinished receivers once and retain exceptions
+from `asyncio.gather(..., return_exceptions=True)`. Reinspect after the batch to
+determine actual completion; a planned attempt or reconciled admission is not a
+successful result. Automatic unbounded retry is not provided by status inspection.
+
+### Configuration
+
 `ManagedConfig` remains immutable and keyword-only. It accepts borrowed
 `state_repo`/`control_store`, exact-boolean `rerun`, optional `start_from` SavedNode,
 and the caller-owned checkpoint callback list. `snapshot()` retains the immutable
