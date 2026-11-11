@@ -4,8 +4,9 @@ import json
 
 import pytest
 
-from dryml.core import Definition, F, Object, Par, Repo, Selector
+from dryml.core import Definition, F, Node, Object, Par, Ref, Repo, Selector
 from dryml.core.store.dir import DirStore
+from tests.core.test_query_decode_work import DecodeState
 
 
 class PostingModel(Object):
@@ -20,6 +21,13 @@ class PostingOwner(Object):
 
     def __init__(self, children, label="owner"):
         self.children, self.label = children, label
+
+
+class PostingQuotedState(DecodeState):
+    """Retain a quoted Node recipe as data in state creation evidence."""
+
+    def __init__(self, value: Ref[Node]):
+        super().__init__(value)
 
 
 def model(width=8, output=2):
@@ -265,11 +273,11 @@ def test_empty_postings_count_checks_all_coverage_families(tmp_path):
 
 
 @pytest.mark.timeout(10)
-def test_quoted_factory_graph_keeps_residual_without_unbounded_projection(tmp_path):
+def test_unordered_quoted_graph_keeps_residual_without_unbounded_projection(tmp_path):
     from dryml.core.query.postings import _compile
     from dryml.core.query.query import _V3Restriction
 
-    nested = Definition(PostingModel, [model().quote()])
+    nested = Definition(PostingModel, [Definition(PostingOwner, {model().concretize()}).quote()])
     pattern = nested.loose_selector()
     assert _compile(_V3Restriction("sel", pattern).prepared).residual is not None
     store = DirStore(tmp_path / "store", query_index="sqlite")
@@ -529,5 +537,163 @@ def test_direct_empty_identity_count_checks_coverage_before_answering(tmp_path):
         con.execute("DELETE FROM store_projection_rows WHERE family='query_graph'")
         with pytest.raises(QueryIndexDirty):
             query.count()
+    finally:
+        store.close()
+
+
+def test_pinned_child_state_counts_without_decoding_and_keeps_other_versions_out(tmp_path, monkeypatch, fixed_snapshot_environment):
+    from tests.core.test_query_decode_work import DecodeState, DecodeValue
+    from dryml.core.query.postings import _compile
+    from dryml.core.query.query import _V3Restriction
+    import dryml.core.node_codec as codec
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    try:
+        dataset = DecodeState(DecodeValue("large-test-data", repo=repo), repo=repo)
+        first = repo.save(dataset)
+        dataset.progress = 1
+        second = repo.save(dataset)
+        assert first.object_id == second.object_id and first.state.key != second.state.key
+        for index, saved in enumerate((first, second)):
+            store.publish_node(Definition(PostingOwner, [model(8), saved], str(index)).concretize())
+        pattern = Definition(PostingOwner, [model(Par("width")), first]).loose_selector()
+        assert _compile(_V3Restriction("sel", pattern).prepared).residual is None
+        direct = repo.query().cdefs().sel(pattern)
+        nested = repo.query().nested(first)
+        expected_direct, expected_nested = direct.collect().count(), nested.collect().count()
+        assert expected_direct == 1 and expected_nested > 0
+        monkeypatch.setattr(codec, "_decode_node_graph_views", lambda *a, **k: pytest.fail("pinned state count decoded a Node graph"))
+        monkeypatch.setattr(store, "read_states", lambda *a, **k: pytest.fail("pin comparison read private state"))
+        assert direct.count() == expected_direct
+        assert nested.count() == expected_nested
+        assert repo.query().sel(first).count() == repo.query().sel(second).count() == 1
+    finally:
+        repo.close(flush=False)
+
+
+def test_state_pin_matches_full_creation_evidence_not_just_the_key(tmp_path, monkeypatch, fixed_snapshot_environment):
+    from tests.core.test_query_decode_work import DecodeState, DecodeValue
+    from dryml.core.state_values import LocalState
+    import dryml.core.node_codec as codec
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    try:
+        saved = repo.save(DecodeState(DecodeValue("original", repo=repo), repo=repo))
+        copied = saved.with_state(LocalState(saved.state.key, saved.state.creation_cdef.copy_graph()))
+        other_creation = Definition(DecodeState, Definition(DecodeValue, "different")).concretize()
+        conflicting = saved.without_state().with_state(LocalState(saved.state.key, other_creation))
+        assert Selector(copied).matches(saved)
+        assert not Selector(conflicting).matches(saved)
+        monkeypatch.setattr(codec, "_decode_node_graph_views", lambda *a, **k: pytest.fail("state creation proof decoded Nodes"))
+        assert repo.query().sel(copied).count() == 1
+        assert repo.query().sel(conflicting).count() == 0
+    finally:
+        repo.close(flush=False)
+
+
+def test_loose_experiment_pattern_retains_fixed_dataset_sizes_and_state_pin(tmp_path, monkeypatch, fixed_snapshot_environment):
+    from tests.core.test_query_decode_work import DecodeState, DecodeValue
+    import dryml.core.node_codec as codec
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    try:
+        large = repo.save(DecodeState(DecodeValue(20000, repo=repo), repo=repo))
+        small = repo.save(DecodeState(DecodeValue(2000, repo=repo), repo=repo))
+        train_large, train_small = [Definition(DecodeValue, size).concretize() for size in (100000, 10000)]
+        for index, (train, test, width) in enumerate(((train_large, large, 8), (train_large, large, 16),
+                                                    (train_small, small, 8), (train_small, large, 8),
+                                                    (train_large, small, 8))):
+            store.publish_node(Definition(PostingOwner, [model(width), train, test], str(index)).concretize())
+        pattern = Definition(PostingOwner, [model(Par("width")), train_large, large]).loose_selector()
+        query = repo.query().cdefs().sel(pattern)
+        assert pattern.root.parameters["children"][2] is large
+        assert query.collect().count() == 2
+        monkeypatch.setattr(codec, "_decode_node_graph_views", lambda *a, **k: pytest.fail("experiment dataset pin decoded Nodes"))
+        assert query.count() == 2
+    finally:
+        repo.close(flush=False)
+
+
+@pytest.mark.parametrize("case", ("soft_same", "soft_extra", "soft_omission", "concrete_same", "concrete_identity", "node_kind"))
+def test_posted_quotation_upgrades_earlier_alias_proofs_exactly(tmp_path, case):
+    from dryml.core import ObjectId, SKIP_ARGS
+    from dryml.core.query.postings import _compile, _read_graph
+    from dryml.core.query.query import _V3Restriction
+
+    if case.startswith("concrete"):
+        expected = model().concretize()
+        actual = expected.copy_graph()
+        if case == "concrete_identity":
+            actual = actual.with_identity(ObjectId())
+    elif case == "soft_omission":
+        expected = Definition(PostingModel, SKIP_ARGS, label="model")
+        actual = Definition(PostingModel, label="model")
+    else:
+        expected = Definition(PostingModel, label="model")
+        actual = expected.copy_graph() if case == "soft_same" else Definition(PostingModel, layers=[], label="model")
+        if case == "node_kind":
+            actual = model().concretize()
+    pattern = Selector(Definition(PostingOwner, children=[expected, expected.quote()]), cls_policy="exact")
+    candidate = Definition(PostingOwner, children=[actual, actual.quote()])
+    prepared = _V3Restriction("sel", pattern).prepared
+    plan = _compile(prepared)
+    assert plan.residual is None
+    reference = prepared.matches(candidate)
+    assert reference == (case in {"soft_same", "concrete_same"})
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    try:
+        record = store.publish_node(candidate)
+        path = store._relative(store._node_path("definitions/blocks", record.block_digest))
+        con = store.open_query_index()._connections.connection(readonly=True)
+        envelope = json.loads(con.execute("SELECT payload FROM store_projection_rows WHERE family='query_graph' AND source=?", (path,)).fetchone()[0])
+        graph = _read_graph(envelope)
+        slot = graph["locators"][record.view["table"] + ":" + str(record.view["slot"])]
+        assert plan.matches(graph, slot) == reference
+    finally:
+        store.close()
+
+
+def test_ordered_quote_and_state_pin_execute_together_without_decoding(tmp_path, monkeypatch, fixed_snapshot_environment):
+    from tests.core.test_query_decode_work import DecodeState, DecodeValue
+    import dryml.core.node_codec as codec
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(store)
+    try:
+        source = Definition(DecodeValue, {"n": 20000}).concretize()
+        stateful = PostingQuotedState(source, repo=repo)
+        saved = repo.save(stateful)
+        stateful.progress = 1
+        other_state = repo.save(stateful)
+        for index, pinned in enumerate((saved, other_state)):
+            store.publish_node(Definition(PostingOwner, [pinned, source.quote()], str(index)).concretize())
+        pattern = Definition(PostingOwner, [saved, source.quote()]).loose_selector()
+        query = repo.query().cdefs().sel(pattern)
+        expected = query.collect().count()
+        assert expected == 1
+        monkeypatch.setattr(codec, "_decode_node_graph_views", lambda *a, **k: pytest.fail("quoted dataset state count decoded Nodes"))
+        assert query.count() == expected
+    finally:
+        repo.close(flush=False)
+
+
+def test_quoted_parameters_remain_literal_data_not_loose_wildcards(tmp_path, monkeypatch):
+    import dryml.core.node_codec as codec
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    try:
+        wanted = Definition(PostingModel, label=Par("this.test_data"))
+        for index, value in enumerate((wanted, Definition(PostingModel, label=Par("this.train_data")),
+                                       Definition(PostingModel, label="literal"))):
+            store.publish_node(Definition(PostingOwner, [value.quote()], str(index)).concretize())
+        selector = Definition(PostingOwner, [wanted.quote()]).loose_selector()
+        query = store.query().cdefs().sel(selector)
+        expected = query.collect().count()
+        assert expected == 1
+        monkeypatch.setattr(codec, "_decode_node_graph_views", lambda *a, **k: pytest.fail("quoted parameter comparison decoded Nodes"))
+        assert query.count() == expected
     finally:
         store.close()

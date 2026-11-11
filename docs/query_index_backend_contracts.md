@@ -271,6 +271,16 @@ Graph interpretation is byte-bounded and terminal-local; declaration checks are
 shared across the terminal but backed by retained fresh byte witnesses. All
 captured files and cuts are revalidated before the scalar answer escapes.
 
+Covered state-facet pins compare the entire encoded key and the candidate creation
+slot's full normalized equality witness with a separately prepared pattern witness.
+They do not infer creation equality from the key's digest or merge creation aliases
+with the surrounding match assignment. Ordered quotation matching uses strength-2
+assignments: raw argument/keyword spelling, soft/concrete kind, and missing facets
+remain exact, and an alias first proved weakly is rechecked when encountered in a
+quotation. Quoted Par records are literal data; they are neither evaluated nor
+loosened. Unordered quoted assignments and selector quotations retain residual
+execution. These capabilities use existing coverage-4 records without migration.
+
 Direct `IdentityQuery.count()` lowers its sel/kind restrictions to contribution
 candidates and reads those rows once in bounded fetches before block grouping.
 It uses the same proof reader and exact primitive matcher as nested counts, but

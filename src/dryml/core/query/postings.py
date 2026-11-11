@@ -221,7 +221,13 @@ class _PostingPredicate:
     residual: str | None = None
 
     def matches(self, graph, target):
-        """Evaluate pure ordered constraints against certified primitive rows."""
+        """Evaluate ordered constraints, exact quotations and complete state pins.
+
+        State equality includes full creation evidence, independently of outer
+        alias assignments. Quotations upgrade prior assignments to exact raw-call
+        and facet comparisons. Missing candidate parameter bindings request the
+        ordinary residual instead of approximating a match.
+        """
         from .query import _query_match_class, _query_match_leaf
         candidate = graph["nodes"]
 
@@ -234,6 +240,8 @@ class _PostingPredicate:
             return isinstance(value, list) and any(contains_match(v) for v in value)
 
         def compare(left, right, forward, reverse, exact=0, present=True):
+            if left is None or right is None:
+                return present and left is right
             tag = left.get("tag")
             if tag == "match" and not exact:
                 match = left["matcher"]
@@ -261,11 +269,18 @@ class _PostingPredicate:
                     return False
                 lslot, rslot = left["slot"], right["slot"]
                 if lslot in forward:
-                    return forward[lslot] == rslot
+                    previous, strength = forward[lslot]
+                    if previous != rslot:
+                        return False
+                    if strength >= exact:
+                        return True
                 if rslot in reverse:
-                    return False
+                    if reverse[rslot] != lslot:
+                        return False
                 a, b = self.rows[lslot], candidate[rslot]
                 if a["shape"]["kind"] == "concrete" and b["shape"]["kind"] != "concrete":
+                    return False
+                if exact == 2 and a["shape"]["kind"] != b["shape"]["kind"]:
                     return False
                 anchor = bool(exact or a["shape"]["kind"] == "concrete")
                 left_cls, right_cls = a["shape"]["cls"], b["shape"]["cls"]
@@ -280,15 +295,30 @@ class _PostingPredicate:
                             class_match="exact" if anchor else self.prepared.class_match):
                         return False
                 identity = _atom(a["shape"]["identity"])
-                if identity is not None and identity != _atom(b["shape"]["identity"]):
+                if (identity is not None or exact == 2) and identity != _atom(b["shape"]["identity"]):
                     return False
+                state = a["shape"]["state"]
+                if state.get("tag") == "local-state":
+                    selected = b["shape"]["state"]
+                    if (selected.get("tag") != "local-state" or state["key"] != selected["key"]
+                            or a["state_creation"] != candidate[selected["creation"]["slot"]]["exact"]):
+                        return False
+                elif exact == 2 and state != b["shape"]["state"]:
+                    return False
+                forward[lslot], reverse[rslot] = (rslot, exact), lslot
+                if exact == 2:
+                    return (compare(a["shape"]["args"], b["shape"]["args"], forward, reverse, 2)
+                            and compare(a["shape"]["kwargs"], b["shape"]["kwargs"], forward, reverse, 2))
                 if a["parameters"] is None or b["parameters"] is None:
                     raise _ResidualRequired()
-                forward[lslot], reverse[rslot] = rslot, lslot
                 return compare(a["parameters"], b["parameters"], forward, reverse, int(anchor))
             if tag == "link":
                 return (right.get("tag") == tag and left["role"] == right["role"]
                         and compare(left["target"], right["target"], forward, reverse, exact))
+            if tag == "quote":
+                return right.get("tag") == tag and compare(left["value"], right["value"], forward, reverse, 2)
+            if tag == "par" and exact == 2:
+                return left == right
             if tag == "factory":
                 if right.get("tag") != tag:
                     return False
@@ -333,27 +363,37 @@ class _PostingPredicate:
 def _compile(prepared):
     """Compile exact class/ordered-container/factory predicates without IO.
 
-Unordered assignments, quotations, state pins, runtime code and support witnesses
-remain explicit Node residuals. Unsupported candidate parameter bindings may
-also request residual execution while interpreting an otherwise closed program.
-"""
+    Ordered quotations preserve omission spelling, Node kind, facets and literal
+    Par data. Fixed state pins compare their full keys and exact creation graphs.
+    Unordered assignments, selector quotations, runtime code and support witnesses
+    remain explicit Node residuals. Unsupported candidate parameter bindings may
+    also request residual execution while interpreting an otherwise closed program.
+    """
     from ..definition import ConcreteDefinition
     from ..node_codec import _describe_node, _value
+    from ..node_prepare import NodePreparation
     from .node_pattern import _parameters
 
-    rows, slots = [], {}
+    rows, slots, state_creations = [], {}, {}
 
     def visit(node):
         if node._view in slots:
             return slots[node._view]
-        if node.state is not None or (node.cls is not None and not isinstance(node, ConcreteDefinition)
-                                     and not (prepared.strict or prepared.class_match == "exact")):
-            raise _ResidualRequired("state or subclass matching")
+        if (node.cls is not None and not isinstance(node, ConcreteDefinition)
+                and not (prepared.strict or prepared.class_match == "exact")):
+            raise _ResidualRequired("subclass matching")
         slot = slots[node._view] = len(rows)
         rows.append(None)
         shape = _describe_node(node, visit)
         parameters = _value(_parameters(node), visit)
-        rows[slot] = {"shape": shape, "parameters": parameters}
+        state_creation = None
+        if node.state is not None:
+            creation = node.state.creation_cdef
+            if creation._view not in state_creations:
+                owner = NodePreparation((creation,))
+                state_creations[creation._view] = owner._flat(owner._slot(creation)).decode("ascii")
+            state_creation = state_creations[creation._view]
+        rows[slot] = {"shape": shape, "parameters": parameters, "state_creation": state_creation}
         return slot
 
     def program(predicate):
@@ -363,9 +403,31 @@ also request residual execution while interpreting an otherwise closed program.
             raise _ResidualRequired("support or path predicate")
         return predicate.kind, [program(child) for child in predicate.operands]
 
-    def inspect(value):
+    inspected = set()
+
+    def inspect(value, *, literal=False):
         if isinstance(value, dict):
             tag = value.get("tag")
+            if tag == "leaf":
+                return
+            if tag == "quote":
+                inspect(value["value"], literal=True)
+                return
+            if tag == "node":
+                key = value["slot"], literal
+                if key in inspected:
+                    return
+                inspected.add(key)
+                row = rows[value["slot"]]
+                inspect(row["shape"]["cls"], literal=literal)
+                if literal:
+                    inspect(row["shape"]["args"], literal=True)
+                    inspect(row["shape"]["kwargs"], literal=True)
+                else:
+                    inspect(row["parameters"])
+                return
+            if tag == "par" and literal:
+                return
             if tag == "factory":
                 def has_node(item):
                     if isinstance(item, dict):
@@ -373,7 +435,7 @@ also request residual execution while interpreting an otherwise closed program.
                     return isinstance(item, list) and any(has_node(v) for v in item)
                 if has_node(value):
                     raise _ResidualRequired("exact factory graph assignment")
-            if tag in {"set", "frozenset", "quote", "selector", "local-state", "config", "par", "binary", "repeat"}:
+            if tag in {"set", "frozenset", "selector", "local-state", "config", "par", "binary", "repeat"}:
                 raise _ResidualRequired("non-ordered or symbolic value")
             if tag == "match" and value["matcher"]["kind"] not in {"any", "present", "missing", "range", "choice"}:
                 raise _ResidualRequired("non-posting matcher")
@@ -381,16 +443,24 @@ also request residual execution while interpreting an otherwise closed program.
                     item.get("tag") not in {"leaf", "float", "complex"} for item in value["matcher"]["values"]):
                 raise _ResidualRequired("non-scalar Choice")
             for child in value.values():
-                inspect(child)
+                inspect(child, literal=literal)
         elif isinstance(value, list):
             for child in value:
-                inspect(child)
+                inspect(child, literal=literal)
+
+    def inspect_program(current):
+        kind, value = current
+        if kind == "node":
+            inspect({"tag": "node", "slot": value})
+        else:
+            for child in value:
+                inspect_program(child)
 
     try:
         if prepared is None or prepared.runtime_matchers:
             raise _ResidualRequired("runtime predicate")
         programs = program(prepared.predicate)
-        inspect(rows)
+        inspect_program(programs)
         return _PostingPredicate(prepared, rows, programs)
     except (TypeError, _ResidualRequired) as error:
         return _PostingPredicate(prepared, rows, None, str(error))

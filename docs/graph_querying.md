@@ -172,7 +172,8 @@ Unbounded `repo.query().sel(pattern).count()` and
 `repo.query().nested().sel(pattern).count()` can use the same certified compact
 graph engine instead of reconstructing containing snapshots. The compiler admits
 exact-class ordered Node patterns, alias assignments, identity pins, lists/tuples,
-partial mappings, scalar-valued factories, and supported pure Match leaves
+partial mappings, scalar-valued factories, fixed state pins, ordered quotations,
+and supported pure Match leaves
 (`AnyValue`, `Present`, `Missing`, scalar `Choice` and `IntRange`). Boolean forms
 retain complete branch evaluation. Factory targets, nested scalar values and
 sequence shapes now supply occurrence-local necessary postings.
@@ -191,6 +192,15 @@ graph evidence, never a digest alone. Counts do not materialize Nodes or Objects
 for the indexed portion. Captured in-memory Repo members retain ordinary matching
 and are merged with indexed identities without double counting.
 
+Fixed state pins compare both the complete StateKey and exact normalized creation
+evidence; a key/digest collision cannot substitute different creation metadata.
+This uses existing certified evidence without restoring state or decoding its
+creation graph. Ordered quotations retain raw omission spelling, soft/concrete
+Node kinds, absent as well as present facets, and sharing across quoted and
+ordinary occurrences. Revisiting an alias through a quotation upgrades its proof.
+Quoted `Par` values such as `Par("this.model")` remain literal recipe data rather
+than becoming wildcards or resolving against a live experiment.
+
 Fresh root/membership records and applicable declarations in **every** connected
 Store remain required. Immutable block bytes are checked against the exact-byte
 witness recorded during validated index publication. Final byte/cut validation
@@ -198,7 +208,8 @@ also detects a missing or replaced file without an epoch change. Named-view and
 state-compatibility proofs can therefore be reused without repeating graph
 normalization on each search. These proofs do not authorize payload use.
 
-Quotes, unordered pattern assignments, state pins, Nodes inside exact factories,
+Unordered pattern assignments (including those inside quotations), selector
+quotations, other symbolic expressions, Nodes inside exact factories,
 runtime callbacks, Generator support, unresolved candidate parameter bindings,
 explicit verification/depth/output bounds, metadata scopes and composed sources
 retain Node residual execution. LocalState sources retain their own consumer.
