@@ -4,8 +4,8 @@ DRYML tests are organized by feature category and by speed tier.
 
 Maintained categories include `formats`, `annotations`, `environments`,
 `worlds`, `runtime`, `session`, `core`, `locking`, `managed`, `package`, `data`, `execute`, `models`,
-`ray`, `tf`, `torch`, `jax`, and `multi_framework`. `dispatch` is a maintained
-medium category. Speed tiers are applied
+`ray`, `tf`, `torch`, `jax`, and `multi_framework`. `dispatch` and `performance`
+are maintained medium categories. Speed tiers are applied
 automatically from `tests/test_tiers.json` by the DRYML pytest timing plugin.
 
 ## Runner Modes
@@ -22,9 +22,10 @@ same mode. It runs smoke and medium tests selected by the checked-in
 does not enable coverage. The ordinary verification sequence is a focused test,
 the affected subsystem, and then `good-enough`.
 
-The routine target is **10–20 minutes locally**, measured as complete runner wall
-time, including collection and both interpreter phases. It is not a time-based
-test cutoff. Policy changes must be timed locally before pushing. Pull requests
+The routine limit is **at most 15 minutes locally**, measured as complete runner wall
+time, including collection, shared fixture setup and both interpreter phases.
+Selection is not based on runtime cutoffs: slow/failing performance canaries fail,
+rather than being skipped. Policy changes must be timed locally before pushing. Pull requests
 run this representative gate once on Linux/Python 3.12 with a 30-minute job cap;
 the Python/platform matrix and heavy framework/native-estimator jobs run only
 after an explicit `exhaustive` or `coverage` workflow dispatch.
@@ -204,7 +205,103 @@ The real TFDS NumPy adapter test is `exhaustive_only`. It requires a caller-sele
 `DRYML_ML_QUALIFICATION_TFDS_DATA_DIR` and uses `download=False`; routine selection keeps
 the mocked offline adapter tests while excluding that real reader.
 
-### Local speed verification (2026-10-25)
+### Query latency regression gate
+
+`tests/performance/test_query_latency.py` is part of the routine medium selection.
+Its explicit medium marker keeps a slower measured case from being reclassified
+out of the performance gate by timing metadata.
+It builds one disposable metadata-only Store, then runs each registered query in
+a **fresh Python subprocess**. Every worker reopens the Store, builds the selector,
+and evaluates the real public query twice (cold process caches and repeated).
+Both answers must equal an independent fixture-derived expected count. No query
+optimizer or decoder is mocked in ordinary performance runs.
+
+The Store models seven widths and five independent copies at each of two dataset
+sizes: **70 experiment/model instances**, 28 repeated history graphs with shared
+model paths, and 256 unrelated roots. Public immutable realization APIs retain
+construction recipes, ObjectIds, exact state selections and quoted artifact Par
+data. State addresses are synthetic and no private payload is needed for these
+metadata queries. No Object is constructed, ML backend imported, data downloaded,
+environment inventoried or training performed. The real derived index is built
+once and is ready before query timing. Queries must leave its generation, coverage
+and authoritative Store cut unchanged.
+
+| Scenario | Expected count |
+|---|---:|
+| `repo.query().sel(exp_sel.model).count()` | 147 = 7 recipes + 70 object refs + 70 states |
+| `repo.query().sel(exp_sel).count()` | 42 = 7 recipes + 35 matching saved experiments |
+| `repo.query().nested().sel(exp_sel.model).count()` | 672 distinct typed owner/path occurrences |
+| Matching saved experiment instances | 35 |
+| Chained refinement to one width | 5 |
+| Matching model object references | 70 |
+| Full selector with an absent fixed dataset size | 0 |
+
+Fixture construction has a **90-second hard deadline**. Each complete query worker
+has an **8-second hard deadline**, including startup, reopening, selector setup,
+both query calls and shutdown. The parent uses `subprocess.run(timeout=...)`, which
+kills and reaps a stalled worker even inside a native SQLite call. A timeout is a
+failed test with the scenario name, budget and partial output; it is not a skip.
+An outer pytest watchdog also bounds setup and harness failures. These deadlines
+do not depend on the caller passing pytest-timeout flags.
+
+The aggregate query-worker budget is capped at **60 seconds**; all seven current
+cases reserve 56 seconds, plus the one shared setup cap. A small routine guard
+rejects duplicate scenario names and accidental deadline/budget inflation. There
+is no filesystem-cache eviction: "cold" means a new interpreter, Repo and query
+cache, not a rebooted machine or empty OS page cache.
+
+Run the focused canaries with their normal explicit deadlines:
+
+```bash
+./tests.sh tests/performance/test_query_latency.py --durations=10
+```
+
+JUnit properties record fixture build time, graph-block count, worker budget,
+worker wall time and both individual query durations. With `--junitxml`, use
+`-o junit_family=legacy` when consuming those custom properties.
+
+To add a regression, extend `SCENARIOS` and `_query()` in
+`tests/performance/query_workload.py`, derive the expected answer from the fixture
+dimensions, and retain the shared setup and aggregate time budget. Single-axis
+scenario rows all run in `good-enough`; model/full-experiment/nested scenarios are
+also mandatory profile pins. Larger fixture families and extensive matrices must
+remain separately opt-in rather than silently growing the routine gate. Re-measure
+the **complete** `good-enough` command before pushing a change to these budgets.
+
+The fixture worker supports a test-only `--legacy` sensitivity probe that disables
+optimized count entry points in that disposable subprocess. This is not enabled
+by normal tests and changes no production settings. It can verify that a canary
+actually catches the historical fallback rather than only timing a tiny toy case.
+
+#### Measured routine gate with latency canaries
+
+The complete CPU `good-enough` command took **757.90 seconds (12m38s)** on the
+Linux/Python 3.12.13 `big_env` development host, including collection and both
+interpreter phases. It passed **4,652 tests**, with **29 skips**:
+
+| Phase | Result | Pytest duration |
+|---|---|---:|
+| Process-sensitive representatives | 265 passed | 45.75 s |
+| Ordinary representatives, including all latency cases | 4,387 passed; 29 skipped | 706.04 s |
+| Whole runner, including startup and collection | 4,652 passed; 29 skipped | **757.90 s wall** |
+
+The shared performance fixture took **61.85 seconds of setup** in that run.
+Its census was 442 graph blocks, 2,068 discovery contributions and 34,778 facets.
+Focused query workers took approximately 0.6–3.3 seconds, including both query
+evaluations and fresh-process startup. Deliberately disabling the optimized
+entry points made the model, experiment and nested-model probes each exceed
+their 8-second deadline; each disposable worker was killed and reaped. Thus the
+canaries detect those historical fallbacks on this fixture. These are local
+measurements, not a claim about every machine or an empty OS filesystem cache.
+
+The wall measurement used:
+
+```bash
+/usr/bin/time -p ./tests.sh good-enough --ignore tests/old --ignore tests/dev \
+  -x tests --durations=12
+```
+
+### Historical local speed verification (2026-10-25)
 
 The revised selection completed in **1,087.72 seconds (18m08s) wall time** on
 Linux with Python 3.12.13 in `big_env`, using `CUDA_VISIBLE_DEVICES=""` and
@@ -234,7 +331,7 @@ preserved. The selection/workflow guards passed all 68 focused checks before the
 first timing run; the complete final run includes those checks.
 
 The following is historical evidence for an older selection, not the current
-10–20 minute target or a runtime cutoff. Before Dataset/JAX integration grew, a
+15-minute limit or a runtime cutoff. Before Dataset/JAX integration grew, a
 reference selection measured **445.03 seconds (7m25s) wall time** on Linux with
 Python 3.12.13 in `big_env`, with **3,167 passed and 22 skipped**:
 

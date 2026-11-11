@@ -20,6 +20,7 @@
     "multi_framework": "heavy",
     "package": "medium",
     "paths": "smoke",
+    "performance": "medium",
     "qualification": "heavy",
     "ray": "heavy",
     "records": "medium",

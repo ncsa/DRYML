@@ -1,7 +1,7 @@
 {
   "profiles": {
     "good-enough": {
-      "description": "10–20 minute local feedback target: broad unit/component coverage and small named integrations; detailed native, process, concurrency, fault-window, and persistence products remain exhaustive.",
+      "description": "At most 15 minutes complete local wall time: broad unit/component coverage, bounded query performance canaries and small named integrations; detailed native, process, concurrency, fault-window, and persistence products remain exhaustive.",
       "excluded_categories": {
         "package": "Artifact builds and installed-package checks remain available through ./tests.sh package and exhaustive modes."
       },
@@ -901,6 +901,10 @@
       "exhaustive_functions": {},
       "exhaustive_paths": {},
       "must_run": {
+        "tests/performance/test_query_latency.py::test_query_canary_budgets_remain_bounded": "Keep shared fixture and aggregate query deadline budgets bounded as scenarios grow.",
+        "tests/performance/test_query_latency.py::test_notebook_queries_finish_within_budget[model_count]": "Pin fresh-process direct model counting with a hard latency deadline.",
+        "tests/performance/test_query_latency.py::test_notebook_queries_finish_within_budget[experiment_count]": "Pin fixed dataset state and quoted artifact selection with a hard latency deadline.",
+        "tests/performance/test_query_latency.py::test_notebook_queries_finish_within_budget[nested_model_count]": "Pin typed occurrence multiplicity and shared ancestor traversal with a hard latency deadline.",
         "tests/managed/test_result_codec.py::test_related_metadata_roots_share_occurrences_and_recompose_exactly": "Pin result-wide metadata alias preservation, independent equal occurrences, retained construction and exact recomposition.",
         "tests/core/test_repo_query_refresh.py::test_u2_same_producer_operands_preserve_external_scope_bindings[True-False-union-True]": "Pin completed independent requests from one shared base so sibling scopes cannot repeat maintenance.",
         "tests/core/test_repo_query_refresh.py::test_u2_same_producer_operands_preserve_external_scope_bindings[True-True-intersection-True]": "Pin the shared-base completed intersection in reversed order alongside marginal pending and separate-base coverage.",
