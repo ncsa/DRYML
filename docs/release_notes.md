@@ -1,5 +1,12 @@
 # Release Notes
 
+## Unreleased
+
+- Support class-agnostic Python object values and list/tuple batches through
+  explicit object/Python-layout TensorSpecs, selected Methods, and ordinary or
+  prepared Dataset pipelines. Keep object contents opaque while validating
+  surrounding structure and batch length; preserve dense NumPy object arrays.
+
 ## 0.3.0b4 (unreleased)
 
 - Improve shared-Store training, checkpoint publication, history queries, and

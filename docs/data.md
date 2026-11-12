@@ -89,6 +89,33 @@ one epoch. Opaque generator factories receive no new replay or seed requirement.
 A completed `CachedDataset` instead persists one selected realization: repeating
 that cache replays its stored values and does not advance the source's epoch seed.
 
+### Opaque Python Elements
+
+`GeneratorDataset` can declare raw Python values without describing their class
+or content:
+
+```python
+from dryml.core import TensorSpec
+from dryml.data import GeneratorDataset, Batch
+
+objects = GeneratorDataset(make_meshes, spec=TensorSpec("object", layout="python"))
+batches = Batch(objects, 32)
+```
+
+Here `make_meshes` is the user's factory. No factory runs during declaration or
+planning. Each opaque source yield counts as one example, even when the yielded
+object itself is a list or dict. `Batch` keeps the original references in an
+outer Python list, and `Unbatch` splits only that declared outer batch. A source
+already yielding list/tuple batches declares `batch=Dynamic` or a fixed batch
+size on the same object spec. Mixed object/tensor spec trees preserve their
+declared structure and collate/split each leaf by its own spec.
+
+Use `Map(objects, conversion_method)` to produce fixed-shape numerical tensors;
+the user-owned Method interprets each object's content and declares its numerical
+output spec. Known-spec Method validation and ordinary/prepared Dataset cursors
+do not inspect opaque values' classes, attributes, or array representations.
+Object declarations do not choose a serialization codec for raw object content.
+
 ### Prepared Stream Graphs
 
 `dataset.method_graph()` returns an inert `MethodGraph` view for a Dataset

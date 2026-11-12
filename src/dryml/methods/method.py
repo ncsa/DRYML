@@ -34,6 +34,7 @@ from .signature import (
     spec_from_runtime_node,
     spec_node,
     spec_nodes,
+    _python_object_inputs,
 )
 from .traits import METHOD_TRAITS_KEY, Traits
 
@@ -636,8 +637,8 @@ class Method(Object):
         input_nodes, required_backend, required_batch = self._selection_constraints(
             input_spec, additional_input_specs, backend, batch_mode
         )
-        del input_nodes
-        return self._compatible(required_backend, required_batch)
+        return self._compatible(required_backend, required_batch,
+                                python_objects=_python_object_inputs(input_nodes))
 
     def find_implementation(
         self,
@@ -659,6 +660,11 @@ class Method(Object):
             output_spec: Optional normalized raw-result constraint retained by the
                 returned callable. It validates after target execution but before
                 a raw-result callback or successful return.
+
+        Object/Python-layout leaves are content-agnostic. Object-only input trees
+        select generic implementations without backend discovery; numeric fields
+        in mixed trees retain their own backend requirements. Selected validation
+        checks opaque batch lengths but never inspects the elements' contents.
 
         Returns:
             One callable carrier retaining its raw authored target and traits.
@@ -705,15 +711,18 @@ class Method(Object):
             output_node = None if output_spec is None else spec_node(output_spec)
         except TypeError as error:
             raise ImplementationSelectionError("conflict") from error
-        direct_candidates = self._compatible(required_backend, required_batch)
+        python_objects = _python_object_inputs(input_nodes)
+        direct_candidates = self._compatible(required_backend, required_batch, python_objects=python_objects)
         input_nodes = tuple(complete_backend_constraint(node, required_backend) for node in input_nodes)
         if input_nodes:
             from .signature import spec_from_node
 
             input_spec = spec_from_node(input_nodes[0])
         if direct_candidates:
-            implementation = self._select(required_backend, required_batch)
+            implementation = self._select(required_backend, required_batch, python_objects=python_objects)
         else:
+            if python_objects:
+                raise ImplementationSelectionError("no_candidate")
             implementation = self._select_converted(
                 input_spec,
                 additional_input_specs,
@@ -807,6 +816,8 @@ class Method(Object):
             raise ImplementationSelectionError("conflict") from error
         if required_backend is not None and spec_backend is not None and required_backend != spec_backend:
             raise ImplementationSelectionError("conflict")
+        if required_backend is not None and _python_object_inputs(input_nodes):
+            raise ImplementationSelectionError("conflict")
         if required_batch is not None and spec_batch is not None and required_batch != spec_batch:
             raise ImplementationSelectionError("conflict")
         selected_backend = required_backend or spec_backend
@@ -827,6 +838,7 @@ class Method(Object):
         self,
         backend: Backend | None,
         batch_mode: BatchMode | None,
+        *, python_objects: bool = False,
     ) -> tuple[MethodImplementation, ...]:
         """Return ordered catalog alternatives whose supplied traits do not conflict."""
 
@@ -834,13 +846,14 @@ class Method(Object):
             candidate
             for candidate in self.implementations()
             if (candidate.traits.backend is None or backend is None or candidate.traits.backend == backend)
+            and (not python_objects or candidate.traits.backend is None)
             and (candidate.traits.batch_mode is None or batch_mode is None or candidate.traits.batch_mode == batch_mode)
         )
 
-    def _select(self, backend: Backend | None, batch_mode: BatchMode | None) -> MethodImplementation:
+    def _select(self, backend: Backend | None, batch_mode: BatchMode | None, *, python_objects=False) -> MethodImplementation:
         """Choose one direct-safe candidate or raise a typed bounded diagnostic."""
 
-        candidates = self._compatible(backend, batch_mode)
+        candidates = self._compatible(backend, batch_mode, python_objects=python_objects)
         if not candidates:
             raise ImplementationSelectionError("no_candidate")
         unknown = tuple(

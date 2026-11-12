@@ -165,6 +165,33 @@ invoker; retained Map, Fold, and group execution uses it throughout the invocati
 Calling a selected carrier directly remains supported and prepares a fresh
 invocation, without a second global or carrier compilation cache.
 
+## Opaque Object Inputs And Outputs
+
+`TensorSpec("object", layout="python")` describes one arbitrary Python value,
+without class registration or content inspection. Use `.with_batch(Dynamic)` or
+a fixed batch size for a list/tuple of opaque values. Known-spec preparation
+(`method.learn(object_spec)`) and selected input/raw-result validation preserve
+the values by reference. An opaque container is one leaf; its dict/list contents
+are not recursively normalized, hashed, coerced to arrays, or retained in a cache.
+Only the explicit outer batch length and declared surrounding tree structure are
+validated. Dynamic batches accept different lengths, including a short final
+batch; Dataset example-count contracts still reject empty batches.
+
+An object-only input has no tensor backend, rather than an unknown one: selection
+admits generic implementations and rejects tensor-specific-only catalogs without
+opening a source to discover a backend. In mixed object/tensor trees, only tensor
+fields contribute backend facts. Completing or discovering those fields never
+assigns a backend to an opaque field or inspects its content. Ordinary first-call
+learning without a declared spec retains its tensor-like inference contract;
+declare opaque boundaries explicitly for preparation.
+
+A mesh-to-tensor Method can therefore accept an opaque input and infer, for
+example, `TensorSpec("float32", shape=(256, 8), backend="numpy")`. Its Python body
+owns the conversion algorithm. Implementation backend traits describe input
+requirements; returning a NumPy tensor does not require a NumPy input trait.
+Dense NumPy object-array inputs continue to use their normal NumPy backend and
+dense tensor shape metadata.
+
 ## Accumulators
 
 `Accumulator[ObservationT, StateT]` is an abstract two-input Method for one

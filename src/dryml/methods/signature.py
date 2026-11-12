@@ -10,7 +10,7 @@ from typing import Literal
 import numpy as np
 
 from dryml.core.backend import Backend, backend_testers
-from dryml.core.tensor_spec import BatchMode, Dynamic, SpecTree, TensorSpec, is_spec_tree
+from dryml.core.tensor_spec import BatchMode, Dynamic, SpecTree, TensorSpec, is_spec_tree, iter_specs, _python_object_batch_size
 
 from .errors import MethodError
 
@@ -206,12 +206,64 @@ def runtime_node_for_constraint(value: object, constraint: MethodCallNode) -> Me
 
     A retained batched TensorSpec makes the first physical runtime axis observable
     without guessing from a dense value during ordinary eager selection.
+    Python object leaves use only the declared outer batch boundary, retaining no
+    content, class, shape attributes or array-conversion evidence. Trees are
+    traversed by their spec so object-valued containers remain opaque leaves.
 
     Raises:
         TypeError: If ``value`` cannot be normalized by the supported adapters.
     """
 
-    return _apply_retained_batch(runtime_node(value), constraint)
+    if constraint.kind == "tensor":
+        expected = constraint.value
+        if expected.is_python_object:
+            size = _python_object_batch_size(value) if expected.batched else None
+            observed = replace(expected, shape=(), batch=size)
+            return MethodCallNode("tensor", observed)
+        return _apply_retained_batch(runtime_node(value), constraint)
+    if constraint.kind == "mapping" and isinstance(value, Mapping):
+        expected = dict(constraint.value)
+        if not all(isinstance(key, (str, int)) for key in value):
+            raise TypeError("Method mapping keys must be str or int.")
+        return MethodCallNode("mapping", tuple(
+            (key, runtime_node_for_constraint(item, expected[key]) if key in expected else runtime_node(item))
+            for key, item in value.items()))
+    if constraint.kind in {"tuple", "list"} and isinstance(value, (tuple, list)):
+        children = constraint.value
+        return MethodCallNode("tuple" if isinstance(value, tuple) else "list", tuple(
+            runtime_node_for_constraint(item, children[index]) if index < len(children) else runtime_node(item)
+            for index, item in enumerate(value)))
+    return runtime_node(value)
+
+
+def _python_object_inputs(nodes) -> bool:
+    """Report a nonempty first-input tree whose backend is inapplicable, not unknown."""
+    leaves = tuple(_tensor_leaves(nodes[0])) if nodes else ()
+    return bool(leaves) and all(spec.is_python_object for spec in leaves)
+
+
+def _runtime_backends_for_spec(value, spec):
+    """Discover tensor backends without traversing explicitly opaque Python leaves."""
+    from dryml.core.backend import discover_backends
+    if not any(leaf.is_python_object for leaf in iter_specs(spec)):
+        return discover_backends(value, activate_native=True)
+
+    def tensor_values(value, spec):
+        if isinstance(spec, TensorSpec):
+            if not spec.is_python_object:
+                yield value
+        elif isinstance(spec, dict) and isinstance(value, Mapping):
+            for key, child in spec.items():
+                if key in value:
+                    yield from tensor_values(value[key], child)
+        elif isinstance(spec, (tuple, list)) and isinstance(value, (tuple, list)):
+            for item, child in zip(value, spec):
+                yield from tensor_values(item, child)
+        else:
+            raise TypeError("Runtime input structure differs from its declared spec.")
+
+    tensors = tuple(tensor_values(value, spec))
+    return discover_backends(*tensors, activate_native=True) if tensors else set()
 
 
 def complete_backend_constraint(
@@ -238,7 +290,7 @@ def complete_backend_constraint(
         return constraint
     if constraint.kind == "tensor":
         spec = constraint.value  # type: ignore[assignment]
-        if spec.backend is None:
+        if spec.backend is None and not spec.is_python_object:
             spec = replace(spec, backend=backend)
         return MethodCallNode("tensor", spec)
     if constraint.kind == "mapping":

@@ -8,9 +8,9 @@ from numbers import Integral
 from typing import Generic, TypeVar
 
 from dryml.core import Object
-from dryml.core.backend import discover_backends
 from dryml.core.cardinality import Cardinality
-from dryml.core.tensor_spec import Dynamic, SpecTree, TensorSpec
+from dryml.core.tensor_spec import Dynamic, SpecTree, TensorSpec, _python_object_batch_size
+from dryml.methods.signature import _runtime_backends_for_spec
 from dryml.methods import ImplementationSelectionError
 from dryml.methods.stream import DatasetExhaustedError, _CursorLifecycle
 
@@ -131,6 +131,8 @@ class Dataset(Object, Generic[T]):
     Subclasses must implement :meth:`__iter__`; cardinality remains optional.
     ``spec`` describes one yielded element when known, and ``peek`` obtains one
     value from a fresh iterator without changing persistent dataset state.
+    Object/Python-layout leaves declare opaque values without class or content
+    inspection; only explicit outer list/tuple batch lengths are countable.
     """
 
     def __init__(self, spec: SpecTree | None = None):
@@ -395,7 +397,8 @@ class Dataset(Object, Generic[T]):
             if isinstance(spec, TensorSpec):
                 if not spec.batched:
                     return [None]
-                observed = _batch_length(runtime, path)
+                observed = (_python_object_batch_size(runtime) if spec.is_python_object
+                            else _batch_length(runtime, path))
                 if observed == 0:
                     raise ValueError(f"Batched value at {path} has zero examples.")
                 if spec.batch is not Dynamic and observed != spec.batch:
@@ -473,7 +476,7 @@ class _MapCursor(DatasetCursor):
             except StopIteration:
                 self._resolved = True
                 return
-            backends = self._call(discover_backends, first, activate_native=True)
+            backends = self._call(_runtime_backends_for_spec, first, self._dataset.src.spec)
             if len(backends) != 1:
                 if len(backends) > 1:
                     raise ImplementationSelectionError("conflict")

@@ -753,9 +753,9 @@ class _MapIterator(Iterator[Any]):
             except StopIteration:
                 self.resolved = True
                 return
-            from dryml.core.backend import discover_backends
+            from .signature import _runtime_backends_for_spec
 
-            backends = self.cursor._call(discover_backends, item, activate_native=True)
+            backends = self.cursor._call(_runtime_backends_for_spec, item, self.input_spec)
             if len(backends) != 1:
                 raise ImplementationSelectionError("conflict" if backends else "unknown_traits", () if backends else ("backend",))
             implementation = self.cursor._call(self.dataset.method.find_implementation,

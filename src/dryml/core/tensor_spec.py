@@ -1,3 +1,5 @@
+"""Immutable tensor and opaque-value specs, batch metadata and spec-tree helpers."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -113,6 +115,12 @@ class TensorSpec:
 
     backend:
         Optional name for the backend used for this tensor
+
+    ``dtype="object", layout="python"`` describes an opaque Python value,
+    without a Python class or content constraint. Its sample shape is ``()`` or
+    unknown and it has no tensor backend or sparse/ragged metadata. An explicit
+    batch contains opaque values in a list or tuple. Dense NumPy object arrays
+    retain their ordinary tensor shape/backend semantics.
     """
     dtype: DType | str | Any
     shape: tuple[DimLike, ...] | list[DimLike] | None = ()
@@ -152,6 +160,23 @@ class TensorSpec:
         if self.backend is not None:
             if not isinstance(self.backend, Backend):
                 object.__setattr__(self, "backend", Backend(self.backend))
+        if self.is_python_object:
+            if self.shape not in ((), None):
+                raise ValueError("Opaque Python object specs do not declare sample axes.")
+            if self.backend is not None:
+                raise ValueError("Opaque Python object specs do not declare a tensor backend.")
+            if any(value is not None for value in (self.ragged_rank, self.row_splits_dtype, self.sparse_format)):
+                raise ValueError("Opaque Python object specs cannot have sparse or ragged metadata.")
+
+    @property
+    def is_python_object(self) -> bool:
+        """Return whether this spec denotes opaque, class-agnostic Python values.
+
+        Only canonical object dtype with Python layout qualifies; dense object
+        arrays remain tensor leaves. This metadata check inspects no runtime
+        value and has no side effects.
+        """
+        return self.dtype.kind == "object" and self.layout is Layout.PYTHON
 
     @property
     def rank(self) -> int | None:
@@ -279,6 +304,13 @@ SpecTree: TypeAlias = (
 )
 
 
+def _python_object_batch_size(value: Any) -> int:
+    """Read only the outer list/tuple length of an explicitly declared object batch."""
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("Opaque Python object batches must be lists or tuples.")
+    return len(value)
+
+
 def is_spec_tree(x: Any) -> bool:
     if isinstance(x, TensorSpec):
         return True
@@ -345,7 +377,27 @@ def batch_from_spec_tree(spec_tree: SpecTree):
 
 
 def fake_from_spec_tree(spec_tree: SpecTree):
+    """Construct a NumPy placeholder tree for supported tensor declarations.
+
+    Args:
+        spec_tree: TensorSpec tree whose ranks and NumPy dtypes are available.
+
+    Returns:
+        The same container structure with zero-filled arrays. Dynamic dimensions
+        become one; unbatched leaves keep the existing leading singleton sample
+        convention.
+
+    Raises:
+        ValueError: If a rank is unknown or an opaque Python object would need
+            invented content.
+        TypeError: If a declared dtype has no NumPy representation.
+
+    Side Effects:
+        Allocates NumPy arrays; never instantiates arbitrary Python object types.
+    """
     def leaf_sample(spec: TensorSpec):
+        if spec.is_python_object:
+            raise ValueError("Cannot synthesize sample content for an opaque Python object spec.")
         if spec.shape is None:
             raise ValueError("Cannot create a fake sample from an unknown-rank TensorSpec.")
         sample_shape = tuple(1 if dim is Dynamic else int(dim) for dim in spec.shape)

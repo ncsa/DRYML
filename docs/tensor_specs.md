@@ -46,6 +46,49 @@ DRYML normalizes dtype values through its core dtype system. Users can usually p
 
 The normalized dtype is stored on `TensorSpec.dtype`.
 
+## Opaque Python Values
+
+Use the canonical dtype name `"object"` with `layout="python"` to declare an
+arbitrary Python value. DRYML records no Python class, fields, geometry, array
+representation, or content fingerprint:
+
+```python
+from dryml.core import TensorSpec
+from dryml.core.tensor_spec import Dynamic
+
+object_spec = TensorSpec("object", layout="python")
+object_batch_spec = object_spec.with_batch(Dynamic)
+assert object_spec.is_python_object
+```
+
+An unbatched leaf accepts any value unchanged, including `None`, a mesh, a dict,
+a list, or a tensor. A batched leaf accepts a list or tuple of arbitrary values;
+only its outer length is validated against fixed or `Dynamic` batch metadata.
+It does not require homogeneous Python classes or inspect the items. A list
+inside an unbatched object leaf is one opaque value, not a structural list.
+Outer spec-tree dict/tuple/list declarations still define ordinary structure.
+
+Opaque sample shape is `()` (or unknown rank), and there is no tensor backend or
+sparse/ragged metadata. `Batch` produces lists of the original references;
+`Unbatch` yields those same references. No array coercion or optional tensor
+framework is needed. Synthetic samples cannot be generated from an opaque spec.
+
+For a NumPy object array, use the existing dense layout and NumPy backend:
+
+```python
+numpy_object_batch = TensorSpec("object", shape=(), batch=Dynamic, backend="numpy")
+```
+
+Here the outer array supplies a tensor batch axis, while its entries contain
+arbitrary Python references. `"numpy"` is a backend, not a layout. Canonical
+object dtype maps back to `np.object_` through `DType.np()`. Numerical reductions
+and implicit cross-framework tensor handoffs still require supported numerical
+dtypes.
+
+Supply an opaque declaration explicitly to `GeneratorDataset` or known-spec
+Method preparation. The conversion Method owns interpretation of object content
+and reports its output with an ordinary fixed-shape numerical `TensorSpec`.
+
 ## Shape And Rank
 
 Useful properties:
