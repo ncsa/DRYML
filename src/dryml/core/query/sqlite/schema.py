@@ -2,7 +2,8 @@
 
 Version inspection never decodes Store or index rows. Valid foreign ownership
 refuses maintenance; known older owned formats can be rebuilt from authority.
-Schema 11 adds local discovery postings and portable occurrence locators.
+Schema 12 adds certified primitive query graphs, exact source-byte witnesses and
+nested value postings. Older sidecars require metadata-only derived recovery.
 """
 
 from __future__ import annotations
@@ -19,18 +20,23 @@ from ..model import CANONICAL_QUERY_SEMANTICS_VERSION, FINGERPRINT_SCHEMA_VERSIO
 
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
-SQLITE_QUERY_INDEX_SCHEMA_VERSION = 11
-STORE_COVERAGE_VERSION = 3
+SQLITE_QUERY_INDEX_SCHEMA_VERSION = 12
+STORE_COVERAGE_VERSION = 4
 # Unimplemented owners are explicit capabilities, never certified empty relations.
 STORE_PROJECTION_FAMILIES = (
     "record", "recipe_root", "saved_root", "declaration", "creation",
     "manifest", "availability", "node", "edge", "facet", "name",
     "requested_metadata", "retention", "lifecycle", "discovery",
-    "discovery_feature", "discovery_link",
+    "discovery_feature", "discovery_link", "record_bytes", "query_graph",
 )
 STORE_UNAVAILABLE_FAMILIES = frozenset({"lifecycle"})
 IndexCompatibilityDecision = Literal["compatible", "rebuild", "future-unsupported", "foreign-owned"]
 """Metadata disposition; foreign-owned destinations must never be repurposed."""
+
+CLASS_FACET_SUFFIX = ':[["field","cls"]]'
+CLASS_SEEK_DDL = """CREATE INDEX IF NOT EXISTS store_facet_class ON store_projection_rows(
+    json_extract(CAST(payload AS TEXT),'$.value'), source, row_key)
+    WHERE family='facet' AND substr(row_key,instr(row_key,':['))=':[["field","cls"]]'"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +104,7 @@ DDL = (
     """CREATE INDEX store_discovery_child ON store_projection_rows(
         family, json_extract(CAST(payload AS TEXT), '$.child'),
         json_extract(CAST(payload AS TEXT), '$.parent')) WHERE family='discovery_link'""",
+    CLASS_SEEK_DDL,
     """
     CREATE TABLE store_projection_coverage (
         family TEXT PRIMARY KEY,

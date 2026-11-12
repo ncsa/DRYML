@@ -365,10 +365,11 @@ def test_selected_combinations_and_replacement_tokens_do_not_hide_conflicts(tmp_
         capture.capture_stores((first, third))
     second.publish_node(conflict)
     capture.active = True
-    with pytest.raises(QueryError, match="changed"):
+    with pytest.raises(source_module._SourceCutChanged):
         capture.capture_store(second, metadata_scopes=frozenset(("object", "lineage")))
+    capture.discard_store_cuts()
     with pytest.raises(QueryError, match="authority conflicts"):
-        SourceCapture().capture_stores((first, second))
+        capture.capture_stores((first, second))
 
 
 def test_repo_knowledge_reuse_separates_cache_tiers_and_retained_lookup(tmp_path):

@@ -47,8 +47,11 @@ The no-argument and option-first forms also select `good-enough`. This routine
 gate runs smoke and medium tests without coverage, excludes package and heavy
 tests, and deliberately uses the checked-in representative policy for selected
 integration functions and parameter products.
-Target 10–20 minutes locally. Detailed process/platform, concurrency, native
-backend, fault-window, and repeated persistence products belong in explicit
+Keep complete local runner wall time at most 15 minutes, including both phases,
+collection and fixture setup. Query performance canaries live in
+`tests/performance/`; share their bounded Store setup and retain explicit hard
+worker deadlines when extending their scenario registry. Detailed process/platform,
+concurrency, native backend, fault-window, and repeated persistence products belong in explicit
 exhaustive coverage; keep small routine representatives. Measure the real local
 `good-enough` wall time before pushing test-selection changes.
 

@@ -1,7 +1,7 @@
 {
   "profiles": {
     "good-enough": {
-      "description": "10–20 minute local feedback target: broad unit/component coverage and small named integrations; detailed native, process, concurrency, fault-window, and persistence products remain exhaustive.",
+      "description": "At most 15 minutes complete local wall time: broad unit/component coverage, bounded query performance canaries and small named integrations; detailed native, process, concurrency, fault-window, and persistence products remain exhaustive.",
       "excluded_categories": {
         "package": "Artifact builds and installed-package checks remain available through ./tests.sh package and exhaustive modes."
       },
@@ -508,7 +508,7 @@
              "test_sidecar_policy_and_derived_only_recovery",
              "test_foreign_sidecar_query_is_refused_intact",
              "test_future_sidecar_is_refused_intact",
-            "test_metadata_rebuild_keeps_overlapping_dirty_token_without_payload_access",
+            "test_metadata_rebuild_recaptures_overlapping_writer_without_payload_access",
             "test_incremental_v3_publication_does_not_rescan_historical_projection_rows",
              "test_clean_incremental_save_and_metadata_do_not_inventory_history",
              "test_indexed_admissions_share_replicas_and_do_not_charge_ordering_lookahead",
@@ -742,8 +742,15 @@
           ]
         },
         "tests/managed/test_status.py": {
-          "rationale": "U14 retains absent selected authority, metadata-only reclaimed checkpoints, producer/caller identity, targeted requests, explicit legacy refusal and unavailable lifecycle coverage.",
+          "rationale": "Retain public reference inspection, Repo/default control selection, same-identity restart, reclaimed checkpoints, owner-loss and pending authority, plus U14 identity/request and lifecycle coverage boundaries.",
           "functions": [
+            "test_public_reference_status_selects_repo_without_namespace_or_payload_io",
+            "test_public_status_store_selection_matches_invocation_and_never_federates",
+            "test_public_status_complete_history_survives_reclamation_and_matches_live_view",
+            "test_public_status_running_failed_and_interrupted_are_not_completed",
+            "test_public_status_reports_owner_loss_and_propagates_pending_authority",
+            "test_public_status_verifies_full_receiver_evidence_and_resource_types",
+            "test_query_candidate_can_restart_fresh_with_the_same_operation_identity",
             "test_absent_status_read_only_and_selected_domain_specific",
             "test_detached_status_and_replay_admission_after_checkpoint_reclamation",
             "test_external_request_preconditions_and_dead_owner_are_read_only",
@@ -901,6 +908,11 @@
       "exhaustive_functions": {},
       "exhaustive_paths": {},
       "must_run": {
+        "tests/performance/test_query_latency.py::test_notebook_trial_planning_finishes_within_one_minute": "Pin full selection, width refinement, managed completion inspection and retry planning to a one-minute hard worker deadline.",
+        "tests/performance/test_query_latency.py::test_query_canary_budgets_remain_bounded": "Keep shared fixture and aggregate query deadline budgets bounded as scenarios grow.",
+        "tests/performance/test_query_latency.py::test_notebook_queries_finish_within_budget[model_count]": "Pin fresh-process direct model counting with a hard latency deadline.",
+        "tests/performance/test_query_latency.py::test_notebook_queries_finish_within_budget[experiment_count]": "Pin fixed dataset state and quoted artifact selection with a hard latency deadline.",
+        "tests/performance/test_query_latency.py::test_notebook_queries_finish_within_budget[nested_model_count]": "Pin typed occurrence multiplicity and shared ancestor traversal with a hard latency deadline.",
         "tests/managed/test_result_codec.py::test_related_metadata_roots_share_occurrences_and_recompose_exactly": "Pin result-wide metadata alias preservation, independent equal occurrences, retained construction and exact recomposition.",
         "tests/core/test_repo_query_refresh.py::test_u2_same_producer_operands_preserve_external_scope_bindings[True-False-union-True]": "Pin completed independent requests from one shared base so sibling scopes cannot repeat maintenance.",
         "tests/core/test_repo_query_refresh.py::test_u2_same_producer_operands_preserve_external_scope_bindings[True-True-intersection-True]": "Pin the shared-base completed intersection in reversed order alongside marginal pending and separate-base coverage.",

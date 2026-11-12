@@ -12,6 +12,7 @@ _MANAGED_EXPORTS = {
     "ResultReference", "ResultSource", "ManagedResultError",
     "InterruptRequestResult",
     "ManagedConfig",
+    "ManagedControlStore",
     "ManagedContext",
     "ManagedConfigError",
     "ManagedConflictError",
@@ -28,6 +29,7 @@ _MANAGED_EXPORTS = {
     "argument_digest",
     "managed_operation",
     "operation_digest",
+    "status",
 }
 
 

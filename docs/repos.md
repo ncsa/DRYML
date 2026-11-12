@@ -33,9 +33,14 @@ no automatic conversion. The Store-owned APIs currently available are:
   data source. When supplied together, destination/codec/positive codec version are admitted before
   payload IO. Only `source.data_directory` is lent to a codec; framework metadata
   siblings are outside it. Context exit or Store closure expires the source.
-   Detached metadata remains inspectable. A native shared full-key lease spans
-   fresh validation and borrowing, preventing cooperating cleanup until context
-   exit. A read creates no durable retained root.
+    Detached metadata remains inspectable. A native shared full-key lease spans
+    fresh validation and borrowing, preventing cooperating cleanup until context
+    exit. A read creates no durable retained root. Concurrent cut drift permits
+    eight metadata attempts with bounded backoff before payload authentication or
+    caller code. After a coherent metadata read, authentication runs once under
+    the same full-key lease; unrelated Store writes do not restart payload hashing.
+    Exhaustion, invalid metadata, payload corruption and caller failures remain
+    explicit errors. A yielded reader's caller body is never retried.
 - `publish_node(root, kind="recipe"|"saved")` / `read_node(digest, kind=...)`:
   explicit independent metadata publication/read. Saved roots require complete
   facets. Required ObjectId anchors compare canonical projections, so state-pin
@@ -44,7 +49,7 @@ no automatic conversion. The Store-owned APIs currently available are:
   Publishing saved metadata does not automatically publish a recipe root.
 
 Supported mutations are journaled under one Store authority cut and synchronously
-maintain enabled SQLite schema-11/coverage-3 projections before complete success.
+maintain enabled SQLite schema-12/coverage-4 projections before complete success.
 DirStore also supplies physical grants and active-use leases as described below.
 Ordinary Repo saves now use the format-4 Node/state-bucket pipeline described
 below. Node build/load/apply/restore use full-key state readers. Managed lifecycle
@@ -148,6 +153,20 @@ runs, but no authority epoch or SQL write is added. Disabled/memory indexing
 creates no persistent sidecar. Initial/stale-index maintenance is separate setup
 work, admitted before capture.
 
+Independent workers can publish into one Store. Save prior-capture checks,
+recovery probes, retention-owner checks and post-publication key/grant/root
+confirmation validate their exact observed bytes and directories under a short
+fence. They accept a newer Store cut when all those dependencies remain unchanged,
+so unrelated publication does not require a quiet Store-wide window. Changed
+dependencies still retry at most eight times with exponential yielding, outside
+Store writer fences, adding at most 12.7s of backoff per loop. These metadata
+retries never repeat capture/restore hooks, publication or training. Explicit cut
+dependencies, public prepared mutations and query continuation cuts remain strict.
+SQLite completion and selected-state readers retain their own bounded validation
+and retry policies. Corrupt authority, real IO failure and cancellation remain
+explicit; exhaustion preserves publication evidence rather than claiming success
+or rollback. A prior-capture failure occurs before new capture or publication.
+
 Ordinary saves currently require the durable DirStore retained-batch seam.
 ZipStore still supports buffered low-level primitives, but its lack of durable
 owner grants makes ordinary retained save explicitly unsupported **before
@@ -185,6 +204,11 @@ ambiguity constructs fresh. Fresh loads attach only the requested root receipt,
 while reused children preserve any independently established historical receipt.
 Every missing full key is reported before construction or live-node reservation;
 malformed selected capture/declaration metadata remains an explicit authority error.
+Checkpoint selection and load-plan capture/lineage checks freshly revalidate their
+observed metadata bytes under short Store fences. They may accept an independently
+advanced Store epoch when all those dependencies are unchanged. A changed selected
+record still retries bounded metadata preparation or raises its authority/conflict
+error; constructors and restoration hooks are never replayed by this mechanism.
 
 `repo.apply_state(obj, states)` applies only the supplied StateSpec/typed path map,
 preserving unspecified state, identities and sharing. It captures/publishes nothing.
@@ -226,6 +250,15 @@ seam also admits provisional publication for a later lifecycle owner, without
 creating an adopted permanent user-save reason. Managed association policy is
 not implemented by this seam.
 
+Retryable Store-owned publication revalidates its exact read set and transition CAS
+under the writer fence. Independent publications need not restart graph or journal
+preparation merely because the global epoch advanced. Matching dependencies permit
+rebasing onto that current cut, which becomes the persisted journal base; changed
+dependencies still require fresh preparation and never overwrite a winning CAS.
+Reused state-source evidence retains all its underlying metadata witnesses. Public
+prepared-mutation application and exact replay remain strict-cut operations. This
+does not cache authority, change query snapshot semantics, or retry authored work.
+
 `report_stores=True` returns `(saved, StoreReport)`. `RepoSaveError.report`
 preserves partial cross-Store outcomes. Each combined batch publication reports
 Store UUID, authority cut, mutation UUID, index disposition, retention token,
@@ -247,12 +280,12 @@ successful completion. Cancellation retains its original exception identity and
 partial report, including when an earlier independent target already failed;
 remaining targets are unattempted.
 
-An unrelated cooperating writer can invalidate a detached read-back cut after
-the save has published. Save confirmation retries that metadata observation at
-most eight times, without repeating capture, state hooks, or publication. Every
-attempt validates a fresh cut; invalid authority is not retried as contention.
-Exhausted read-back remains an unconfirmed save failure with its partial report,
-and does not advance the live root's receipt.
+After publication, save confirmation may rebase onto a newer Store cut only when
+every observed key, grant, owner, root and declaration dependency still matches.
+A changed dependency retries only that metadata observation at most eight times,
+without repeating capture, state hooks or publication. Invalid authority is not
+retried as contention. Exhausted read-back remains an unconfirmed save failure
+with its partial report, and does not advance the live root's receipt.
 
 Repair a failed index with `store.open_query_index().maintain_store()`. For an
 authority-partial save, reconnect the exact Store and call
@@ -369,6 +402,9 @@ an index. Provisional and adopted grants protect equally.
 - `protect(token, connected_stores)` may incrementally protect prepared targets.
   `adopt(token, connected_stores)` requires every named target and grant. Both
   serialize with owner dispositions; neither establishes a managed association.
+  Adoption retries only cut-invalidated target grant metadata, up to eight
+  attempts under shared full-key leases, before writing the adopted owner intent.
+  Missing grants, IO errors, cancellation and exhausted contention remain failures.
 - `abandon(token)` is an explicit owner-fenced tombstone for prepared work. It
   permanently rejects later protection/adoption. Death, elapsed time, missing
   index entries and disconnected/unreadable owners never call it automatically.
@@ -429,7 +465,7 @@ the canonical bucket header, manifest and graph history remain. Old retries may
 remove only those retired remnants, never the new public `data/` directory.
 
 All grant, owner-ledger and availability changes enter the Store journal and
-enabled schema-11/coverage-3 index. The `retention` relation exposes per-key grant
+enabled schema-12/coverage-4 index. The `retention` relation exposes per-key grant
 postings. Requested metadata has its own supported closed relation; managed
 lifecycle associations remain explicitly unsupported. Missing reverse indexes may be rebuilt from authoritative records;
 they never authorize removal. Low-level `apply_prepared_mutation()` acquires key

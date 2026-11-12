@@ -1,4 +1,8 @@
-"""Persistent DefLink structure for graph edges and normalized data markers."""
+"""Persistent graph-edge and data carriers with explicit metadata unwrapping.
+
+Unwrapping exposes a retained value without interpreting the edge as permission
+to normalize, select, materialize or load its target.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +29,10 @@ class DefLink:
     encoding, or direct pickle. The separate Node graph v1 codec may record closed
     immutable assertions as soft syntax without finalizing them; live runtime or
     resource targets remain nonportable.
+
+    Use :meth:`unwrap` to inspect the retained target or quoted payload. This is
+    an explicit metadata operation for either Ref or Mat links, not delivery or
+    materialization through a signature boundary.
     """
 
     kind: Any
@@ -50,6 +58,33 @@ class DefLink:
         """
 
         return self._finalized
+
+    def unwrap(self) -> Any:
+        """Return the retained target, removing one quotation carrier if present.
+
+        For a ``QuotedDef`` target, return its exact ``value``. For a
+        ``SelectorSpec`` target, return its exact ``selector``. All other targets
+        are returned unchanged, including Nodes, live assertion values and nested
+        links. Nested quotations and the returned value's contents are not entered.
+
+        Returns:
+            Any: The retained payload itself, without copying. Node facets, alias
+            relationships and selector policies are preserved. The behavior is
+            identical for Ref/Mat edges and finalized/transient links.
+
+        Side Effects:
+            None. This does not mutate or finalize the link, bind expressions,
+            apply defaults, select authority, resolve targets, construct Objects,
+            access a Repo/Store or load private state. A transient live target
+            remains live; unwrapping does not freeze or validate it.
+        """
+        from .quoted import QuotedDef, SelectorSpec
+
+        if isinstance(self.target, QuotedDef):
+            return self.target.value
+        if isinstance(self.target, SelectorSpec):
+            return self.target.selector
+        return self.target
 
     @classmethod
     def finalized(cls, kind: Any, target: Any) -> "DefLink":

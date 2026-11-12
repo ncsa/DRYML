@@ -106,6 +106,41 @@ the existing authenticated Node graph codec; compatible legacy expression data
 retains its v1 family. Plain CDef export rejects Node facets it cannot represent;
 the authenticated Node codec carries them without loss. No Store migration occurs.
 
+### Explicitly Unwrapping Links
+
+Call `link.unwrap()` on the `DefLink` returned by `Ref(...)` or retained in
+constructor/selector metadata. It exposes the retained value without normalization
+or materialization:
+
+| Link target | `unwrap()` returns |
+| --- | --- |
+| Node, Definition or another ordinary target | The same target handle |
+| `QuotedDef` | Its retained `.value`, such as an Artifact recipe |
+| `SelectorSpec` | Its retained `.selector`, including its matching policy |
+
+The method removes the link and **one** quotation carrier, not nested quotations
+or links. Ref and Mat links, including transient assertions, use the same metadata
+operation. Live assertion targets remain live; the method neither copies nor
+finalizes them. Link roles, Node facets and alias relationships remain unchanged.
+It does not bind expressions, apply defaults, resolve symbols, choose a checkpoint,
+construct an Object or access a Repo/Store.
+
+For a quoted Experiment metric recipe retained by a loose selector:
+
+```python
+exp_sel = mdl_experiment.loose_selector()
+art = exp_sel.artifacts["mse"].unwrap()
+art_pattern = art.sub(this=exp_sel.root, traverse_refs=True)
+metrics = repo.query().sel(art_pattern)
+```
+
+`exp_sel.root` supplies the Definition used by semantic paths such as `this.model`;
+the Selector wrapper itself is not a substitution root. `traverse_refs=True`
+reaches active expressions in the recipe's Ref-held source descriptions. This
+produces a query pattern; execution requires binding to an actual checkpoint.
+
+### Template Mapping Parameters
+
 The only nested Template grammar is `Mapping[str, Template]` (or the equivalent
 `Mapping[str, Template[Node]]`, including the retained Definition spelling), optionally unioned with `None`. Activated
 normalization validates string keys, orders entries by `canonical_key_bytes`, and

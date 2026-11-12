@@ -18,7 +18,7 @@ import tempfile
 from uuid import UUID, uuid4
 
 from dryml.core.node import Node, require_saved
-from dryml.core._content_facts import _current_content_facts
+from dryml.core._content_facts import _content_facts_scope, _current_content_facts
 from dryml.core.node_codec import decode_node_graph, encode_node_graph
 from dryml.core.node_prepare import NodePreparation
 from dryml.core.repo import Repo
@@ -633,6 +633,37 @@ class ManagedControlStore:
         self.control_store, self.state_repo = control_store, state_repo
         self._domain = control_store.store_uuid, local_path_key(control_store.base_dir)
 
+    @classmethod
+    def from_repo(cls, repo=None, *, control_store=None):
+        """Borrow a Repo's selected managed authority without initializing it.
+
+        Args:
+            repo: Existing Repo, or None for the current session Repo.
+            control_store: Optional exact DirStore override. Otherwise the active
+                worker control default, then the Repo default Store is selected,
+                exactly as for managed invocation. Other Stores are not searched.
+
+        Returns:
+            A ManagedControlStore borrowing both resources; callers must keep
+            them open. No separate adapter close is required.
+
+        Raises:
+            ManagedStoreError: If the Repo is missing/invalid or the selected
+                control Store is not an exact DirStore.
+
+        Side Effects:
+            No publication, namespace initialization, payload IO, ownership wait,
+            or resource closing. Multi-Store Repos retain their default routing.
+        """
+        from .errors import ManagedStoreError
+        from .storage import resolve_stores
+
+        if repo is not None and not isinstance(repo, Repo):
+            raise ManagedStoreError("invalid_state_repo", "repo must be a Repo or None")
+        stores = resolve_stores(state_repo=repo, control_store=control_store,
+                                require_writable=False)
+        return cls(stores.control_store, stores.state_repo)
+
     @property
     def root(self):
         """Return managed namespace path (str), without creating or reading it."""
@@ -792,12 +823,52 @@ class ManagedControlStore:
         as failed/owner_lost, without writing current. Invalid authority/probe IO
         raises ManagedControlError; saved payload availability is irrelevant.
         """
+        return self._status(operation_id)
+
+    def status_for(self, receiver, member):
+        """Inspect a named operation on detached Node metadata or a live Object.
+
+        Args:
+            receiver: Concrete Node with bound stateful ObjectIds, or a live
+                Object. Saved payloads need not be available.
+            member: Nonempty Python member name, such as "train" or "compute".
+                This is an identity lookup, not a declaration/import check.
+
+        Returns:
+            Immutable ManagedStatus, including state, failure_code, checkpoint
+            and final. An absent record is not_started. Proven owner loss is
+            failed/owner_lost. Multiple checkpoints and replay share one identity.
+
+        Raises:
+            ManagedConfigError: If receiver/member metadata is invalid.
+            ManagedControlError: If control authority is corrupt or pending.
+            ManagedConflictError: If identity evidence conflicts or changes
+                during owner observation.
+
+        Side Effects:
+            Reads fresh selected-domain metadata only, without importing the
+            receiver's class, constructing/loading it, repairing control records,
+            or waiting for workload ownership. This snapshot is not admission or
+            a payload-availability guarantee.
+        """
+        from .runtime import _receiver
+
+        with _content_facts_scope():
+            receiver = _receiver(receiver)
+            return self._status(operation_digest(receiver, member), receiver=receiver,
+                                member=member)
+
+    def _status(self, operation_id, *, receiver=None, member=None):
+        """Project one owner observation, optionally verifying complete identity."""
         from .model import ManagedStatus
         snapshot, lost, stable = self.observe_running_owner(operation_id)
         if not stable:
             raise ManagedConflictError("generation_conflict", "authority changed during owner observation")
         if snapshot is None:
             return ManagedStatus("not_started", operation_id, None, None, 0, None, None, False, None, None)
+        if receiver is not None and (
+                snapshot.member != member or not snapshot.receiver.object_projection_equal(receiver)):
+            raise ManagedConflictError("operation_collision", "operation projection evidence differs")
         return ManagedStatus("failed" if lost else snapshot.state, operation_id, snapshot.run_id,
             snapshot.invocation_id, snapshot.generation, snapshot.checkpoint, snapshot.final,
             snapshot.interrupt_request is not None, "owner_lost" if lost else snapshot.failure_code,

@@ -497,7 +497,7 @@ class _SelectorEncoder:
         if isinstance(value, SelectorSpec):
             return {
                 "kind": "selector-spec",
-                "selector": _SelectorEncoder(self.budget).selector(value.selector, path + ".selector", depth + 1),
+                "selector": _SelectorEncoder(self.budget).selector(value.selector, path + ".selector", depth + 1, interpret_roles=False),
             }
         if isinstance(value, Selector):
             raise _error(path, "unquoted selector is not portable")
@@ -620,7 +620,7 @@ class _SelectorEncoder:
             "matcher": match,
         }
 
-    def selector(self, selector: Any, path: str, depth: int = 0) -> dict[str, Any]:
+    def selector(self, selector: Any, path: str, depth: int = 0, *, interpret_roles: bool = True) -> dict[str, Any]:
         from .generator import GeneratorSelector
         from .definition import ConcreteNode
         from .node import Node
@@ -629,6 +629,13 @@ class _SelectorEncoder:
 
         if isinstance(selector, GeneratorSelector):
             return {"kind": "template-selector", "payload": selector.to_data()}
+        from .generator import _project_selector_definition_roles
+        from .definition import Definition
+        from .selector import Selector
+
+        if interpret_roles and isinstance(selector.root, Definition):
+            selector = Selector(_project_selector_definition_roles(selector.root),
+                                strict=selector.strict, cls_policy=selector.cls_policy)
         try:
             prepared = NodePreparation((selector.root,))
             needs_graph = any(_unordered(row) for row in prepared._rows) or any(

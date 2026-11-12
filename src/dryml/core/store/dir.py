@@ -484,8 +484,8 @@ class DirStore(Store):
                 records.append(record)
             return tuple(records)
 
-    def _metadata_read(self):
-        return authority.detached_read(self)
+    def _metadata_read(self, *, rebase=False):
+        return authority.detached_read(self, rebase=rebase)
 
     def _relative(self, path):
         return os.path.relpath(path, self.base_dir).replace(os.sep, "/")
@@ -501,26 +501,30 @@ class DirStore(Store):
 
     def _prepare_and_apply(self, prepare, *, retry_stale=True, return_receipt=False):
         # The preparation callable is strictly outside the Store writer fence.
-        # A bounded retry admits concurrent siblings without merging stale CAS.
-        for _ in range(8):
+        # Independent epochs can rebase only unchanged byte/directory read sets;
+        # actual dependency conflicts require fresh preparation and exact CAS.
+        for attempt in range(8):
             try:
                 self.recover_authority()
                 index = self.open_query_index()
                 if index is not None and not self.authority_cut().pending:
                     index.maintain_store()
-                with self._metadata_read() as captured:
+                with self._metadata_read(rebase=retry_stale) as captured:
                     changes, scopes, result = prepare()
                     unique = list(dict.fromkeys(change for change in changes if change is not None))
-                    facts = captured.batch(unique, scopes)
+                facts = captured.batch(unique, scopes)
                 if index is not None:
                     self._validate_projection_changes(facts)
-                identity, cut = authority.apply(self, facts, _acknowledge_nonpersistent=index is None)
+                identity, cut = authority.apply(self, facts, _acknowledge_nonpersistent=index is None,
+                                               _rebase_unchanged=retry_stale)
                 if index is not None:
                     self._complete_index_mutation(index, identity, cut)
                 return (identity, self.authority_cut()) if return_receipt else result
             except StoreCutChanged:
                 if not retry_stale:
                     raise
+                if attempt < 7:
+                    authority._pause_cut_retry(attempt)
                 continue
         raise StoreCutChanged("Store changed repeatedly; retry publication explicitly.")
 
@@ -685,16 +689,17 @@ class DirStore(Store):
             changes.append(self._prepared_file(self._node_path("definitions/blocks", batch.block.digest), batch.block))
             origins = {}
             evidence = {source.state.key.cdef_digest: source for source in batch.creation_sources
-                        if source.store is self and source._metadata_owner is self._prepared_fact_owner}
+                         if source.store is self and source._metadata_owner is self._prepared_fact_owner}
             validated = set()
-            current_cut = authority.read_cut(self)
+            captured = authority.detached_owner(self)
             for header, node in batch.creations:
                 source = evidence.get(header.digest)
                 proof = None if source is None else source._metadata_evidence
-                if proof is not None and proof.cut == current_cut:
+                if proof is not None and proof.cut == captured.cut:
                     if id(proof) not in validated:
                         with self.authority_read_fence():
                             proof.validate()
+                        captured.include_witnesses(proof)
                         validated.add(id(proof))
                     old = source.state.creation_cdef
                 else:
@@ -1211,6 +1216,10 @@ class DirStore(Store):
         metadata fence before yielding. A native shared full-key lease spans
         validation and borrowing; cleanup immediately reports in-use. Context/Store
         closure expires the source. No durable retention root is created.
+        Concurrent cut drift permits eight metadata attempts with bounded backoff
+        before payload authentication or caller code. Payload errors and failures
+        after yielding are not retried; the full-key lease protects selected bytes
+        throughout authentication and borrowing.
         """
         self._assert_state_owner_open()
         StateKeyRecord(key)
@@ -1223,20 +1232,31 @@ class DirStore(Store):
 
     @contextmanager
     def _read_state_source(self, key, destination, codec, codec_version):
-        with self._metadata_read():
-            origin = self.read_creation(key.cdef_digest)
-            descriptor = self._read_variant(key, origin)
-            if descriptor is None or not descriptor.available:
-                raise StoreAuthorityError("Selected state is unavailable.")
-            if destination is not None:
-                if descriptor.manifest.codec_version != codec_version:
-                    raise StoreAuthorityError("Selected state codec version is incompatible.")
-                try:
-                    descriptor.state.validate_for(destination, codec=codec)
-                except (TypeError, ValueError) as error:
-                    raise StoreAuthorityError("Selected state codec/configuration is incompatible.") from error
-            self._authenticate_state_data(descriptor.manifest, self.state_data_path(key))
-            source = StateReadSource(self, descriptor.state, descriptor.manifest, self.state_data_path(key))
+        from .authority import StoreCutChanged, _pause_cut_retry
+
+        for attempt in range(8):
+            try:
+                with self._metadata_read():
+                    origin = self.read_creation(key.cdef_digest)
+                    descriptor = self._read_variant(key, origin)
+                    if descriptor is None or not descriptor.available:
+                        raise StoreAuthorityError("Selected state is unavailable.")
+                    if destination is not None:
+                        if descriptor.manifest.codec_version != codec_version:
+                            raise StoreAuthorityError("Selected state codec version is incompatible.")
+                        try:
+                            descriptor.state.validate_for(destination, codec=codec)
+                        except (TypeError, ValueError) as error:
+                            raise StoreAuthorityError("Selected state codec/configuration is incompatible.") from error
+                break
+            except StoreCutChanged:
+                if attempt == 7:
+                    raise
+                _pause_cut_retry(attempt)
+        # The caller's full-key lease protects immutable bytes after metadata
+        # validation; unrelated Store writes need not restart payload hashing.
+        self._authenticate_state_data(descriptor.manifest, self.state_data_path(key))
+        source = StateReadSource(self, descriptor.state, descriptor.manifest, self.state_data_path(key))
         try:
             yield source
         finally:
@@ -2222,14 +2242,18 @@ class DirStore(Store):
         """Read capture after an owning active-source destination preflight.
 
         The private caller has validated every selected StateKey/destination.
-        Decode fresh captured block bytes, compare exact graph evidence with that
-        prepared target, and check every declaration contribution. This reuses the
+        Read fresh captured block bytes, compare exact graph evidence with that
+        prepared target, and check every declaration contribution. An active
+        bounded content scope may reuse pure decoding of identical block/view
+        bytes, but no membership, declaration, capture or cut check is skipped.
+        This reuses the
         destination validation instead of repeating it for an equal saved graph.
         The detached owner/final cut witness remains operation-local. Custom root
         readers retain their public validation path.
         """
         import json
         from ..node_codec import _decode_node_graph_views
+        from .._content_facts import _current_content_facts
         from ..metadata import _node_snapshot_metadata
         from .records import NodeMetadataRecord
         if (getattr(self.read_node, "__func__", None) is not DirStore.read_node
@@ -2247,9 +2271,16 @@ class DirStore(Store):
             if record is None or record.root_kind != "saved" or record.digest != digest:
                 raise StoreAuthorityError("Missing or mismatched selected saved-graph authority.")
             block = self._read_node_block(record.block_digest)
-            packet = block.blocks
-            packet["views"] = [record.view]
-            (root,), owner = _decode_node_graph_views(packet, with_owner=True)
+            def decode():
+                packet = block.blocks
+                packet["views"] = [record.view]
+                return _decode_node_graph_views(packet, with_owner=True)
+            facts = _current_content_facts()
+            if facts is None:
+                (root,), owner = decode()
+            else:
+                (root,), owner = facts.decode(("store-selected-root", record.view_bytes, _decode_node_graph_views),
+                                              block.content, decode)
             if not owner.exact_equal(root, prepared, target):
                 raise StoreAuthorityError("Selected saved graph conflicts with captured authority.")
             nodes = self._publication_identities(root)

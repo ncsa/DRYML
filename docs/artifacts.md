@@ -134,7 +134,17 @@ declared Methods.
 immutable recipe-state and managed completion authority without constructing a
 candidate. It returns one exact completed receipt or `None`; multiple distinct
 completed results for the same recipe raise `ArtifactRecoveryError` rather than
-choosing arbitrarily. `Artifact.load_completed(...)` then restores that one ready
+choosing arbitrarily. Candidate discovery uses buffered terminals:
+concurrent Store changes can restart discovery before any candidates are used,
+with the query's bounded cut-retry policy. Completion records are checked freshly
+after that coherent candidate selection. Retry exhaustion or invalid authority
+remains an error, not a cache miss or a request to rerun computation.
+A recipe pinning its root ObjectId first seeks one matching independently stored
+snapshot, then reads that canonical receiver's one `compute` completion record.
+This avoids hydrating all containing model snapshots just to recover an already
+identified cache. If no independent matching root exists, embedded saved knowledge
+is still searched. Recipes without a root identity retain full ambiguity checking.
+`Artifact.load_completed(...)` then restores that one ready
 result, reusing an exact matching live object by default. `Artifact.recover(
 initial_state_ref, ...)` uses the initial receiver's immutable identity to return
 its completed result when available, or restores the initial receiver so the same
@@ -244,6 +254,12 @@ never saves an unpersisted source or model. A completed metric Fold can restore
 its result from its own StateRef without source/model payloads or managed control
 records; a later rerun still requires the retained input references and fails
 when that authority is unavailable.
+
+Metric evaluation pairs are mappings with exactly the named `prediction` and
+`target` fields. Insertion order is irrelevant: graph transport can reorder
+mapping entries without changing their meaning. Both leaves must still be
+TensorSpecs with declared backends and matching batch modes. Missing/extra fields
+or incompatible leaves fail implementation selection before evaluation.
 
 `ConfusionCounts` uses fixed ordered, unique, homogeneous exact `int` or `str`
 classes. It consumes scalar labels or matching non-empty one-dimensional label

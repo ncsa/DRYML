@@ -45,16 +45,21 @@ def selector_to_data(selector: Any) -> dict[str, object]:
         link roles and retained construction evidence are not discarded.
 
     Raises:
-        TemplateCodecError: If the selector uses a custom runtime provider.
+        TemplateCodecError: If the selector uses a custom runtime provider or
+            role projection would hide an active root under exact quotation.
+
+    Inspects trusted annotations on supplied live classes to retain receiving
+    roles. It does not resolve symbolic targets or invoke constructors/providers.
     """
 
     from .domains import UniformFromSet, UniformIntRange
-    from .generator import GeneratorSelector
+    from .generator import GeneratorSelector, _portable_generator_definition
 
     if not isinstance(selector, GeneratorSelector):
         raise TypeError("selector_to_data requires a GeneratorSelector")
     generator = selector._generator
-    if _needs_node_codec(generator.definition) or any(
+    definition = _portable_generator_definition(generator)
+    if _needs_node_codec(definition) or any(
             isinstance(domain, UniformFromSet) and any(_needs_node_codec(item) for item in domain.values)
             for domain in generator.distributions.values()):
         domains = {}
@@ -66,7 +71,7 @@ def selector_to_data(selector: Any) -> dict[str, object]:
             else:
                 raise TemplateCodecError("template selector has a nonportable domain")
         return _encode_node_value("template-selector", {
-            "definition": generator.definition, "domains": domains,
+            "definition": definition, "domains": domains,
             "traverse_refs": generator._traverse_refs, "max_assignments": selector._max_assignments,
         })
     domains = []
@@ -78,7 +83,7 @@ def selector_to_data(selector: Any) -> dict[str, object]:
             domains.append({"name": name, "kind": "set", "values": [encoder.value(value) for value in domain.values]})
         else:
             raise TemplateCodecError("template selector has a nonportable domain")
-    root = encoder.value(generator.definition)
+    root = encoder.value(definition)
     return encoder.finish(
         "template-selector",
         root,

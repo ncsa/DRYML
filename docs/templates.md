@@ -165,6 +165,56 @@ the original template's loose selector. Use a partial `Definition` to constrain
 only the experiment fields of interest, or
 `Definition(Experiment, SKIP_ARGS)` to select all Experiment definitions.
 
+Loose projection inspects role annotations on supplied live constructor classes
+so Template parameters, including `Experiment.artifacts` mappings, use the same
+quotation shape as their admitted definitions. It preserves positional spelling,
+variadic buckets, sharing and omitted defaults; it does not resolve symbolic class
+targets, construct Objects, bind an Artifact's `this`, or access Stores. A symbolic
+Template recipe can become a local wildcard rather than an impossible unquoted
+constraint. Resolved recipes and explicitly quoted configuration remain exact
+constraints, so use explicit quotation when the recipe itself must be fixed.
+
+Ordinary Definition predicates use the same receiving-role interpretation at
+preparation, without loose wildcard substitution. A width-specific filter can
+therefore be conjoined directly with the template's loose selector:
+
+```python
+universe = repo.query().sel(mdl_experiment.loose_selector())
+width_32 = universe.sel(mdl_experiment.sub(width=32))
+```
+
+This applies to direct `Selector.matches`, compiled/boolean `QueryPredicate`
+values, occurrence targets and memory/SQLite execution. Supplied live constructor
+annotations determine Template quotation, typed Ref edges, and Definition/Node/
+Selector-as-data carriers. Width, fixed capabilities, exact identity/state facets
+and alias partitions remain constraints; quotation contents are neither bound nor
+interpreted as executable predicates. Preparation applies no omitted defaults,
+constructs no Objects, resolves no symbolic targets and reads no private state.
+Portable predicates and Repo routing snapshots retain those interpreted carriers
+before live signatures are discarded; decoding remains inert. A purely symbolic
+class reference does not implicitly import its constructor to discover annotations.
+
+Definition-valued selector attributes preserve Selector interpretation. For
+example, `model_sel = exp_sel.model` is a Selector rooted at the model component,
+carrying `exp_sel.strict` and `exp_sel.cls_policy`; chained access such as
+`exp_sel.model.encoder` works the same way. Use it directly in
+`repo.query().sel(model_sel)`, or retain experiment provenance with
+`repo.query().sel(exp_sel).nested(model_sel).targets()`. A corresponding retained
+exact child is rebased as the child selector's `.exact_root`, supporting
+`.restore()` and `.exact()` after categorical projection. Editing a child selector
+does not rewrite its parent or automatically add the parent's other constraints
+to a standalone child query.
+
+For a raw Definition handle, use `exp_sel.model.root` or
+`exp_sel.parameters["model"]`. Scalars and container-valued attributes still expose
+their supplied values: dictionary/list lookup does not automatically wrap entries.
+Ref and quotation boundaries likewise remain explicit. For a quoted Artifact
+entry, `exp_sel.artifacts["mse"].unwrap()` returns the recipe without the link or
+its quotation carrier. Bind it explicitly with
+`art.sub(this=exp_sel.root, traverse_refs=True)` to form a metric query pattern.
+Unwrapping neither evaluates the recipe nor selects a saved checkpoint; see
+[explicit link unwrapping](signatures.md#explicitly-unwrapping-links).
+
 The retained V3 query contract counts by the selected identity domain. `.cdefs().count()` counts
 distinct definitions, `.state_refs().count()` counts saved snapshots, and
 `.state_refs().object_projection().count()` counts distinct realized object
@@ -178,6 +228,13 @@ witness enumeration rather than process-local handle membership. Conservative pr
 prove membership. An unavailable finite proof raises
 `UnsupportedGeneratorVerificationError`; bounded grid and proof operations
 raise `ParameterizationLimitError` rather than returning partial results.
+
+Portable exact support also snapshots role carriers. If an active Generator root
+would become hidden inside implicit Template quotation, export raises
+`TemplateCodecError` rather than silently changing support. Bind such roots before
+exporting the resulting predicates. `traverse_refs=True` does not enter quotation
+data, so it does not bypass this restriction. Runtime generation and support
+verification remain available for the original unexported Generator.
 
 `QueryPredicate.support(generator, max_assignments=...)` captures this same
 exact proof as an explicit predicate. Compose it with Node patterns, `&`, `|`,

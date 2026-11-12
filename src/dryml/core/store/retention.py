@@ -483,7 +483,20 @@ class RetentionAuthority:
 
         token is a UUID. Malformed/misplaced authority raises StoreAuthorityError;
         disconnected/closed owners fail. Reads no target payload or operation history.
+        A top-level detached read retries unrelated cut drift at most eight times,
+        yielding between attempts. Nested reads leave retries to their outer owner.
         """
+        from .authority import StoreCutChanged, detached_owner, _pause_cut_retry
+        for attempt in range(8):
+            try:
+                return self._read(token)
+            except StoreCutChanged:
+                if attempt == 7 or detached_owner(self.store) is not None:
+                    raise
+                _pause_cut_retry(attempt)
+
+    def _read(self, token):
+        """Read one detached owner record without mutating retention authority."""
         self.store._assert_state_owner_open()
         with self.store._metadata_read():
             value = self.store._read_file(self._path(token), RetentionIntentRecord)
@@ -654,7 +667,12 @@ class RetentionAuthority:
         stores must reconnect every affected target. Adoption is an evidence
         primitive, not a managed control association. Missing/disconnected targets,
         absent grants and abandonment fail closed; no old protection is released.
+        Each target's grant metadata permits eight cut attempts with bounded
+        backoff under shared full-key leases, before changing the owner intent.
+        IO/authority failures and cancellation propagate without retrying mutation.
         """
+        from .authority import StoreCutChanged, _pause_cut_retry
+
         with self._fence(token):
             intent = self.read(token)
             if intent is None or intent.abandoned or intent.disposition not in {"prepared", "adopted"}:
@@ -667,10 +685,17 @@ class RetentionAuthority:
                 if resource.keys:
                     grant = self._grant(intent, resource)
                     with state_leases((target, key) for key in resource.keys):
-                        with target._metadata_read():
-                            for key in resource.keys:
-                                if target._read_file(_grant_path(target, key, grant), RetentionGrantRecord) != grant:
-                                    raise StoreAuthorityError("Required retention target grant is missing.")
+                        for attempt in range(8):
+                            try:
+                                with target._metadata_read():
+                                    for key in resource.keys:
+                                        if target._read_file(_grant_path(target, key, grant), RetentionGrantRecord) != grant:
+                                            raise StoreAuthorityError("Required retention target grant is missing.")
+                                break
+                            except StoreCutChanged:
+                                if attempt == 7:
+                                    raise
+                                _pause_cut_retry(attempt)
             return self._write(replace(intent, disposition="adopted"), intent)
 
     def abandon(self, token):

@@ -915,18 +915,23 @@ class Definition(Node, DefInterface, Mapping):
             A selector that replaces unknown symbolic relationships with local
             wildcards while preserving known Definition structure. Fixed nested
             ConcreteDefinitions and exact reference values remain exact anchors;
-            their parameters and identities are not loosened.
+            their parameters and identities are not loosened. Supplied live
+            constructor annotations project Template/Ref Definition data to its
+            persisted quotation form. Symbolic Template recipes may become local
+            wildcards; already quoted recipes remain exact data.
 
         Raises:
             ParameterizationError: If the Definition cannot be projected.
 
         Side Effects:
-            None. Projection does not construct Objects or access Store authority.
+            Inspects trusted annotations on supplied live classes. Projection does
+            not resolve symbolic class targets, apply defaults, construct Objects
+            or access Store authority.
         """
 
-        from .generator import _loose_selector
+        from .generator import _loose_selector, _project_selector_definition_roles
 
-        selector = _loose_selector(self)
+        selector = _loose_selector(_project_selector_definition_roles(self, loose=True))
         if strict:
             from .selector import Selector
 

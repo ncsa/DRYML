@@ -1,7 +1,68 @@
+"""Lower query predicates to conservative SQLite candidate relations.
+
+Source authority and exact residual matching establish accepted results. These
+prefilters retain occurrence correlation and enforce the caller's scan policy.
+"""
+
 from __future__ import annotations
 
 
-def _store_discovery_relation(query, *, scan_admission=None):
+def _quoted_root_identity_paths(node):
+    """Yield encoded ordered paths and required identity pins at quotation roots.
+
+    The Node codec supplies the same typed value paths as existing edge/facet
+    rows. Only the immediate quoted root is inspected; quotation does not become
+    discovery traversal. Unordered positions are not portable correlation keys.
+    These necessary constraints never replace exact quoted-graph matching.
+    """
+    from ...node_codec import _describe_node
+    from ...node import Node
+    from ...links import DefLink
+    from ...quoted import QuotedDef
+    from ...freeze import FrozenSet
+    from ...template import _template_children
+
+    def has_pin(value):
+        if isinstance(value, QuotedDef):
+            return getattr(value.value, "object_id", None) is not None
+        if isinstance(value, (Node, set, frozenset, FrozenSet)):
+            return False
+        if isinstance(value, DefLink):
+            return has_pin(value.target)
+        return any(has_pin(child) for child in _template_children(value))
+
+    # Most exact recipes contain no quoted identity constraints. Avoid encoding
+    # their arrays and complete constructor metadata just to discover that fact.
+    if not any(has_pin(value) for value in node.parameters.values()):
+        return
+    nodes = []
+
+    def remember(value):
+        nodes.append(value)
+        return len(nodes) - 1
+
+    def walk(value, path=()):
+        if isinstance(value, dict):
+            tag = value.get("tag")
+            if tag in {"set", "frozenset", "leaf", "array", "numpy-scalar"}:
+                return
+            if tag == "quote":
+                target = value["value"]
+                if target.get("tag") == "node":
+                    identity = getattr(nodes[target["slot"]], "object_id", None)
+                    if identity is not None:
+                        yield path + (("field", "value"),), identity
+                return
+            for key, child in value.items():
+                yield from walk(child, path + (("field", key),))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                yield from walk(child, path + (("index", index),))
+
+    yield from walk(_describe_node(node, remember))
+
+
+def _store_discovery_relation(query, *, scan_admission=None, class_seek=False):
     """Compile necessary format-4 predicates with occurrence correlation intact.
 
     Returns (family, where SQL, parameters, required seek index). Prefilters only;
@@ -11,6 +72,9 @@ def _store_discovery_relation(query, *, scan_admission=None):
     scan admission before source inventory or index recovery.
     """
     from ...selector import QueryPredicate, Selector
+    from ...definition import ConcreteDefinition
+    from ...symbol import ImportRef, maybe_symbol_ref
+    from ..._value_json import _value_to_json
     from ...node import Node
     from ..relationships import _local_discovery_tokens, _local_discovery_edges
     from ...store.records import _json_bytes
@@ -46,31 +110,56 @@ def _store_discovery_relation(query, *, scan_admission=None):
     if isinstance(query.source, RetainedRepoLookupSource):
         terms.append(f"json_extract({payload}, '$.stored')=1")
 
-    ctes, arguments, compiled = [], [], {}
+    ctes, arguments, compiled, classes = [], [], {}, {}
+    materialized = ""
+    if class_seek:
+        try:
+            import sqlite3
+            if sqlite3.sqlite_version_info >= (3, 35, 0):
+                materialized = "MATERIALIZED "
+        except ImportError:
+            pass
     def field(alias, name):
         return f"json_extract(CAST({alias}.payload AS TEXT),'$.{name}')"
 
-    def node_relation(value):
-        marker = id(value)
+    def node_relation(value, exact_classes=False):
+        marker = id(value), exact_classes
         if marker in compiled:
             return compiled[marker]
         tokens = list(_local_discovery_tokens(value))
-        children = [(path, role, node_relation(child)) for path, role, child in _local_discovery_edges(value)]
+        children = [(path, role, node_relation(child, exact_classes)) for path, role, child in _local_discovery_edges(value)]
         children = [(path, role, relation) for path, role, relation in children if relation is not None]
-        if not tokens and not children:
+        symbol = maybe_symbol_ref(value.cls, functions=False) if class_seek and exact_classes else None
+        class_relation = None
+        if symbol is not None:
+            from .schema import CLASS_FACET_SUFFIX
+            encoded = _json_bytes({"tag": "leaf", "value": _value_to_json(symbol, grammar=3)}).decode("ascii")
+            if encoded not in classes:
+                name = "dn" + str(len(ctes))
+                base = ("substr(f.source,-71,64) || ':' || substr(f.row_key,1,length(f.row_key)-" + str(len(CLASS_FACET_SUFFIX)) + ")")
+                ctes.append(name + "(node) AS " + materialized + "(SELECT " + base + " || suffix FROM store_projection_rows f INDEXED BY store_facet_class "
+                             "CROSS JOIN (SELECT '' AS suffix UNION ALL SELECT ':creation' UNION ALL SELECT ':object') "
+                             "WHERE f.family='facet' AND substr(f.row_key,instr(f.row_key,':['))='" + CLASS_FACET_SUFFIX + "' AND " +
+                             field("f", "value") + "=json(?))")
+                arguments.append(encoded)
+                classes[encoded] = name
+            class_relation = classes[encoded]
+        if not tokens and not children and class_relation is None:
             compiled[marker] = None
             return None
         name = "dn" + str(len(ctes))
         # Prefer exact facets; then an anchored child over broad local scalars.
         anchor = next((token for token in tokens if token[0] in {"identity", "state"}), None)
-        if anchor is None and not children:
+        if anchor is None and not children and class_relation is None:
             anchor = tokens[0]
         filters, values = [], []
         if anchor is not None:
             body = ("SELECT " + field("f", "node") + " AS node FROM store_projection_rows f INDEXED BY store_discovery_token "
                     "WHERE f.family='discovery_feature' AND " + field("f", "token") + "=?")
             values.append(_json_bytes(anchor).decode("ascii"))
-        else:
+        elif class_relation is not None:
+            body = "SELECT node FROM " + class_relation
+        elif children:
             path, role, relation = children[0]
             body = ("SELECT DISTINCT " + field("e", "parent") + " AS node FROM " + relation +
                     " a CROSS JOIN store_projection_rows e INDEXED BY store_discovery_child WHERE e.family='discovery_link' AND " +
@@ -79,6 +168,10 @@ def _store_discovery_relation(query, *, scan_admission=None):
             if not any(s["kind"] == "set_member" for s in path.to_data()["segments"]):
                 body += " AND " + field("e", "path") + "=json(?)"
                 values.append(_json_bytes(path.to_data()).decode("ascii"))
+        else:
+            body = "SELECT node FROM " + class_relation
+        if class_relation is not None and anchor is not None:
+            filters.append("base.node IN (SELECT node FROM " + class_relation + ")")
         for token in tokens:
             if token == anchor:
                 continue
@@ -87,77 +180,147 @@ def _store_discovery_relation(query, *, scan_admission=None):
                            field("t", "node") + "=base.node)")
             values.append(_json_bytes(token).decode("ascii"))
         for path, role, relation in children:
-            condition = ("EXISTS (SELECT 1 FROM store_projection_rows e INDEXED BY store_discovery_parent WHERE "
-                         "e.family='discovery_link' AND " + field("e", "parent") + "=base.node AND " +
-                         field("e", "role") + "=? AND " + field("e", "child") + " IN (SELECT node FROM " + relation + ")")
+            condition = ("EXISTS (SELECT 1 FROM store_projection_rows e INDEXED BY store_discovery_parent CROSS JOIN " + relation + " candidate WHERE "
+                          "e.family='discovery_link' AND " + field("e", "parent") + "=base.node AND " +
+                          field("e", "role") + "=? AND " + field("e", "child") + "=candidate.node")
             values.append(role)
             if not any(s["kind"] == "set_member" for s in path.to_data()["segments"]):
                 condition += " AND " + field("e", "path") + "=json(?)"
                 values.append(_json_bytes(path.to_data()).decode("ascii"))
             filters.append(condition + ")")
-        ctes.append(name + "(node) AS (SELECT node FROM (" + body + ") base" +
+        ctes.append(name + "(node) AS " + materialized + "(SELECT node FROM (" + body + ") base" +
                     (" WHERE " + " AND ".join(filters) if filters else "") + ")")
         arguments.extend(values)
         compiled[marker] = name
         return name
 
-    def pattern(value):
+    def pattern(value, exact_classes=False):
         if isinstance(value, Selector):
+            exact_classes = value.strict or value.cls_policy == "exact"
             value = value.root
         if isinstance(value, QueryPredicate):
             if value.kind == "and":
-                relations = [pattern(operand) for operand in value.operands]
+                relations = [pattern(operand, exact_classes) for operand in value.operands]
                 relations = [r for r in relations if r is not None]
                 if relations:
                     name = "dn" + str(len(ctes))
                     ctes.append(name + "(node) AS (" + " INTERSECT ".join("SELECT node FROM " + r for r in relations) + ")")
                     return name
             elif value.kind == "or":
-                relations = [pattern(operand) for operand in value.operands]
+                relations = [pattern(operand, exact_classes) for operand in value.operands]
                 if all(r is not None for r in relations):
                     name = "dn" + str(len(ctes))
                     ctes.append(name + "(node) AS (" + " UNION ".join("SELECT node FROM " + r for r in relations) + ")")
                     return name
             elif value.kind == "node":
-                return pattern(value.value)
+                return pattern(value.value, exact_classes)
             return None
         if not isinstance(value, Node):
             return None
-        return node_relation(value)
+        return node_relation(value, exact_classes)
 
     relations = []
     for restriction in query.restrictions:
         if restriction.kind == "sel":
-            relation = pattern(restriction.value)
+            prepared = restriction.prepared
+            relation = pattern(prepared.predicate if prepared is not None else restriction.value,
+                               prepared is not None and (prepared.strict or prepared.class_match == "exact"))
             if relation is not None:
                 relations.append(relation)
+            selected = restriction.value
+            if isinstance(selected, Selector):
+                selected = selected.root
+            if isinstance(selected, QueryPredicate) and selected.kind == "node":
+                selected = selected.value
+            if (relation is None and isinstance(selected, ConcreteDefinition) and kinds
+                    and all(kind in {"object_ref", "state_ref"} for kind in kinds)):
+                block = field("p", "root.block_digest")
+                source = "'definitions/blocks/' || substr(" + block + ",1,2) || '/' || " + block + " || '.record'"
+                locator = field("p", "locator.table") + " || ':' || " + field("p", "locator.slot")
+                symbol = maybe_symbol_ref(selected.cls, functions=False)
+                if isinstance(symbol, ImportRef):
+                    # Existing facet rows bind the exact class to this occurrence.
+                    # Soft class selectors still admit subclasses, so cannot use
+                    # this filter. It reduces decoding, not physical scan policy.
+                    terms.append("EXISTS (SELECT 1 FROM store_projection_rows cls WHERE cls.family='facet' AND "
+                        "cls.source=" + source + " AND "
+                        "cls.row_key=" + locator + " || ':[[\"field\",\"cls\"]]' AND " + field("cls", "value") + "=json(?))")
+                    params.append(_json_bytes({"tag": "leaf", "value": _value_to_json(symbol, grammar=3)}).decode("ascii"))
+                for path, identity in _quoted_root_identity_paths(selected):
+                    terms.append("EXISTS (SELECT 1 FROM store_projection_rows e JOIN store_projection_rows pin ON "
+                        "pin.family='facet' AND pin.source=e.source AND pin.row_key=" + field("e", "table") +
+                        " || ':' || " + field("e", "target") + " || ':[[\"field\",\"identity\"]]' "
+                        "WHERE e.family='edge' AND e.source=" + source + " AND e.row_key=" + locator +
+                        " || ':' || ? AND " + field("e", "role") + "='quote' AND " + field("pin", "value") + "=json(?))")
+                    params.extend((_json_bytes(path).decode("ascii"),
+                        _json_bytes({"tag": "leaf", "value": _value_to_json(identity, grammar=3)}).decode("ascii")))
+        elif restriction.kind == "nested_candidates":
+            prepared, policy = restriction.value
+            relation = pattern(prepared.predicate, prepared.strict or prepared.class_match == "exact")
+            if relation is not None:
+                roles = tuple(role for role, kind in (("materialize", "materialize"), ("ref", "reference"))
+                              if any(item.value == kind for item in policy.kinds))
+                name = "dn" + str(len(ctes))
+                body = "SELECT node FROM " + relation
+                if roles:
+                    body += (" UNION SELECT " + field("e", "parent") + " FROM " + name +
+                             " a CROSS JOIN store_projection_rows e INDEXED BY store_discovery_child "
+                             "WHERE e.family='discovery_link' AND " + field("e", "child") + "=a.node AND " +
+                             field("e", "role") + " IN (" + ",".join("?" for _ in roles) + ")")
+                    arguments.extend(roles)
+                ctes.append(name + "(node) AS (" + body + ")")
+                relations.append(name)
         elif restriction.kind == "object_id":
             from ...definition import Definition
             relations.append(node_relation(Definition().with_identity(restriction.value)))
     if relations:
         relation_sql = " INTERSECT ".join("SELECT node FROM " + relation for relation in relations)
-        terms.append(field("p", "fact") + " IN (WITH " + ",".join(ctes) + " " + relation_sql + ")")
+        terms.append(field("p", "fact") + " IN (WITH RECURSIVE " + ",".join(ctes) + " " + relation_sql + ")")
         params.extend(arguments)
-    elif any(r.kind in {"sel", "object_id", "namespace", "contains"} for r in query.restrictions):
+    elif any(r.kind in {"sel", "object_id", "namespace", "contains", "nested_candidates"} for r in query.restrictions):
         if scan_admission is not None:
             scan_admission()
     return family, " AND ".join(terms) or "1", tuple(params), "store_discovery_fact" if relations else None
 
 
-def _store_discovery_page_sql(plan, *, after=None, page_size):
+def _store_discovery_page_sql(plan, *, after=None, page_size, object_hints=False):
     """Build a bounded keyset page, forcing the selective contribution seek.
 
     SQLite otherwise prefers its ordering index and scans every contribution,
     even when the independently evaluated posting relation is empty.
+    ``object_hints=True`` adds the occurrence's derived identity facet as an
+    optional fourth column. It is only a lookup address; the consumer must prove
+    source membership, declaration contribution and canonical projection itself.
     """
     family, where, params, seek_index = plan
     order = ("p.source,p.row_key" if family == "manifest" else
-             "json_extract(CAST(p.payload AS TEXT),'$.key_kind'),json_extract(CAST(p.payload AS TEXT),'$.digest'),p.source,p.row_key")
+              "json_extract(CAST(p.payload AS TEXT),'$.key_kind'),json_extract(CAST(p.payload AS TEXT),'$.digest'),p.source,p.row_key")
     clause, arguments = ("", ()) if after is None else (
         " AND (" + order + ") > (" + ",".join("?" for _ in after) + ")", after)
     table = "store_projection_rows p" + (" INDEXED BY " + seek_index if seek_index else "")
-    return ("SELECT p.source,p.row_key,p.payload FROM " + table + " WHERE p.family=? AND (" + where + ")" +
+    hint = ""
+    if object_hints:
+        root = "json_extract(CAST(p.payload AS TEXT),'$.root.block_digest')"
+        locator = ("json_extract(CAST(p.payload AS TEXT),'$.locator.table') || ':' || "
+                   "json_extract(CAST(p.payload AS TEXT),'$.locator.slot')")
+        hint = (",(SELECT json_extract(CAST(i.payload AS TEXT),'$.value') FROM store_projection_rows i "
+                "WHERE i.family='facet' AND i.source='definitions/blocks/' || substr(" + root + ",1,2) || '/' || " + root +
+                " || '.record' AND i.row_key=" + locator + " || ':[[\"field\",\"identity\"]]')")
+    return ("SELECT p.source,p.row_key,p.payload" + hint + " FROM " + table + " WHERE p.family=? AND (" + where + ")" +
             clause + " ORDER BY " + order + " LIMIT ?", (family, *params, *arguments, page_size))
+
+def _store_discovery_addresses_sql(plan):
+    """Capture necessary addresses once for an unexposed full root capture.
+
+    Payloads and authority are still read/validated in bounded pages. Ordering by
+    block shares decoding without rerunning recursive SQL for each page. These
+    addresses belong only to the captured index/authority token.
+    """
+    family, where, params, seek = plan
+    table = "store_projection_rows p" + (" INDEXED BY " + seek if seek else "")
+    return ("SELECT p.source,p.row_key FROM " + table + " WHERE p.family=? AND (" + where + ") ORDER BY "
+            "json_extract(CAST(p.payload AS TEXT),'$.root.block_digest'),p.source,p.row_key", (family, *params))
+
 
 import warnings
 from dataclasses import dataclass

@@ -41,14 +41,16 @@ class _NodeStateSources(dict):
 def _node_metadata_evidence(repo, node, owned, sources, prepared, *, source_store=None, source_stores=None, reservation=None):
     """Read selected capture/lineage authority afresh, never retain it in a plan.
 
-    Records are metadata-only and independently cut-revalidated outside writer
-    fences. Exact capture replicas must agree unless a provider was selected;
+    Records are metadata-only and decoded outside writer fences, then every
+    observed byte is freshly revalidated under a short fence. Unchanged read sets
+    may rebase across independent publications. Exact capture replicas must agree
+    unless a provider was selected;
     lineage evidence must agree with that capture and existing live identities.
     Missing object declarations are not invented from a donor LocalState.
-    Unrelated cooperating publications may invalidate a detached cut; retry only
-    this metadata preparation, at most eight times, never constructors or hooks.
+    Changed dependencies retry only this metadata preparation, at most eight
+    attempts, never constructors or hooks.
     """
-    from .store.authority import StoreCutChanged
+    from .store.authority import StoreCutChanged, _pause_cut_retry
     for attempt in range(8):
         try:
             return _read_node_metadata_evidence(repo, node, owned, sources, prepared,
@@ -56,6 +58,7 @@ def _node_metadata_evidence(repo, node, owned, sources, prepared, *, source_stor
         except StoreCutChanged:
             if attempt == 7:
                 raise
+            _pause_cut_retry(attempt)
 
 
 def _read_node_metadata_evidence(repo, node, owned, sources, prepared, *, source_store, source_stores, reservation):
@@ -76,7 +79,7 @@ def _read_node_metadata_evidence(repo, node, owned, sources, prepared, *, source
         provider = (overrides.get(current.state.key) if current.state is not None else None) or source_store
         captures = []
         for store in ((provider,) if provider is not None else stores):
-            with store._metadata_read():
+            with store._metadata_read(rebase=True):
                 selected = store._read_node_capture_for_selection(current, prepared)
                 if selected is not None:
                     captures.append(selected[0].content)
@@ -101,7 +104,7 @@ def _read_node_metadata_evidence(repo, node, owned, sources, prepared, *, source
         if root_fact is not None:
             rows.append((root_fact["creation_status"], root_fact["created_at"]))
         for store in candidates:
-            with store._metadata_read():
+            with store._metadata_read(rebase=True):
                 if not store._holds_node_metadata(current, "lineage"):
                     continue
                 record = store._read_node_metadata(current, "lineage")
@@ -176,13 +179,14 @@ def _selected_state_sources(repo, associations, *, source_store=None, source_sto
                 keys = [key for key, stores in candidates.items() if store in stores and key not in sources]
                 if keys:
                     try:
-                        from .store.authority import StoreCutChanged
+                        from .store.authority import StoreCutChanged, _pause_cut_retry
                         for attempt in range(8):
                             try:
                                 selected_sources = lifetime.enter_context(store.read_states(keys))
                             except StoreCutChanged:
                                 if attempt == 7:
                                     raise
+                                _pause_cut_retry(attempt)
                             else:
                                 sources.update(selected_sources)
                                 break

@@ -135,6 +135,8 @@ def compile_selector_graph(
     if isinstance(selector, (Node, QueryPredicate)):
         from .node_pattern import _PreparedPredicate
         residual = _PreparedPredicate(QueryPredicate(selector), strict=strict, class_match=class_match or "selector")
+        if isinstance(selector, Node):
+            selector = residual.predicate.value
     if isinstance(selector, QueryPredicate) or (residual is not None and _node_has_new_facets(residual.prepared)):
         return SelectorGraph(
             root=0, nodes=(SelectorGraphNode(0, DefinitionPath(), selector, ()),), edges=(),

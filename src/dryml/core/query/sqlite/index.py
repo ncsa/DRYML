@@ -157,7 +157,7 @@ class SQLiteStoreQueryIndex:
     validation preserves the sidecar, and repair succeeds only after activation
     and captured-token acknowledgement. Report-oriented reconcile retains errors.
 
-    With a format-4 owning Store, schema-10 coverage is maintained through
+    With a format-4 owning Store, schema-12 coverage is maintained through
     ``maintain_store`` and read through ``projection_rows``. Legacy Query V3 views
     are refused. Ready refresh uses the current authority certificate; explicit
     rebuild inventories metadata without payload IO. Public Store mutations own
@@ -313,8 +313,25 @@ class SQLiteStoreQueryIndex:
                 state = "corrupt" if _is_sqlite_corrupt_exception(error) else "incompatible"
                 diagnostics = {"error": str(error)}
         return QueryIndexStatus("sqlite", self.source_key, generation, SQLITE_QUERY_INDEX_SCHEMA_VERSION,
-                                {"coverage_contract": STORE_COVERAGE_VERSION}, state,
-                                path=str(self.path), diagnostics=diagnostics)
+                                 {"coverage_contract": STORE_COVERAGE_VERSION}, state,
+                                 path=str(self.path), diagnostics=diagnostics)
+
+    def _has_class_seek(self):
+        """Inspect the optional class access path without maintenance or inventory."""
+        with self._connections._read_lease() as (con, _):
+            return con.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='store_facet_class'").fetchone() is not None
+
+    def _ensure_class_seek(self, *, scan_admission):
+        """Install an optional derived seek under SQLite's atomic writer protocol.
+
+        The scan is admitted before maintenance, runs outside Store fences and
+        touches no authority, coverage rows or generations. Readers of older
+        sidecars can continue without this optional physical optimization.
+        """
+        from .schema import CLASS_SEEK_DDL
+        if not self._has_class_seek():
+            scan_admission()
+            self._run_write_transaction(lambda con: con.execute(CLASS_SEEK_DDL))
 
     def projection_rows(self, family, *, refresh=False):
         """Read one certified format-4 relation as detached correlated byte rows.
@@ -361,8 +378,10 @@ class SQLiteStoreQueryIndex:
         Replays classified journal records without application capture or payload
         IO. A missing/stale/owned incompatible index uses visible staged metadata-
         only rebuild; ``rebuild=True`` requests unconditional replacement. Returns
-        None only after captured work is acknowledged. Later writers cause bounded
-        retry or StoreCutChanged and are never acknowledged by an earlier cut.
+        None only after captured work is acknowledged. Later writers cause up to
+        eight fresh metadata-only attempts, then StoreCutChanged; they are never
+        acknowledged by an earlier cut. Retry never republishes the caller's
+        authoritative mutation or reruns capture, hooks or the managed workload.
         A declined rebuild claim is revalidated against its captured authority
         cut; a claimant's subsequent publication is retryable cut drift, not a
         claim-contention failure for the completed replacement.
@@ -378,6 +397,19 @@ class SQLiteStoreQueryIndex:
         Its refusal propagates before inventory; explicit maintenance without a
         callback retains its ordinary rebuild permission.
         """
+        from ...store.authority import StoreCutChanged, _pause_cut_retry
+
+        for attempt in range(8):
+            try:
+                return self._maintain_store_once(rebuild=rebuild, stats=stats,
+                    quarantine_existing=quarantine_existing, scan_admission=scan_admission)
+            except StoreCutChanged:
+                if attempt == 7:
+                    raise
+                _pause_cut_retry(attempt)
+
+    def _maintain_store_once(self, *, rebuild, stats, quarantine_existing, scan_admission):
+        """Prepare and confirm one fresh projection cut, releasing scopes on drift."""
         from ..authority import capture_store_projection
         from ...store import authority as a
         if type(rebuild) is not bool or type(quarantine_existing) is not bool:

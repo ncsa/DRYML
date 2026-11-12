@@ -123,8 +123,10 @@ class QueryPredicate:
                 local-state queries, including masked boolean branches.
             TypeError: For unsupported graph leaves or unavailable parameter names.
         Side Effects:
-            Pure metadata preparation only. No defaults, target construction,
-            identity allocation, capture or state IO.
+            Inspects trusted receiving-role annotations on supplied live classes.
+            Template/Ref constraints use their persisted carriers without binding
+            defaults, resolving symbolic targets, constructing Objects, allocating
+            identities, capturing state or accessing Stores. Quotations stay exact.
         """
         from .query.node_pattern import _PreparedPredicate
         return _PreparedPredicate(self, domain=domain)
@@ -152,7 +154,10 @@ class QueryPredicate:
         Returns a mapping using the shared Node codec, preserving aliases, roles,
         exact facets, Match leaves and built-in domains. Runtime providers raise
         ParameterizationError; unsupported values raise TypeError/ValueError.
-        Encoding never invokes a provider, resolves targets or accesses a Store.
+        Encoding snapshots supplied live-class receiving roles before discarding
+        signature authority. It never invokes a provider, resolves symbolic
+        targets or accesses a Store. Support export raises TemplateCodecError if
+        implicit quotation would hide active Generator roots; bind those first.
         """
         from .query.node_pattern import _predicate_to_data
         return _predicate_to_data(self)
@@ -179,8 +184,26 @@ class QueryPredicate:
 class Selector:
     """Query interpretation wrapper around an immutable Definition root.
 
-    Supplied semantic parameters are exposed through ``parameters`` and direct
-    non-reserved attributes without changing selector omission semantics.
+    Args:
+        root: Definition, ConcreteDefinition, or live class to describe partially.
+        strict: Matching strictness propagated to child selectors.
+        cls_policy: ``"selector"`` for inherited class matching or ``"exact"``
+            for exact class references, subject to strictness and exact anchors.
+        exact_root: Optional retained ConcreteDefinition used by restore/exact
+            edits. A concrete root supplies its own authority when omitted.
+
+    Definition-valued attributes return child Selectors carrying this wrapper's
+    matching policy and the corresponding retained exact subtree, when available.
+    Other attributes expose their supplied values without entering containers,
+    reference links or quotations. ``parameters`` provides the raw semantic record;
+    navigation never fills omitted defaults or changes the parent selector.
+
+    Raises:
+        TypeError: If the root or retained exact authority has an unsupported type.
+
+    Side Effects:
+        None. Authoring and attribute navigation do not construct Objects, resolve
+        symbolic classes or access Stores. Matching has its own preparation policy.
     """
 
     root: Any
@@ -210,36 +233,81 @@ class Selector:
 
         Returns:
             The partial parameter record supplied to the wrapped Definition.
+            Definition values remain raw handles here, unlike direct attributes
+            which expose those values as child Selectors.
         """
 
         return self.root.parameters
 
     def __getattr__(self, name: str) -> Any:
-        """Delegate non-reserved semantic parameter access to ``root``.
+        """Navigate a retained attribute, preserving Selector interpretation.
 
         Args:
             name: Requested Python attribute name.
 
         Returns:
-            The supplied frozen semantic value from the wrapped Definition.
+            A child Selector for a Definition or ConcreteDefinition value, with
+            the same strictness and class policy. Its exact authority is the
+            corresponding ConcreteDefinition from this selector's retained exact
+            record when available; otherwise a concrete child is its own exact
+            authority. Scalars, containers, links, quotation data and other values
+            are returned directly. Child edits do not replace the parent subtree.
 
         Raises:
             AttributeError: If ``name`` is not supplied on the wrapped root.
+
+        Side Effects:
+            None. Retains the exact child handle and alias relationships without
+            resolving classes, applying defaults, constructing Objects, accessing
+            a Repo/Store or entering reference and quotation boundaries. Wrapper
+            fields and methods take precedence over delegated attributes.
         """
 
         try:
-            return getattr(self.root, name)
+            value = getattr(self.root, name)
         except AttributeError as error:
             raise AttributeError(
                 f"{type(self).__name__!s} object has no attribute {name!r}"
             ) from error
+        from .definition import ConcreteDefinition, Definition
+
+        if isinstance(value, (Definition, ConcreteDefinition)):
+            exact = None if self.exact_root is None else self.exact_root.parameters.get(name)
+            return Selector(value, strict=self.strict, cls_policy=self.cls_policy,
+                            exact_root=exact if isinstance(exact, ConcreteDefinition) else None)
+        return value
 
     def compile(self, ctx=None):
+        """Prepare a posting plan with the shared exact metadata residual.
+
+        Args:
+            ctx: Retained compatibility argument; unused.
+        Returns:
+            SelectorGraph, or None for a legacy unsupported input.
+        Raises:
+            TypeError, ValueError: For malformed or unsupported pattern metadata.
+        Side Effects:
+            Inspects supplied live-class annotations, without construction,
+            omitted defaults, symbolic target resolution or Store access.
+        """
         from .query.selector_graph import compile_selector_graph
 
         return compile_selector_graph(self, class_match=self.cls_policy)
 
     def matches(self, target: Any, *, verbose: bool = False) -> bool:
+        """Match supplied constraints using shared receiving-role interpretation.
+
+        Args:
+            target: Node or Object metadata to inspect.
+            verbose: Retained compatibility flag; no diagnostics are emitted.
+        Returns:
+            bool: Whether all supplied structural and exact constraints match.
+        Raises:
+            TypeError, ValueError: For unsupported or malformed metadata.
+        Side Effects:
+            As for compile; no construction, default binding or Store access.
+            Quoted recipe and selector data retain exact payload semantics.
+        """
         from .query.query import _query_match
 
 

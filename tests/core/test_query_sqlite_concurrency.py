@@ -1389,8 +1389,7 @@ def test_u7_replacement_preserves_active_same_process_reader(tmp_path):
 
 @pytest.mark.timeout(30)
 def test_u13_main_writer_runs_outside_pages_and_invalidates_continuation(tmp_path, monkeypatch):
-    """Detached paging permits writers and explicitly refuses a changed cut."""
-    from dryml.core.query.model import QueryError
+    """Detached paging permits writers and restarts unpublished pages coherently."""
     from dryml.core.query.source import _NodePage
     from dryml.core.store.records import NodeNameRecord
 
@@ -1429,8 +1428,8 @@ def test_u13_main_writer_runs_outside_pages_and_invalidates_continuation(tmp_pat
     with monkeypatch.context() as scoped:
         scoped.setattr(_NodePage, "expand", expand)
         try:
-            with pytest.raises(QueryError, match="changed|continuation"):
-                store.query().cdefs().stored().refresh(False).require_indexed().take(1)
+            result = store.query().cdefs().stored().alias("main").refresh(False).require_indexed().take(1)
+            assert result.one().graph_equal(_cdef("second"))
         finally:
             if worker.ident is not None:
                 worker.join(10)
@@ -1961,17 +1960,21 @@ def test_root_registration_fails_dirty_while_rebuild_claim_is_active(tmp_path):
 
 
 def test_ensure_ready_does_not_initialize_while_build_claim_is_active(tmp_path, monkeypatch):
-    path = tmp_path / "index.sqlite"
-    owner = _index(path)
-    contender = _index(path)
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    peer = DirStore.open_existing(store.base_dir, query_index="sqlite")
+    owner = store.open_query_index()
+    contender = peer.open_query_index()
     monkeypatch.setattr(sqlite_index_module, "_BUILD_CLAIM_WAIT_SECONDS", 0.05)
 
-    with owner._build_claim(force=True) as acquired:
-        assert acquired
-        with pytest.raises(QueryIndexBusy, match="Timed out"):
-            contender._ensure_ready()
-
-    assert not path.exists()
+    try:
+        with owner._build_claim(force=True) as acquired:
+            assert acquired
+            with pytest.raises(QueryIndexBusy, match="Timed out"):
+                contender._ensure_ready()
+        assert not owner.path.exists()
+    finally:
+        peer.close()
+        store.close()
 
 
 def test_live_stale_build_claim_is_not_stolen(tmp_path, monkeypatch):

@@ -1991,9 +1991,11 @@ class Repo:
 
         The snapshot includes only supported Store descriptors, routing, and
         declarative settings. It never traverses Store/cache data, commits an
-        archive, resolves symbols, activates a session, or reconstructs live
+        archive, resolves symbolic targets, activates a session, or reconstructs live
         resources. Exported ``config`` values are caller-owned and may be
-        sensitive; errors avoid rendering arbitrary supplied values.
+        sensitive; errors avoid rendering arbitrary supplied values. Live-class
+        route selectors snapshot trusted receiving-role annotations so restored
+        selectors retain their meaning without importing their target classes.
 
         Returns:
             A detached :class:`RepoDefinition` containing only portable
