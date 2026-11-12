@@ -248,6 +248,14 @@ _EXPECTED_ROOT_EXPORTS = {
     "AutoRef",
     "Choice",
     "ConcreteDefinition",
+    "ConcreteNode",
+    "IdentitySpec",
+    "LocalState",
+    "Node",
+    "QueryPredicate",
+    "SavedNode",
+    "StateKey",
+    "StateSpec",
     "categorical_definition",
     "Definition",
     "Distribution",
@@ -311,6 +319,7 @@ _EXPECTED_ROOT_EXPORTS = {
     "normalize_return",
     "reset_config",
     "requirements",
+    "require_saved",
     "selector_mode",
     "session",
     "status",
@@ -322,8 +331,15 @@ _EXPECTED_ROOT_EXPORTS = {
 }
 
 _EXPECTED_MANAGED_EXPORTS = {
+    "ExecutionIdentity",
+    "FailedInvocationResult",
+    "InvocationResult",
+    "ResultReference",
+    "ResultSource",
+    "ManagedResultError",
     "InterruptRequestResult",
     "ManagedConfig",
+    "ManagedControlStore",
     "ManagedContext",
     "ManagedConfigError",
     "ManagedConflictError",
@@ -340,6 +356,7 @@ _EXPECTED_MANAGED_EXPORTS = {
     "argument_digest",
     "managed_operation",
     "operation_digest",
+    "status",
 }
 
 _EXPECTED_REQUIREMENT_EXPORTS = {
@@ -631,7 +648,7 @@ print(json.dumps({
     assert data["root_filesystem"]
     assert data["root_paths"]
     assert data["aliases"] == {"env": True, "world": True, "requirements": "dryml.requirements"}
-    assert data["version"] == data["metadata_version"] == "0.3.0b2"
+    assert data["version"] == data["metadata_version"] == "0.3.0b4"
     assert "site-packages" in data["module"].replace("\\", "/")
 
 

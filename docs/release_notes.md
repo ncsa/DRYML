@@ -1,5 +1,28 @@
 # Release Notes
 
+## 0.3.0b4 (unreleased)
+
+- Improve shared-Store training, checkpoint publication, history queries, and
+  metric evaluation under concurrent writers, with bounded retries that preserve
+  completed work and interruption evidence.
+- Align ordinary and loose selectors with Template/Ref/Mat receiving roles;
+  preserve matching policy through component access and expose retained reference
+  data through `unwrap()`.
+- Accelerate cached-object discovery, direct and nested counts, and selective
+  `collect()` using certified postings while retaining exact state pins,
+  quotation/alias semantics, and fresh authority checks.
+- Add metadata-only managed-operation inspection through `managed.status(...)`,
+  `ManagedControlStore.from_repo(...)`, and `status_for(...)`, with documented
+  completion and same-identity restart behavior.
+- Add notebook-scale latency regression tests, including a 60-second full
+  training-planning deadline. The synthetic planning worker completed in 10.53
+  seconds; live-Store timing during continuous training remains unverified.
+
+Derived SQLite indexes now use schema 12 / coverage 4; older schema-11/coverage-3
+indexes require one permitted metadata-only rebuild. Store format 4 and Node
+identity version 3 are unchanged. See [Graph Querying](graph_querying.md),
+[Managed Operations](managed_operations.md), and [Testing](testing.md).
+
 ## 0.3.0b2 (unreleased)
 
 Legacy Repo/Store API v3 and compound-reference capabilities are removed, with
