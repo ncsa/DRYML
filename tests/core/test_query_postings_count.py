@@ -697,3 +697,96 @@ def test_quoted_parameters_remain_literal_data_not_loose_wildcards(tmp_path, mon
         assert query.count() == expected
     finally:
         store.close()
+
+
+def test_certified_collection_decodes_only_matching_blocks_and_merges_evidence(tmp_path, monkeypatch, fixed_snapshot_environment):
+    import dryml.core.node_codec as codec
+    import dryml.core.query.indexed_count as indexed
+
+    first, second = [DirStore(tmp_path / name, query_index="sqlite") for name in ("first", "second")]
+    writer = Repo(first)
+    selected = writer.save(DecodeState(model(), repo=writer))
+    first.publish_node(Definition(PostingOwner, [selected, selected], "selected").concretize())
+    second.publish_node(selected, kind="saved")
+    first.publish_node(Definition(PostingOwner, [model(output=3)], "unrelated").concretize())
+    writer.close(flush=False)
+    repo = Repo((first, second))
+    try:
+        query = repo.query().sel(Selector(Definition(DecodeState), cls_policy="exact"))
+        with monkeypatch.context() as patch:
+            patch.setattr(indexed, "_try_identity_collect", lambda *a: None)
+            expected = query.collect()
+        calls, original = [], codec._decode_node_graph_views
+        def decode(packet, **kwargs):
+            calls.append(packet["views"])
+            return original(packet, **kwargs)
+        monkeypatch.setattr(codec, "_decode_node_graph_views", decode)
+        from dryml.core.state_values import LocalState
+        monkeypatch.setattr(LocalState, "validate_for", lambda *a, **k: pytest.fail("repeated certified state validation"))
+        monkeypatch.setattr(first, "read_states", lambda *a: pytest.fail("collection loaded payloads"))
+        actual = query.collect()
+        assert actual._entries.keys() == expected._entries.keys()
+        for key in actual._entries:
+            assert actual._entries[key][1] == expected._entries[key][1]
+        assert len(calls) <= actual.count()
+        assert repo._num_constructions == 0
+        assert len(actual.evidence_for(selected).sources) == 2
+    finally:
+        repo.close(flush=False)
+
+
+@pytest.mark.parametrize("damage", ("block", "membership", "declaration"))
+def test_certified_collection_rechecks_source_authority_after_success(tmp_path, damage):
+    from pathlib import Path
+    from dryml.core import ObjectId
+    from dryml.core.query.model import QueryError
+    from dryml.core.store.store import StoreCapabilityError, StoreAuthorityError
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    child = model().concretize().with_identity(ObjectId())
+    try:
+        root = store.publish_node(Definition(PostingOwner, [child]).concretize())
+        query = store.query().refresh(False).object_refs().sel(model(Par("width")).loose_selector())
+        assert query.collect().count() == 1
+        paths = {
+            "block": store._node_path("definitions/blocks", root.block_digest),
+            "membership": store._node_path("membership/recipe", root.digest),
+            "declaration": store._node_path("declarations/anchors", store._anchor_key(child.object_id)),
+        }
+        Path(paths[damage]).unlink()
+        with pytest.raises((QueryError, StoreCapabilityError, StoreAuthorityError)):
+            query.collect()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("change", ("authority", "index", "interrupt"))
+def test_certified_collection_revalidates_after_decoding(tmp_path, monkeypatch, change):
+    import dryml.core.query.indexed_count as indexed
+
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    original, changed = indexed._collect_selected, False
+    def decode(*args):
+        nonlocal changed
+        result = original(*args)
+        if not changed:
+            changed = True
+            if change == "authority":
+                store.publish_node(model(16).concretize())
+            elif change == "index":
+                store.open_query_index().maintain_store(rebuild=True)
+            else:
+                raise KeyboardInterrupt("controlled collection interruption")
+        return result
+    try:
+        store.publish_node(model().concretize())
+        monkeypatch.setattr(indexed, "_collect_selected", decode)
+        query = store.query().sel(model(Par("width")).loose_selector())
+        if change == "interrupt":
+            with pytest.raises(KeyboardInterrupt, match="controlled collection"):
+                query.collect()
+        else:
+            assert query.collect().count() == (2 if change == "authority" else 1)
+        assert not store.open_query_index()._connections.connection(readonly=True).in_transaction
+    finally:
+        store.close()

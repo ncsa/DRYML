@@ -1801,6 +1801,10 @@ class IdentityQuery:
             Reads source authority and caches under retryable cuts and may refresh
             derived indexes according to the plan. Exact live selection completes
             relevant contributors, including embedded and retained-cache evidence.
+            Covered unbounded sel/kind plans prove matches against certified
+            primitive metadata, then decode matching result blocks only. Source
+            membership, declaration, exact-byte and final-cut checks remain fresh;
+            unsupported restrictions and explicit bounds keep the page consumer.
             Physical cut changes discard all buffered rows and Store proofs and
             permit at most eight cut attempts with bounded backoff. Spent
             verification work is not refunded; scan/index controls and initial
@@ -2307,6 +2311,10 @@ class IdentityQuery:
     def _terminal_entries(self, capture):
         """Evaluate all fallible validation, then return qualified private entries."""
 
+        from .indexed_count import _try_identity_collect
+        indexed = _try_identity_collect(self, capture)
+        if indexed is not None:
+            return indexed, False
         from .source import node_query_stores
         if node_query_stores(self, capture) is not None:
             return dict(self._iter_terminal_members(capture)), False

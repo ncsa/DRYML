@@ -1,4 +1,4 @@
-"""Postings-first scalar counts over certified Store graph projections.
+"""Postings-first counts and selective collection over certified Store graphs.
 
 Pure semantic proofs come from coverage-versioned projection records. Membership,
 required declarations, immutable source bytes, connected-Store agreement, and the
@@ -208,6 +208,22 @@ def _try_identity_count(query, capture):
     replicated sources and declarations in nonmatching connected Stores. Scoped,
     composed, bounded and unsupported predicates retain the ordinary consumer.
     """
+    return _try_identity_result(query, capture)
+
+
+def _try_identity_collect(query, capture):
+    """Return certified identity entries, decoding only matching source blocks.
+
+    The same fresh evidence as scalar counting proves source membership, complete
+    receiver declarations and exact predicate matches. Returned Nodes are decoded
+    from those authenticated bytes, not reconstructed from derived projections.
+    Unsupported plans retain the ordinary consumer.
+    """
+    return _try_identity_result(query, capture, collect=True)
+
+
+def _try_identity_result(query, capture, *, collect=False):
+    """Share eligibility and authority admission for identity count/collection."""
     from .source import RepoSource, StoreSource
 
     if (query.take_limit is not None or capture.max_depth_limit is not None or capture.max_verify_limit is not None
@@ -223,7 +239,8 @@ def _try_identity_count(query, capture):
         return None
     stores, indexes = ready
     try:
-        return _count(None, capture, stores, indexes, query, predicates, identity_query=query)
+        return _count(None, capture, stores, indexes, query, predicates,
+                      identity_query=query, collect=collect)
     except _ResidualRequired:
         return None
 
@@ -260,10 +277,10 @@ def _ready_indexes(query, candidates, capture):
     return stores, indexes
 
 
-def _count(occurrence, capture, stores, indexes, candidates, predicates, *, identity_query=None):
+def _count(occurrence, capture, stores, indexes, candidates, predicates, *, identity_query=None, collect=False):
     from ..store import records as r
     from .source import _node_index_token, _SourceCutChanged, _node_discovery_plan, RepoSource
-    from .identity import _identity_kind
+    from .identity import _identity_kind, IdentityEvidence
     from ..node_prepare import NodePreparation
     from .relationships import count_relationship_occurrences
 
@@ -289,6 +306,7 @@ def _count(occurrence, capture, stores, indexes, candidates, predicates, *, iden
     clause = " WHERE p.family=? AND (" + where + ")"
     sql = "SELECT DISTINCT p.source FROM " + table + clause
     roots_seen, total = set(), 0
+    selections = {}
     kinds = None if identity_query is not None else {kind.value for kind in occurrence.edges.kinds}
     for store in stores:
         rows = []
@@ -339,6 +357,9 @@ def _count(occurrence, capture, stores, indexes, candidates, predicates, *, iden
                 raise InventoryCapabilityError("Candidate semantic digest disagrees with certified authority.")
             key = (item["kind"] if identity_query is not None else node["kind"]), node["digest"], node["exact"]
             if key in roots_seen:
+                if collect and key in selections:
+                    selections[key][1] = selections[key][1].merged_with(
+                        IdentityEvidence(frozenset((query._source_evidence(store),))))
                 continue
             roots_seen.add(key)
 
@@ -351,6 +372,9 @@ def _count(occurrence, capture, stores, indexes, candidates, predicates, *, iden
                 return matched[target]
 
             total += bool(matches(slot)) if identity_query is not None else _count_paths(graph, slot, matches, kinds)
+            if collect and matches(slot):
+                selections[key] = [(store, record, item),
+                                 IdentityEvidence(frozenset((query._source_evidence(store),))), None]
     if isinstance(query.source, RepoSource):
         source = query.source
         cached = capture.cache_knowledge(source.repo, weak=source.weak)
@@ -358,10 +382,16 @@ def _count(occurrence, capture, stores, indexes, candidates, predicates, *, iden
             owner = NodePreparation((value,))
             key = _identity_kind(value), owner.digest(value), owner._flat(owner._slot(value)).decode("ascii")
             if key in roots_seen or any(item.value != key[0] for item in query.restrictions if item.kind == "kind"):
+                if collect and key in selections:
+                    selections[key][1] = selections[key][1].merged_with(
+                        IdentityEvidence(frozenset((query._source_evidence(source.repo),))))
                 continue
             roots_seen.add(key)
             if identity_query is not None:
-                total += all(predicate.prepared.matches(value) for predicate in predicates)
+                matched = all(predicate.prepared.matches(value) for predicate in predicates)
+                total += matched
+                if collect and matched:
+                    selections[key] = [None, IdentityEvidence(frozenset((query._source_evidence(source.repo),))), value]
             else:
                 total += count_relationship_occurrences((value,), lambda target: (
                     (occurrence.target_kind_filter is None or _identity_kind(target) in occurrence.target_kind_filter)
@@ -370,6 +400,52 @@ def _count(occurrence, capture, stores, indexes, candidates, predicates, *, iden
             if tuple(map(id, source.repo.stores)) != tuple(map(id, capture.repo_stores(source.repo))):
                 from .model import QueryError
                 raise QueryError("Repo topology changed during query continuation.")
+    result = _collect_selected(reader, selections, capture) if collect else total
     reader.page.validate()
     capture.verified_count += len(roots_seen)
-    return total
+    return result
+
+
+def _collect_selected(reader, selected, capture):
+    """Decode matching immutable blocks without repeating certified graph proofs."""
+    from ..node_codec import _decode_node_graph_views
+    from ..node_prepare import NodePreparation
+    from ..store import records as r
+    from .identity import IdentityKey
+    from .source import _NodeOwnerCache, InventoryCapabilityError
+
+    owners = _NodeOwnerCache(32 * 1024 * 1024, 32 * 1024 * 1024)
+    entries = {}
+    # Keep all consumers of one shared block together, independently of identity
+    # ordering. The returned fixed set supplies canonical public iteration order.
+    ordered = sorted(selected.items(), key=lambda pair: (
+        "" if pair[1][0] is None else pair[1][0][1].block_digest, pair[0]))
+    for certificate, (location, evidence, value) in ordered:
+        if location is not None:
+            store, record, item = location
+            path = store._relative(store._node_path("definitions/blocks", record.block_digest))
+            block = reader.read(store, path, r.NodeBlockRecord, True)
+            previous = owners.get(block.content)
+            if previous is None:
+                packet = block.blocks
+                packet["views"] = [record.view]
+                _, prepared = _decode_node_graph_views(packet, with_owner=True,
+                                                      max_cached_bytes=1024 * 1024)
+                capture.cdef_blobs_decoded += 1
+                from .._content_facts import _node_block_owner_size
+                charge = _node_block_owner_size(block.content, packet) + prepared.max_cached_bytes
+                previous = prepared, {}
+                owners.retain(block.content, previous, charge)
+            prepared, views = previous
+            locator = item["locator"]["table"], item["locator"]["slot"], item["projection"]
+            if locator not in views:
+                node = prepared._transport_nodes[locator[:2]]
+                value = (node.creation_view() if locator[2] == "creation" else
+                         node.object_view() if locator[2] == "object" else node)
+                owner = prepared if id(value) in prepared._slots else NodePreparation((value,))
+                if (owner.digest(value), owner._flat(owner._slot(value)).decode("ascii")) != certificate[1:]:
+                    raise InventoryCapabilityError("Decoded candidate disagrees with its certified identity evidence.")
+                views[locator] = value
+            value = views[locator]
+        entries[IdentityKey(certificate[0], certificate[1], value)] = value, evidence
+    return entries

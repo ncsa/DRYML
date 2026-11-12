@@ -303,6 +303,24 @@ is an authority error, not a cache hit or success.
 
 ### Detached decoded pages
 
+Covered unbounded `IdentityQuery.collect()` shares the scalar identity proof
+reader and predicate compiler. It authenticates every contributing membership,
+root, block byte witness and relevant connected-Store declaration, including
+duplicate contributors, before merging complete kind/digest/exact certificates.
+Only matching certificates are decoded from authoritative block bytes. Each
+returned Node is compared with the full certified normalized identity, not just
+its digest. Cached Repo matches and all contributing source evidence are retained.
+
+Certified named-view/state compatibility proofs need not be recomputed after
+decoding unchanged bytes; grammar, transport locators and complete result evidence
+are still verified. A terminal-local 32 MiB byte-charged owner LRU groups matching
+block consumers. Oversized owners remain transient rather than accumulating.
+All file, authority-cut and SQLite-incarnation witnesses are revalidated after
+decoding. Interruption returns no partial fixed set. No payloads, imports of
+receiver classes, authoritative-format changes or new index families are needed.
+Explicit bounds and unsupported/scoped/composed plans keep the ordinary consumer;
+incremental iterators keep their existing page/output discipline.
+
 The current consumer captures bounded keys and immutable record/block bytes under
 short Store/SQLite cuts. It releases both before preparation, exact matching and
 metadata expansion, revalidates that same cut before accepting the page, and

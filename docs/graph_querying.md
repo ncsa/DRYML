@@ -166,7 +166,7 @@ mandatory on reuse. Pure caches never establish membership, names, availability,
 retention, or completeness. Collected results fix membership; later payload use
 requires its own fresh protected read.
 
-### Postings-first identity and nested counts
+### Postings-first identity collection and counts
 
 Unbounded `repo.query().sel(pattern).count()` and
 `repo.query().nested().sel(pattern).count()` can use the same certified compact
@@ -215,15 +215,25 @@ explicit verification/depth/output bounds, metadata scopes and composed sources
 retain Node residual execution. LocalState sources retain their own consumer.
 Direct indexed counts currently admit only selection and kind restrictions;
 stored/alias/namespace and other scoped restrictions retain the ordinary consumer.
-Large compact graphs explicitly advertise residual-only execution. `collect()`
-and iterators retain their existing object/result and page semantics.
+Large compact graphs explicitly advertise residual-only execution.
+
+Unbounded `collect()` uses the same covered sel/kind program and complete identity
+proofs, but decodes matching result blocks into detached Nodes after selection.
+It does not hydrate rejected candidates or declaration-only containing graphs,
+or repeat certified immutable state-compatibility proofs. Every returned Node's
+complete normalized identity is checked against its proof; replica and Repo-cache
+source evidence is merged. Final source-byte/cut checks precede result escape.
+Decoded blocks are grouped and byte-bounded within this terminal, not retained as
+external authority. Iterators retain their existing incremental page consumer.
+Bounds, scoped restrictions and unsupported patterns retain ordinary collection.
 
 Schema-11/coverage-3 indexes need a **one-time metadata-only rebuild** for the new
 proof and nested-posting families. Automatic refresh performs permitted recovery;
 `refresh(False)` refuses it. This upgrade changes derived SQLite only and can take
 substantially longer than subsequent indexed searches.
 Direct identity counts reuse the same coverage-4 evidence and require no further
-index upgrade when that coverage is already ready.
+index upgrade when that coverage is already ready. Selective collection also
+reuses coverage 4 without an index rebuild or authoritative-format change.
 
 ## Node Pattern Semantics
 

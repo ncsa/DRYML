@@ -908,6 +908,7 @@
       "exhaustive_functions": {},
       "exhaustive_paths": {},
       "must_run": {
+        "tests/performance/test_query_latency.py::test_notebook_trial_planning_finishes_within_one_minute": "Pin full selection, width refinement, managed completion inspection and retry planning to a one-minute hard worker deadline.",
         "tests/performance/test_query_latency.py::test_query_canary_budgets_remain_bounded": "Keep shared fixture and aggregate query deadline budgets bounded as scenarios grow.",
         "tests/performance/test_query_latency.py::test_notebook_queries_finish_within_budget[model_count]": "Pin fresh-process direct model counting with a hard latency deadline.",
         "tests/performance/test_query_latency.py::test_notebook_queries_finish_within_budget[experiment_count]": "Pin fixed dataset state and quoted artifact selection with a hard latency deadline.",

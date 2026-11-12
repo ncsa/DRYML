@@ -250,6 +250,20 @@ rejects duplicate scenario names and accidental deadline/budget inflation. There
 is no filesystem-cache eviction: "cold" means a new interpreter, Repo and query
 cache, not a rebooted machine or empty OS page cache.
 
+The same shared Store includes 35 metadata-only managed `train` receivers in the
+selected cohort: 25 completed and ten failed. A separate full notebook planning
+worker has a **60-second hard deadline** covering fresh-process startup, reopen,
+full selector collection, all seven width refinements, object projection, managed
+status reads and same-identity restart planning. It must report exactly 35
+candidates, 25 completions and ten retries without loading payloads, executing
+training or changing authority. This is an additional, independently guarded
+60-second budget; the seven scalar query cases retain their aggregate 60-second
+cap. The existing 90-second shared setup cap is unchanged. The planning test's
+160-second outer watchdog also covers an individually selected run's fixture.
+This cap exercises an unchanged metadata cut. Continuous concurrent publications
+can force source-cut retries or explicit busy/dirty errors; the canary does not
+weaken consistency checks or promise one-minute success under sustained writes.
+
 Run the focused canaries with their normal explicit deadlines:
 
 ```bash
@@ -269,23 +283,28 @@ remain separately opt-in rather than silently growing the routine gate. Re-measu
 the **complete** `good-enough` command before pushing a change to these budgets.
 
 The fixture worker supports a test-only `--legacy` sensitivity probe that disables
-optimized count entry points in that disposable subprocess. This is not enabled
+optimized count entry points (or selective collection for `trial_planning`) in
+that disposable subprocess. This is not enabled
 by normal tests and changes no production settings. It can verify that a canary
 actually catches the historical fallback rather than only timing a tiny toy case.
 
 #### Measured routine gate with latency canaries
 
-The complete CPU `good-enough` command took **757.90 seconds (12m38s)** on the
+The complete CPU `good-enough` command with the full planning canary took
+**837.09 seconds (13m57s)** on the
 Linux/Python 3.12.13 `big_env` development host, including collection and both
-interpreter phases. It passed **4,652 tests**, with **29 skips**:
+interpreter phases. It passed **4,667 tests**, with **29 skips**:
 
 | Phase | Result | Pytest duration |
 |---|---|---:|
-| Process-sensitive representatives | 265 passed | 45.75 s |
-| Ordinary representatives, including all latency cases | 4,387 passed; 29 skipped | 706.04 s |
-| Whole runner, including startup and collection | 4,652 passed; 29 skipped | **757.90 s wall** |
+| Process-sensitive representatives | 265 passed | 47.46 s |
+| Ordinary representatives, including all latency cases | 4,402 passed; 29 skipped | 783.09 s |
+| Whole runner, including startup and collection | 4,667 passed; 29 skipped | **837.09 s wall** |
 
-The shared performance fixture took **61.85 seconds of setup** in that run.
+In focused affected-subsystem verification, the shared performance fixture took
+**71.97 seconds of setup**, and the complete fresh planning worker took **10.53
+seconds** against its 60-second hard cap. The earlier scalar-only fixture took
+61.85 seconds in its representative run.
 Its census was 442 graph blocks, 2,068 discovery contributions and 34,778 facets.
 Focused query workers took approximately 0.6–3.3 seconds, including both query
 evaluations and fresh-process startup. Deliberately disabling the optimized

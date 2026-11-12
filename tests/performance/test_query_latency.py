@@ -15,7 +15,8 @@ import time
 import pytest
 
 from tests.performance.query_workload import (
-    BUILD_TIMEOUT_SECONDS, INSTANCES, QUERY_TIMEOUT_SECONDS, SCENARIO_TIMEOUT_BUDGET_SECONDS, SCENARIOS,
+    BUILD_TIMEOUT_SECONDS, INSTANCES, PLANNING_TIMEOUT_SECONDS, QUERY_TIMEOUT_SECONDS,
+    SCENARIO_TIMEOUT_BUDGET_SECONDS, SCENARIOS,
 )
 
 
@@ -44,6 +45,7 @@ def test_query_canary_budgets_remain_bounded():
     assert all(type(case.expected) is int and case.expected >= 0 for case in SCENARIOS)
     assert all(0 < case.timeout_seconds <= QUERY_TIMEOUT_SECONDS <= 8 for case in SCENARIOS)
     assert sum(case.timeout_seconds for case in SCENARIOS) <= SCENARIO_TIMEOUT_BUDGET_SECONDS <= 60
+    assert 0 < PLANNING_TIMEOUT_SECONDS <= 60
 
 
 @pytest.fixture(scope="module")
@@ -72,3 +74,15 @@ def test_notebook_queries_finish_within_budget(query_store, scenario, record_pro
     record_property("worker_seconds", result["worker_seconds"])
     for item in result["results"]:
         record_property(item["phase"] + "_query_seconds", item["seconds"])
+
+
+@pytest.mark.timeout(160)
+def test_notebook_trial_planning_finishes_within_one_minute(query_store, record_property):
+    """Bound full selection, seven refinements, status inspection and retry planning."""
+    store, summary = query_store
+    result = _worker("trial_planning", store, PLANNING_TIMEOUT_SECONDS)
+    assert (result["candidates"], result["completed"], result["planned"]) == (35, 25, 10)
+    record_property("fixture_build_seconds", summary["build_seconds"])
+    record_property("worker_budget_seconds", PLANNING_TIMEOUT_SECONDS)
+    record_property("worker_seconds", result["worker_seconds"])
+    record_property("planning_seconds", result["seconds"])

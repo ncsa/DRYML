@@ -20,6 +20,7 @@ from dryml.core import Definition, F, Node, Object, ObjectId, Par, Ref, Repo, Se
 from dryml.core.state_values import LocalState, StateKey
 from dryml.core.store.dir import DirStore
 from dryml.core.utils.graph.path import GraphPath, Parameter
+from dryml.managed import managed_operation
 
 
 WIDTHS = (32, 64, 128, 256, 512, 1024, 2048)
@@ -32,6 +33,7 @@ HISTORIES = len(WIDTHS) * len(COHORTS) * HISTORY_PER_EXPERIMENT
 BUILD_TIMEOUT_SECONDS = 90
 QUERY_TIMEOUT_SECONDS = 8.0
 SCENARIO_TIMEOUT_BUDGET_SECONDS = 60.0
+PLANNING_TIMEOUT_SECONDS = 60.0
 ROOT = GraphPath()
 MODEL = GraphPath((Parameter("model"),))
 
@@ -76,6 +78,11 @@ class _Experiment(Serializable):
 
     def __init__(self, model, train_data, test_data, artifacts: Mapping[str, Template]):
         raise AssertionError("query workload constructed an experiment")
+
+    @managed_operation(resumable=True)
+    def train(self, *, managed):
+        """Declare a metadata-only test operation; execution is forbidden."""
+        raise AssertionError("planning workload executed training")
 
 
 class _History(Object):
@@ -161,7 +168,7 @@ def build_store(path: Path) -> dict:
         raise ValueError("performance fixture requires a new disposable Store")
     started = time.monotonic()
     store = DirStore(path, query_index="none")
-    datasets, publications = {}, 0
+    datasets, publications, training = {}, 0, []
     try:
         for train_size, test_size in COHORTS:
             creation = Definition(_CachedDataset, Definition(_Dataset, test_size, seed=42).concretize()).concretize()
@@ -182,6 +189,8 @@ def build_store(path: Path) -> dict:
                         states={ROOT: _state(template, label), MODEL: _state(model_creation, "model-" + label)})
                     store.publish_node(selected, kind="saved")
                     publications += 1
+                    if train_size == COHORTS[-1][0]:
+                        training.append((width, copy, selected))
                     for step in range(HISTORY_PER_EXPERIMENT if copy == 0 else 0):
                         history = Definition(_History, experiment=selected, model=selected.parameters["model"], step=step).concretize()
                         store.publish_node(history)
@@ -190,6 +199,28 @@ def build_store(path: Path) -> dict:
         for number in range(DECOYS):
             store.publish_node(Definition(_Unrelated, number, {"enabled": True, "values": list(range(8))}).concretize())
             publications += 1
+        from dryml.managed.control import ControlSnapshot, ManagedControlStore
+        from dryml.managed.identity import AdmissionIdentity
+        from dryml.managed.results import ResultReference
+        repo = Repo(store)
+        try:
+            control = ManagedControlStore.from_repo(repo)
+            failures = dict(zip(WIDTHS, (3, 3, 2, 1, 0, 0, 1), strict=True))
+            for width, copy, selected in training:
+                identity = AdmissionIdentity.from_call(selected, _Experiment.train, (), {})
+                with control.admission(identity) as owner:
+                    failed = copy < failures[width]
+                    snapshot = ControlSnapshot(
+                        receiver=selected, member="train", argument_digest=identity.argument_digest,
+                        run_id=owner.run_id, invocation_id=owner.invocation_id, generation=1,
+                        state="failed" if failed else "completed", checkpoint=selected if failed else None,
+                        failure_code="body_error" if failed else None,
+                        final=None if failed else selected,
+                        producer_invocation_id=None if failed else owner.invocation_id,
+                        result_reference=None if failed else ResultReference("f" * 64))
+                    control.create_initial(snapshot, owner=owner)
+        finally:
+            repo.close(flush=False)
     finally:
         store.close()
     publish_seconds = time.monotonic() - started
@@ -246,6 +277,8 @@ def run_scenario(path: Path, name: str, *, legacy: bool = False) -> dict:
     Side Effects:
         Reads fixture metadata and its index. No payload read or Store mutation.
     """
+    if name == "trial_planning":
+        return _run_trial_planning(path, legacy=legacy)
     case = next(case for case in SCENARIOS if case.name == name)
     if legacy:
         from dryml.core.query import indexed_count
@@ -279,10 +312,52 @@ def run_scenario(path: Path, name: str, *, legacy: bool = False) -> dict:
         repo.close(flush=False)
 
 
+def _run_trial_planning(path, *, legacy=False):
+    """Plan the notebook's seven-width batch using fresh managed completion reads."""
+    from dryml import Generator, UniformFromSet, managed
+    if legacy:
+        from dryml.core.query import indexed_count
+        indexed_count._try_identity_collect = lambda *a: None
+    manifest = json.loads((path.parent / "query-fixture.json").read_text(encoding="utf-8"))
+    repo = Repo(DirStore.open_existing(path))
+    try:
+        before = repo.default_store.authority_cut()
+        started = time.monotonic()
+        cached = repo.default_store.read_node(manifest["dataset_roots"][str(COHORTS[-1][0])], kind="saved")
+        template = _experiment(Par("width"), COHORTS[-1][0], cached)
+        definitions = Generator(template, {"width": UniformFromSet(WIDTHS)}).grid()
+        universe = repo.query().sel(template.loose_selector()).collect()
+        completed, candidates, trials = 0, 0, []
+        for width, definition in zip(WIDTHS, definitions, strict=True):
+            objects = universe.query().sel(definition).object_projection()
+            states = [(ref, managed.status(ref, "train", repo=repo)) for ref in objects]
+            done = {ref.object_id for ref, status in states if status.state == "completed"}
+            unfinished = [(ref, status) for ref, status in states
+                          if status.state in {"not_started", "failed", "interrupted"}]
+            active = sum(status.state in {"running", "finalizing"} for _, status in states)
+            needed = max(0, COPIES - len(done) - active)
+            for offset in range(needed):
+                ref, status = unfinished[offset]
+                node = definition.concretize().with_realization(identities=ref.identity_spec())
+                assert node.object_projection_equal(ref)
+                trials.append((width, node, status.state != "not_started"))
+            candidates += len(states)
+            completed += len(done)
+        assert (candidates, completed, len(trials)) == (35, 25, 10)
+        assert all(restart for _, _, restart in trials)
+        assert repo._num_constructions == 0
+        assert repo.default_store.authority_cut() == before
+        assert not {"tensorflow", "torch", "jax", "ray"}.intersection(sys.modules)
+        return {"scenario": "trial_planning", "candidates": candidates,
+                "completed": completed, "planned": len(trials), "seconds": time.monotonic() - started}
+    finally:
+        repo.close(flush=False)
+
+
 def main(argv=None):
     """Run one build/query worker; emit JSON or propagate an actionable failure."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("build", *(case.name for case in SCENARIOS)))
+    parser.add_argument("action", choices=("build", "trial_planning", *(case.name for case in SCENARIOS)))
     parser.add_argument("store", type=Path)
     parser.add_argument("--legacy", action="store_true", help="test-only fallback sensitivity probe")
     args = parser.parse_args(argv)

@@ -72,7 +72,8 @@ def test_quoted_identity_prefilter_correlates_slots_and_keeps_exact_residual(tmp
         store.publish_node(Definition(QuotedPair, Ref(different), Ref(second)).concretize(), kind="saved")
         result = store.query().saved().sel(wanted).collect()
         assert result.one().graph_equal(wanted)
-        assert result.diagnostic().cdef_blobs_decoded == 2
+        assert result.diagnostic().candidate_rows_read == 2
+        assert result.diagnostic().cdef_blobs_decoded == 1
         with pytest.raises(QueryIndexUnavailable):
             store.query().saved().sel(wanted).require_indexed().collect()
 
