@@ -110,6 +110,19 @@ GeneratorDataset can infer varying dimensions from a SpecHint while retaining an
 explicit example_count. Sampling closes its cursor on success or failure; observed
 example totals are checked on subsequent normal traversals once the spec exists.
 
+### Ragged Elements
+
+`Batch(source, size, ragged=True)` packs variable dense sample axes using NumPy
+row partitions or native TensorFlow ragged tensors. Fixed-shape labels remain
+dense and opaque leaves retain list batching. Existing ragged samples gain an
+outer partition with ordinary Batch as well. Unbatch removes one partition,
+preserving empty rows and returning dense samples when the ragged rank reaches
+zero. Ordinary and prepared graphs share the same collation and split contracts.
+
+Cast, scalar Scale, composition, and authored Models can preserve ragged values or
+produce dense outputs. Example counts use the outer population, independently of
+row lengths. See [Ragged Tensors](ragged.md) for complete examples and contracts.
+
 ### Opaque Python Elements
 
 For a fixed numerical array such as sampled probe coordinates, the

@@ -51,6 +51,7 @@ _REQUIRED_MODULES = {
     "dryml/locking.py",
     "dryml/paths.py",
     "dryml/numpy/array.py",
+    "dryml/numpy/ragged.py",
     "dryml/core/state.py",
     "dryml/core/__init__.py",
     "dryml/core/cdef_codec.py",

@@ -548,7 +548,8 @@ class StreamPlan:
             return _StreamOp("map", dataset=dataset, inputs=(child,), selected=selected, spec=spec)
         if kind in {"batch", "unbatch"}:
             child = self._build(dataset.src, records)
-            spec = (batch_spec_tree(child.spec, batch=dataset.batch_size if dataset.drop_remainder else Dynamic)
+            spec = (batch_spec_tree(child.spec, batch=dataset.batch_size if dataset.drop_remainder else Dynamic,
+                                    ragged=dataset.ragged)
                     if kind == "batch" else unbatch_spec_tree(child.spec))
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset),

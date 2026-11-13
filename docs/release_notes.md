@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add owned NumPy RaggedTensor values and native TensorFlow ragged pipelines,
+  including explicit ragged collation, nested Batch/Unbatch partition inference,
+  empty rows, mixed trees, selected/prepared Method IR, and partition-preserving
+  Cast/Scale. Validate rank/offset metadata and reject unsupported ragged shape
+  transforms or implicit dense/backend conversions explicitly.
 - Qualify dynamic dense sample dimensions together with variable batches across
   known-spec Methods, composition, Models, and ordinary/prepared Dataset paths.
   Interpret declared axis names on native values, preserve names through ArgMax

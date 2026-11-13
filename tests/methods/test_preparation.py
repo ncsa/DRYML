@@ -181,6 +181,7 @@ def test_cached_signature_detects_every_exact_tensor_field_and_preserves_cache()
     baseline = TensorSpec(
         "float32",
         shape=(Dynamic, 3),
+        batch=Dynamic,
         backend="numpy",
         layout=Layout.RAGGED,
         axis_names=("tokens", "features"),

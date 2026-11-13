@@ -1,8 +1,9 @@
-"""NumPy dtype/spec adapters and lazy array-payload container exports.
+"""NumPy dtype/spec adapters, packed ragged values and lazy payload exports.
 
 Adapter registration does not load the Serializable container. Accessing
 NumpyArray imports its class declaration without allocating content or reading
-Store state; optional tensor frameworks remain behind their own boundaries.
+Store state. RaggedTensor is a lightweight NumPy value; optional tensor frameworks
+remain behind their own boundaries.
 """
 
 # Check we have the right context
@@ -14,6 +15,7 @@ from dryml.core.backend import Backend
 
 from .dtype import dtype, _dtype_np
 from .tensor_spec import as_tensor_spec, _tensor_spec_np
+from .ragged import RaggedTensor
 
 
 def _install() -> None:
@@ -21,12 +23,12 @@ def _install() -> None:
         install_method(DType, "np", _dtype_np)
         install_method(TensorSpec, "np", _tensor_spec_np)
     except RuntimeError:
-        # methods already installed, so we'll exit here.
-        return
+        # Existing extension hooks do not replace this plugin's runtime detector.
+        pass
 
     from dryml.core.backend import backend_testers, backend_existence_testers
     from dryml.core.utils.types import is_numpy
-    backend_testers[Backend.numpy] = is_numpy
+    backend_testers[Backend.numpy] = lambda value: is_numpy(value) or isinstance(value, RaggedTensor)
     backend_existence_testers[Backend.numpy] = lambda: True
 
 
@@ -47,4 +49,4 @@ def __dir__():
     return sorted(set(globals()) | set(__all__))
 
 
-__all__ = ["dtype", "as_tensor_spec", "NumpyArray"]
+__all__ = ["dtype", "as_tensor_spec", "NumpyArray", "RaggedTensor"]

@@ -189,8 +189,6 @@ def runtime_node(value: object) -> MethodCallNode:
     # explicitly registered itself. Looking in sys.modules avoids importing a
     # framework merely to inspect an ordinary Method call.
     for backend, tester in tuple(backend_testers.items()):
-        if backend is Backend.numpy:
-            continue
         try:
             recognized = tester(value)
         except Exception as error:

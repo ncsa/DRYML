@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 
 from dryml.core.utils.types import is_namedtuple
-from dryml.core.tensor_spec import Dynamic, TensorSpec, iter_specs, _python_object_batch_size
+from dryml.core.tensor_spec import Dynamic, Layout, TensorSpec, iter_specs, _python_object_batch_size
 
 
 def split_for_spec(spec):
@@ -17,11 +17,14 @@ def split_for_spec(spec):
     falls back to :func:`default_split` for unknown, mixed, or unsupported specs.
     Explicitly batched Python object leaves split only their outer list/tuple;
     their contents and classes remain uninspected. Mixed object/tensor trees are
-    split by declaration. Unbatched object leaves raise ValueError at selection.
+    split by declaration. NumPy and TensorFlow ragged values split their outer row
+    partition, preserving empty rows and deeper partitions. Unbatched object or
+    ragged leaves raise ValueError; unsupported ragged backends raise TypeError.
+    Runtime ragged values are validated against the retained leaf spec.
     """
 
     leaves = tuple(iter_specs(spec))
-    if any(leaf.is_python_object for leaf in leaves):
+    if any(leaf.is_python_object or leaf.layout is Layout.RAGGED for leaf in leaves):
         return _object_tree_splitter(spec)
     backends = {tensor_spec.backend for tensor_spec in leaves}
     if len(backends) != 1:
@@ -47,6 +50,20 @@ def split_for_spec(spec):
 def _object_tree_splitter(spec):
     """Compile tree splitting while preserving each opaque example by identity."""
     if isinstance(spec, TensorSpec):
+        if spec.layout is Layout.RAGGED:
+            if not spec.batched:
+                raise ValueError("Unbatch requires explicitly batched ragged specs.")
+            if spec.backend is None or spec.backend.value not in {"numpy", "tf"}:
+                raise TypeError("Native ragged splitting supports only NumPy and TensorFlow.")
+            spec.backend.module
+            def split_ragged(batch):
+                from dryml.methods.signature import runtime_node_for_constraint, satisfies, spec_node
+                constraint = spec_node(spec)
+                if not satisfies(constraint, runtime_node_for_constraint(batch, constraint)):
+                    raise ValueError("Ragged Unbatch input differs from its declared spec.")
+                size = len(batch) if spec.backend.value == "numpy" else int(batch.nrows())
+                return [batch[i] for i in range(size)]
+            return split_ragged
         if not spec.is_python_object:
             return split_for_spec(spec) or default_split
         if not spec.batched:
@@ -77,6 +94,8 @@ def _object_tree_splitter(spec):
         size = next(iter(lengths), 0)
         if isinstance(spec, dict):
             return [{key: value[index] for key, value in parts.items()} for index in range(size)]
+        if is_namedtuple(batch):
+            return [type(batch)(*(value[index] for value in parts)) for index in range(size)]
         return [kind(value[index] for value in parts) for index in range(size)]
 
     return split

@@ -119,6 +119,16 @@ class TensorSpec:
     backend:
         Optional name for the backend used for this tensor
 
+    ragged_rank:
+        Positive number of row-partition levels in the full physical tensor,
+        including any batch axis in rank accounting; None leaves it unspecified.
+        Partitioned axes start after the outermost physical axis. Fixed uniform
+        axes before deeper variable axes are represented by partitions as well.
+
+    row_splits_dtype:
+        Ragged partition offsets use int32 or int64. None is unconstrained;
+        newly ragged-batched dense values use int64 by default.
+
     ``dtype="object", layout="python"`` describes an opaque Python value,
     without a Python class or content constraint. Its sample shape is ``()`` or
     unknown and it has no tensor backend or sparse/ragged metadata. An explicit
@@ -163,6 +173,17 @@ class TensorSpec:
 
         if self.row_splits_dtype is not None:
             object.__setattr__(self, "row_splits_dtype", normalize_dtype(self.row_splits_dtype))
+
+        if self.layout is Layout.RAGGED:
+            if self.full_rank is not None and self.full_rank < 2:
+                raise ValueError("Ragged tensors require at least two physical axes.")
+            if self.ragged_rank is not None:
+                if type(self.ragged_rank) is not int or self.ragged_rank < 1:
+                    raise ValueError("ragged_rank must be a positive integer or None.")
+                if self.full_rank is not None and self.ragged_rank >= self.full_rank:
+                    raise ValueError("ragged_rank must be smaller than the physical tensor rank.")
+            if self.row_splits_dtype is not None and self.row_splits_dtype.name not in {"int32", "int64"}:
+                raise ValueError("Ragged row_splits_dtype must be int32 or int64.")
 
         if self.backend is not None:
             if not isinstance(self.backend, Backend):
@@ -212,10 +233,45 @@ class TensorSpec:
         return self.shape
 
     def with_batch(self, batch: int | Dim = Dynamic, axis_name: str | None = "batch") -> TensorSpec:
-        return replace(self, batch=batch, batch_axis_name=axis_name)
+        """Add or update a leading batch axis, adding a partition for ragged samples.
+
+        Args:
+            batch: Fixed or Dynamic leading size; no runtime values are inspected.
+            axis_name: Optional logical batch label.
+
+        Returns:
+            A new spec. Adding a batch to an unbatched ragged tensor increments
+            its physical ragged_rank; changing an existing batch does not.
+
+        Raises:
+            ValueError: If a ragged sample has no known partition rank.
+        """
+        rank = self.ragged_rank
+        if self.layout is Layout.RAGGED and not self.batched:
+            if type(rank) is not int or rank < 1:
+                raise ValueError("Batching ragged values requires a positive ragged_rank.")
+            rank += 1
+        return replace(self, batch=batch, batch_axis_name=axis_name, ragged_rank=rank)
 
     def without_batch(self) -> TensorSpec:
-        return replace(self, batch=None, batch_axis_name=None)
+        """Remove a batch axis and its outer ragged partition, without reading values.
+
+        Returns:
+            An unbatched spec. Ragged rank one becomes dense; higher ranks lose
+            one partition. Already unbatched specs retain their layout metadata.
+
+        Raises:
+            ValueError: If a batched ragged spec has no known positive rank.
+        """
+        changes = {}
+        if self.layout is Layout.RAGGED and self.batched:
+            if type(self.ragged_rank) is not int or self.ragged_rank < 1:
+                raise ValueError("Unbatching ragged values requires a positive ragged_rank.")
+            if self.ragged_rank == 1:
+                changes.update(layout=Layout.DENSE, ragged_rank=None, row_splits_dtype=None)
+            else:
+                changes["ragged_rank"] = self.ragged_rank - 1
+        return replace(self, batch=None, batch_axis_name=None, **changes)
 
     def with_dtype(self, dtype: DType | str | Any) -> TensorSpec:
         return replace(self, dtype=dtype)
@@ -369,11 +425,59 @@ def assert_same_spec_structure(*specs: SpecTree) -> None:
             raise ValueError("Spec trees do not have the same structure.")
 
 
-def batch_spec_tree(spec: SpecTree, batch=Dynamic, axis_name: str | None = "batch") -> SpecTree:
-    return map_spec_tree(spec, lambda s: s.with_batch(batch=batch, axis_name=axis_name))
+def batch_spec_tree(spec: SpecTree, batch=Dynamic, axis_name: str | None = "batch", *, ragged: bool = False) -> SpecTree:
+    """Add batch metadata, optionally partitioning dense sample axes for ragged collation.
+
+    Args:
+        spec: Unbatched input spec tree. Existing ragged samples gain a partition.
+        batch: Fixed or Dynamic output population.
+        axis_name: Optional batch label.
+        ragged: Explicitly pack variable-shaped dense samples using row partitions
+            through their last Dynamic sample axis. Fixed-shape leaves (including
+            scalar labels) remain dense; opaque leaves retain list batching.
+
+    Returns:
+        A new spec tree. Ragged outputs retain numeric dtype and dense tail axes.
+
+    Raises:
+        TypeError, ValueError: If explicit ragged collation has unknown
+            sample rank, batched inputs, unsupported layout/backend, or bad rank.
+    """
+    if type(ragged) is not bool:
+        raise TypeError("ragged must be an exact bool.")
+    def leaf(s):
+        if s.layout is Layout.RAGGED and s.batched:
+            raise ValueError("Batch requires unbatched ragged samples.")
+        if not ragged or s.is_python_object or s.layout is Layout.RAGGED:
+            return s.with_batch(batch=batch, axis_name=axis_name)
+        if s.batched or s.layout is not Layout.DENSE or s.shape is None:
+            raise ValueError("Ragged Batch requires unbatched dense samples of known rank.")
+        if Dynamic not in s.shape:
+            return s.with_batch(batch=batch, axis_name=axis_name)
+        if s.backend is not Backend.numpy and s.backend is not Backend.tf:
+            raise TypeError("Ragged Batch requires a declared NumPy or TensorFlow backend.")
+        rank = max((i + 1 for i, dim in enumerate(s.shape) if dim is Dynamic), default=1)
+        return replace(s, batch=batch, batch_axis_name=axis_name, layout=Layout.RAGGED,
+                       ragged_rank=rank, row_splits_dtype="int64")
+    return map_spec_tree(spec, leaf)
 
 
 def unbatch_spec_tree(spec: SpecTree) -> SpecTree:
+    """Remove each leaf's batch axis and the corresponding outer ragged partition.
+
+    Args:
+        spec: TensorSpec tree with logical batch metadata.
+
+    Returns:
+        A new tree. Rank-one ragged batches produce dense samples; higher ragged
+        ranks decrease by one. Already unbatched leaves keep their layout.
+
+    Raises:
+        ValueError: If a batched ragged leaf has no known positive partition rank.
+
+    Side Effects:
+        None. This is pure metadata inference, without splitting runtime values.
+    """
     return map_spec_tree(spec, lambda s: s.without_batch())
 
 
@@ -401,8 +505,8 @@ def fake_from_spec_tree(spec_tree: SpecTree):
         convention.
 
     Raises:
-        ValueError: If a rank is unknown or an opaque Python object would need
-            invented content.
+        ValueError: If a rank is unknown, opaque content would need invention,
+            or ragged partitions would have to be synthesized.
         TypeError: If a declared dtype has no NumPy representation.
 
     Side Effects:
@@ -411,6 +515,8 @@ def fake_from_spec_tree(spec_tree: SpecTree):
     def leaf_sample(spec: TensorSpec):
         if spec.is_python_object:
             raise ValueError("Cannot synthesize sample content for an opaque Python object spec.")
+        if spec.layout is Layout.RAGGED:
+            raise ValueError("Cannot synthesize ragged row partitions from a TensorSpec.")
         if spec.shape is None:
             raise ValueError("Cannot create a fake sample from an unknown-rank TensorSpec.")
         sample_shape = tuple(1 if dim is Dynamic else int(dim) for dim in spec.shape)

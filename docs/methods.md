@@ -187,6 +187,16 @@ First-call numerical `learn()` remains exact. Supply a known dynamic spec to adm
 variation deliberately, and `output_spec=` to validate the raw output. This is
 local Method/IR reuse, not a guarantee about native JIT retracing or compilation.
 
+### Ragged Calls
+
+NumPy RaggedTensor and native TensorFlow ragged values are logical tensor leaves.
+Known-spec preparation validates layout, partition rank/dtype, fixed uniform axes,
+numeric dtype and batch metadata while admitting declared Dynamic dimensions.
+Cast and scalar Scale preserve partitions; Pipe, Project, Select and authored
+Models retain ragged graph ports and may return dense tensors. Unsupported ragged
+Flatten/ArgMax inference and automatic cross-backend conversions fail explicitly.
+See [Ragged Tensors](ragged.md) for partition semantics and Dataset integration.
+
 ## Opaque Object Inputs And Outputs
 
 `TensorSpec("object", layout="python")` describes one arbitrary Python value,

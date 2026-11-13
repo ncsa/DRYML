@@ -6,7 +6,7 @@ from dataclasses import replace
 from math import prod
 
 from dryml.core.dtype import normalize_dtype
-from dryml.core.tensor_spec import Dynamic, SpecTree, map_spec_tree
+from dryml.core.tensor_spec import Dynamic, Layout, SpecTree, map_spec_tree
 from dryml.methods import ImplementationSelectionError, Method, traits
 
 
@@ -388,6 +388,19 @@ class Pipe(Method):
 
 
 class Cast(Method):
+    """Convert one native dense or ragged tensor to a declared semantic dtype.
+
+    Args:
+        dtype: Canonical DRYML or supported native dtype spelling.
+
+    Returns:
+        A native value preserving shape, layout, batch and ragged partitions.
+        NumPy ragged outputs own their buffers; native backend cast semantics
+        otherwise apply. Pure inference maps the same dtype change over a tree.
+
+    Raises:
+        TypeError, ValueError: For unsupported dtypes, values or native casts.
+    """
     @property
     def iteration_independent(self) -> bool:
         """Return whether discarded Cast calls can be omitted safely."""
@@ -481,8 +494,11 @@ class ArgMax(Method):
 
         Raises:
             ValueError: If a known rank cannot admit the selected axis.
+            TypeError: For ragged input, whose reduction contract is not defined.
         """
         def infer(spec):
+            if spec.layout is Layout.RAGGED:
+                raise TypeError("ArgMax does not yet define a ragged-axis reduction contract.")
             names = None if spec.axis_names is None else _argmax_shape(spec.axis_names, self.axis)
             return replace(spec, dtype="int64", shape=_argmax_shape(spec.shape, self.axis), axis_names=names)
 
@@ -555,8 +571,13 @@ class Flatten(Method):
 
         Side Effects:
             None. No values, sources or native frameworks are evaluated.
+
+        Raises:
+            TypeError: For ragged input, whose sample-flattening contract is not defined.
         """
         def infer(spec):
+            if spec.layout is Layout.RAGGED:
+                raise TypeError("Flatten does not yet define a ragged sample-flattening contract.")
             names = spec.axis_names
             if names is not None and spec.rank != 1:
                 names = (None,)
@@ -623,6 +644,21 @@ class Flatten(Method):
 
 
 class Scale(Method):
+    """Apply scalar centering/scaling to a dense or ragged native tensor.
+
+    Args:
+        mean: Scalar center subtracted after dtype conversion.
+        std: Nonzero scalar divisor.
+        dtype: Semantic output dtype, default float32.
+
+    Returns:
+        A native value with unchanged shape/layout and preserved row partitions.
+        NumPy ragged output owns new buffers. Inference performs only dtype changes.
+
+    Raises:
+        ValueError: If std is zero or native arithmetic/broadcasting is invalid.
+        TypeError: For unsupported dtypes or values. No input buffers are mutated.
+    """
     @property
     def iteration_independent(self) -> bool:
         """Return whether discarded Scale calls can be omitted safely."""
@@ -647,6 +683,19 @@ class Scale(Method):
 
     @traits(backend="numpy")
     def numpy_call(self, x):
+        """Return dtype-converted, centered and scaled NumPy values.
+
+        Args:
+            x: Dense ndarray or packed RaggedTensor.
+
+        Returns:
+            A new value of the same layout; ragged row partitions are preserved.
+            Unsupported casts or arithmetic propagate NumPy TypeError/ValueError.
+        """
+        from dryml.numpy.ragged import RaggedTensor
+        if isinstance(x, RaggedTensor):
+            values = (x.flat_values.astype(self.dtype.np()) - self.mean) / self.std
+            return x.with_flat_values(values)
         return (x.astype(self.dtype.np()) - self.mean) / self.std
 
     @traits(backend="tf")

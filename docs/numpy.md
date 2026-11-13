@@ -1,4 +1,12 @@
-# NumPy Array Storage
+# NumPy Values And Array Storage
+
+`dryml.numpy.RaggedTensor` is the owned packed-values/row-partitions reference
+representation for ragged runtime tensors. It supports validated read-only buffers,
+empty rows, nested partitions, dtype changes and row extraction without implicit
+padding. See [Ragged Tensors](ragged.md) for construction and Dataset/Method usage.
+It is an ordinary tensor value rather than a Serializable payload container.
+
+## NumpyArray Storage
 
 `dryml.numpy.NumpyArray` is a concrete `Serializable` container for one array.
 Its constructor takes `shape` and `dtype` and initializes a zero array. Those two

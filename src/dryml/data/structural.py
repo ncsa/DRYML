@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dryml.core.cardinality import Cardinality
-from dryml.core.tensor_spec import Dynamic, SpecTree, batch_spec_tree, unbatch_spec_tree
+from dryml.core.tensor_spec import Dynamic, Layout, SpecTree, batch_spec_tree, iter_specs, unbatch_spec_tree
 from dryml.data.collate import collate_for_spec, default_collate
 from dryml.data.dataset import Dataset, DatasetCursor, DatasetExhaustedError
 from dryml.data.split import default_split, split_for_spec
@@ -16,6 +16,10 @@ class Batch(Dataset):
         src: Dataset supplying unbatched elements.
         batch_size: Positive number of elements per batch.
         drop_remainder: Discard the final short batch when true.
+        ragged: Pack Dynamic dense sample axes with row partitions instead of
+            stacking. Requires declared NumPy or TensorFlow sample specs of known
+            rank. Fixed-shape leaves/labels stay dense. Existing ragged samples
+            always gain a partition, even when false. No padding is performed.
 
     Iteration returns a lazy closeable cursor. Source/collation failures close
     children while retaining the primary error; non-pull StopIteration is failure.
@@ -23,16 +27,23 @@ class Batch(Dataset):
     """
 
     _stream_operator = "batch"
-    def __init__(self, src: Dataset, batch_size: int, *, drop_remainder: bool = False):
+    def __init__(self, src: Dataset, batch_size: int, *, drop_remainder: bool = False, ragged: bool = False):
         if batch_size <= 0:
             raise ValueError("batch_size must be positive.")
+        if type(ragged) is not bool:
+            raise TypeError("ragged must be an exact bool.")
         self.src = src
         self.batch_size = batch_size
         self.drop_remainder = drop_remainder
+        self.ragged = ragged
         # A non-dropping final batch may be shorter than ``batch_size``. Preserve
         # a fixed size only when dropping that final partial batch is guaranteed.
         batch = batch_size if drop_remainder else Dynamic
-        super().__init__(spec=batch_spec_tree(src.spec, batch=batch))
+        spec = batch_spec_tree(src.spec, batch=batch, ragged=ragged)
+        if any(leaf.layout is Layout.RAGGED and (leaf.backend is None or leaf.backend.value not in {"numpy", "tf"})
+               for leaf in iter_specs(spec)):
+            raise TypeError("Ragged Batch requires a declared NumPy or TensorFlow backend.")
+        super().__init__(spec=spec)
 
     def __iter__(self):
         """Return a lazy owned traversal, releasing children on every terminal path."""
@@ -101,7 +112,7 @@ class Batch(Dataset):
         """Select one declared-backend collator, retaining generic fallback."""
 
         del first_batch
-        return collate_for_spec(self.src.spec if input_spec is None else input_spec) or default_collate
+        return collate_for_spec(self.src.spec if input_spec is None else input_spec, ragged=self.ragged) or default_collate
 
 
 class Unbatch(Dataset):

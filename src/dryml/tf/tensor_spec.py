@@ -19,6 +19,8 @@ def dims_to_tf(shape):
 def _tensor_spec_tf(self, *, include_batch: bool = True, name: str | None = None):
     import tensorflow as tf
 
+    if not include_batch and self.batched:
+        return _tensor_spec_tf(self.without_batch(), include_batch=True, name=name)
     shape = self.framework_shape(include_batch=include_batch)
     tf_shape = dims_to_tf(shape)
     tf_dtype = self.dtype.tf()
@@ -103,22 +105,45 @@ def as_tensor_spec(
     batch_axis_name: str | None = "batch",
 ) -> SpecTree:
     """
-    Convert a TensorFlow TypeSpec or TensorFlow value to a DRYML TensorSpec.
+    Infer metadata for a TensorFlow value/TypeSpec or a plain tree of them.
 
-    Parameters
-    ----------
-    batched:
-        TensorFlow specs do not intrinsically identify a "batch axis".
-        If True, interpret the leading axis as batch.
+    Args:
+        x: Dense, sparse or RaggedTensor values/TypeSpecs, possibly in a tree.
+        batched: Interpret the leading physical axis as batch without changing
+            ragged_rank, which always counts physical partition levels.
+        batch_axis_name: Optional logical batch label.
+
+    Returns:
+        A SpecTree preserving layout, dtype and ragged partition metadata.
+        Eager ragged values additionally prove uniform widths from row splits;
+        TypeSpecs and traced values retain their declared static shape facts.
+
+    Raises:
+        TypeError: For unsupported values, TypeSpecs or dtypes.
+        ValueError: For scalar/unknown-rank batching or invalid ragged metadata.
+
+    Side Effects:
+        Imports TensorFlow at this explicit adapter boundary. Eager ragged shape
+        inference copies row splits to the host and may synchronize the device;
+        numeric flat values are not copied or retained.
     """
     def leaf_to_spec(x: Any) -> TensorSpec:
         import tensorflow as tf
 
+        value = x
         if not isinstance(x, tf.TypeSpec):
             x = tf.type_spec_from_value(x)
 
         if isinstance(x, tf.RaggedTensorSpec):
             shape = _tf_shape_to_dryml(x.shape)
+            if isinstance(value, tf.RaggedTensor) and tf.executing_eagerly() and shape is not None:
+                import numpy as np
+                shape = list(shape)
+                for axis, splits in enumerate(value.nested_row_splits, start=1):
+                    lengths = np.diff(splits.numpy())
+                    if len(lengths) and np.all(lengths == lengths[0]):
+                        shape[axis] = int(lengths[0])
+                shape = tuple(shape)
             sample_shape, batch = _split_batch(shape, batched=batched)
 
             return TensorSpec(

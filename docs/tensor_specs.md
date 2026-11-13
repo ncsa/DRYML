@@ -181,6 +181,14 @@ promise a backend JIT will compile every concrete shape into the same executable
 
 Dense tensors are the common default. Ragged and sparse specs can carry extra layout metadata such as ragged rank, row-splits dtype, or sparse format.
 
+Ragged rank counts row-partition levels in the full physical tensor. NumPy packed
+values and native TensorFlow ragged values are supported through Method IR and
+`Batch(..., ragged=True)`/Unbatch. Rank-one ragged batches unbatch to dense rows;
+deeper ranks lose one partition. Adding a batch to an unbatched ragged spec adds
+a partition, while interpreting an existing value with `batched=True` does not.
+See [Ragged Tensors](ragged.md) for representations, empty rows, shape-preserving
+Methods, validation, and supported backend boundaries.
+
 ## Spec Trees
 
 Many datasets and models operate on nested structures, not one tensor. DRYML supports spec trees made from `TensorSpec`, `dict`, `tuple`, and `list`.

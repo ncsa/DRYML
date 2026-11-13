@@ -672,11 +672,29 @@ print(json.dumps({
 }))
 """)
     data = json.loads(result.stdout)
-    assert data["exports"] == ["NumpyArray", "as_tensor_spec", "dtype"]
+    assert data["exports"] == ["NumpyArray", "RaggedTensor", "as_tensor_spec", "dtype"]
     assert data["module"] == "dryml.numpy.array"
     assert data["values"] == [[0, 1, 2], [3, 4, 5]]
     assert data["writeable"] is False
     assert data["parameters"] == {"shape": [2, 3], "dtype": "float32"}
+
+
+def test_installed_ragged_tensor_export_and_spec(installed_python: Path) -> None:
+    """Packed ragged values and their adapter are usable from the installed wheel."""
+    result = _installed_probe(installed_python, """
+import json
+import numpy as np
+from dryml.numpy import RaggedTensor, as_tensor_spec
+value = RaggedTensor.stack([np.ones((2, 5), dtype='float32'), np.zeros((0, 5), dtype='float32')])
+spec = as_tensor_spec(value, batched=True)
+print(json.dumps({'module': RaggedTensor.__module__, 'shape': value.shape,
+                  'rank': spec.ragged_rank, 'layout': spec.layout.value,
+                  'splits': spec.row_splits_dtype.name, 'writeable': value.flat_values.flags.writeable}))
+""")
+    assert json.loads(result.stdout) == {
+        "module": "dryml.numpy.ragged", "shape": [2, None, 5], "rank": 1,
+        "layout": "ragged", "splits": "int64", "writeable": False,
+    }
 
 
 def test_installed_declaration_imports_are_passive(

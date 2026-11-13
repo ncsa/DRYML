@@ -76,7 +76,7 @@ def test_unbounded_logical_count_rejected_without_source_acquisition(cardinality
     TensorSpec("float32", shape=(2,), backend="torch"),
     TensorSpec("float32", shape=(2,), backend=None),
     TensorSpec("float32", shape=(2,), backend="numpy", layout="sparse"),
-    TensorSpec("float32", shape=(2,), backend="numpy", layout="ragged"),
+    TensorSpec("float32", shape=(2, 2), backend="numpy", layout="ragged", ragged_rank=1),
     TensorSpec("bool", shape=(2,), backend="numpy"),
     TensorSpec("float16", shape=(2,), backend="numpy"),
     TensorSpec("complex64", shape=(2,), backend="numpy"),
