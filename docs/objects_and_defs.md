@@ -24,6 +24,12 @@ Mappings admit exact string/integer keys (not bool-as-int keys). Mutable arrays
 are snapshotted with dtype, shape, byte order and logical contents retained,
 including across Python pickle; object-dtype arrays are rejected.
 
+For bulk NumPy data that should not become constructor metadata, use
+[`dryml.numpy.NumpyArray`](numpy.md): declare the small `shape` and `dtype`
+arguments, optionally assign `.array` over its initial zeros, and save its state.
+Keep the returned SavedNode to reuse the exact payload in later recipes. Shape
+and dtype are searchable metadata; the array values are not constructor data.
+
 The existing plain `ConcreteDefinition` construction-view API retains structural
 equality for existing consumers. Legacy `stable_hash()` and `graph_hash()` remain
 construction-view keys, not new facet-aware Node keys or saved-graph encodings.

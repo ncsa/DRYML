@@ -652,6 +652,33 @@ print(json.dumps({
     assert "site-packages" in data["module"].replace("\\", "/")
 
 
+def test_installed_numpy_array_export_owns_readonly_content(installed_python: Path) -> None:
+    """The installed wheel exposes the payload class, not a checkout-only export."""
+    result = _installed_probe(installed_python, """
+import sys
+import json
+import numpy as np
+import dryml.numpy as backend
+assert 'dryml.numpy.array' not in sys.modules
+from dryml.numpy import NumpyArray
+holder = NumpyArray(shape=(2, 3), dtype='float32')
+holder.array = np.arange(6, dtype='float32').reshape(2, 3)
+print(json.dumps({
+    'exports': sorted(backend.__all__),
+    'module': NumpyArray.__module__,
+    'values': holder.array.tolist(),
+    'writeable': holder.array.flags.writeable,
+    'parameters': dict(holder.definition.parameters),
+}))
+""")
+    data = json.loads(result.stdout)
+    assert data["exports"] == ["NumpyArray", "as_tensor_spec", "dtype"]
+    assert data["module"] == "dryml.numpy.array"
+    assert data["values"] == [[0, 1, 2], [3, 4, 5]]
+    assert data["writeable"] is False
+    assert data["parameters"] == {"shape": [2, 3], "dtype": "float32"}
+
+
 def test_installed_declaration_imports_are_passive(
     installed_python: Path,
 ) -> None:

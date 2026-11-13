@@ -638,6 +638,26 @@ See [Repos and Stores](repos.md) for reconstruction ownership and
 [Session](session.md) for cache lifetime; [Generic Execute](execute.md) accepts
 only the narrower direct-DirStore worker transport.
 
+## NumPy Array Payload V1
+
+`dryml.numpy.NumpyArray` uses the opaque state codec `npy1`, with one codec-private
+`array.npy` file. The token versions this container contract, not NumPy's NPY
+header version. Constructor metadata contains normalized shape/dtype fields but
+no array values. The standard NumPy header must agree with those declarations;
+shape or dtype mismatches fail before payload installation.
+
+Readers/writers disable pickle and admit only nonobject, unstructured dtypes with
+no dtype metadata that NPY can preserve exactly. A dtype such as a custom bfloat
+representation that NPY reduces to void is rejected rather than relabeled.
+Missing, malformed, truncated, unsupported or trailing bytes fail before the hook
+replaces its installed array. Restored arrays are eager, owned and read-only;
+there is no retained mmap or external-file authority.
+
+Core's normal inventory/hash checks, immutable StateKey publication, selected
+source validation, graph invalidation and receipt installation remain in force.
+The class adds no Store-format or Node-identity revision. See
+[NumPy Array Storage](numpy.md) for ownership, default Repo selection and usage.
+
 ## Artifact Value V1
 
 `Value` local state contains one trusted dill protocol-5 `value.pkl` envelope:

@@ -1,3 +1,10 @@
+"""NumPy dtype/spec adapters and lazy array-payload container exports.
+
+Adapter registration does not load the Serializable container. Accessing
+NumpyArray imports its class declaration without allocating content or reading
+Store state; optional tensor frameworks remain behind their own boundaries.
+"""
+
 # Check we have the right context
 from dryml.core.utils.classes import install_method
 
@@ -26,4 +33,18 @@ def _install() -> None:
 _install()
 
 
-__all__ = ["dtype", "as_tensor_spec"]
+def __getattr__(name):
+    """Resolve NumpyArray lazily, or raise AttributeError for unknown exports."""
+    if name == "NumpyArray":
+        from .array import NumpyArray
+        globals()[name] = NumpyArray
+        return NumpyArray
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    """List declared exports without importing the payload container."""
+    return sorted(set(globals()) | set(__all__))
+
+
+__all__ = ["dtype", "as_tensor_spec", "NumpyArray"]
