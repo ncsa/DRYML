@@ -123,6 +123,16 @@ Cast, scalar Scale, composition, and authored Models can preserve ragged values 
 produce dense outputs. Example counts use the outer population, independently of
 row lengths. See [Ragged Tensors](ragged.md) for complete examples and contracts.
 
+### Padding And Masks
+
+`Padding(length, return_mask=True)` returns `{"values": dense_tensor,
+"mask": bool_tensor}` from one geometry decision. Sample axes exclude batch;
+mask axes stop before unchanged trailing features. Fixed targets or per-input
+maxima, left/right placement and explicit truncation work in ordinary/prepared
+pipelines. Real values equal to the fill value remain valid. NumPy/TensorFlow
+accept ragged input; all four tensor backends provide dense padding. See
+[Padding And Validity Masks](padding.md) for full contracts and examples.
+
 ### Opaque Python Elements
 
 For a fixed numerical array such as sampled probe coordinates, the

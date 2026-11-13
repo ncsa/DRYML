@@ -189,6 +189,15 @@ a partition, while interpreting an existing value with `batched=True` does not.
 See [Ragged Tensors](ragged.md) for representations, empty rows, shape-preserving
 Methods, validation, and supported backend boundaries.
 
+## Padding Inference
+
+Padding converts supported ragged layouts to dense values and clears partition
+metadata. Selected fixed targets fix dimensions; maximum targets preserve known
+sizes or Dynamic. `return_mask=True` adds a bool TensorSpec over the batch and
+sample prefix through the last padded axis, preserving corresponding axis names.
+Mask shape does not repeat unchanged trailing feature axes. See
+[Padding And Validity Masks](padding.md) for examples.
+
 ## Spec Trees
 
 Many datasets and models operate on nested structures, not one tensor. DRYML supports spec trees made from `TensorSpec`, `dict`, `tuple`, and `list`.

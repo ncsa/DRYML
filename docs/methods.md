@@ -197,6 +197,16 @@ Models retain ragged graph ports and may return dense tensors. Unsupported ragge
 Flatten/ArgMax inference and automatic cross-backend conversions fail explicitly.
 See [Ragged Tensors](ragged.md) for partition semantics and Dataset integration.
 
+### Padding Outputs
+
+Padding is a tensor Method with native NumPy/TensorFlow/Torch/JAX alternatives.
+Its optional mask is part of the inferred output SpecTree, not hidden runtime
+state. Fixed targets resolve output dimensions before values exist; per-input
+maxima retain Dynamic dimensions. Named bool masks describe the sample prefix
+through the final padded axis and preserve the input batch contract. Pipe,
+Project, Select and authored Models can consume or forward the values/mask dict.
+See [Padding And Validity Masks](padding.md) for geometry and failure semantics.
+
 ## Opaque Object Inputs And Outputs
 
 `TensorSpec("object", layout="python")` describes one arbitrary Python value,

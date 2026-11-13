@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add Padding with optional bool validity masks, fixed or per-input maximum
+  targets, sample-axis selection, left/right placement and explicit truncation.
+  Support dense NumPy/TensorFlow/Torch/JAX execution and NumPy/TensorFlow ragged
+  inputs, with pure structured spec inference, prepared pipelines, empty rows,
+  gradient preservation and dense model handoffs.
 - Add owned NumPy RaggedTensor values and native TensorFlow ragged pipelines,
   including explicit ragged collation, nested Batch/Unbatch partition inference,
   empty rows, mixed trees, selected/prepared Method IR, and partition-preserving

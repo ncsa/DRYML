@@ -697,6 +697,28 @@ print(json.dumps({'module': RaggedTensor.__module__, 'shape': value.shape,
     }
 
 
+def test_installed_padding_values_and_mask(installed_python: Path) -> None:
+    """Padding is public and executes against installed ragged values and specs."""
+    result = _installed_probe(installed_python, """
+import json
+import numpy as np
+from dryml.core.tensor_spec import Dynamic, TensorSpec
+from dryml.data import Padding
+from dryml.numpy import RaggedTensor
+spec = TensorSpec('float32', shape=(Dynamic, 5), batch=Dynamic, backend='numpy',
+                  layout='ragged', ragged_rank=1, row_splits_dtype='int64')
+method = Padding(3, return_mask=True)
+method.learn(spec, output_spec=method.infer_output_spec(spec))
+output = method(RaggedTensor.stack([np.zeros((1, 5), dtype='float32'), np.zeros((0, 5), dtype='float32')]))
+print(json.dumps({'module': Padding.__module__, 'shape': output['values'].shape,
+                  'mask': output['mask'].tolist(), 'dtype': str(output['mask'].dtype)}))
+""")
+    assert json.loads(result.stdout) == {
+        "module": "dryml.data.padding", "shape": [2, 3, 5],
+        "mask": [[True, False, False], [False, False, False]], "dtype": "bool",
+    }
+
+
 def test_installed_declaration_imports_are_passive(
     installed_python: Path,
 ) -> None:
@@ -715,6 +737,8 @@ class RejectNative:
             raise AssertionError('unexpected native import: ' + fullname)
 sys.meta_path.insert(0, RejectNative())
 import dryml
+from dryml.data import Padding
+Padding(5, return_mask=True)
 import dryml.annotations
 import dryml.environments
 import dryml.formats

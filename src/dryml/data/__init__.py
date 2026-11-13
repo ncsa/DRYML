@@ -3,6 +3,7 @@ from dryml.data.native import NativeTrainingCursor, PreparedDataset
 from dryml.data.source import ArrayDataset, GeneratorDataset, NpyFileDataset, TFDSAdapter, TorchDatasetAdapter
 from dryml.data.combine import Chain, Zip
 from dryml.data.methods import ArgMax, Cast, Flatten, Pipe, Project, Scale, Select
+from dryml.data.padding import Padding
 from dryml.data.reduction_methods import (
     Abs,
     ArrayMean,
@@ -49,6 +50,7 @@ __all__ = [
     "Cast",
     "Flatten",
     "Scale",
+    "Padding",
     "Zip",
     "Chain",
     "Batch",

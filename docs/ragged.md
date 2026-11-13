@@ -134,8 +134,9 @@ support for ragged inputs is the authored native model's responsibility.
 Flatten and ArgMax reject ragged inference until their ragged-axis semantics are
 defined. Spec-only fake samples cannot invent row partitions. Automatic cross-backend
 handoffs remain dense-only; native Torch/JAX ragged collation is not provided.
-Padding, masks, truncation, and layout conversion require explicit transforms and
-are not silently introduced by batching or Method selection.
+[Padding](padding.md) explicitly produces dense values and optional geometry masks,
+with fixed or maximum targets, left/right placement and opt-in truncation. These
+operations are not silently introduced by batching or Method selection.
 
 The TensorFlow adapter retains native partition rank/dtype. Eager inference reads
 row splits on the host to prove uniform widths, which can synchronize a device;
