@@ -740,6 +740,35 @@ Node records use version 1; `dryml-managed-history` v2 and
 reference and StateKey versions are validated independently. No Object payload,
 Repo handle, portable Repo definition or Python continuation is stored.
 
+Control wire bytes remain bounded to 1 MiB. Large records can use the closed
+`dryml-managed-control-blocks` v1 envelope with exactly `schema`, `version`,
+`record`, and `blocks`. The pool maps existing 64-hex Node value-block keys to
+their exact JSON blocks. A reference replaces only a graph `values` entry (or a
+nested envelope's `blocks` entry), and must equal that entry's key. Nested
+envelopes retain independent reference scopes. Missing/unused blocks, invalid
+references, conflicting same-key content, duplicate JSON keys and unsupported
+versions fail closed. Sharing does not merge Node tables, views, occurrences,
+ObjectIds, state bindings or retained construction evidence; authenticated graph
+v1 / identity-3 validation still runs after expansion.
+
+Writers retain plain canonical JSON through 256 KiB and select pooling of repeated
+blocks of at least 256 bytes only when it reduces stored bytes. Expanded metadata
+is separately bounded to 8 MiB, depth 96, 65,536 nodes, 16,384 entries per container,
+1 MiB strings and 64-bit integers. These limits apply before graph reconstruction;
+a compact reference expansion cannot bypass them. Plain current-v4 records remain
+readable and retain their original bytes.
+
+New `dryml-managed-start` wire v2 preparations retain the logical v1 projection
+shape but embed previous/proposed snapshots as closed
+`dryml-managed-snapshot-packet` v1 descriptors, with `packet` and `source` fields.
+`packet` contains the actual plain/shared snapshot JSON. `source` is null for
+canonical bytes, otherwise the original UTF-8 JSON spelling, validated against
+that packet. Readers also accept existing inline-snapshot start v1 preparations.
+Unchanged decoded snapshots/preparations return their exact source bytes; changing
+a preparation preserves each nested snapshot's original CAS witness. This is
+explicit wire-format readability, not conversion of incompatible Store, current,
+result or graph authority.
+
 Durable ordinary values use `dryml-managed-result` version 2, independent of the
 current-control record version. Its closed envelope contains exactly `schema`,
 `version`, `nodes`, `root`, and `metadata`. Metadata rows select exact authenticated
@@ -765,7 +794,7 @@ before publication. POSIX publication syncs the parent directory; the Windows
 adapter syncs regular files and atomic replacement without claiming unsupported
 directory-descriptor fsync. Unsupported, malformed, incomplete, unreadable, or
 pending control authority fails reconciliation rather than becoming a fabricated
-status. Old authority is preserved unchanged; there is no compatibility reader or
-automatic conversion. See [Managed Operations](managed_operations.md) for start,
+status. Incompatible authority is preserved unchanged; only the explicitly listed
+wire representations are readable, without automatic conversion. See [Managed Operations](managed_operations.md) for start,
 checkpoint, retention and result semantics, and [verification evidence](object_state_lifecycle_verification.md)
 for measured qualification and pending coordinator gates.

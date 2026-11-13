@@ -24,7 +24,6 @@ from dryml.core.node_prepare import NodePreparation
 from dryml.core.repo import Repo
 from dryml.core.store import authority as journal
 from dryml.core.store.dir import DirStore
-from dryml.formats import canonical_json_bytes, canonical_json_load_bytes
 from dryml.locking import FileLock, interprocess_lock
 from dryml.paths import local_path_key
 
@@ -32,6 +31,7 @@ from .errors import ManagedConfigError, ManagedConflictError, ManagedControlErro
 from .identity import AdmissionIdentity, operation_digest, _receiver
 from .storage import OperationAdmission, OperationOwnership
 from .results import ResultReference, StoreAcknowledgement
+from .control_codec import ControlSizeError, check_expanded, decode_control, encode_control
 
 _MAX_BYTES = 1024 * 1024
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
@@ -71,15 +71,13 @@ def _generation(value):
         raise ManagedControlError("invalid_current", "generation is outside its supported range")
 
 
-def _bytes(data):
+def _bytes(data, *, shared=True, validated=False):
     try:
-        payload = canonical_json_bytes(data, max_depth=96, max_nodes=65536,
-            max_entries=16384, max_string=_MAX_BYTES, max_int_bits=64)
+        return encode_control(data, max_bytes=_MAX_BYTES, shared=shared, validated=validated)
+    except ControlSizeError as error:
+        raise ManagedControlError("snapshot_too_large", "control metadata exceeds its stored or expanded byte budget") from error
     except (TypeError, ValueError, ManagedConfigError) as error:
         raise ManagedControlError("invalid_control", "control metadata exceeds its closed grammar") from error
-    if len(payload) > _MAX_BYTES:
-        raise ManagedControlError("snapshot_too_large", "control metadata exceeds 1 MiB")
-    return payload
 
 
 def _data(payload):
@@ -87,14 +85,13 @@ def _data(payload):
         raise ManagedControlError("invalid_control", "control bytes exceed their support bound")
     try:
         def validate():
-            canonical_json_load_bytes(payload, max_depth=96, max_nodes=65536,
-                max_entries=16384, max_string=_MAX_BYTES, max_int_bits=64)
+            decode_control(payload, max_bytes=_MAX_BYTES)
         facts = _current_content_facts()
         if facts is None:
-            validate()
+            return decode_control(payload, max_bytes=_MAX_BYTES)
         else:
-            facts.decode(("control-json", canonical_json_load_bytes), payload, validate)
-        return json.loads(payload)
+            facts.decode(("control-json", decode_control, _MAX_BYTES), payload, validate)
+        return decode_control(payload, max_bytes=_MAX_BYTES, validated=True)
     except (ValueError, TypeError) as error:
         raise ManagedControlError("invalid_control", "control metadata is malformed") from error
 
@@ -346,6 +343,8 @@ class ControlSnapshot:
     private, nonserialized fact, not proof of external authority. Replacement drops
     that fact; every CAS still checks fresh persisted bytes and ownership/fences.
     Codec methods read no payloads and grant no retention.
+    New large records may use a record-local shared-value-block wire envelope;
+    logical to_data mappings remain current v4, with unchanged Node packet scopes.
     result_reference is optional typed ResultReference and mandatory on completed
     records. Finalizing retains it before automatic capture; failed/interrupted
     records may preserve this evidence without claiming an ordinary success value.
@@ -455,11 +454,13 @@ class ControlSnapshot:
                 "result_ack": None if self.result_ack is None else self.result_ack.to_data()}
 
     def to_bytes(self):
-        """Return validated source bytes or bounded canonical JSON for a new value.
+        """Return exact source bytes or bounded plain/shared JSON for a new value.
 
         Source bytes are immutable data, not a cached authority check. New values
         may use different Node packet labels for logically equal unordered graphs.
-        Oversized new records raise ManagedControlError; no IO occurs.
+        Stored bytes remain bounded to 1 MiB; expanded logical metadata to 8 MiB
+        and the existing closed grammar. Oversize raises ManagedControlError.
+        No IO occurs and sharing never coalesces Node occurrences or bindings.
         """
         if self._source_bytes is not None:
             return self._source_bytes
@@ -561,6 +562,9 @@ class StartPreparation:
     Validated source bytes are a bounded immutable nonserialized fact, discarded
     by replacement. Nested snapshots preserve their own exact byte evidence. The
     fact confers no authority: publication freshly checks sidecar/current bytes.
+    New wire version 2 embeds exact snapshot packet evidence and may share Node
+    value blocks across packets; legacy wire v1 remains readable without rewriting.
+    to_data keeps the logical v1 projection shape for existing index consumers.
     """
 
     token: str
@@ -591,10 +595,25 @@ class StartPreparation:
             "proposed": self.proposed.to_data(), "phase": self.phase, "settled": self.settled}
 
     def to_bytes(self):
-        """Return bounded closed start-intent v1 bytes, including exact CAS evidence."""
+        """Return bounded start-intent v2 bytes with exact nested snapshot packets.
+
+        Logical to_data projection remains v1. The wire packet preserves plain or
+        shared snapshot bytes, including noncanonical source spelling, so changing
+        representation never manufactures a previous-current CAS witness.
+        Oversized wire/expanded metadata raises ManagedControlError before IO.
+        """
         if self._source_bytes is not None:
             return self._source_bytes
-        return _bytes(self.to_data())
+        try:
+            logical = check_expanded(self.to_data(), max_bytes=_MAX_BYTES)
+        except ControlSizeError as error:
+            raise ManagedControlError("snapshot_too_large", "preparation exceeds its expanded byte budget") from error
+        except (TypeError, ValueError) as error:
+            raise ManagedControlError("invalid_control", "expanded preparation exceeds its closed grammar") from error
+        return _bytes({"schema": "dryml-managed-start", "version": 2, "token": self.token,
+                       "previous": _snapshot_packet(self.previous, logical["previous"]),
+                       "proposed": _snapshot_packet(self.proposed, logical["proposed"]),
+                       "phase": self.phase, "settled": self.settled})
 
     @classmethod
     @_decoded_record
@@ -608,13 +627,49 @@ class StartPreparation:
         current authority. No Store IO, hooks, restoration or capture occurs.
         """
         data = _data(payload)
-        _closed(data, "dryml-managed-start", 1, {"token", "previous", "proposed", "phase", "settled"})
+        version = data.get("version") if isinstance(data, Mapping) else None
+        _closed(data, "dryml-managed-start", 1 if version == 1 else 2,
+                {"token", "previous", "proposed", "phase", "settled"})
+        snapshot = (lambda value: ControlSnapshot.from_bytes(_bytes(value, shared=False, validated=True), operation_id=operation_id)
+                    if version == 1 else _snapshot_from_packet(value, operation_id=operation_id))
         result = cls(data["token"], None if data["previous"] is None else
-            ControlSnapshot.from_bytes(_bytes(data["previous"]), operation_id=operation_id),
-            ControlSnapshot.from_bytes(_bytes(data["proposed"]), operation_id=operation_id),
+            snapshot(data["previous"]), snapshot(data["proposed"]),
             data["phase"], data["settled"])
+        try:
+            check_expanded(result.to_data(), max_bytes=_MAX_BYTES)
+        except (TypeError, ValueError) as error:
+            raise ManagedControlError("invalid_control", "expanded preparation exceeds its closed grammar") from error
         object.__setattr__(result, "_source_bytes", payload)
         return result
+
+
+def _snapshot_packet(snapshot, logical):
+    if snapshot is None:
+        return None
+    payload = (snapshot._source_bytes if snapshot._source_bytes is not None else
+               _bytes(logical, validated=True))
+    packet = json.loads(payload)
+    canonical = json.dumps(packet, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False, allow_nan=False).encode("utf8")
+    return {"schema": "dryml-managed-snapshot-packet", "version": 1, "packet": packet,
+            "source": None if canonical == payload else payload.decode("utf8")}
+
+
+def _snapshot_from_packet(data, *, operation_id):
+    _closed(data, "dryml-managed-snapshot-packet", 1, {"packet", "source"})
+    packet = _bytes(data["packet"], shared=False, validated=True)
+    if data["source"] is not None:
+        if type(data["source"]) is not str:
+            raise ManagedControlError("invalid_control", "snapshot source must be UTF-8 JSON text")
+        try:
+            source = data["source"].encode("utf8")
+        except UnicodeError as error:
+            raise ManagedControlError("invalid_control", "snapshot source is not UTF-8 JSON text") from error
+        _data(source)
+        if _bytes(json.loads(source), shared=False, validated=True) != packet:
+            raise ManagedControlError("invalid_control", "snapshot source differs from its packet")
+        packet = source
+    return ControlSnapshot.from_bytes(packet, operation_id=operation_id)
 
 
 class ManagedControlStore:

@@ -120,6 +120,7 @@ _REQUIRED_MODULES = {
     "dryml/managed/config.py",
     "dryml/managed/context.py",
     "dryml/managed/control.py",
+    "dryml/managed/control_codec.py",
     "dryml/managed/descriptor.py",
     "dryml/managed/errors.py",
     "dryml/managed/identity.py",

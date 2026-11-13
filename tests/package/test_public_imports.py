@@ -652,6 +652,32 @@ print(json.dumps({
     assert "site-packages" in data["module"].replace("\\", "/")
 
 
+def test_installed_large_control_preparation_preserves_snapshot_bytes(installed_python: Path) -> None:
+    """Installed control readers share recipe blocks and preserve nested CAS bytes."""
+    result = _installed_probe(installed_python, """
+import json
+from dataclasses import replace
+from uuid import uuid4
+import numpy as np
+from dryml.core import Definition
+from dryml.data import ArrayDataset
+from dryml.managed.control import ControlSnapshot, StartPreparation
+
+node = Definition(ArrayDataset, np.arange(30000, dtype='float32').reshape(10000, 3)).concretize()
+previous = ControlSnapshot(node, 'run', 'a' * 64, uuid4().hex, uuid4().hex, 1, 'running', checkpoint=node)
+preparation = StartPreparation(uuid4().hex, previous, replace(previous, generation=2))
+payload = preparation.to_bytes()
+decoded = StartPreparation.from_bytes(payload, operation_id=previous.operation_id)
+assert decoded.previous.to_bytes() == previous.to_bytes()
+assert decoded.proposed.to_bytes() == preparation.proposed.to_bytes()
+print(json.dumps({'shared': json.loads(payload)['schema'] == 'dryml-managed-control-blocks',
+                  'size': len(payload)}))
+""")
+    data = json.loads(result.stdout)
+    assert data["shared"]
+    assert data["size"] < 1024 * 1024
+
+
 def test_installed_numpy_array_export_owns_readonly_content(installed_python: Path) -> None:
     """The installed wheel exposes the payload class, not a checkout-only export."""
     result = _installed_probe(installed_python, """

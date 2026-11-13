@@ -331,6 +331,37 @@ by **4,514 passed, 29 skipped** in the final representative `good-enough` gate,
 lint and whitespace checks passed. The original-expression synthetic benchmark
 also returned the expected completed state with one lookup graph decode.
 
+## Large checkpoint association metadata
+
+Repeated receiver/checkpoint/final recipes can exceed the 1 MiB control limit
+even when each graph packet fits individually. Control encoding now pools exact
+repeated Node value blocks within a record, preserving separate graph tables,
+views, bindings and exact previous/proposed source-byte witnesses. It does not
+raise the stored-byte limit or open private state.
+
+Two deterministic synthetic regressions exercise this boundary:
+
+| Case | Expanded logical JSON | Stored wire bytes |
+| --- | ---: | ---: |
+| Seven graph packets in a 43-row final-association preparation | 1,601,539 | 553,387 |
+| Largest preparation in an authored checkpoint/completion workflow | 1,636,419 | 214,555 |
+
+The authored workflow completes with one body, two captures and zero restores,
+then rebuilds SQLite projections and replays completion with private-state reads
+forbidden. Separate tests cover exact legacy/noncanonical source bytes,
+owner-exit recovery, distinct saved states, malformed pools and expansion bounds.
+These are local synthetic measurements, not a rerun of the user's notebook or a
+latency guarantee. Expanded control metadata has its own 8 MiB limit; unique wire
+metadata must still fit 1 MiB. See [formats](formats.md#managed-control-formats).
+
+Final verification: **194 affected checks passed**, including 18 sharing/size/
+recovery regressions, and **8 offline source/wheel artifact checks passed**.
+The representative `good-enough` gate passed **4,834 tests, 29 skipped**, in
+**885.09s (14m45s)** complete wall time across both interpreter phases. An earlier
+run reached its 890-second cutoff; removing duplicate preparation graph encoding
+and reusing already validated detached metadata brought the final run within the
+15-minute gate without changing test selection or validation bounds.
+
 ## Original performance-pass verification
 
 - Affected subsystem selection: **702 passed** under the representative policy.

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Share repeated exact Node value blocks in large managed-control records so
+  checkpoint/final-association preparation can fit the existing 1 MiB wire limit.
+  Preserve exact nested snapshot CAS bytes, legacy plain records, graph identities
+  and metadata-only recovery/replay; bound expanded metadata separately to 8 MiB.
 - Add Padding with optional bool validity masks, fixed or per-input maximum
   targets, sample-axis selection, left/right placement and explicit truncation.
   Support dense NumPy/TensorFlow/Torch/JAX execution and NumPy/TensorFlow ragged
