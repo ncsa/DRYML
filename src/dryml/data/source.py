@@ -79,7 +79,9 @@ class _GeneratorCursor(DatasetCursor):
         self._values = None
         self._observed_examples = 0
         declaration = dataset._declared_example_count
-        self._validate_observed = declaration is not None and not declaration.is_unknown
+        self._validate_observed = (
+            dataset._spec is not None and declaration is not None and not declaration.is_unknown
+        )
 
     def _validate_end(self):
         if self._validate_observed:
@@ -123,8 +125,10 @@ class GeneratorDataset(SourceDataset):
         example_count: Optional explicit total for opaque or dynamic batches.
         spec: Optional yielded-element SpecTree or SpecHint (also accepted as a
             dict, string or sample count). A hint samples the source immediately,
-            inferring numerical and class-agnostic opaque Python leaves. An
-            explicit SpecTree opens no factory during construction.
+            inferring numerical and class-agnostic opaque Python leaves, then
+            closes the sampling cursor. Example totals are validated on normal
+            traversals once a countable spec exists. An explicit SpecTree opens
+            no factory during construction.
         seed: Base seed for the supported seed-aware source protocol.
         seed_aware: Enable the versioned per-epoch seed protocol.
         epoch_seed_version: Version of the stable epoch seed derivation protocol.
@@ -176,13 +180,18 @@ class GeneratorDataset(SourceDataset):
         if spec is None:
             self._spec = None
         elif isinstance(spec, SpecHint):
-            self._spec = detect_spec_tree(iter(self), spec)
+            self._spec = self._infer_spec(spec)
         else:
             leaf = first_leaf(spec)
             if isinstance(leaf, TensorSpec):
                 self._spec = spec
             else:
-                self._spec = detect_spec_tree(iter(self), SpecHint.build(spec))
+                self._spec = self._infer_spec(SpecHint.build(spec))
+
+    def _infer_spec(self, hint: SpecHint) -> SpecTree:
+        """Own the bounded sampling traversal before an element spec is available."""
+        with self.iterator() as cursor:
+            return detect_spec_tree(cursor, hint)
 
     @classmethod
     def __dryml_normalize_definition_arguments__(cls, args, kwargs):
