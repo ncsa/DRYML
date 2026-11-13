@@ -215,9 +215,22 @@ def runtime_node_for_constraint(value: object, constraint: MethodCallNode) -> Me
     Python object leaves use only the declared outer batch boundary, retaining no
     content, class, shape attributes or array-conversion evidence. Trees are
     traversed by their spec so object-valued containers remain opaque leaves.
+    Native values inherit logical sample-axis labels from the retained declaration;
+    explicit TensorSpec values retain their own labels and must satisfy them.
+
+    Args:
+        value: Runtime native tensor, opaque value, or declared structural tree.
+        constraint: Immutable MethodCallNode carrying the retained logical spec.
+
+    Returns:
+        An immutable node with observed tensor metadata and declared logical axis
+        interpretation, without retaining opaque values or their classes.
 
     Raises:
         TypeError: If ``value`` cannot be normalized by the supported adapters.
+
+    Side Effects:
+        Reads native metadata through registered adapters; executes no Method.
     """
 
     return _runtime_node_with_schema(value, constraint, retain_batch=True)
@@ -232,7 +245,13 @@ def _runtime_node_with_schema(value, constraint, *, retain_batch):
             observed = replace(expected, shape=(), batch=size)
             return MethodCallNode("tensor", observed)
         observed = runtime_node(value)
-        return _apply_retained_batch(observed, constraint) if retain_batch else observed
+        if not retain_batch:
+            return observed
+        observed = _apply_retained_batch(observed, constraint)
+        if (not isinstance(value, TensorSpec) and observed.kind == "tensor"
+                and expected.axis_names is not None and observed.value.rank == expected.rank):
+            observed = MethodCallNode("tensor", replace(observed.value, axis_names=expected.axis_names))
+        return observed
     if constraint.kind == "mapping" and isinstance(value, Mapping):
         expected = dict(constraint.value)
         if not all(isinstance(key, (str, int)) for key in value):

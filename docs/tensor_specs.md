@@ -115,6 +115,61 @@ Useful properties:
 
 Unknown rank is represented by `shape=None`. Dynamic dimensions are represented by `Dynamic`.
 
+### Dynamic Dense Dimensions And Variable Batches
+
+Dynamic axes are supported in dense sample shapes independently of the batch
+size. These declarations have known full rank three:
+
+| Full shape contract | Sample shape | Batch |
+| --- | --- | --- |
+| `(B, 10, L)` | `(10, Dynamic)` | `Dynamic` |
+| `(B, L, 5)` | `(Dynamic, 5)` | `Dynamic` |
+| `(B, 10, 5)` | `(10, 5)` | `Dynamic` |
+| `(B, L, F)` | `(Dynamic, Dynamic)` | `Dynamic` |
+
+Each yielded or passed dense tensor remains rectangular. Sizes may differ
+between calls or Dataset yields; unequal-length rows within one tensor require
+a separate ragged or padded representation. A repeated `Dynamic` is not a named
+symbol and does not establish equality between axes or different tensors.
+
+```python
+import numpy as np
+from dryml.core.tensor_spec import Dynamic, TensorSpec
+from dryml.data import Flatten
+
+inputs = TensorSpec("float32", shape=(Dynamic, 5), batch=Dynamic, backend="numpy")
+flatten = Flatten()
+outputs = flatten.infer_output_spec(inputs)
+assert outputs.shape == (Dynamic,)
+flatten.learn(inputs, output_spec=outputs)
+assert flatten(np.ones((4, 12, 5), dtype="float32")).shape == (4, 60)
+assert flatten(np.ones((1, 7, 5), dtype="float32")).shape == (1, 35)
+```
+
+Known-spec Method preparation retains these wildcards, validates fixed dimensions,
+rank, dtype, layout and backend on each call, and reuses its selected invoker.
+An explicit `output_spec` checks the raw result as well. In contrast, `learn()`
+without a spec captures the first numerical call's exact physical shape; observing
+one value does not establish which dimensions may vary.
+
+Shape inference follows each Method's operation: Cast and Scale preserve sample
+dimensions; ArgMax removes its selected sample axis and axis name; Flatten
+multiplies fixed sizes and otherwise retains a Dynamic width. A known zero factor
+proves a flattened width of zero even beside Dynamic dimensions. Flatten preserves
+a single sample-axis name and uses an unnamed axis when collapsing several axes.
+Native arrays carry physical axes rather than DRYML labels, so known-spec validation
+interprets their axis names from the declaration. Explicit TensorSpec arguments
+must still carry compatible labels of their own.
+
+`merge_tensor_specs` and sample inference generalize varying sizes to Dynamic
+without mixing batched and unbatched declarations. Sampling can only establish
+variation actually observed; use an explicit spec for other intended variability.
+
+Logical dynamic specs do not allocate unknown-sized arrays. NumPy's concrete
+backend-spec conversion still requires fixed sizes. TensorFlow, Torch and JAX
+runtime values can be validated under a DRYML dynamic contract; this does not
+promise a backend JIT will compile every concrete shape into the same executable.
+
 ## Layouts
 
 `TensorSpec.layout` describes the broad storage style:

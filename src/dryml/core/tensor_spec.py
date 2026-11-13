@@ -97,7 +97,9 @@ class TensorSpec:
         Canonical semantic dtype.
 
     shape:
-        Sample shape, excluding batch. None means unknown rank.
+        Sample shape, excluding batch. Nonnegative integers fix dimension sizes;
+        Dynamic accepts different concrete sizes across calls. None means
+        unknown rank, not a dynamic dimension inside a shape tuple.
 
     batch:
         Batch axis contract:
@@ -122,6 +124,10 @@ class TensorSpec:
     unknown and it has no tensor backend or sparse/ragged metadata. An explicit
     batch contains opaque values in a list or tuple. Dense NumPy object arrays
     retain their ordinary tensor shape/backend semantics.
+
+    Dense Dynamic dimensions describe rectangular tensors of varying size, not
+    unequal row lengths within one value. Each Dynamic is an independent unknown;
+    repeated occurrences do not assert equality between axes or separate leaves.
     """
     dtype: DType | str | Any
     shape: tuple[DimLike, ...] | list[DimLike] | None = ()
@@ -430,10 +436,28 @@ def match_input_batch(spec: TensorSpec, input_spec: SpecTree) -> TensorSpec:
 
 
 def merge_tensor_specs(specs: Sequence[TensorSpec]) -> TensorSpec:
-    """Merge same-position TensorSpecs, marking varying dimensions dynamic."""
+    """Merge same-position tensor metadata without changing batch interpretation.
+
+    Args:
+        specs: Nonempty sequence of equally ranked, uniformly batched or
+            unbatched TensorSpecs with compatible non-shape metadata.
+
+    Returns:
+        A TensorSpec with differing sample dimensions or batch sizes marked
+        Dynamic. Fixed dimensions and common layout/dtype/axis facts remain.
+
+    Raises:
+        ValueError: If the sequence is empty, ranks or batch interpretations
+            differ, or non-shape metadata conflicts.
+
+    Side Effects:
+        None. Merging reads metadata without inspecting or allocating tensors.
+    """
     specs = list(specs)
     if not specs:
         raise ValueError("At least one TensorSpec is required.")
+    if len({spec.batched for spec in specs}) != 1:
+        raise ValueError("TensorSpecs must be uniformly batched or unbatched to merge.")
 
     ranks = [spec.rank for spec in specs]
     if len(set(ranks)) > 1:

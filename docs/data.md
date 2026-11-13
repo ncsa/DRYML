@@ -90,6 +90,26 @@ one epoch. Opaque generator factories receive no new replay or seed requirement.
 A completed `CachedDataset` instead persists one selected realization: repeating
 that cache replays its stored values and does not advance the source's epoch seed.
 
+### Dynamic Dense Elements
+
+Dense Dataset values may vary in sample dimensions as well as batch size. For
+example, `TensorSpec("float32", shape=(Dynamic, 5), batch=Dynamic, backend="numpy")`
+admits consecutive tensors shaped `(2, 3, 5)`, `(1, 7, 5)` and `(3, 2, 5)`.
+Map, composed Methods, explicit-output Models and prepared stream graph ports
+retain that contract. Counts still use only the leading batch length, so changing
+a sample length does not change the number of examples represented by a batch.
+
+Batch can stack equally shaped samples in one group while later groups have
+different shapes. It cannot stack unequal sample shapes within the same dense
+batch: ordinary and prepared execution propagate the collation failure. Unbatch
+preserves the declared Dynamic sample dimensions and splits actual batch lengths.
+Zero-sized sample axes are distinct from empty batches; Dataset runtime example
+counting still rejects a zero-example batch.
+
+GeneratorDataset can infer varying dimensions from a SpecHint while retaining an
+explicit example_count. Sampling closes its cursor on success or failure; observed
+example totals are checked on subsequent normal traversals once the spec exists.
+
 ### Opaque Python Elements
 
 For a fixed numerical array such as sampled probe coordinates, the

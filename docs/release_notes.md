@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Qualify dynamic dense sample dimensions together with variable batches across
+  known-spec Methods, composition, Models, and ordinary/prepared Dataset paths.
+  Interpret declared axis names on native values, preserve names through ArgMax
+  and Flatten inference, retain provable zero flattened widths, and reshape empty
+  batches without an ambiguous inferred dimension. Reject merged specs that mix
+  batched and unbatched interpretations.
+- Allow GeneratorDataset spec hints alongside explicit example totals and close
+  sampling resources deterministically on successful or failed inference.
 - Preserve GeneratorDataset's explicit example total through example-preserving
   Map and whole-source yield ranges, including finite dynamic batches with a
   short final batch. Partial dynamic-batch ranges remain unknown without a proof.

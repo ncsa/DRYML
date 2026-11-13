@@ -165,6 +165,28 @@ invoker; retained Map, Fold, and group execution uses it throughout the invocati
 Calling a selected carrier directly remains supported and prepares a fresh
 invocation, without a second global or carrier compilation cache.
 
+### Dynamic Dense Calls
+
+Known-spec preparation supports Dynamic sample dimensions and Dynamic batch sizes
+at the same time, including `shape=(10, Dynamic)`, `shape=(Dynamic, 5)` and
+`shape=(Dynamic, Dynamic)` with `batch=Dynamic`. Repeated calls and graph edges
+retain the declared contracts rather than specializing to the first concrete size.
+Different sizes reuse finalized invokers without selection or signature compilation.
+Fixed axes, rank, dtype, layout and backend remain checked. Named sample axes on
+native values are interpreted from retained declarations; explicit TensorSpec
+arguments must carry compatible metadata themselves.
+
+Pure `infer_output_spec()` rules describe how each authored operation changes
+shape. Pipe threads those rules and Project/Select preserve their structured
+results. Dynamic does not prove equality between operands: an operation such as
+Diff still checks actual equal shapes rather than silently broadcasting. Models
+with explicit dynamic output specs retain them and inherit input batch metadata;
+the native model must itself support the concrete dimensions supplied.
+
+First-call numerical `learn()` remains exact. Supply a known dynamic spec to admit
+variation deliberately, and `output_spec=` to validate the raw output. This is
+local Method/IR reuse, not a guarantee about native JIT retracing or compilation.
+
 ## Opaque Object Inputs And Outputs
 
 `TensorSpec("object", layout="python")` describes one arbitrary Python value,
