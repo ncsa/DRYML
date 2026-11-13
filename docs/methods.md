@@ -181,9 +181,12 @@ An object-only input has no tensor backend, rather than an unknown one: selectio
 admits generic implementations and rejects tensor-specific-only catalogs without
 opening a source to discover a backend. In mixed object/tensor trees, only tensor
 fields contribute backend facts. Completing or discovering those fields never
-assigns a backend to an opaque field or inspects its content. Ordinary first-call
-learning without a declared spec retains its tensor-like inference contract;
-declare opaque boundaries explicitly for preparation.
+assigns a backend to an opaque field or inspects its content. First-call learning
+also infers unknown Python leaves as object/Python-layout specs. Standard
+containers remain structural trees; with batched intent, a nonempty list/tuple
+of opaque leaves becomes an object batch. Use an explicit spec for ambiguous
+containers or variable batch lengths. Once retained, an opaque leaf accepts any
+Python value, including a tensor or container, without reclassifying its contents.
 
 A mesh-to-tensor Method can therefore accept an opaque input and infer, for
 example, `TensorSpec("float32", shape=(256, 8), backend="numpy")`. Its Python body
@@ -191,6 +194,14 @@ owns the conversion algorithm. Implementation backend traits describe input
 requirements; returning a NumPy tensor does not require a NumPy input trait.
 Dense NumPy object-array inputs continue to use their normal NumPy backend and
 dense tensor shape metadata.
+
+These are ordinary IR values in either direction: object-to-object,
+tensor-to-object, and object-to-tensor Methods compose through Pipe, Project,
+Select, accumulator carry, and Dataset Map graphs. Selected graph ports retain
+the inferred output specs. No mesh-specific adapter is needed; each authored
+Method remains responsible for interpreting its input and declaring its output.
+Native adapter/dtype failures still raise rather than silently changing a tensor
+into an opaque value.
 
 ## Accumulators
 
@@ -243,8 +254,9 @@ imports when called with no arguments. The next supported call normalizes
 complete positional and keyword layout, selects under eager rules, and publishes an immutable
 `cached_signature` plus target before invocation. Selection/normalization
 failure stays learning without a partial cache; a selected target that fails
-still leaves the cache available. Unsupported opaque learning values raise
-`MethodError`; ordinary eager generic calls remain available.
+still leaves the cache available. Unknown Python leaves normalize to opaque
+specs without retaining their classes or values. Invalid native tensor metadata
+or unsupported structural keys still fail before caching or invocation.
 
 `learn(input_spec, *additional_input_specs, strategy="local",
 output_spec=None)` instead prepares a retained local invoker from known
@@ -358,6 +370,10 @@ inference, or default lookup. A mismatch raises
 `PreparedCallMismatchError(expected, observed)` before user code and preserves
 the cache. `MethodCallNode` and `MethodCallSignature` are immutable diagnostic
 carriers that preserve tensor, tuple, list, mapping, and mapping-order facts.
+Opaque leaves compare only their logical spec, not class or content; learned
+object batches retain the observed fixed outer length. Surrounding structure and
+numerical fields remain exact. For variable batches, use known-spec preparation
+with `batch=Dynamic`.
 
 `eager()` returns `None`, clears learning/cached state, and preserves an explicit
 `default_batched`. `learn()` from cached state similarly clears the old cache and

@@ -91,6 +91,12 @@ that cache replays its stored values and does not advance the source's epoch see
 
 ### Opaque Python Elements
 
+For a fixed numerical array such as sampled probe coordinates, the
+[`NumpyArray` Serializable container](numpy.md) keeps the bytes in saved state
+instead of constructor metadata, with small searchable `shape`/`dtype` arguments
+and zero initialization. It is a payload container, not a Dataset; retain its
+SavedNode as a dependency of the Dataset that evaluates or traverses it.
+
 `GeneratorDataset` can declare raw Python values without describing their class
 or content:
 
@@ -115,6 +121,18 @@ the user-owned Method interprets each object's content and declares its numerica
 output spec. Known-spec Method validation and ordinary/prepared Dataset cursors
 do not inspect opaque values' classes, attributes, or array representations.
 Object declarations do not choose a serialization codec for raw object content.
+
+Object values can remain opaque across multiple Map stages and only become
+tensors when a user Method produces them. Tensor-to-object outputs and mixed
+object/tensor intermediate trees use the same specs in ordinary and prepared
+graphs; Project and Select preserve the declared boundaries.
+
+Alternatively, `spec=SpecHint(samples=2)` asks `GeneratorDataset` to sample two
+values during construction and infer unknown Python leaves as opaque specs.
+`SpecHint(batch_mode="batched", samples=2)` infers nonempty list/tuple batches of
+opaque leaves and merges different lengths to `Dynamic`. Hints are normalized
+to ordinary definition metadata. Use an explicit spec for object-valued
+containers, empty batches, or construction without factory execution.
 
 ### Prepared Stream Graphs
 

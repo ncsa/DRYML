@@ -10,7 +10,7 @@ from threading import RLock
 from dryml.annotations import AnnotatedMember, annotations_for_members
 from dryml.core.backend import Backend
 from dryml.core.object import Object, _register_class_transformer
-from dryml.core.tensor_spec import BatchMode, SpecTree, TensorSpec
+from dryml.core.tensor_spec import BatchMode, SpecTree, TensorSpec, iter_specs
 from dryml.core.utils.recurse import iter_leaves
 
 from .errors import ImplementationDeclarationError, ImplementationSelectionError, MethodError, PreparedCallMismatchError
@@ -363,7 +363,10 @@ class Method(Object):
 
         Args:
             input_spec: Optional known first input specification. Omitting it
-                preserves the original first-supported-call learning behavior.
+                learns numerical metadata and class-agnostic opaque Python leaf
+                boundaries from the first call. Standard containers remain trees;
+                batched intent admits nonempty lists/tuples of opaque leaves as
+                object batches. Explicit specs resolve ambiguous containers.
             *additional_input_specs: Known later positional input specifications.
             strategy: Preparation strategy. U4 supports only ``"local"``.
             output_spec: Optional raw-result contract for known-spec preparation.
@@ -915,7 +918,7 @@ class Method(Object):
             if expected is None or cached is None:
                 raise MethodError("Method cached state is incomplete.")
             try:
-                observed = call_signature(args, kwargs)
+                observed = call_signature(args, kwargs, expected=expected)
             except (TypeError, ValueError) as error:
                 raise PreparedCallMismatchError(expected, expected) from error
             if observed.batch_mode is None:
@@ -936,7 +939,7 @@ class Method(Object):
             try:
                 signature = call_signature(args, kwargs)
             except TypeError as error:
-                raise MethodError("Method learning requires supported tensor-like call values.") from error
+                raise MethodError("Method learning requires representable logical call values.") from error
             backend = signature.backend
             effective_batch = signature.batch_mode
             if effective_batch is None and default_batched is not None:
@@ -947,9 +950,13 @@ class Method(Object):
                     if not signature.args
                     else spec_from_runtime_node(signature.args[0], effective_batch)
                 )
+                python_objects = input_spec is not None and _python_object_inputs((spec_node(input_spec),))
+                if input_spec is not None and any(spec.is_python_object for spec in iter_specs(input_spec)):
+                    schema = replace(signature, args=(spec_node(input_spec), *signature.args[1:]))
+                    signature = call_signature(args, kwargs, expected=schema)
                 implementation = receiver._prepare_implementation(
                     input_spec,
-                    backend=backend,
+                    backend=None if python_objects else backend,
                     batch_mode=effective_batch,
                 )
             except TypeError as error:

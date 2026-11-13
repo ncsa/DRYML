@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, Callable
@@ -119,7 +121,10 @@ class GeneratorDataset(SourceDataset):
         *factory_args: Positional arguments retained for ``gen_factory``.
         cardinality: Declared yield cardinality.
         example_count: Optional explicit total for opaque or dynamic batches.
-        spec: Optional yielded-element specification or inference hint.
+        spec: Optional yielded-element SpecTree or SpecHint (also accepted as a
+            dict, string or sample count). A hint samples the source immediately,
+            inferring numerical and class-agnostic opaque Python leaves. An
+            explicit SpecTree opens no factory during construction.
         seed: Base seed for the supported seed-aware source protocol.
         seed_aware: Enable the versioned per-epoch seed protocol.
         epoch_seed_version: Version of the stable epoch seed derivation protocol.
@@ -129,6 +134,8 @@ class GeneratorDataset(SourceDataset):
     ordinary iteration is epoch zero. Factories are acquired on first advancement;
     cursors own and close the actual factory iterator on early close, failure,
     finite cutoff, or natural EOF. Explicit example totals are metadata only.
+    Invalid declarations raise TypeError or ValueError; inference also propagates
+    factory/adapter errors and rejects insufficient or incompatible samples.
     """
 
     def __init__(
@@ -137,7 +144,7 @@ class GeneratorDataset(SourceDataset):
         *factory_args,
         cardinality: Cardinality = Cardinality.UNKNOWN,
         example_count: int | Cardinality | None = None,
-        spec: SpecTree|str|int|dict[str,str|int]|None=None,
+        spec: SpecTree|SpecHint|str|int|dict[str,str|int]|None=None,
         seed: int | None = None,
         seed_aware: bool = False,
         epoch_seed_version: int = 1,
@@ -176,6 +183,22 @@ class GeneratorDataset(SourceDataset):
                 self._spec = spec
             else:
                 self._spec = detect_spec_tree(iter(self), SpecHint.build(spec))
+
+    @classmethod
+    def __dryml_normalize_definition_arguments__(cls, args, kwargs):
+        """Keep explicit SpecHints inert and definition-compatible until initialization.
+
+        Return constructor positional/keyword forms with a SpecHint represented
+        by its ordinary batch_mode/samples mapping. This normalizes only metadata;
+        it never opens a factory, infers sample content, or imports a backend.
+        Other values, including declared SpecTrees and existing dict hints, retain
+        their normal interpretation. Binding errors raise TypeError.
+        """
+        bound = inspect.signature(cls.__init__).bind_partial(None, *args, **kwargs)
+        hint = bound.arguments.get("spec")
+        if isinstance(hint, SpecHint):
+            bound.arguments["spec"] = {"batch_mode": hint.batch_mode.value, "samples": hint.samples}
+        return bound.args[1:], dict(bound.kwargs)
 
 
     def __iter__(self) -> Iterator[Any]:

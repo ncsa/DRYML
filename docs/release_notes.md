@@ -2,10 +2,16 @@
 
 ## Unreleased
 
+- Add `dryml.numpy.NumpyArray`, a zero-initialized Serializable container with
+  searchable shape/dtype arguments, read-only owned content and non-pickle NPY
+  state payloads. Values remain replaceable within the declared shape/dtype;
+  saved references retain exact arrays without embedding values in definitions.
 - Support class-agnostic Python object values and list/tuple batches through
-  explicit object/Python-layout TensorSpecs, selected Methods, and ordinary or
-  prepared Dataset pipelines. Keep object contents opaque while validating
-  surrounding structure and batch length; preserve dense NumPy object arrays.
+  object/Python-layout TensorSpecs, shared spec inference, Method learning, and
+  ordinary or prepared Dataset pipelines. Preserve opaque inputs, outputs, and
+  intermediate IR values across compositions while validating surrounding
+  structure and batch length; preserve dense NumPy object arrays. GeneratorDataset
+  accepts SpecHint objects as normalized inference metadata.
 
 ## 0.3.0b4 (unreleased)
 

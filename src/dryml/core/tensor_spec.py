@@ -10,8 +10,9 @@ from typing import Any, TypeAlias
 import numpy as np
 
 from .dtype import DType, normalize_dtype
-from .backend import discover_backend, Backend
+from .backend import Backend, _native_backend, _try_discover_backend
 from .utils.recurse import map_leaf_groups, map_leaves, iter_leaves
+from .utils.types import is_namedtuple
 
 
 class Dim(Enum):
@@ -311,6 +312,12 @@ def _python_object_batch_size(value: Any) -> int:
     return len(value)
 
 
+def _python_object_spec(*, batch=None, batch_axis_name="batch") -> TensorSpec:
+    """Describe an opaque value domain without accepting an instance or class."""
+    return TensorSpec("object", layout=Layout.PYTHON, batch=batch,
+                      batch_axis_name=batch_axis_name if batch is not None else None)
+
+
 def is_spec_tree(x: Any) -> bool:
     if isinstance(x, TensorSpec):
         return True
@@ -475,17 +482,82 @@ def merge_spec_trees(specs: Sequence[SpecTree]) -> SpecTree:
 
 
 def as_tensor_spec(x: Any, *args, require_consistent_backend=True, **kwargs):
-    # Tensor Specs should have a consistent backend.
-    all_backends = set(map(discover_backend, iter_leaves(x)))
-    if len(all_backends) == 0:
-        raise ValueError("No values with a backend?")
+    """Infer a logical SpecTree from tensors, Python scalars and opaque objects.
 
-    if require_consistent_backend and len(all_backends) > 1:
-        raise ValueError(f"Found values from multiple backends: {all_backends}")
+    Args:
+        x: One value or a dict/list/tuple/namedtuple value tree. Unknown Python
+            leaves become object/Python-layout specs without recording their
+            classes or inspecting content. Existing TensorSpecs pass through.
+        *args: Positional options forwarded to native backend adapters.
+        require_consistent_backend: Require one consistent native tensor backend;
+            opaque leaves contribute no backend, rather than a conflicting one.
+        **kwargs: Adapter options, including batched and batch_axis_name. With
+            batched=True, a nonempty list/tuple of opaque leaves is one opaque
+            batch. Other containers retain ordinary tree structure. Ambiguous
+            object-valued containers can always use an explicit object spec.
 
-    backend = all_backends.pop()
+    Returns:
+        A normalized SpecTree with numerical or opaque leaves. Variable opaque
+        batch lengths can be merged by detect_spec_tree into Dynamic metadata.
 
-    return backend.as_tensor_spec(x, *args, **kwargs)
+    Raises:
+        TypeError: For unsupported native adapters/dtypes, detector failures,
+            invalid Python-object options, or unsupported mapping keys.
+        ValueError: For conflicting native backends, incompatible batching, or
+            an empty tree with no inferable leaves.
+
+    Side Effects:
+        Invokes registered native spec adapters when recognized; optional native
+        families need their existing adapters rather than being relabeled opaque.
+        No opaque content, equality, hash, shape or array protocol is inspected.
+        Input objects are not retained in the returned metadata.
+    """
+    batched = kwargs.get("batched", False)
+    batch_axis_name = kwargs.get("batch_axis_name", "batch")
+
+    def leaf(value, *, as_batch):
+        if isinstance(value, TensorSpec):
+            return value
+        backend = _try_discover_backend(value)
+        if backend is not None:
+            options = dict(kwargs, batched=as_batch)
+            return backend.as_tensor_spec(value, *args, **options)
+        if _native_backend(value) is not None:
+            raise TypeError("Native tensor spec inference requires its registered backend adapter.")
+        if args or set(kwargs) - {"batched", "batch_axis_name"}:
+            raise TypeError("Python value spec inference supports only batched and batch_axis_name options.")
+        if np.isscalar(value):
+            if as_batch:
+                raise ValueError("A Python scalar has no physical batch axis.")
+            array = np.asarray(value)
+            return TensorSpec(array.dtype, shape=array.shape)
+        if as_batch:
+            raise ValueError("Opaque object batches require an outer list or tuple.")
+        return _python_object_spec()
+
+    def infer(value):
+        if isinstance(value, dict):
+            if not all(isinstance(key, (str, int)) for key in value):
+                raise TypeError("SpecTree mapping keys must be str or int.")
+            return {key: infer(child) for key, child in value.items()}
+        if isinstance(value, (tuple, list)):
+            if batched and value and not is_namedtuple(value) and all(
+                    not isinstance(child, (dict, tuple, list)) for child in value):
+                candidates = tuple(leaf(child, as_batch=False) for child in value)
+                if all(spec.is_python_object for spec in candidates):
+                    return _python_object_spec(batch=len(value), batch_axis_name=batch_axis_name)
+            items = tuple(infer(child) for child in value)
+            return type(value)(*items) if is_namedtuple(value) else list(items) if isinstance(value, list) else items
+        return leaf(value, as_batch=batched)
+
+    result = infer(x)
+    leaves = tuple(iter_specs(result))
+    if not leaves:
+        raise ValueError("No values with an inferable specification.")
+    backends = {spec.backend for spec in leaves if spec.backend is not None}
+    if require_consistent_backend and len(backends) > 1:
+        raise ValueError(f"Found values from multiple backends: {backends}")
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,7 +588,27 @@ def detect_spec_tree(
     samples: Iterable[Any],
     hint: SpecHint | dict[str, str | int] | str | int | None = None,
 ) -> SpecTree:
-    """Infer one SpecTree from several sample values."""
+    """Infer and merge logical metadata from a bounded number of sample values.
+
+    Args:
+        samples: Iterable of numerical, opaque Python, or structured values.
+        hint: SpecHint or its dict/string/count shorthand. Defaults to two
+            element samples; batched mode treats nonempty lists/tuples of opaque
+            leaves as object batches and merges differing lengths to Dynamic.
+
+    Returns:
+        A SpecTree retaining structure and common dtype/layout/backend facts,
+        with varying dimensions merged to Dynamic and no opaque values/classes.
+
+    Raises:
+        TypeError: For invalid hints, structural keys, or native adapter/dtypes.
+        ValueError: For insufficient samples or incompatible spec metadata.
+        Exception: Propagates sample iterator and registered adapter failures.
+
+    Side Effects:
+        Advances the iterable by hint.samples values and invokes recognized
+        native adapters. Explicit specs avoid this sampling step entirely.
+    """
     hint = SpecHint.build(hint)
     batched = hint.batch_mode is BatchMode.batched
     it = iter(samples)

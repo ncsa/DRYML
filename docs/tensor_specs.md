@@ -85,9 +85,23 @@ object dtype maps back to `np.object_` through `DType.np()`. Numerical reduction
 and implicit cross-framework tensor handoffs still require supported numerical
 dtypes.
 
-Supply an opaque declaration explicitly to `GeneratorDataset` or known-spec
-Method preparation. The conversion Method owns interpretation of object content
-and reports its output with an ordinary fixed-shape numerical `TensorSpec`.
+`as_tensor_spec(value)` also infers unrecognized Python leaves as opaque specs.
+It preserves standard dict/list/tuple/namedtuple structure, recognizes numerical
+leaves through their existing adapters, and ignores opaque leaves when checking
+backend consistency. Native adapter or dtype failures are errors, not opaque
+fallbacks. Inferred metadata retains no Python object or class.
+
+With `batched=True`, a nonempty list/tuple of opaque noncontainer leaves is one
+object batch. `detect_spec_tree(samples, SpecHint(batch_mode="batched"))` merges
+different outer lengths to `Dynamic`. Empty or object-valued structural containers
+are ambiguous: supply an explicit object spec to keep them opaque. An explicit
+spec also avoids sampling a generator during construction.
+
+Object specs work for Method inputs, outputs, and intermediate graph edges.
+First-call learning can infer opaque leaves; known-spec preparation accepts an
+explicit declaration before values exist. The conversion Method owns
+interpretation of object content and reports its numerical output with an
+ordinary fixed-shape `TensorSpec`.
 
 ## Shape And Rank
 

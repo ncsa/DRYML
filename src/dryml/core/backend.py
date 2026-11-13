@@ -159,6 +159,16 @@ def discover_backend(
         optional plugin and register its adapter. Does not copy/extract values or
         validate placement, gradients, or conversion eligibility.
     """
+    backend = _try_discover_backend(x, _backends=_backends, activate_native=activate_native)
+    if backend is None:
+        raise TypeError("Unable to discover backend")
+    return backend
+
+
+def _try_discover_backend(
+    x: Any, _backends: list[Backend] | None = None, *, activate_native: bool = False,
+) -> Backend | None:
+    """Return None only for unrecognized values, never for detector/adapter failures."""
     candidates = available_backends() if _backends is None else _backends
     for backend in candidates:
         tester = backend_testers.get(backend)
@@ -173,7 +183,7 @@ def discover_backend(
             if backend_testers[native](x):
                 return native
 
-    raise TypeError("Unable to discover backend")
+    return None
 
 
 def discover_backends(
