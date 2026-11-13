@@ -36,6 +36,14 @@ def dynamic_batches_factory():
     return iter((np.ones((3, 2), dtype=np.float32), np.ones((2, 2), dtype=np.float32)))
 
 
+def short_dynamic_batches_factory():
+    return iter(np.ones((size, 2), dtype=np.float32) for size in (2, 2, 1))
+
+
+def short_object_batches_factory():
+    return iter([object() for _ in range(size)] for size in (2, 2, 1))
+
+
 def seeded_values_factory(*, seed):
     generator = np.random.default_rng(seed)
     while True:
@@ -269,6 +277,82 @@ def test_opaque_dynamic_generator_can_declare_its_total_examples_without_reading
     assert Take(dataset, 1).example_cardinality() == Cardinality.UNKNOWN
 
 
+@pytest.mark.parametrize("factory,spec", (
+    (short_dynamic_batches_factory, _spec(batch=Dynamic)),
+    (short_object_batches_factory, TensorSpec("object", layout="python", batch=Dynamic)),
+))
+def test_preserving_map_keeps_explicit_dynamic_batch_total_without_opening_source(factory, spec, monkeypatch):
+    import dryml.data.source as source_module
+
+    source = GeneratorDataset(factory, cardinality=3, example_count=5, spec=spec)
+    mapped = Map(source, Select(), preserves_examples=True)
+    graph = mapped.method_graph()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("example metadata or preparation opened the generator")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(source_module, "_fresh_iterable", forbidden)
+        assert source.example_cardinality() == Cardinality.finite(5)
+        assert mapped.yield_cardinality() == Cardinality.finite(3)
+        assert mapped.example_cardinality() == Cardinality.finite(5)
+        assert Map(mapped, Select(), preserves_examples=True).example_cardinality() == Cardinality.finite(5)
+        assert Map(source, Select()).example_cardinality() == Cardinality.UNKNOWN
+        assert Unbatch(mapped).yield_cardinality() == Cardinality.finite(5)
+        graph.learn()
+
+    for opener in (mapped.iterator, graph.iterator):
+        with opener() as cursor:
+            batches = list(cursor)
+        assert [len(batch) for batch in batches] == [2, 2, 1]
+
+
+def test_explicit_generator_total_proves_whole_ranges_but_not_dynamic_batch_subsets(monkeypatch):
+    import dryml.data.source as source_module
+
+    source = GeneratorDataset(
+        short_dynamic_batches_factory, cardinality=3, example_count=5, spec=_spec(batch=Dynamic),
+    )
+    mapped = Map(source, Select(), preserves_examples=True)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("range metadata opened the generator")
+
+    monkeypatch.setattr(source_module, "_fresh_iterable", forbidden)
+    for dataset in (source, mapped):
+        assert Take(dataset, 3).example_cardinality() == Cardinality.finite(5)
+        assert Skip(dataset, 0).example_cardinality() == Cardinality.finite(5)
+        assert dataset._range_example_cardinality(0, 4) == Cardinality.finite(5)
+        assert Take(dataset, 2).example_cardinality() == Cardinality.UNKNOWN
+        assert Skip(dataset, 1).example_cardinality() == Cardinality.UNKNOWN
+        assert dataset._range_example_cardinality(0, 0) == Cardinality.finite(0)
+        assert dataset._range_example_cardinality(3) == Cardinality.finite(0)
+        with pytest.raises(ValueError):
+            dataset._range_example_cardinality(0, -1)
+
+
+def test_generator_range_proofs_preserve_unknown_empty_and_infinite_cases():
+    unknown_yields = GeneratorDataset(
+        short_dynamic_batches_factory, example_count=5, spec=_spec(batch=Dynamic),
+    )
+    unknown_examples = GeneratorDataset(
+        short_dynamic_batches_factory, cardinality=3,
+        example_count=Cardinality.UNKNOWN, spec=_spec(batch=Dynamic),
+    )
+    empty = GeneratorDataset(
+        short_dynamic_batches_factory, cardinality=0, example_count=0, spec=_spec(batch=Dynamic),
+    )
+    infinite = GeneratorDataset(
+        short_dynamic_batches_factory, cardinality=Cardinality.INFINITE, spec=_spec(batch=2),
+    )
+
+    assert Map(unknown_yields, Select(), preserves_examples=True).example_cardinality() == Cardinality.finite(5)
+    assert Take(unknown_yields, 3).example_cardinality() == Cardinality.UNKNOWN
+    assert Map(unknown_examples, Select(), preserves_examples=True).example_cardinality() == Cardinality.UNKNOWN
+    assert Map(empty, Select(), preserves_examples=True).example_cardinality() == Cardinality.finite(0)
+    assert Map(infinite, Select(), preserves_examples=True).example_cardinality() == Cardinality.INFINITE
+
+
 def test_generator_example_count_rejects_provable_and_observed_conflicts():
     declared_conflict = GeneratorDataset(
         dynamic_batches_factory,
@@ -285,8 +369,12 @@ def test_generator_example_count_rejects_provable_and_observed_conflicts():
 
     with pytest.raises(ValueError, match="conflicts"):
         declared_conflict.example_cardinality()
+    with pytest.raises(ValueError, match="conflicts"):
+        Map(declared_conflict, Select(), preserves_examples=True).example_cardinality()
     with pytest.raises(ValueError, match="observed"):
         list(observed_conflict)
+    with pytest.raises(ValueError, match="observed"):
+        list(Map(observed_conflict, Select(), preserves_examples=True))
 
 
 def test_zip_proves_only_aligned_examples_and_an_empty_input_proves_zero():

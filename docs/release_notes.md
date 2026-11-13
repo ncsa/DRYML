@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve GeneratorDataset's explicit example total through example-preserving
+  Map and whole-source yield ranges, including finite dynamic batches with a
+  short final batch. Partial dynamic-batch ranges remain unknown without a proof.
 - Add `dryml.numpy.NumpyArray`, a zero-initialized Serializable container with
   searchable shape/dtype arguments, read-only owned content and non-pickle NPY
   state payloads. Values remain replaceable within the declared shape/dtype;

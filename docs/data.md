@@ -19,9 +19,10 @@ Important expectations:
 - `yield_cardinality()` returns the declared number of yielded values as a
   finite, unknown, or infinite `Cardinality`. It normalizes legacy integer and
   `Cardinality` `__len__` declarations without opening a cursor.
-- `example_cardinality()` returns an example total only when declared TensorSpec
-  batch metadata proves it. Unbatched values have one example per yield; fixed
-  uniform batches multiply yield cardinality; dynamic batches remain unknown.
+- `example_cardinality()` returns an example total when declared TensorSpec
+  batch metadata or an explicit source total proves it. Unbatched values have
+  one example per yield; fixed uniform batches multiply yield cardinality;
+  dynamic batches remain unknown unless an explicit total is available.
   A zero-yield dataset has zero examples regardless of batch metadata.
 - `examples_in(value)` validates one runtime TensorSpec tree and returns its
   exact positive example count. Batched leaves must expose non-rank-zero,
@@ -236,7 +237,16 @@ import, split, local filesystem, and download failures; NumPy delivery avoids
 importing DRYML's TensorFlow spec backend.
 
 `GeneratorDataset` accepts an optional explicit `example_count` for opaque
-or dynamically batched sources. It also supports a declared `seed_aware=True`
+or dynamically batched sources. A preserving `Map` retains this total without
+opening the generator: for three yields with batch sizes `[2, 2, 1]`, a declared
+`example_count=5` remains five examples after `Map(..., preserves_examples=True)`.
+Ranges covering the whole source (including `Take(source, 3)` when the declared
+yield cardinality is three, and `Skip(source, 0)`) retain the total as well.
+Proper dynamic-batch subsets remain unknown because the total alone does not
+locate examples within batches. Conflicting provable declarations still raise,
+and iteration still validates observed source totals and preserving Map outputs.
+
+It also supports a declared `seed_aware=True`
 factory protocol: a base `seed` and versioned epoch derivation supply a deterministic
 `seed` keyword to `iterator_for_epoch(epoch)`, allowing direct epoch reopening
 without traversing earlier epochs.

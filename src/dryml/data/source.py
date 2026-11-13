@@ -243,11 +243,36 @@ class GeneratorDataset(SourceDataset):
         return self.cardinality
 
     def example_cardinality(self) -> Cardinality:
-        """Return an explicit opaque-source total or ordinary spec-derived facts."""
+        """Return the explicit example total or ordinary spec-derived cardinality.
 
-        derived = super().example_cardinality()
+        Returns:
+            Finite, infinite, or unknown metadata. Explicit example_count also
+            proves a whole-source yield range used by preserving Map and other
+            structural nodes; it does not prove arbitrary dynamic-batch subsets.
+
+        Raises:
+            TypeError: For malformed countable spec metadata.
+            ValueError: If declared example_count conflicts with the spec and
+                yield cardinality, or if fixed batch declarations disagree.
+
+        Side Effects:
+            None. No source factory, cursor or optional backend is opened.
+        """
+        return self._range_example_cardinality(0)
+
+    def _range_example_cardinality(
+        self, start: int, stop: int | None = None,
+    ) -> Cardinality:
+        """Use the declared total only when a yield range covers the whole source."""
+        derived = super()._range_example_cardinality(start, stop)
         declared = self._declared_example_count
         if declared is None or declared.is_unknown:
+            return derived
+        yields = self.yield_cardinality()
+        whole_source = start == 0 and (
+            stop is None or (yields.is_finite and stop >= yields.require_finite())
+        )
+        if not whole_source:
             return derived
         if not derived.is_unknown and derived != declared:
             raise ValueError(
