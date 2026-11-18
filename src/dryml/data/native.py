@@ -1,11 +1,193 @@
-"""Dependency-light prepared Dataset cursors for native training integrations."""
+"""Frozen source acquisition adapters and prepared native-training Dataset cursors.
+
+Preparation detaches small controls and topology without acquiring sources or
+cloning payload bytes. Each cursor owns independent live progress and resources;
+ordinary pulls neither extract continuation state nor encode it for persistence.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any
+from dataclasses import dataclass, replace
+from functools import partial
+from typing import Any, TYPE_CHECKING
+
+from dryml.core.tensor_spec import SpecTree
 
 from dryml.methods.stream import DatasetExhaustedError, _CursorLifecycle
+
+if TYPE_CHECKING:
+    from .dataset import Dataset, DatasetCursor
+    from dryml.methods.stream import StreamGraphCursor
+
+
+@dataclass(frozen=True, slots=True)
+class _ConfigTree:
+    """Detached container topology, with payload leaves retained by reference."""
+
+    kind: type
+    items: tuple
+
+    def unpack(self, memo=None):
+        memo = {} if memo is None else memo
+        if id(self) in memo:
+            return memo[id(self)]
+        if self.kind is dict:
+            result = {key: _unpack_config(value, memo) for key, value in self.items}
+        else:
+            result = self.kind(_unpack_config(value, memo) for value in self.items)
+        memo[id(self)] = result
+        return result
+
+
+def _unpack_config(value, memo=None):
+    return value.unpack(memo) if isinstance(value, _ConfigTree) else value
+
+
+def _freeze_config(value, *, small=False, active=None, memo=None):
+    """Freeze plain small configuration containers, never copy payload leaves.
+
+    Large factory argument containers are payload bindings, not small controls.
+    The bounded preflight avoids traversing or cloning a source-sized list just
+    to discover that distinction. Array-source topology is always detached.
+    """
+    if type(value) not in (dict, list, tuple):
+        return value
+    memo = {} if memo is None else memo
+    if id(value) in memo:
+        return memo[id(value)]
+    if small and not _small_config(value, [256], set()):
+        return value
+    active = set() if active is None else active
+    if id(value) in active:
+        raise ValueError("Prepared source configuration contains a container cycle.")
+    active.add(id(value))
+    try:
+        items = (tuple((key, _freeze_config(child, active=active, memo=memo)) for key, child in value.items())
+                 if type(value) is dict else tuple(_freeze_config(child, active=active, memo=memo) for child in value))
+        frozen = _ConfigTree(type(value), items)
+        memo[id(value)] = frozen
+        return frozen
+    finally:
+        active.remove(id(value))
+
+
+def _small_config(value, budget, active):
+    budget[0] -= 1
+    if budget[0] < 0:
+        return False
+    if type(value) not in (dict, list, tuple):
+        return True
+    if id(value) in active:
+        raise ValueError("Prepared source configuration contains a container cycle.")
+    if len(value) > budget[0]:
+        return False
+    active.add(id(value))
+    try:
+        return all(_small_config(child, budget, active) for child in
+                   (value.values() if type(value) is dict else value))
+    finally:
+        active.remove(id(value))
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceBinding:
+    """One inert source declaration and its frozen acquisition callable."""
+
+    kind: str
+    binding: object
+    open: object
+
+
+@dataclass(frozen=True, slots=True)
+class _GeneratorBinding:
+    """Frozen factory controls consumed by the existing owned generator cursor."""
+
+    gen_factory: object
+    args: tuple
+    kwargs: tuple
+    cardinality: object
+    _declared_example_count: object
+    _spec: object
+    examples_in: object
+    seed: int | None
+    seed_aware: bool
+    epoch_seed_version: int
+
+    @property
+    def factory_args(self):
+        return tuple(_unpack_config(value) for value in self.args)
+
+    @property
+    def factory_kwargs(self):
+        return {key: _unpack_config(value) for key, value in self.kwargs}
+
+    def open(self, epoch):
+        from .source import _GeneratorCursor
+
+        memo = {}
+        invocation = replace(self,
+            args=tuple(_unpack_config(value, memo) for value in self.args),
+            kwargs=tuple((key, _unpack_config(value, memo)) for key, value in self.kwargs),
+        )
+        return _GeneratorCursor(invocation, epoch)
+
+
+def _prepare_source(dataset, spec):
+    """Bind concrete built-in source controls without acquisition or payload copies.
+
+    Unknown/custom source implementations retain their trusted compatibility
+    opener; this binding does not certify their configuration or recovery.
+    """
+    from .dataset import Dataset, DatasetCursor
+    from .source import (ArrayDataset, GeneratorDataset, NpyFileDataset,
+                         TFDSAdapter, TorchDatasetAdapter, _IndexedDatasetCursor, _tree_index)
+    from dryml.methods.signature import spec_node
+
+    if type(dataset) is GeneratorDataset:
+        memo = {}
+        binding = _GeneratorBinding(
+            dataset.gen_factory,
+            tuple(_freeze_config(value, small=True, memo=memo) for value in dataset.factory_args),
+            tuple((key, _freeze_config(value, small=True, memo=memo)) for key, value in dataset.factory_kwargs.items()),
+            dataset.cardinality, dataset._declared_example_count, spec_node(spec),
+            partial(Dataset._examples_in_spec, spec),
+            dataset.seed, dataset.seed_aware, dataset.epoch_seed_version,
+        )
+        return _SourceBinding("generator", binding, binding.open)
+    if type(dataset) is ArrayDataset:
+        tree, length = _freeze_config(dataset.arrays), dataset._length
+
+        def open_array(epoch):
+            arrays = _unpack_config(tree)
+            return _IndexedDatasetCursor(length, partial(_tree_index, arrays))
+
+        return _SourceBinding("array", (tree, length), open_array)
+    if type(dataset) is NpyFileDataset:
+        import numpy as np
+
+        files, allow_pickle = tuple(dataset.files), dataset.allow_pickle
+        return _SourceBinding("npy", (files, allow_pickle), lambda epoch: _IndexedDatasetCursor(
+            len(files), lambda index: np.load(files[index], allow_pickle=allow_pickle)))
+    if type(dataset) is TFDSAdapter:
+        native, as_numpy = dataset.dataset, dataset.as_numpy
+        return _SourceBinding("tfds", (native, as_numpy), lambda epoch: DatasetCursor(
+            native.as_numpy_iterator() if as_numpy else iter(native)))
+    if type(dataset) is TorchDatasetAdapter:
+        native = dataset.dataset
+
+        def open_torch(epoch):
+            import torch.utils.data as tud
+
+            return DatasetCursor(iter(native) if isinstance(native, tud.IterableDataset)
+                                 else (native[index] for index in range(len(native))))
+
+        return _SourceBinding("torch", native, open_torch)
+    opener = getattr(dataset, "iterator_for_epoch", None)
+    if not callable(opener):
+        iterator = dataset.iterator
+        opener = lambda epoch: iterator()
+    return _SourceBinding("custom", dataset, opener)
 
 
 class PreparedDataset:
@@ -15,23 +197,35 @@ class PreparedDataset:
         dataset: Dataset pipeline whose declared stream graph is prepared once.
 
     Attributes:
-        dataset: The unchanged source Dataset pipeline.
+        dataset: Inspection reference to the source Dataset recipe; qualified
+            execution does not reread its controls.
         spec: Captured output SpecTree from the prepared plan (or eager fallback
             declaration), independent of later shared Dataset metadata changes.
         execution_level: ``"stream"`` when the qualified stream graph was
             prepared, or ``"eager"`` when an unqualified operator retains its
             documented ordinary Dataset iteration fallback.
 
-    A prepared graph is constructed without opening a source. Each
+    A prepared graph freezes operator controls, source acquisition declarations,
+    small factory configuration containers, topology, specs and selections
+    without opening a source. Payload bindings are retained, not cloned. Each
     :meth:`iterator` call returns an independent closeable cursor, so a consumer
     can stop, resume from a separately opened cursor, or traverse concurrently
     without sharing source position. This carrier owns no traversal and does not
     update training progress, checkpoint state, or exposure.
     Preparation and fallback never publish or reset child Method state; failed
     planning cannot leave partial child selections requiring cleanup.
+
+    Raises:
+        ImplementationSelectionError: If a qualified declared Method cannot be
+            selected. Other inference/compilation and backend errors propagate.
+        TypeError, ValueError: For invalid specs or unsupported source controls,
+            including cycles in small factory configuration containers.
+
+    Custom/unqualified execution retains its established eager semantics and
+    does not gain a frozen-configuration or continuation guarantee.
     """
 
-    def __init__(self, dataset) -> None:
+    def __init__(self, dataset: Dataset[Any]) -> None:
         self.dataset = dataset
         self.graph = dataset.method_graph()
         try:
@@ -42,14 +236,34 @@ class PreparedDataset:
             self.execution_level = "eager"
         else:
             self.execution_level = "stream"
+        from dryml.methods.signature import spec_from_node
+
         if self.execution_level == "stream":
-            from dryml.methods.signature import spec_from_node
-
-            self.spec = spec_from_node(self.graph.nodes[-1].outputs[0].spec)
+            root = self.graph._stream_plan._prepared.root
+            self._signature = root.signature
+            self._cardinality = root.cardinality
+            count_spec = spec_from_node(self._signature)
         else:
-            self.spec = dataset.spec
+            self._eager_spec = dataset.spec
+            self._cardinality = None
+            count_spec = self._eager_spec
+        self._count_examples = partial(dataset._examples_in_spec, count_spec)
 
-    def examples_in(self, value) -> int:
+    @property
+    def spec(self) -> SpecTree:
+        """Return captured output metadata, detached for qualified stream plans.
+
+        Qualified mutable list/dict structure is detached on each read; immutable
+        TensorSpec leaves are shared. Eager fallback retains its original declared
+        spec. Reading performs no selection or source acquisition.
+        """
+        from dryml.methods.signature import spec_from_node
+
+        if self.execution_level == "eager":
+            return self._eager_spec
+        return spec_from_node(self._signature)
+
+    def examples_in(self, value: Any) -> int:
         """Validate/count one value against captured output metadata.
 
         Args:
@@ -64,7 +278,7 @@ class PreparedDataset:
         Side Effects:
             Reads captured specs only; no selection, inference, or source access.
         """
-        return self.dataset._examples_in_spec(self.spec, value)
+        return self._count_examples(value)
 
     def _require_declared_selection(self) -> None:
         """Reject Maps needing cursor-local discovery, including eager wrappers."""
@@ -97,7 +311,7 @@ class PreparedDataset:
 
             admit(self.dataset)
 
-    def iterator(self, *, epoch: int = 0):
+    def iterator(self, *, epoch: int = 0) -> DatasetCursor[Any] | StreamGraphCursor:
         """Open one independent closeable traversal at the prepared execution level.
 
         Args:
@@ -109,12 +323,15 @@ class PreparedDataset:
             cursor for the documented eager fallback.
 
         Raises:
+            ValueError: If ``epoch`` is not a nonnegative exact integer.
             Source-specific acquisition or iteration errors from the underlying
             Dataset pipeline.
 
         Side Effects:
-            May acquire resources for this one traversal. The prepared plan itself
-            remains reusable and holds neither cursor position nor source handles.
+            Qualified cursor creation acquires nothing; its first advancement may
+            acquire source resources. Eager fallback may acquire on creation.
+            The reusable plan holds source bindings but no live cursor position
+            or acquired traversal resources.
         """
 
         if type(epoch) is not int or epoch < 0:
@@ -180,7 +397,9 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
             raise ValueError("epoch must be a nonnegative exact int.")
         self._epoch = epoch
         self._cursor = None
-        cardinality = self._call(dataset.dataset.yield_cardinality)
+        cardinality = dataset._cardinality
+        if cardinality is None:
+            cardinality = self._call(dataset.dataset.yield_cardinality)
         self._expected = cardinality.require_finite() if cardinality.is_finite else None
         self._yielded = 0
 

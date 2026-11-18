@@ -198,6 +198,18 @@ class Dataset(Object, Generic[T]):
 
         return MethodGraph(self, stream_plan=StreamPlan(self))
 
+    def _prepare_stream_source(self, spec):
+        """Supply a Data-owned inert source binding to the lower-layer kernel."""
+        from dryml.data.native import _prepare_source
+
+        return _prepare_source(self, spec)
+
+    def _prepare_stream_selection(self, kind, input_spec):
+        """Select Data-owned collation/splitting once during graph preparation."""
+        if kind == "batch":
+            return self._resolve_collate((), input_spec=input_spec)
+        return self._resolve_split(input_spec=input_spec)
+
     def prepare(self):
         """Plan this Dataset once for native training-data delivery.
 

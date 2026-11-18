@@ -319,7 +319,7 @@ mutating that child's first-call cache. Element-only Method graphs reject
 `iterator()`. A Dataset supplies the iterator-port form through
 `dataset.method_graph()`: it is inert until `learn(strategy="local")` records
 its qualified stream plan, then `iterator()` returns an independent pull cursor.
-The qualified stream subset is Map, Batch, Unbatch, Zip, and Chain. Ports carry
+The qualified stream subset is Map, Batch, Unbatch, Take, Zip, and Chain. Ports carry
 element specs separately from iterator consumption/emission, so a list returned
 from an element Method is still one output element. `IteratorPort` and
 `StreamNode` provide the bounded deterministic custom authoring seam; their
@@ -333,8 +333,9 @@ direct CPU host-copy handoff to a uniquely most-specific target backend. Each
 `ConversionEdge` exposes producer/consumer specs, adapter name, exact
 dtype/shape/batch preservation, and CPU device policy. Ties remain selection
 errors; there is no framework preference, route search, cost ranking, or
-multi-edge conversion. Planning imports neither optional framework and invokes
-no adapter.
+multi-edge conversion. Map/handoff planning imports neither optional framework
+and invokes no conversion adapter. Declared Batch/Unbatch selection may load its
+configured backend's native stack/split operation during preparation.
 
 Dataset graph cursors own source and selected-output resources, close acquired
 resources once in reverse acquisition order, and preserve a primary acquisition
@@ -358,6 +359,33 @@ the previous plan and independently running cursors usable. Dataset graph
 `eager()` discards only that plan's selections; already captured cursors continue
 using their invokers. Direct `Method.learn()` retains its distinct clearing
 contract: a failed reprepare leaves learning mode with no old or partial plan.
+
+Each prepared occurrence also retains immutable controls, a deterministic child
+path, normalized spec/cardinality evidence, source bindings, and Zip/Chain
+topology. Qualified pulls consume these descriptors rather than Dataset recipe
+attributes. Batch collators and Unbatch splitters are retained at preparation
+lifetime, alongside fully declared Map invokers; backend-unknown Map discovery
+remains cursor-local. Data supplies inert source-opening adapters through a
+one-way hook; Methods imports neither Data nor Models. Bound custom-source
+compatibility openers do not certify frozen custom configuration or recovery.
+
+`dryml.methods.stream_state` exposes dependency-light structural protocols:
+`SourceBinding.open(epoch)` supplies independent acquisition;
+`StreamExecution.pull()` reports `PullKind.DELIVERY`, `SECTION_END`, or
+`ROOT_END`, with a borrowed `value` only for delivery. `BoundaryHandoff` is the
+separate optional transition out of a pending section, and `StateExport` /
+`StateRestore` describe explicit, domain-validated state transfer. These names
+are submodule exports, not additions to the Methods-root manifest. They define
+local execution capabilities, not a persisted schema or Dataset traversal API.
+
+`StreamGraphCursor.pull()` is an optional one-pass adapter over the existing
+flattened iterator: it reports delivery/root completion, never section end.
+Calling it after explicit close without observed EOF raises `RuntimeError`;
+source/operator/cleanup errors propagate. Ordinary `next()` keeps returning the
+authored value directly, including native batches, without per-edge event boxes,
+state extraction, serialization, or source-payload clones. Capturing state is an
+explicit optional operation, not part of a pull. Root EOF remains distinct from
+a logical section boundary; the protocols alone introduce no section policy.
 
 The protected lifecycle in `methods.stream` is shared with ordinary Dataset and
 native-training cursors. Use a cursor context manager around consumer work to

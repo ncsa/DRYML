@@ -216,6 +216,34 @@ def test_later_branch_failed_reprepare_preserves_complete_plan_and_cursors(monke
     assert later.call_mode == "eager"
 
 
+@pytest.mark.parametrize("selection", ("collate", "split"))
+def test_failed_structural_replacement_keeps_old_controls_and_selections(monkeypatch, selection):
+    """Failure after building children cannot publish new controls or invokers."""
+    from dryml.data import ArrayDataset, Batch, Unbatch
+
+    batch = Batch(Map(ArrayDataset(np.arange(5)), NumpyIdentity()), 2)
+    unbatch = Unbatch(batch)
+    graph = unbatch.method_graph()
+    graph.learn()
+    nodes = graph.nodes
+    cursor = graph.iterator()
+    assert next(cursor) == 0
+    batch.batch_size = 3
+
+    def fail(*args, **kwargs):
+        raise ValueError("replacement selection failed")
+
+    target, attribute = ((batch, "_resolve_collate") if selection == "collate"
+                         else (unbatch, "_resolve_split"))
+    monkeypatch.setattr(target, attribute, fail)
+    with pytest.raises(ValueError, match="replacement selection"):
+        graph.learn()
+    assert graph.nodes is nodes
+    assert list(cursor) == [1, 2, 3, 4]
+    assert list(graph.iterator()) == [0, 1, 2, 3, 4]
+    assert graph._stream_plan._prepared.root.inputs[0].controls == (2, False, False)
+
+
 def _paired_spec(specs):
     return specs[0]
 

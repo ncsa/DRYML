@@ -190,13 +190,37 @@ source specs, and `output_spec` is an assertion of its declared result spec.
 Mismatched assertions, unsupported strategies, unqualified operators, and
 Method-selection failures raise before source execution.
 
-The initial prepared subset is `Map`, `Batch`, `Unbatch`, `Zip`, and `Chain`.
+The prepared subset is `Map`, `Batch`, `Unbatch`, `Take`, `Zip`, and `Chain`.
 It preserves their ordinary order and cardinality rules: Map emits one result
 per input, Batch retains short final batches unless `drop_remainder=True`,
 Unbatch emits split items in order, Zip stops at the shortest source with its
 existing left-to-right positional over-pull, and Chain opens/advances sources in
-declaration order. Other Dataset operators keep their eager behavior but reject
+declaration order. Take preserves its strict count and logical seed coordinates.
+Other Dataset operators keep their eager behavior but reject
 graph planning explicitly.
+
+Preparation publishes a complete frozen occurrence tree only after source
+binding, inference, assertions, and selection succeed. It retains Batch size,
+remainder/ragged policy, Take count/epoch/fixed-prefix controls, Map preservation
+policy and Method selection, normalized specs/cardinalities, and the ordered
+Zip/Chain shape (including nested dict/list/tuple containers). Editing the
+original recipe later does not change existing prepared execution or its output
+metadata. Fresh preparation observes recipe edits. Failed `graph.learn()`
+replacement preserves the previous tree, selections, and existing cursors.
+
+Concrete Array, Generator, NPY-file, TFDS and Torch sources supply Data-owned
+acquisition adapters. Array tree structure, file ordering/loading policy,
+generator factory/seed/cardinality declarations and small factory argument
+containers are retained at preparation. Small plain dict/list/tuple argument
+trees (up to 256 visited values per argument) are detached and reconstructed for
+each cursor, preserving shared-container aliases. Container cycles in this
+configuration raise `ValueError` before acquisition. Larger argument trees,
+arrays, native objects and opaque values remain payload bindings by reference;
+preparation never clones their full contents. Their existing external mutation,
+ownership and availability requirements still apply. Freezing configuration is
+not a snapshot of externally mutable payload bytes or of arbitrary Python code.
+Custom source implementations retain their trusted compatibility opener and do
+not gain a frozen-configuration or recovery guarantee.
 
 One graph cursor owns all source and selected output iterator resources it
 acquires. It closes them once in reverse acquisition order on exhaustion,
@@ -212,7 +236,8 @@ adapter is applied while advancing the Dataset cursor, before native model
 forward/loss/backward/tape or compiled work begins. Dataset preprocessing is
 therefore data-only: it is not an end-to-end autodiff, tracing, or `tf.function`
 contract. Batch and Unbatch select the existing declared-backend stack/split
-operation once when available; their generic Python fallback remains equivalent
+operation once per prepared occurrence when available, reusing it across
+independent cursors; their generic Python fallback remains equivalent
 for order, short batches, cardinality, and cursor cleanup. Zip and Chain retain
 the Python fallback unless compatible source-native composition is explicitly
 provided by all inputs.
@@ -225,6 +250,12 @@ without opening a source. Its `execution_level` is `"stream"` when that qualifie
 plan runs and `"eager"` when an unqualified operator retains ordinary eager
 Dataset iteration. Selection failures in qualified operators still fail during
 preparation; eager fallback is only for unqualified Dataset operators.
+The qualified plan's output `spec` is returned with detached container structure;
+native cursor finite-count checks use the same preparation's captured cardinality,
+not later Dataset edits. Existing independent flattened iteration remains lazy
+and does not extract producer state, build continuation records, serialize values,
+or scalarize a selected native/batched Method. Public continuation/session APIs
+are not supplied by this preparation substrate.
 
 `PreparedDataset.iterator()` opens an independent closeable cursor each time.
 `training_batches(preparation)` applies one already selected x/y handoff per
