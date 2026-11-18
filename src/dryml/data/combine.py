@@ -6,7 +6,8 @@ from typing import Any
 
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import merge_spec_trees
-from dryml.data.dataset import Dataset, DatasetCursor
+from dryml.data.dataset import Dataset, DatasetCursor, _section_iterator
+from dryml.methods.stream import _dataset_sections, _section_total
 
 
 def _pack_tree(args: tuple[Any, ...], kwargs: dict[str, Any] | None = None) -> Any:
@@ -104,6 +105,9 @@ class Zip(Dataset):
     partial acquisition failures close all acquired inputs in reverse order.
     Primary acquisition/read failures survive cleanup errors. Invalid or empty
     source trees raise TypeError/ValueError without opening a traversal.
+    Sectioned branches align by ordinal, end at the shortest section and discard
+    unmatched tails before proceeding. Mixed sectioned/unsectioned branches are
+    rejected during preparation. Closing never drains unmatched tails.
     """
 
     _stream_operator = "zip"
@@ -117,7 +121,8 @@ class Zip(Dataset):
     def __iter__(self):
         """Return a lazy cursor closing all inputs, including partial acquisition."""
 
-        return DatasetCursor._from_generator(self._iterate)
+        sectioned = _section_iterator(self)
+        return sectioned if sectioned is not None else DatasetCursor._from_generator(self._iterate)
 
     def _iterate(self, owner):
         iterators = [owner._own(owner._call(ds.iterator)) for ds in _iter_dataset_leaves(self.sources)]
@@ -148,6 +153,14 @@ class Zip(Dataset):
             yield owner._call(build, self.sources)
 
     def __len__(self) -> Cardinality:
+        """Return exact flattened shortest membership, or UNKNOWN without proof.
+
+        Explicit sections use aligned per-section minima, including discarded
+        tails. Source acquisition/scanning is never used to establish a count.
+        """
+        sectioned, runs, bound = _dataset_sections(self)
+        if sectioned:
+            return _section_total(runs, bound=bound)
         return _min_cardinality(
             ds.yield_cardinality() for ds in _iter_dataset_leaves(self.sources)
         )
@@ -160,6 +173,10 @@ class Zip(Dataset):
             known yield and example total; zero when any branch is known empty;
             otherwise ``Cardinality.UNKNOWN``.
 
+            Explicit section tail discards participate in the proof: uniform
+            declared example sizes multiply the section-sensitive output count;
+            dynamic representations require aligned complete membership.
+
         Side Effects:
             None. This inspects declarations and never opens source iterators.
         """
@@ -168,6 +185,14 @@ class Zip(Dataset):
         if output.is_finite and output.require_finite() == 0:
             return Cardinality.finite(0)
         sources = tuple(_iter_dataset_leaves(self.sources))
+        if _dataset_sections(self)[0]:
+            declared = Dataset.example_cardinality(self)
+            if not declared.is_unknown:
+                return declared
+            if any(_dataset_sections(source)[1] is None for source in sources):
+                return Cardinality.UNKNOWN
+            if any(source.yield_cardinality() != output for source in sources):
+                return Cardinality.UNKNOWN
         yields = tuple(ds.yield_cardinality() for ds in sources)
         examples = tuple(ds.example_cardinality() for ds in sources)
         if any(value.is_unknown for value in yields) or any(value.is_unknown for value in examples):
@@ -187,6 +212,9 @@ class Chain(Dataset):
     predecessors end. Acquisition/read failures close acquired resources without
     masking the primary error; acquisition StopIteration is causal RuntimeError.
     Invalid/empty source sequences raise TypeError/ValueError during construction.
+    Sectioned children concatenate and renumber their visible sections; an empty
+    child's root does not end the Chain. Mixed boundary modes fail before source
+    acquisition. Each completed physical child is closed/released promptly.
     """
 
     _stream_operator = "chain"
@@ -203,7 +231,8 @@ class Chain(Dataset):
     def __iter__(self):
         """Return a lazy traversal owning each source acquired in declaration order."""
 
-        return DatasetCursor._from_generator(self._iterate)
+        sectioned = _section_iterator(self)
+        return sectioned if sectioned is not None else DatasetCursor._from_generator(self._iterate)
 
     def _iterate(self, owner):
         for source in self.sources:
@@ -214,6 +243,7 @@ class Chain(Dataset):
                 except StopIteration:
                     break
                 yield value
+            owner._release(iterator)
 
     def __len__(self) -> Cardinality:
         return _sum_cardinality(source.yield_cardinality() for source in self.sources)

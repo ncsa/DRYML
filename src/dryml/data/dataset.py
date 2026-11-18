@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import abstractmethod
 from collections.abc import Iterator
 from numbers import Integral
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, TYPE_CHECKING
 
 from dryml.core import Object
 from dryml.core.cardinality import Cardinality
@@ -14,9 +14,21 @@ from dryml.methods.signature import _runtime_backends_for_spec
 from dryml.methods import ImplementationSelectionError
 from dryml.methods.stream import DatasetExhaustedError, _CursorLifecycle
 
+if TYPE_CHECKING:
+    from .traversal import AcceptanceMode, DatasetTraversal
+
 
 T = TypeVar("T")
 _PENDING = object()
+
+
+def _section_iterator(dataset, *, epoch=0):
+    """Route sectioned built-ins through the retained shared boundary kernel."""
+    from dryml.methods.stream import _dataset_sections
+
+    if _dataset_sections(dataset)[0]:
+        return dataset.prepare().iterator(epoch=epoch)
+    return None
 
 
 def _normalize_cardinality(value: int | Cardinality) -> Cardinality:
@@ -89,8 +101,9 @@ class DatasetCursor(_CursorLifecycle, Iterator[T], Generic[T]):
     ``position`` advances after each source value is consumed, including values
     discarded by :meth:`skip`. Closing is idempotent and forwards to an owned
     iterator's ``close`` method when it has one. A closed cursor stops yielding,
-    but only ``observed_eof`` proves successful root-output termination. Use a
-    context manager to preserve consumer failures when cleanup also fails.
+    but only ``observed_eof`` proves successful owned-output termination (one
+    selected epoch for :meth:`Dataset.iterate`, one physical pass for iterator).
+    Use a context manager to preserve consumer failures when cleanup also fails.
     Read failures close the source; cleanup failures propagate without erasing
     genuine EOF. Non-pull StopIteration becomes RuntimeError with its cause.
     """
@@ -211,7 +224,7 @@ class Dataset(Object, Generic[T]):
         return self._resolve_split(input_spec=input_spec)
 
     def prepare(self):
-        """Plan this Dataset once for native training-data delivery.
+        """Plan this Dataset once for local sessions and native data delivery.
 
         Returns:
             A dependency-light :class:`dryml.data.native.PreparedDataset` that
@@ -230,6 +243,41 @@ class Dataset(Object, Generic[T]):
         from dryml.data.native import PreparedDataset
 
         return PreparedDataset(self)
+
+    def open(self, *, epoch: int | None = None, start: int | None = None,
+             acceptance: AcceptanceMode = "delivery") -> DatasetTraversal[T]:
+        """Prepare and return a lazy, independent local DatasetTraversal.
+
+        Args:
+            epoch: Exact nonnegative logical epoch, default zero. Explicit sections
+                seek by consuming earlier sections; implicit finite passes open the
+                selected physical pass directly.
+            start: Exact nonnegative final-output offset in that epoch, default zero.
+            acceptance: ``"delivery"`` accepts on next; ``"explicit"`` requires
+                reserving and accepting one lightweight candidate at a time.
+
+        Returns:
+            A context-managed owner lending finite EpochViews. Preparation freezes
+            qualified controls/selections without acquiring a producer.
+
+        Raises:
+            TypeError, ValueError: Invalid controls, unsupported boundary algebra,
+                or a provably infinite boundary-free root. Seek shortfalls raise
+                DatasetExhaustedError lazily. Source/selection failures propagate.
+        """
+        return self.prepare().open(epoch=epoch, start=start, acceptance=acceptance)
+
+    def iterate(self, *, epoch: int | None = None, start: int | None = None) -> DatasetCursor[T]:
+        """Return an owned one-level cursor over one selected finite epoch.
+
+        ``epoch`` and ``start`` are exact nonnegative integers, defaulting to zero.
+        The lazy cursor owns a private traversal and closes it on completion,
+        failure or explicit close. Exact-end offsets are empty; larger offsets
+        raise DatasetExhaustedError. Invalid controls raise TypeError/ValueError;
+        acquisition, execution and cleanup failures retain their identities.
+        Unlike iterator(), EOF here proves only the selected epoch's completion.
+        """
+        return self.prepare().iterate(epoch=epoch, start=start)
 
     def peek(self) -> T:
         """Return one fresh element, releasing its traversal before returning.
@@ -629,7 +677,8 @@ class Map(Dataset):
             independence after selection resolves.
         """
 
-        return _MapCursor(self)
+        sectioned = _section_iterator(self)
+        return sectioned if sectioned is not None else _MapCursor(self)
 
     def __len__(self) -> Cardinality:
         return self.src.yield_cardinality()

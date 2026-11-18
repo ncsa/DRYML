@@ -45,6 +45,17 @@ class ShortDataset(TrackingDataset):
         return DatasetCursor(self.resource)
 
 
+class LegacySkip(Dataset):
+    """Opaque custom wrapper retaining ordinary eager fallback after Skip qualifies."""
+
+    def __init__(self, src):
+        self.src = src
+        super().__init__(spec=src.spec)
+
+    def __iter__(self):
+        return iter(Skip(self.src, 1))
+
+
 def _batches():
     source = TrackingDataset((
         (np.asarray([0.0], dtype=np.float32), np.asarray([0.0], dtype=np.float32)),
@@ -138,7 +149,7 @@ def test_native_inputs_reject_unresolved_maps_with_known_output_declarations(fal
     mapped = Map(source, Project(Pipe(Select(0), DeclaredNative()), Pipe(Select(1), DeclaredNative())))
     dataset = Batch(mapped, 1)
     if fallback:
-        dataset = Skip(dataset, 0)
+        dataset = LegacySkip(dataset)
     prepared = dataset.prepare()
     assert all(spec.backend.value == "torch" for spec in prepared.spec)
     preparation = TrainingPreparation.from_specs(Training(verbose=0), *prepared.spec, "torch")
@@ -209,7 +220,7 @@ def test_prepared_dataset_retains_eager_fallback_for_unqualified_operator():
     from dryml.data.native import PreparedDataset
 
     source, dataset = _batches()
-    prepared = PreparedDataset(Skip(dataset, 1))
+    prepared = PreparedDataset(LegacySkip(dataset))
 
     assert prepared.execution_level == "eager"
     cursor = prepared.iterator()

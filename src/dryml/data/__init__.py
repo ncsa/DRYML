@@ -19,7 +19,9 @@ from dryml.data.reduction_methods import (
     ReservoirUpdate,
     Squared,
 )
-from dryml.data.structural import Batch, Repeat, Shuffle, Skip, Take, Unbatch
+from dryml.data.structural import Batch, Epoch, Repeat, Shuffle, Skip, Take, Unbatch
+from dryml.data.errors import TraversalError, TraversalOwnershipError
+from dryml.data.traversal import AcceptanceMode, DatasetTraversal, EpochView, PendingElement, TraversalPosition
 from dryml.data.util import (
     Collect,
     collect_xy,
@@ -34,6 +36,14 @@ __all__ = [
     "Dataset",
     "DatasetCursor",
     "DatasetExhaustedError",
+    "AcceptanceMode",
+    "DatasetTraversal",
+    "EpochView",
+    "PendingElement",
+    "TraversalPosition",
+    "TraversalError",
+    "TraversalOwnershipError",
+    "Epoch",
     "PreparedDataset",
     "NativeTrainingCursor",
     "GeneratorDataset",

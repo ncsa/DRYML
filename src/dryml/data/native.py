@@ -19,6 +19,7 @@ from dryml.methods.stream import DatasetExhaustedError, _CursorLifecycle
 if TYPE_CHECKING:
     from .dataset import Dataset, DatasetCursor
     from dryml.methods.stream import StreamGraphCursor
+    from .traversal import AcceptanceMode, DatasetTraversal
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +227,9 @@ class PreparedDataset:
     """
 
     def __init__(self, dataset: Dataset[Any]) -> None:
+        from dryml.methods.stream import _dataset_sections
+
+        sectioned, _, _ = _dataset_sections(dataset)
         self.dataset = dataset
         self.graph = dataset.method_graph()
         try:
@@ -233,6 +237,8 @@ class PreparedDataset:
         except NotImplementedError as error:
             if not str(error).startswith("Dataset graph planning does not support"):
                 raise
+            if sectioned:
+                raise NotImplementedError("Unsupported custom operator in section composition.") from error
             self.execution_level = "eager"
         else:
             self.execution_level = "stream"
@@ -367,6 +373,45 @@ class PreparedDataset:
         if not callable(getattr(preparation, "prepare", None)):
             raise TypeError("Native training data requires a prepared x/y handoff.")
         return NativeTrainingCursor(self, preparation, epoch=epoch)
+
+    def open(self, *, epoch: int | None = None, start: int | None = None,
+             acceptance: AcceptanceMode = "delivery") -> DatasetTraversal[Any]:
+        """Lend finite epoch views from an independent lazy local traversal.
+
+        Args:
+            epoch: Exact nonnegative logical epoch, default zero.
+            start: Exact nonnegative final-output offset within it, default zero.
+            acceptance: ``"delivery"`` or single-candidate ``"explicit"`` acceptance.
+
+        Returns:
+            DatasetTraversal retaining this preparation's frozen descriptors and
+            invokers; sibling traversals share no live execution state.
+
+        Raises:
+            TypeError, ValueError: Malformed controls or an infinite unsectioned
+                root. Unsupported section combinations fail before acquisition.
+                Positional shortfalls and source/operator failures occur lazily.
+
+        Side Effects:
+            Creation and unread close acquire no producer. A custom eager fallback
+            retains ordinary behavior without a frozen-configuration guarantee.
+        """
+        from .traversal import DatasetTraversal
+
+        return DatasetTraversal(self, epoch=epoch, start=start, acceptance=acceptance)
+
+    def iterate(self, *, epoch: int | None = None, start: int | None = None) -> DatasetCursor[Any]:
+        """Return a lazy DatasetCursor owning one selected epoch and its traversal.
+
+        Exact nonnegative ``epoch``/``start`` default to zero. An exact-end start
+        produces an empty cursor; a larger start raises DatasetExhaustedError.
+        TypeError/ValueError reject malformed controls; source and cleanup errors
+        propagate. The cursor reuses frozen selections and closes its private
+        traversal on EOF, failure, or explicit close, without opening on creation.
+        """
+        from .traversal import _SelectedEpochCursor
+
+        return _SelectedEpochCursor(self.open(epoch=epoch, start=start))
 
 
 class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):

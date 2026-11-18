@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from typing import TypeVar
+
 from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import Dynamic, Layout, SpecTree, batch_spec_tree, iter_specs, unbatch_spec_tree
 from dryml.data.collate import collate_for_spec, default_collate
-from dryml.data.dataset import Dataset, DatasetCursor, DatasetExhaustedError
+from dryml.data.dataset import Dataset, DatasetCursor, DatasetExhaustedError, _section_iterator
+from dryml.methods.stream import _dataset_sections, _section_total
 from dryml.data.split import default_split, split_for_spec
+
+T = TypeVar("T")
 
 
 class Batch(Dataset):
@@ -24,6 +30,8 @@ class Batch(Dataset):
     Iteration returns a lazy closeable cursor. Source/collation failures close
     children while retaining the primary error; non-pull StopIteration is failure.
     Construction rejects nonpositive sizes with ValueError and opens no source.
+    Above Epoch, groups never cross sections: short groups flush/drop separately,
+    and even dropped empty output sections remain visible to local traversals.
     """
 
     _stream_operator = "batch"
@@ -48,7 +56,8 @@ class Batch(Dataset):
     def __iter__(self):
         """Return a lazy owned traversal, releasing children on every terminal path."""
 
-        return DatasetCursor._from_generator(self._iterate)
+        sectioned = _section_iterator(self)
+        return sectioned if sectioned is not None else DatasetCursor._from_generator(self._iterate)
 
     def _iterate(self, owner):
         it = owner._own(owner._call(self.src.iterator))
@@ -70,6 +79,14 @@ class Batch(Dataset):
             yield owner._call(collate, batch)
 
     def __len__(self) -> Cardinality:
+        """Return exact flattened groups, accounting for each explicit remainder.
+
+        Unknown section membership returns UNKNOWN rather than treating a section
+        upper bound as an exact count. This metadata query never opens a source.
+        """
+        sectioned, runs, bound = _dataset_sections(self)
+        if sectioned:
+            return _section_total(runs, bound=bound)
         src_cardinality = self.src.yield_cardinality()
         if src_cardinality.is_infinite:
             return Cardinality.INFINITE
@@ -90,6 +107,15 @@ class Batch(Dataset):
         outputs = self._range_yield_cardinality(start, stop)
         if outputs.is_finite and outputs.require_finite() == 0:
             return Cardinality.finite(0)
+        if _dataset_sections(self)[0]:
+            if start == 0 and stop is None:
+                if not self.drop_remainder:
+                    return self.src.example_cardinality()
+                leaves = tuple(iter_specs(self.src.spec))
+                if not outputs.is_unknown and leaves and all(not leaf.batched for leaf in leaves):
+                    return (Cardinality.INFINITE if outputs.is_infinite else
+                            Cardinality.finite(outputs.require_finite() * self.batch_size))
+            return Cardinality.UNKNOWN
         if outputs.is_unknown:
             return Cardinality.UNKNOWN
         source_start = start * self.batch_size
@@ -124,6 +150,7 @@ class Unbatch(Dataset):
     Iteration returns a lazy closeable cursor owning its source and split
     iterators. Source/split/cleanup errors propagate, retaining any primary
     failure. Construction infers output specs without opening a traversal.
+    All splits of an input precede its following explicit section boundary.
     """
 
     _stream_operator = "unbatch"
@@ -134,7 +161,8 @@ class Unbatch(Dataset):
     def __iter__(self):
         """Return a lazy traversal owning both its source and split iterators."""
 
-        return DatasetCursor._from_generator(self._iterate)
+        sectioned = _section_iterator(self)
+        return sectioned if sectioned is not None else DatasetCursor._from_generator(self._iterate)
 
     def _iterate(self, owner):
         split = owner._call(self._resolve_split)
@@ -174,6 +202,8 @@ class Take(Dataset):
 
     Each lazy cursor owns its child. Shortfall retains requested/yielded counts,
     remains primary over cleanup errors, and never certifies root EOF.
+    Over explicit sections the count is global; a midsection bound completes that
+    output section and this Take occurrence without another source pull.
     """
 
     _stream_operator = "take"
@@ -224,10 +254,27 @@ class Take(Dataset):
         return self.iterator_for_epoch(0)
 
     def iterator_for_epoch(self, logical_epoch: int) -> DatasetCursor:
-        """Create one strict cursor for a logical repeat epoch without replay."""
+        """Create a strict owned physical-pass cursor at a seed coordinate.
+
+        Args:
+            logical_epoch: Nonnegative exact integer added to this Take's base
+                epoch unless fixed_prefix is true.
+
+        Returns:
+            A lazy closeable cursor, using the shared section kernel for explicit
+            sections. Section ordinals never replace physical seed coordinates.
+
+        Raises:
+            ValueError: Invalid logical_epoch. Planning rejects unsupported section
+                composition; lazy source/cleanup errors retain their identities,
+                and a short source raises DatasetExhaustedError(n, yielded).
+        """
 
         if type(logical_epoch) is not int or logical_epoch < 0:
             raise ValueError("logical_epoch must be a nonnegative exact int.")
+        sectioned = _section_iterator(self, epoch=logical_epoch)
+        if sectioned is not None:
+            return sectioned
         epoch = self.epoch if self.fixed_prefix else self.epoch + logical_epoch
         return _TakeCursor(self.src, self.n, epoch=epoch)
 
@@ -286,7 +333,11 @@ class Skip(Dataset):
     TypeError/ValueError reject malformed counts. Iteration returns a closeable
     cursor and propagates source/cleanup failures while retaining primary errors.
     A source ending within the discarded prefix produces empty output normally.
+    Prefix counting is global across explicit sections; crossed markers survive,
+    including sections whose entire output was discarded.
     """
+
+    _stream_operator = "skip"
 
     def __init__(self, src: Dataset, n: int):
         if type(n) is not int:
@@ -300,7 +351,8 @@ class Skip(Dataset):
     def __iter__(self):
         """Return an owned traversal; a short discarded prefix remains forgiving."""
 
-        return DatasetCursor._from_generator(self._iterate)
+        sectioned = _section_iterator(self)
+        return sectioned if sectioned is not None else DatasetCursor._from_generator(self._iterate)
 
     def _iterate(self, owner):
         it = owner._own(owner._call(self.src.iterator))
@@ -343,7 +395,11 @@ class Repeat(Dataset):
     normally. Each completed epoch releases its resources before reopening the
     source. Source/cleanup failures propagate and preserve any primary failure.
     Negative counts raise ValueError without source acquisition.
+    Child root completion triggers reopening; explicit section boundaries merely
+    forward with monotonically renumbered ordinals and do not restart the child.
     """
+
+    _stream_operator = "repeat"
 
     def __init__(self, src: Dataset, count: int | None = None):
         if count is not None and count < 0:
@@ -355,7 +411,8 @@ class Repeat(Dataset):
     def __iter__(self):
         """Return a lazy cursor reopening and releasing one source per epoch."""
 
-        return DatasetCursor._from_generator(self._iterate)
+        sectioned = _section_iterator(self)
+        return sectioned if sectioned is not None else DatasetCursor._from_generator(self._iterate)
 
     def _iterate(self, owner):
         epoch = 0
@@ -415,7 +472,12 @@ class Shuffle(Dataset):
     Iteration returns a closeable cursor; early close/failure releases the source.
     Source/cleanup errors preserve the primary failure. Construction rejects
     nonpositive buffers with ValueError and acquires no traversal resources.
+    Above Epoch the buffer drains within each section before its marker, while
+    one RNG stream continues across adjacent sections. Preparation retains the
+    buffer/seed controls; independent traversals own independent RNGs and buffers.
     """
+
+    _stream_operator = "shuffle"
 
     def __init__(self, src: Dataset, buffer_size: int, *, seed=None):
         if buffer_size <= 0:
@@ -428,7 +490,8 @@ class Shuffle(Dataset):
     def __iter__(self):
         """Return a bounded-buffer traversal owning its source until termination."""
 
-        return DatasetCursor._from_generator(self._iterate)
+        sectioned = _section_iterator(self)
+        return sectioned if sectioned is not None else DatasetCursor._from_generator(self._iterate)
 
     def _iterate(self, owner):
         import numpy as np
@@ -472,4 +535,41 @@ class Shuffle(Dataset):
         return Cardinality.UNKNOWN
 
 
-__all__ = ["Batch", "Repeat", "Shuffle", "Skip", "Take", "Unbatch"]
+class Epoch(Dataset[T]):
+    """Section incoming yields without reopening or reseeding the upstream stream.
+
+    Args:
+        src: Dataset whose final yields form each section.
+        len: Required positive exact integer section length (keyword-only).
+
+    Empty sources emit no section; a nonempty short final section is retained.
+    Flattened iteration preserves membership and specs. Batch/Shuffle above Epoch
+    work within each section; Map/Unbatch forward its boundaries. Only one visible
+    axis is supported: nested Epoch and mixed sectioned/unsectioned Chain/Zip fail
+    during planning before acquisition. TypeError/ValueError reject invalid len.
+    Every cursor/traversal owns its resources; source/operator failures propagate.
+    """
+
+    _stream_operator = "epoch"
+
+    def __init__(self, src: Dataset[T], *, len: int) -> None:
+        if type(len) is not int:
+            raise TypeError("len must be a positive exact int.")
+        if len <= 0:
+            raise ValueError("len must be positive.")
+        self.src, self.length = src, len
+        super().__init__(spec=src.spec)
+
+    def __iter__(self) -> Iterator[T]:
+        """Return an independent lazy flattened cursor sharing the boundary kernel."""
+        return self.prepare().iterator()
+
+    def __len__(self) -> Cardinality:
+        """Preserve flattened source cardinality without scanning or acquisition."""
+        return self.src.yield_cardinality()
+
+    def _range_example_cardinality(self, start, stop=None):
+        return self.src._range_example_cardinality(start, stop)
+
+
+__all__ = ["Batch", "Epoch", "Repeat", "Shuffle", "Skip", "Take", "Unbatch"]

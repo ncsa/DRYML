@@ -178,6 +178,100 @@ opaque leaves and merges different lengths to `Dynamic`. Hints are normalized
 to ordinary definition metadata. Use an explicit spec for object-valued
 containers, empty batches, or construction without factory execution.
 
+### Local Traversals And Epochs
+
+`Dataset.open(*, epoch=None, start=None, acceptance="delivery")` prepares once
+and returns a lazy `DatasetTraversal`. `PreparedDataset.open(...)` reuses its
+frozen controls, topology, source bindings and selected invokers. Each traversal
+owns independent live cursors, RNGs and buffers; multiple traversals may interleave.
+Reading an unread traversal's `position` or closing it opens no producer.
+
+```python
+from dryml.data import Epoch, Batch
+
+prepared = Epoch(Batch(source, 32), len=100).prepare()
+with prepared.open() as traversal:
+    for epoch, elements in traversal.epochs(stop=3):
+        for batch in elements:
+            consume(batch)
+```
+
+`Epoch(src, *, len)` requires a positive **exact int** and sections incoming
+yields without reopening or reseeding upstream. It retains a nonempty short final
+section; an empty source creates no section. Adjacent views share one execution.
+Without Epoch, each finite physical pass is one implicit epoch; the data layer
+reopens it for the next pass. A genuinely empty pass terminates traversal. A
+provably infinite boundary-free root rejects epoch-oriented opening before
+acquisition; UNKNOWN is supported without a scan and does not promise termination.
+Existing `iterator()`/`__iter__()` remain independent flattened physical-pass APIs.
+
+`traversal.next_epoch()` returns a borrowed finite `EpochView`, or raises
+`StopIteration` at terminal completion. `traversal.epochs(*, stop=None)` yields
+`(ordinal, view)` pairs; stop is an exclusive logical epoch. One unfinished view
+or active enumeration may borrow an individual traversal. Finish each view before
+requesting another. The traversal, view and one-level cursor are context managers.
+Closing an unfinished view aborts its owner; exhausted views remain exhausted and
+closing them is a no-op. Closing never drains discarded tails. Source, operator,
+consumer and cleanup failures follow the cursor primary-exception policy above.
+Pulls and mutations are owner-thread-only; recursive advancement and competing
+consumers raise `TraversalOwnershipError` (a `TraversalError`/`RuntimeError`).
+
+`epoch` and `start` default to zero; start counts final outputs in the selected
+epoch. Explicit positional seeking may consume earlier sections. An exact-end
+start is valid: epoch enumeration normalizes past that completed section, while
+`Dataset.iterate(*, epoch=None, start=None)` and `PreparedDataset.iterate(...)`
+return an empty one-level cursor for it. Larger offsets raise
+`DatasetExhaustedError(requested, yielded)`. `iterate()` owns a private traversal,
+returns authored elements (including `(x, y)` pairs) unchanged, and its EOF proves
+only selected-epoch completion. New epoch/start/stop/len counts reject bool, NumPy
+integers, integer subclasses and floats with `TypeError`; negative values and
+stop before the effective epoch raise `ValueError`. Stop equal to that epoch
+acquires nothing; reaching stop leaves the traversal usable.
+
+`TraversalPosition` reports accepted `epoch`, `start`, `sequence`,
+`section_complete` and `root_complete`. A fixed final boundary normalizes on its
+last delivery without another producer pull. Unknown natural EOF is observed
+later; exact EOF never fabricates another explicit view. Implicit physical EOF
+retains a boundary handoff before another pass is acquired; it is not terminal
+traversal EOF. Nonempty-pass evidence includes values discarded during positional
+seeking, independently of whether its selected suffix was empty.
+
+For explicit acceptance use `open(acceptance="explicit")`, then `view.reserve()`
+and `traversal.accept(candidate)` or `traversal.reject(candidate)`. At most one
+`PendingElement` is outstanding. It carries a borrowed value, proposed position
+and known-section-completion fact with an opaque single-use token, not a detached
+continuation record. Acceptance performs no capture/serialization. A converted
+value carrier may alias the same token; accepting/rejecting an alias consumes all
+aliases. Stale/foreign tokens fail without progress. Rejection aborts speculative
+execution while retaining the accepted position; tokens cannot be pickled.
+
+Only one explicit section axis is supported. Nested Epoch, mixed boundary modes
+in Chain/Zip, and unsupported custom section compositions reject during planning
+before acquisition. Boundary-free custom operators retain ordinary eager fallback.
+
+| Operator above Epoch | Section behavior |
+|---|---|
+| Map | One output per input; forwards boundaries |
+| Batch | Flushes/drops short groups per section; never combines sections |
+| Unbatch | Finishes the current input's splits before its boundary |
+| Shuffle | Drains its section-local buffer; one continuing RNG stream |
+| Take / Skip | Count a global prefix; Skip preserves crossed empty sections; Take remains strict and can terminate midsection |
+| Repeat | Reopens only at child root completion; forwards and renumbers sections |
+| Chain | Concatenates and renumbers sectioned children; skips empty child roots |
+| Zip | Ends at the shortest aligned section, then discards unmatched tails before the next section |
+
+Empty transformed sections remain visible. For example,
+`Batch(Epoch(source, len=3), 4, drop_remainder=True)` has empty sections, rather
+than false root EOF. `Epoch(Batch(source, 2), len=3)` groups six source elements
+per full section; `Batch(Epoch(source, len=3), 2)` yields batches of two and one
+within each three-input section.
+
+`yield_cardinality()` accounts for per-section Batch remainders and Zip tail
+discards. It returns UNKNOWN when declarations cannot prove exact membership.
+`EpochView.cardinality` is exact from its opening offset or UNKNOWN;
+`max_elements` is a separate optional upper bound. An upper bound is never used
+as an exact-count shortfall check. These queries neither scan nor acquire sources.
+
 ### Prepared Stream Graphs
 
 `dataset.method_graph()` returns an inert `MethodGraph` view for a Dataset
@@ -190,7 +284,8 @@ source specs, and `output_spec` is an assertion of its declared result spec.
 Mismatched assertions, unsupported strategies, unqualified operators, and
 Method-selection failures raise before source execution.
 
-The prepared subset is `Map`, `Batch`, `Unbatch`, `Take`, `Zip`, and `Chain`.
+The prepared subset is `Map`, `Batch`, `Unbatch`, `Take`, `Skip`, `Repeat`,
+`Shuffle`, `Epoch`, `Zip`, and `Chain`.
 It preserves their ordinary order and cardinality rules: Map emits one result
 per input, Batch retains short final batches unless `drop_remainder=True`,
 Unbatch emits split items in order, Zip stops at the shortest source with its
@@ -201,7 +296,8 @@ graph planning explicitly.
 
 Preparation publishes a complete frozen occurrence tree only after source
 binding, inference, assertions, and selection succeed. It retains Batch size,
-remainder/ragged policy, Take count/epoch/fixed-prefix controls, Map preservation
+remainder/ragged policy, Take count/epoch/fixed-prefix controls, Skip/Repeat counts,
+Shuffle buffer/seed, Epoch length, Map preservation
 policy and Method selection, normalized specs/cardinalities, and the ordered
 Zip/Chain shape (including nested dict/list/tuple containers). Editing the
 original recipe later does not change existing prepared execution or its output

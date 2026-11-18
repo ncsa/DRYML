@@ -315,3 +315,17 @@ def test_source_read_failure_preserves_primary_when_owned_cleanup_fails(skip):
     assert list(cursor) == []
     cursor.close()
     assert resource.closes == 1
+
+
+def test_selected_epoch_cursor_eof_owns_only_one_epoch_and_unread_close_is_inert():
+    from dryml.data import Epoch
+
+    dataset = TrackingDataset([0, 1, 2])
+    unread = Epoch(dataset, len=2).iterate()
+    unread.close()
+    assert dataset.opens == 0
+    with Epoch(dataset, len=2).iterate() as cursor:
+        assert list(cursor) == [0, 1]
+        assert cursor.observed_eof
+        assert cursor.position == 2
+    assert dataset.closes == [0]

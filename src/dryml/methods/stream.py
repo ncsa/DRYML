@@ -266,7 +266,9 @@ class _CursorLifecycle:
     def _close_resources(self) -> list[BaseException]:
         errors = self._deferred_cleanup
         self._deferred_cleanup = []
-        for resource in reversed(self._resources):
+        resources, self._resources = self._resources, []
+        self._resource_ids.clear()
+        for resource in reversed(resources):
             try:
                 close = self._call(getattr, resource, "close", None)
                 if close is not None:
@@ -411,6 +413,9 @@ class _StreamOp:
     source: SourceBinding | None = None
     occurrence: tuple[int, ...] = ()
     cardinality: Cardinality = Cardinality.UNKNOWN
+    sectioned: bool = False
+    sections: tuple | None = None
+    section_bound: int | None = None
 
     @property
     def spec(self) -> SpecTree | None:
@@ -454,6 +459,181 @@ def _freeze_zip_tree(tree, leaves):
         return _ZipTree("tuple" if isinstance(tree, tuple) else "list",
                         tuple(_freeze_zip_tree(value, leaves) for value in tree))
     raise TypeError(f"Zip expects Dataset leaves, got {type(tree).__name__}.")
+
+
+def _section_total(runs, *, bound=None):
+    if bound == 0:
+        return Cardinality.finite(0)
+    if runs is None:
+        return Cardinality.UNKNOWN
+    if any(count is None and size for size, count in runs):
+        return Cardinality.INFINITE
+    return Cardinality.finite(sum(size * count for size, count in runs if count is not None))
+
+
+def _section_size(runs, index):
+    if runs is None:
+        return None
+    for size, count in runs:
+        if count is None or index < count:
+            return size
+        index -= count
+    return None
+
+
+def _prefix_sections(runs, n, *, skip=False):
+    if runs is None:
+        return None
+    result = []
+    for size, count in runs:
+        if n == 0:
+            if skip:
+                result.append((size, count))
+                continue
+            break
+        if size == 0:
+            result.append((0, count))
+            continue
+        whole = n // size
+        if count is not None:
+            whole = min(count, whole)
+        if whole:
+            result.append((0 if skip else size, whole))
+            n -= whole * size
+        remaining = None if count is None else count - whole
+        if remaining == 0:
+            continue
+        if n:
+            result.append((size - n if skip else n, 1))
+            n = 0
+            remaining = None if remaining is None else remaining - 1
+        if skip and remaining != 0:
+            result.append((size, remaining))
+        if not skip:
+            break
+    return tuple(result)
+
+
+def _zip_sections(branches):
+    if any(runs is None for runs in branches):
+        return None
+    positions = [0] * len(branches)
+    remaining = [runs[0][1] if runs else 0 for runs in branches]
+    result = []
+    while all(index < len(runs) for index, runs in zip(positions, branches)):
+        finite = [count for count in remaining if count is not None]
+        count = min(finite) if finite else None
+        size = min(runs[index][0] for index, runs in zip(positions, branches))
+        result.append((size, count))
+        if count is None:
+            break
+        for i, runs in enumerate(branches):
+            if remaining[i] is not None:
+                remaining[i] -= count
+                if remaining[i] == 0:
+                    positions[i] += 1
+                    if positions[i] < len(runs):
+                        remaining[i] = runs[positions[i]][1]
+    return tuple(result)
+
+
+def _dataset_sections(dataset):
+    """Validate one visible axis and prove compact section-size runs, without IO.
+
+    A run is (final-output size, repetition count); None repetitions are infinite.
+    Unknown sizes remain unknown, separately from an optional per-section bound.
+    This metadata seam never selects invokers or treats source lengths as pulls.
+    """
+    kind = type(dataset).__dict__.get("_stream_operator")
+    if kind in {"zip", "chain", "custom"}:
+        leaves = []
+        _freeze_zip_tree(dataset.sources, leaves)
+        children = [_dataset_sections(child) for child in leaves]
+    elif kind is None and hasattr(dataset, "sources"):
+        def declared_leaves(tree):
+            if hasattr(tree, "_stream_operator"):
+                yield tree
+            elif isinstance(tree, (tuple, list, dict)):
+                for child in (tree.values() if isinstance(tree, dict) else tree):
+                    yield from declared_leaves(child)
+        children = [_dataset_sections(child) for child in declared_leaves(dataset.sources)]
+    elif hasattr(getattr(dataset, "src", None), "_stream_operator"):
+        children = [_dataset_sections(dataset.src)]
+    else:
+        children = []
+    modes = [child[0] for child in children]
+    if kind == "epoch":
+        if any(modes):
+            raise ValueError("Nested Epoch axes are unsupported.")
+        length = dataset.length
+        cardinality = dataset.src.yield_cardinality()
+        if cardinality.is_infinite:
+            runs = ((length, None),)
+        elif cardinality.is_finite:
+            full, tail = divmod(cardinality.require_finite(), length)
+            runs = (() if not full else ((length, full),)) + (() if not tail else ((tail, 1),))
+        else:
+            runs = None
+        return True, runs, length
+    if not any(modes):
+        return False, None, None
+    if kind in {"chain", "zip"}:
+        if not all(modes):
+            raise ValueError("Mixed explicit and unsectioned boundary modes are unsupported.")
+        runs = (None if any(child[1] is None for child in children)
+                else tuple(run for child in children for run in child[1]))
+        bounds = [child[2] for child in children]
+        if kind == "zip":
+            runs = _zip_sections([child[1] for child in children])
+            known = [bound for bound in bounds if bound is not None]
+            bound = min(known) if known else None
+        else:
+            bound = max(bounds) if all(value is not None for value in bounds) else None
+        return True, runs, bound
+    if kind not in {"map", "batch", "unbatch", "take", "skip", "repeat", "shuffle"}:
+        raise NotImplementedError("Unsupported custom operator over sectioned input.")
+    _, runs, bound = children[0]
+    if kind == "batch":
+        size, drop = dataset.batch_size, dataset.drop_remainder
+        def groups(n):
+            return n // size if drop else (n + size - 1) // size
+        runs = None if runs is None else tuple((groups(n), count) for n, count in runs)
+        bound = None if bound is None else groups(bound)
+    elif kind == "unbatch":
+        from dryml.core.tensor_spec import TensorSpec, Dynamic
+        spec = dataset.src.spec
+        if isinstance(spec, TensorSpec) and spec.batched and spec.batch is not Dynamic:
+            runs = None if runs is None else tuple((n * spec.batch, count) for n, count in runs)
+            bound = None if bound is None else bound * spec.batch
+        elif type(dataset.src).__dict__.get("_stream_operator") == "batch":
+            batch = dataset.src
+            _, runs, bound = _dataset_sections(batch.src)
+            if batch.drop_remainder:
+                runs = None if runs is None else tuple((n // batch.batch_size * batch.batch_size, count) for n, count in runs)
+        else:
+            runs, bound = None, None
+    elif kind in {"take", "skip"}:
+        runs = _prefix_sections(runs, dataset.n, skip=kind == "skip")
+        if kind == "take":
+            bound = dataset.n if bound is None else min(bound, dataset.n)
+    elif kind == "repeat":
+        count = dataset.count
+        if count == 0:
+            runs = ()
+        elif runs is not None:
+            if len(runs) == 1:
+                n, repeats = runs[0]
+                runs = ((n, None if repeats is None or count is None else repeats * count),)
+            elif count is None:
+                runs = None
+            else:
+                runs = runs * count
+    return True, runs, bound
+
+
+def _needs_boundary_kernel(op):
+    return op.sectioned or op.kind in {"skip", "repeat", "shuffle", "epoch"} or any(
+        _needs_boundary_kernel(child) for child in op.inputs)
 
 
 class StreamPlan:
@@ -525,6 +705,7 @@ class StreamPlan:
         if strategy != "local":
             raise ValueError(f"Unsupported Method preparation strategy {strategy!r}; only 'local' is available.")
         records: list[object] = []
+        _dataset_sections(self.dataset)
         root = self._build(self.dataset, records)
         from .signature import spec_from_node, spec_node
 
@@ -585,14 +766,16 @@ class StreamPlan:
         kind = type(dataset).__dict__.get("_stream_operator")
         if kind is None:
             kind = "unsupported" if hasattr(dataset, "src") else "source"
-        if kind not in {"source", "map", "batch", "unbatch", "take", "zip", "chain", "custom"}:
+        if kind not in {"source", "map", "batch", "unbatch", "take", "skip", "repeat", "shuffle", "epoch", "zip", "chain", "custom"}:
             raise NotImplementedError(f"Dataset graph planning does not support {type(dataset).__name__}.")
         spec = spec_from_node(spec_node(getattr(dataset, "spec")))
         cardinality = dataset.yield_cardinality()
 
         def operation(kind, **kwargs):
+            sectioned, sections, bound = _dataset_sections(dataset)
             return _StreamOp(kind, dataset=dataset, signature=spec_node(spec),
-                             occurrence=occurrence, cardinality=cardinality, **kwargs)
+                             occurrence=occurrence, cardinality=cardinality,
+                             sectioned=sectioned, sections=sections, section_bound=bound, **kwargs)
 
         if kind == "source":
             records.append(MethodGraphNode(len(records), "source", None, outputs=(MethodPort("iterator", spec_node(spec)),)))
@@ -658,6 +841,20 @@ class StreamPlan:
                 ),
             ))
             return operation("take", inputs=(child,), controls=(dataset.n, dataset.epoch, dataset.fixed_prefix))
+        if kind in {"skip", "repeat", "shuffle", "epoch"}:
+            child = self._build(dataset.src, records, occurrence + (0,))
+            controls = {"skip": lambda: (dataset.n,), "repeat": lambda: (dataset.count,),
+                        "shuffle": lambda: (dataset.buffer_size, dataset.seed),
+                        "epoch": lambda: (dataset.length,)}[kind]()
+            spec = child.spec
+            records.append(MethodGraphNode(
+                len(records), "method", type(dataset),
+                inputs=(MethodPort("iterator", spec_node(child.spec)),),
+                outputs=(MethodPort("iterator", spec_node(spec)),),
+                stream_node=self._builtin_node(type(dataset).__name__, (child.spec,), spec,
+                    dataset, (kind,), dataset.buffer_size if kind == "shuffle" else 0),
+            ))
+            return operation(kind, inputs=(child,), controls=controls)
         if kind == "zip":
             leaves = []
             tree = _freeze_zip_tree(dataset.sources, leaves)
@@ -744,6 +941,9 @@ class StreamGraphCursor(_CursorLifecycle, Iterator[Any]):
         self._position = 0
         self._value: Any = None
         self._has_value = False
+        self._kernel = None
+        if _needs_boundary_kernel(root):
+            self._kernel = self._own(_SectionExecution(root, epoch))
 
     def __iter__(self) -> "StreamGraphCursor":
         """Return this cursor as its own iterator."""
@@ -791,6 +991,16 @@ class StreamGraphCursor(_CursorLifecycle, Iterator[Any]):
         if self._has_value:
             self._has_value = False
             self._value = None
+        if self._kernel is not None:
+            while True:
+                kind = self._kernel.pull()
+                if kind == PullKind.ROOT_END:
+                    raise StopIteration
+                if kind == PullKind.SECTION_END:
+                    self._kernel.handoff()
+                    continue
+                self._position += 1
+                return self._kernel.value
         if self._root is None:
             self._root = self._call(self._open, self._root_op)
         value = self._pull(self._root)
@@ -1010,10 +1220,11 @@ class _ChainIterator(Iterator[Any]):
     def __next__(self) -> Any:
         while self.index < len(self.inputs):
             if self.current is None:
-                self.current = self.cursor._call(self.cursor._open, self.inputs[self.index], epoch=self.epoch)
+                self.current = self.cursor._own(StreamGraphCursor(self.inputs[self.index], epoch=self.epoch))
             try:
                 return self.cursor._pull(self.current)
             except StopIteration:
+                self.cursor._release(self.current)
                 self.current = None
                 self.index += 1
         raise StopIteration
@@ -1037,6 +1248,337 @@ class _CustomIterator(Iterator[Any]):
             inputs = tuple(self.cursor._call(self.cursor._open, op, epoch=self.epoch) for op in self.inputs)
             self.output = self.cursor._own(self.cursor._call(self.node.open, *inputs))
         return self.cursor._pull(self.output)
+
+
+class _SectionExecution(_CursorLifecycle):
+    """Mutable occurrence state, with out-of-band boundaries and explicit phases.
+
+    Child roots are local: only Repeat/Chain may replace an occurrence. A pending
+    boundary is stable until handoff; no suspended operator generator encodes the
+    frontier. Values are borrowed, and no continuation snapshots are constructed.
+    """
+
+    def __init__(self, op, epoch=0):
+        super().__init__()
+        self.op, self.epoch = op, epoch
+        self.children = {}
+        self.source = None
+        self.value = None
+        self.section_final = False
+        self.root_final = False
+        self.boundary = False
+        self.terminal = False
+        self.after_boundary_root = False
+        self.count = 0
+        self.within = 0
+        self.index = 0
+        self.produced = False
+        self.selected = op.selected
+        self.output_spec = op.spec
+        self.input_spec = op.inputs[0].spec if op.kind == "map" else None
+        self.buffer = []
+        self.split_values = ()
+        self.split_index = 0
+        self.input_batch = None
+        self.input_final = False
+        self.input_root = False
+        self.phase = "fill"
+        self.rng = None
+
+    def _child(self, index=0, epoch=None):
+        if index not in self.children:
+            child = _SectionExecution(self.op.inputs[index], self.epoch if epoch is None else epoch)
+            self.children[index] = self._own(child)
+        return self.children[index]
+
+    def _forget(self, index):
+        child = self.children.pop(index)
+        self._release(child)
+
+    def _deliver(self, value, *, final=False, root=False):
+        self.value = value
+        self.section_final, self.root_final = final, root
+        self.boundary = final
+        self.after_boundary_root = root and final
+        if root and not final:
+            self.terminal = True
+        self.count += 1
+        self.produced = True
+        return PullKind.DELIVERY
+
+    def _section(self, *, root=False):
+        self.boundary = True
+        self.after_boundary_root = root
+        self.produced = True
+        return PullKind.SECTION_END
+
+    def pull(self):
+        if self.boundary:
+            return PullKind.SECTION_END
+        if self.terminal:
+            return PullKind.ROOT_END
+        if self._closed:
+            raise RuntimeError("Closed execution cannot advance.")
+        self.section_final = self.root_final = False
+        self.value = None
+        try:
+            kind = self._step()
+            if kind == PullKind.ROOT_END:
+                self.terminal = True
+            return kind
+        except BaseException as error:
+            self._close_after_failure(error)
+            raise
+
+    def handoff(self):
+        if self._closed or not self.boundary:
+            raise RuntimeError("No pending section handoff.")
+        self.boundary = False
+        self.terminal = self.after_boundary_root
+        self.after_boundary_root = False
+        self.within = 0
+        if self.op.kind != "zip":
+            for child in self.children.values():
+                if child.boundary:
+                    child.handoff()
+        if self.op.kind == "shuffle":
+            self.phase = "fill"
+
+    def _step(self):
+        kind = self.op.kind
+        if kind == "source":
+            if self.source is None:
+                self.source = self._own(self._call(self.op.source.open, self.epoch))
+            try:
+                value = self._pull(self.source)
+            except StopIteration:
+                return PullKind.ROOT_END
+            indexed = getattr(self.op.source, "kind", None) in {"array", "npy"}
+            final = indexed and self.op.cardinality.is_finite and self.count + 1 == self.op.cardinality.require_finite()
+            return self._deliver(value, root=final)
+        if kind == "take":
+            n, base, fixed = self.op.controls
+            if self.count == n:
+                return PullKind.ROOT_END
+            child = self._child(epoch=base if fixed else base + self.epoch)
+            signal = child.pull()
+            if signal == PullKind.ROOT_END:
+                raise DatasetExhaustedError(n, self.count)
+            if signal == PullKind.SECTION_END:
+                return self._section()
+            last = self.count + 1 == n
+            return self._deliver(child.value, final=child.section_final or (last and self.op.sectioned),
+                                 root=last)
+        if kind in {"chain", "repeat"}:
+            limit = len(self.op.inputs) if kind == "chain" else self.op.controls[0]
+            while limit is None or self.index < limit:
+                slot = self.index if kind == "chain" else 0
+                child = self._child(slot, self.epoch if kind == "chain" else self.epoch + self.index)
+                signal = child.pull()
+                if signal == PullKind.ROOT_END:
+                    nonempty = child.produced
+                    self._forget(slot)
+                    self.index += 1
+                    if kind == "repeat" and limit is None and not nonempty:
+                        return PullKind.ROOT_END
+                    continue
+                if signal == PullKind.SECTION_END:
+                    return self._section()
+                # A child root is not the root of its Chain/Repeat parent.
+                return self._deliver(child.value, final=child.section_final)
+            return PullKind.ROOT_END
+        if kind == "zip":
+            return self._zip()
+        if kind == "custom":
+            if self.source is None:
+                inputs = tuple(_KernelIterator(self._child(i)) for i in range(len(self.op.inputs)))
+                self.source = self._own(self._call(self.op.node.open, *inputs))
+            try:
+                return self._deliver(self._pull(self.source))
+            except StopIteration:
+                return PullKind.ROOT_END
+        child = self._child()
+        if kind == "shuffle":
+            return self._shuffle(child)
+        if kind == "unbatch":
+            return self._unbatch(child)
+        if kind == "batch":
+            return self._batch(child)
+        while True:
+            signal = child.pull()
+            if signal == PullKind.ROOT_END:
+                if kind == "epoch" and self.within:
+                    return self._section(root=True)
+                return signal
+            if signal == PullKind.SECTION_END:
+                return self._section(root=child.after_boundary_root)
+            value = child.value
+            if kind == "skip" and self.index < self.op.controls[0]:
+                self.index += 1
+                if child.section_final:
+                    return self._section(root=child.root_final)
+                continue
+            if kind == "epoch":
+                self.within += 1
+                return self._deliver(value, final=self.within == self.op.controls[0] or child.root_final,
+                                     root=child.root_final)
+            if kind == "map":
+                value = self._map(value)
+            return self._deliver(value, final=child.section_final, root=child.root_final)
+
+    def _map(self, value):
+        preserves, finder, examples = self.op.controls
+        if self.selected is None:
+            from .signature import _runtime_backends_for_spec
+            try:
+                implementation = self._call(finder, input_spec=self.input_spec)
+            except ImplementationSelectionError as error:
+                if error.reason != "unknown_traits" or error.unknown_traits != ("backend",):
+                    raise
+                backends = self._call(_runtime_backends_for_spec, value, self.input_spec)
+                if len(backends) != 1:
+                    raise error
+                implementation = self._call(finder, input_spec=self.input_spec, backend=next(iter(backends)))
+            self.selected = self._call(implementation.prepared_invoker)
+            self.output_spec = self._call(implementation.infer_output_spec)
+        result = self._call(self.selected, value)
+        if preserves and self._call(examples, self.input_spec, value) != self._call(examples, self.output_spec, result):
+            raise ValueError("Map declared preserves_examples but changed an example count.")
+        return result
+
+    def _batch(self, child):
+        size, drop, _ = self.op.controls
+        self.buffer = []
+        boundary = root = False
+        while len(self.buffer) < size:
+            signal = child.pull()
+            if signal != PullKind.DELIVERY:
+                boundary, root = signal == PullKind.SECTION_END, signal == PullKind.ROOT_END
+                break
+            self.buffer.append(child.value)
+            if child.section_final or child.root_final:
+                boundary, root = child.section_final, child.root_final
+                break
+        if not self.buffer or (drop and len(self.buffer) < size):
+            self.buffer = []
+            return self._section(root=child.after_boundary_root) if boundary else PullKind.ROOT_END
+        value = self._call(self.selected, self.buffer)
+        self.buffer = []
+        return self._deliver(value, final=boundary, root=root)
+
+    def _unbatch(self, child):
+        while self.split_index == len(self.split_values):
+            self.split_values, self.input_batch, self.split_index = (), None, 0
+            if self.input_final:
+                self.input_final = False
+                return self._section(root=self.input_root)
+            if self.input_root:
+                return PullKind.ROOT_END
+            signal = child.pull()
+            if signal != PullKind.DELIVERY:
+                return self._section(root=child.after_boundary_root) if signal == PullKind.SECTION_END else signal
+            self.input_batch = child.value
+            self.input_final, self.input_root = child.section_final, child.root_final
+            values = self._call(self.selected, self.input_batch)
+            if isinstance(values, (tuple, list)):
+                self.split_values = values
+            else:
+                splits = self._own(self._call(iter, values))
+                items = []
+                while True:
+                    try:
+                        items.append(self._pull(splits))
+                    except StopIteration:
+                        break
+                self._release(splits)
+                self.split_values = items
+        value = self.split_values[self.split_index]
+        self.split_index += 1
+        last = self.split_index == len(self.split_values)
+        final, root = last and self.input_final, last and self.input_root
+        if last:
+            self.input_final = False
+        return self._deliver(value, final=final, root=root)
+
+    def _shuffle(self, child):
+        if self.rng is None:
+            import numpy as np
+            self.rng = np.random.default_rng(self.op.controls[1])
+        if self.phase in {"fill", "refill"}:
+            target = self.op.controls[0] if self.phase == "fill" else len(self.buffer) + 1
+            while len(self.buffer) < target:
+                signal = child.pull()
+                if signal != PullKind.DELIVERY:
+                    self.phase = "section" if signal == PullKind.SECTION_END else "root"
+                    break
+                self.buffer.append(child.value)
+                if child.section_final or child.root_final:
+                    self.phase = "section" if child.section_final else "root"
+                    break
+        if not self.buffer:
+            return self._section(root=child.after_boundary_root) if self.phase == "section" else PullKind.ROOT_END
+        index = int(self.rng.integers(0, len(self.buffer))) if len(self.buffer) > 1 else 0
+        value = self.buffer.pop(index)
+        final = not self.buffer and self.phase == "section"
+        root = not self.buffer and (self.phase == "root" or child.root_final)
+        if self.phase not in {"section", "root"}:
+            self.phase = "refill"
+        return self._deliver(value, final=final, root=root)
+
+    def _zip(self):
+        children = [self._child(i) for i in range(len(self.op.inputs))]
+        if self.phase == "drain":
+            for child in children:
+                while not child.boundary:
+                    if child.pull() == PullKind.ROOT_END:
+                        return PullKind.ROOT_END
+            for child in children:
+                child.handoff()
+            self.phase = "fill"
+        values = []
+        final = empty = False
+        for child in children:
+            signal = child.pull()
+            if signal == PullKind.ROOT_END:
+                return PullKind.ROOT_END
+            if signal == PullKind.SECTION_END:
+                empty = True
+                continue
+            values.append(child.value)
+            final |= child.section_final
+        if empty:
+            self.phase = "drain"
+            return self._section()
+        if final:
+            self.phase = "drain"
+        return self._deliver(self._call(self.op.tree.build, iter(values)), final=final)
+
+    def close(self):
+        self.value = self.input_batch = self.source = None
+        self.buffer = []
+        self.split_values = ()
+        try:
+            super().close()
+        finally:
+            self.children.clear()
+
+
+class _KernelIterator(Iterator[Any]):
+    """Borrow a boundary-free kernel as a custom node's ordinary input."""
+
+    def __init__(self, execution):
+        self.execution = execution
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        signal = self.execution.pull()
+        if signal == PullKind.ROOT_END:
+            raise StopIteration
+        if signal != PullKind.DELIVERY:
+            raise RuntimeError("Custom stream received an unsupported section boundary.")
+        return self.execution.value
 
 
 __all__ = ["IteratorPort", "StreamGraphCursor", "StreamNode"]

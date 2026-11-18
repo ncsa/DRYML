@@ -438,3 +438,18 @@ def test_seed_aware_generator_epochs_are_direct_reproducible_and_optionally_fixe
     )
     assert reopened.returncode == 0, reopened.stderr
     assert json.loads(reopened.stdout) == epoch_two
+
+
+def test_section_tail_discards_change_zip_examples_and_batch_examples_without_scans():
+    from dryml.data import ArrayDataset, Epoch
+
+    source = ArrayDataset(np.arange(6))
+    paired = Zip(Epoch(source, len=4), Epoch(source, len=3))
+    assert paired.yield_cardinality() == Cardinality.finite(5)
+    assert paired.example_cardinality() == Cardinality.finite(5)
+    batches = Batch(Epoch(source, len=3), 2)
+    assert batches.yield_cardinality() == Cardinality.finite(4)
+    assert batches.example_cardinality() == Cardinality.finite(6)
+    dropped = Batch(Epoch(source, len=3), 2, drop_remainder=True)
+    assert dropped.example_cardinality() == Cardinality.finite(4)
+    assert Unbatch(dropped).yield_cardinality() == Cardinality.finite(4)
