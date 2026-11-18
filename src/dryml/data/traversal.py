@@ -141,7 +141,7 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
             from .state import DatasetState
             if not isinstance(state, DatasetState):
                 raise TypeError("state must be a DatasetState or None.")
-            state.validate(prepared)
+            data = state._validated_data(prepared)
             position = state.position
             if epoch is not None and _count(epoch, "epoch") != position.epoch or start is not None and _count(start, "start") != position.start:
                 raise ContinuationMismatchError("Explicit position differs from DatasetState.")
@@ -175,7 +175,7 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
         if state is not None:
             from .continuation import rebuild_native
             from .recovery import _restore_execution, _snapshot_root
-            data = rebuild_native(state._data())
+            data = rebuild_native(data)
             self._root = _snapshot_root(self._root, data["snapshots"])
             self._sequence = data["position"]["sequence"]
             self._section_complete = data["position"]["section_complete"]
@@ -456,9 +456,7 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
                 if signal != PullKind.DELIVERY:
                     if signal == PullKind.SECTION_END:
                         self._complete(root=self._execution.after_boundary_root)
-                    elif self._explicit:
-                        self._complete(root=True)
-                    elif self._pass_nonempty:
+                    elif self._explicit or self._pass_nonempty:
                         self._complete(root=True)
                     else:
                         self._root_complete = True

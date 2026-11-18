@@ -580,14 +580,14 @@ def _dataset_sections(dataset):
     if kind in {"chain", "zip"}:
         if not all(modes):
             raise ValueError("Mixed explicit and unsectioned boundary modes are unsupported.")
-        runs = (None if any(child[1] is None for child in children)
-                else tuple(run for child in children for run in child[1]))
         bounds = [child[2] for child in children]
         if kind == "zip":
             runs = _zip_sections([child[1] for child in children])
             known = [bound for bound in bounds if bound is not None]
             bound = min(known) if known else None
         else:
+            runs = (None if any(child[1] is None for child in children)
+                    else tuple(run for child in children for run in child[1]))
             bound = max(bounds) if all(value is not None for value in bounds) else None
         return True, runs, bound
     if kind not in {"map", "batch", "unbatch", "take", "skip", "repeat", "shuffle"}:

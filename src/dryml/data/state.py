@@ -7,7 +7,7 @@ a supplied equivalent target authorizes lazy execution/source restoration.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 from contextlib import contextmanager
 import os
@@ -67,7 +67,7 @@ def _validate(data):
         require_saved(_decode_node(data["state_ref"]))
     if type(rows) is not list or not rows or type(data["snapshots"]) is not dict:
         raise ContinuationFormatError("Missing target occurrences/snapshots.")
-    by_path, aliases, arrays = {}, set(), set()
+    by_path, children_by_path, aliases, arrays = {}, {}, set(), set()
     for row in rows:
         _fields(row, ("path", "kind", "alias", "controls", "spec", "cardinality", "sectioned", "sections",
                       "section_bound", "recipe", "method", "state", "tree", "source", "selection"), "target occurrence")
@@ -77,6 +77,8 @@ def _validate(data):
         if path in by_path or path and path[:-1] not in by_path:
             raise ContinuationFormatError("Duplicate or missing target occurrence.")
         by_path[path] = row
+        if path:
+            children_by_path.setdefault(path[:-1], []).append(path[-1])
         if row["kind"] not in {"source", "map", "batch", "unbatch", "take", "skip", "repeat", "shuffle", "chain", "zip", "epoch"}:
             raise ContinuationFormatError("Unknown target operator tag.")
         if type(row["alias"]) is not int or row["alias"] < 0 or row["alias"] > len(aliases):
@@ -142,7 +144,7 @@ def _validate(data):
                         or run[1] is not None and (type(run[1]) is not int or run[1] < 0)
                         or run[1] is None and index != len(sections) - 1):
                     raise ContinuationFormatError("Invalid target section run values.")
-        children = [key[-1] for key in by_path if key and key[:-1] == path]
+        children = children_by_path.get(path, [])
         if children != list(range(len(children))):
             raise ContinuationFormatError("Invalid target child ordering.")
         count = len(children)
@@ -193,6 +195,9 @@ class DatasetState(Generic[T]):
     _saved_position: TraversalPosition
     _saved_policy: str
     _saved_replay: bool
+    _recipe_packet: tuple[bytes, tuple[bytes, ...]] = field(repr=False, compare=False)
+    _state_ref_packet: tuple[bytes, tuple[bytes, ...]] | None = field(
+        repr=False, compare=False)
 
     def __new__(cls, *args, **kwargs):
         """Reject direct construction; use traversal.capture_state() or load()."""
@@ -213,6 +218,11 @@ class DatasetState(Generic[T]):
         object.__setattr__(record, "_saved_position", TraversalPosition(**decoded["position"]))
         object.__setattr__(record, "_saved_policy", decoded["policy"])
         object.__setattr__(record, "_saved_replay", decoded["active_replay"])
+        object.__setattr__(record, "_recipe_packet",
+                           encode_value(decoded["target"][0]["recipe"]))
+        object.__setattr__(record, "_state_ref_packet",
+                           None if decoded["state_ref"] is None else
+                           encode_value(decoded["state_ref"]))
         return record
 
     def _data(self):
@@ -220,16 +230,24 @@ class DatasetState(Generic[T]):
 
     @property
     def cdef(self) -> ConcreteNode:
-        """Return target immutable ConcreteNode metadata, without target resolution."""
+        """Decode independent target ConcreteNode metadata, not the frontier.
+
+        Resolves no target and acquires no source; returned mutable literals cannot
+        alter this record or metadata returned by another property access.
+        """
         from .recovery import _decode_node
-        return _decode_node(self._data()["target"][0]["recipe"])
+        return _decode_node(decode_value(*self._recipe_packet))
 
     @property
     def state_ref(self) -> SavedNode | None:
-        """Return optional exact target SavedNode metadata; grants no retention/restore."""
+        """Decode independent exact target SavedNode metadata, or return None.
+
+        Decodes no frontier and grants no retention or restoration authority;
+        returned mutable literals cannot change this record or later reads.
+        """
         from .recovery import _decode_node
-        packet = self._data()["state_ref"]
-        return None if packet is None else _decode_node(packet)
+        return (None if self._state_ref_packet is None else
+                _decode_node(decode_value(*self._state_ref_packet)))
 
     @property
     def position(self) -> TraversalPosition:
@@ -254,6 +272,7 @@ class DatasetState(Generic[T]):
         Returns:
             None on compatible metadata; no source is advanced or reconstructed.
         Raises:
+            TypeError: Target is neither a Dataset nor a PreparedDataset.
             ContinuationMismatchError: Target differs from the saved execution.
             UnsupportedContinuationError: Target lacks qualified exact evidence.
         Side Effects:
@@ -261,6 +280,10 @@ class DatasetState(Generic[T]):
             Never constructs a Dataset, calls factories/hooks, opens Stores, or
             restores referenced Objects. Does not certify future availability.
         """
+        self._validated_data(target)
+
+    def _validated_data(self, target):
+        """Return fresh host-decoded data after complete inert target validation."""
         from .native import PreparedDataset
         from .dataset import Dataset
         if isinstance(target, Dataset):
@@ -276,6 +299,7 @@ class DatasetState(Generic[T]):
                 raise ContinuationMismatchError("Required target SavedNode selection differs.")
         if encode_value((rows, snapshots)) != encode_value((data["target"], data["snapshots"])):
             raise ContinuationMismatchError("Frozen Dataset recipe/source/spec/sharing evidence differs.")
+        return data
 
     def save(self, path: StatePath) -> Path:
         """Publish a new complete inventoried directory without replacing any name.
@@ -433,9 +457,9 @@ def _capture(traversal):
     # Unresolved factories require an explicit trusted replay decision unless
     # their declared class provides inert direct capability.
     if traversal._replay_policy == "disabled":
+        active = {tuple(e["path"]): e for e in _record_executions(execution)}
         for row in rows:
             if row["kind"] == "source" and row["source"]["kind"] == "generator" and not row["source"]["declared_direct"]:
-                active = {tuple(e["path"]): e for e in _record_executions(execution)}
                 current = active.get(tuple(row["path"]))
                 if current is None or current["source"] is None or current["source"]["strategy"] != "direct":
                     raise UnsupportedContinuationError("Unresolved ordinary generator requires enabled or conditional replay.")

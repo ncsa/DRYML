@@ -77,7 +77,7 @@ def _executions(root):
 
 def _config_available(value):
     from .native import _ConfigTree, _SavedSourceArgument, _SmallArrayConfig
-    from dryml.core.node import Node, require_saved
+    from dryml.core.node import Node
     from dryml.core.object import Object
     if isinstance(value, _SavedSourceArgument):
         return value.selection is not None and value.value.last_state_ref is value.selection
@@ -88,7 +88,7 @@ def _config_available(value):
                 and value.dtype.kind in "biufcSUmM" and value.dtype.itemsize > 0)
     if isinstance(value, (Node, Object)):
         try:
-            require_saved(_saved_argument(value))
+            _saved_argument(value)
         except (TypeError, ValueError, UnsupportedContinuationError):
             return False
         return True
@@ -520,9 +520,9 @@ def _capture_execution(execution, policy):
 def _validate_execution(record, rows, parent=None):
     if record is None:
         return
+    from .state import _fields
     expected = set(_COUNTERS + _FLAGS + _VALUES) | {"path", "kind", "phase", "rng", "children", "source"}
-    if type(record) is not dict or set(record) != expected:
-        raise ContinuationFormatError("Invalid occurrence state fields.")
+    _fields(record, expected, "occurrence state")
     path = record["path"]
     if type(path) is not list or any(type(n) is not int or n < 0 for n in path):
         raise ContinuationFormatError("Invalid occurrence path.")

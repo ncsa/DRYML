@@ -65,8 +65,95 @@ def test_frozen_target_binding_survives_control_mutation_and_open_revalidates():
         prepared.open(state=state, start=3)
 
 
+def test_each_open_decodes_once_and_revalidates_before_position_checks(
+        monkeypatch):
+    import dryml.data.state as state_module
+
+    dataset = data.ArrayDataset(np.arange(8))
+    prepared = dataset.prepare()
+    state = _capture(dataset)
+    assert state.validate(prepared) is None
+    original = state_module.decode_value
+    decodes = []
+
+    def counted(metadata, payloads):
+        if metadata == state._metadata:
+            decodes.append(metadata)
+        return original(metadata, payloads)
+
+    monkeypatch.setattr(state_module, "decode_value", counted)
+    for _ in range(2):
+        with prepared.open(state=state) as resumed:
+            assert list(resumed.next_epoch()) == list(range(1, 8))
+    assert len(decodes) == 2
+    dataset.arrays[0] = -1
+    with pytest.raises(data.ContinuationMismatchError, match="Frozen Dataset"):
+        prepared.open(state=state, start="invalid")
+    assert len(decodes) == 3
+
+
+@pytest.mark.parametrize("loaded", [False, True])
+def test_metadata_properties_decode_only_independent_inert_packets(
+        tmp_path, monkeypatch, loaded):
+    import dryml.data.state as state_module
+
+    dataset = data.ArrayDataset(np.arange(64))
+    state = _capture(dataset)
+    if loaded:
+        state = data.DatasetState.load(state.save(tmp_path / "cut"))
+    original = state_module.decode_value
+    decoded = []
+
+    def counted(metadata, payloads):
+        value = original(metadata, payloads)
+        decoded.append(value)
+        return value
+
+    monkeypatch.setattr(state_module, "decode_value", counted)
+    first, second = state.cdef, state.cdef
+    assert state.state_ref is None
+    assert len(decoded) == 2
+    assert all("snapshots" not in value for value in decoded)
+    assert first is not second
+    assert not np.shares_memory(first.parameters["arrays"],
+                                second.parameters["arrays"])
+    with pytest.raises(ValueError, match="read-only"):
+        first.parameters["arrays"][:] = -1
+    np.testing.assert_array_equal(second.parameters["arrays"], np.arange(64))
+    np.testing.assert_array_equal(state.cdef.parameters["arrays"],
+                                  np.arange(64))
+
+
+@pytest.mark.parametrize("mutation,message", [
+    ("duplicate", "Duplicate or missing target occurrence"),
+    ("missing_parent", "Duplicate or missing target occurrence"),
+    ("order", "Invalid target child ordering"),
+    ("arity", "Invalid target arity"),
+])
+def test_target_child_inventory_preserves_topology_diagnostics(
+        mutation, message):
+    from dryml.core._value_json import _value_to_json
+
+    source = data.ArrayDataset(np.arange(3))
+    state = _capture(data.Chain(source, source))
+    value = state._data()
+    rows = value["target"]
+    if mutation == "duplicate":
+        rows.append(rows[1])
+    elif mutation == "missing_parent":
+        rows[1]["path"] = [2, 0]
+    elif mutation == "order":
+        rows[1], rows[2] = rows[2], rows[1]
+    else:
+        rows[0]["kind"] = "skip"
+        rows[0]["controls"] = _value_to_json((0,), grammar=3)
+    with pytest.raises(data.ContinuationFormatError, match=message):
+        data.DatasetState._from_bytes(*encode_value(value))
+
+
 @pytest.mark.usefixtures("fixed_snapshot_environment")
-def test_exact_target_saved_state_round_trips_without_descendant_live_receipt_identity(tmp_path):
+def test_exact_target_saved_state_round_trips_without_descendant_live_receipt_identity(tmp_path, monkeypatch):
+    import dryml.data.state as state_module
     from dryml.core import Repo
     from dryml.core.store.dir import DirStore
     repo = Repo(DirStore(tmp_path / "store", query_index="none"))
@@ -77,6 +164,22 @@ def test_exact_target_saved_state_round_trips_without_descendant_live_receipt_id
     target_ref = repo.save_object(dataset)
     state = _capture(dataset)
     assert state.state_ref.exact_key() == target_ref.exact_key()
+    decoded = []
+    original = state_module.decode_value
+
+    def counted(metadata, payloads):
+        value = original(metadata, payloads)
+        decoded.append(value)
+        return value
+
+    with monkeypatch.context() as patch:
+        patch.setattr(state_module, "decode_value", counted)
+        first, second = state.state_ref, state.state_ref
+        assert first is not second
+        assert first.exact_key() == second.exact_key()
+        assert first.exact_key() == target_ref.exact_key()
+        assert len(decoded) == 2
+        assert all("snapshots" not in value for value in decoded)
     independent = repo.load_state_ref(target_ref, reuse_live="never")
     with independent.open(state=state) as traversal:
         assert list(traversal.next_epoch()) == [2, 4, 6, 8]
