@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from .dataset import Dataset, DatasetCursor
     from dryml.methods.stream import StreamGraphCursor
     from .traversal import AcceptanceMode, DatasetTraversal
+    from .state import DatasetState
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,22 +42,59 @@ class _ConfigTree:
         return result
 
 
+@dataclass(frozen=True, slots=True)
+class _SavedSourceArgument:
+    """Borrow a live source argument with its original immutable saved selection."""
+
+    value: object
+    selection: object
+
+
+@dataclass(frozen=True, slots=True)
+class _SmallArrayConfig:
+    """Bounded immutable initialization bytes, not a source-sized payload clone."""
+
+    dtype: str
+    shape: tuple
+    data: bytes
+
+    def unpack(self, memo=None):
+        import numpy as np
+        memo = {} if memo is None else memo
+        if id(self) not in memo:
+            memo[id(self)] = np.frombuffer(self.data, dtype=self.dtype).reshape(self.shape).copy()
+        return memo[id(self)]
+
+
 def _unpack_config(value, memo=None):
-    return value.unpack(memo) if isinstance(value, _ConfigTree) else value
+    if isinstance(value, _SavedSourceArgument):
+        return value.value
+    return value.unpack(memo) if isinstance(value, (_ConfigTree, _SmallArrayConfig)) else value
 
 
 def _freeze_config(value, *, small=False, active=None, memo=None):
-    """Freeze plain small configuration containers, never copy payload leaves.
+    """Freeze small configuration, borrowing source-sized payload leaves.
 
     Large factory argument containers are payload bindings, not small controls.
     The bounded preflight avoids traversing or cloning a source-sized list just
-    to discover that distinction. Array-source topology is always detached.
+    to discover that distinction. At most 2 KiB per small factory array leaf is
+    owned once; ordinary ArrayDataset bindings never take this configuration path.
     """
-    if type(value) not in (dict, list, tuple):
-        return value
+    from dryml.core.object import Object
+    import numpy as np
     memo = {} if memo is None else memo
     if id(value) in memo:
         return memo[id(value)]
+    if (small and type(value) is np.ndarray and value.nbytes <= 2048 and not value.dtype.hasobject
+            and value.dtype.fields is None and not value.dtype.metadata
+            and value.dtype.kind in "biufcSUmM" and value.dtype.itemsize > 0):
+        result = _SmallArrayConfig(value.dtype.str, value.shape, value.tobytes())
+        memo[id(value)] = result
+        return result
+    if isinstance(value, Object):
+        return _SavedSourceArgument(value, value.last_state_ref)
+    if type(value) not in (dict, list, tuple):
+        return value
     if small and not _small_config(value, [256], set()):
         return value
     active = set() if active is None else active
@@ -64,8 +102,8 @@ def _freeze_config(value, *, small=False, active=None, memo=None):
         raise ValueError("Prepared source configuration contains a container cycle.")
     active.add(id(value))
     try:
-        items = (tuple((key, _freeze_config(child, active=active, memo=memo)) for key, child in value.items())
-                 if type(value) is dict else tuple(_freeze_config(child, active=active, memo=memo) for child in value))
+        items = (tuple((key, _freeze_config(child, small=small, active=active, memo=memo)) for key, child in value.items())
+                 if type(value) is dict else tuple(_freeze_config(child, small=small, active=active, memo=memo) for child in value))
         frozen = _ConfigTree(type(value), items)
         memo[id(value)] = frozen
         return frozen
@@ -74,9 +112,13 @@ def _freeze_config(value, *, small=False, active=None, memo=None):
 
 
 def _small_config(value, budget, active):
+    import numpy as np
     budget[0] -= 1
     if budget[0] < 0:
         return False
+    if type(value) is np.ndarray:
+        budget[0] -= (value.nbytes + 7) // 8
+        return budget[0] >= 0
     if type(value) not in (dict, list, tuple):
         return True
     if id(value) in active:
@@ -131,7 +173,18 @@ class _GeneratorBinding:
             args=tuple(_unpack_config(value, memo) for value in self.args),
             kwargs=tuple((key, _unpack_config(value, memo)) for key, value in self.kwargs),
         )
-        return _GeneratorCursor(invocation, epoch)
+        cursor = _GeneratorCursor(invocation, epoch)
+        cursor._initial_binding = self
+        return cursor
+
+
+def _required_saved_state(value):
+    """Ignore incidental stateless save receipts when binding continuation evidence."""
+    from dryml.core.node import _owned_nodes
+    selected = getattr(value, "last_state_ref", None)
+    if selected is not None and any(node.state is not None for _, node in _owned_nodes(selected)):
+        return selected
+    return None
 
 
 def _prepare_source(dataset, spec):
@@ -254,6 +307,24 @@ class PreparedDataset:
             self._cardinality = None
             count_spec = self._eager_spec
         self._count_examples = partial(dataset._examples_in_spec, count_spec)
+        self._continuation_nodes = {}
+        self._continuation_target_state = _required_saved_state(dataset)
+        self._continuation_missing_states = set()
+        if self.execution_level == "stream":
+            def retain(op):
+                from dryml.core.cdef_graph import has_stateful_materialization
+                recipe = getattr(op.dataset, "definition", None)
+                method = getattr(op.dataset, "method", None) if op.kind == "map" else None
+                method_definition = getattr(method, "definition", None)
+                method_state = _required_saved_state(method)
+                if (method_definition is not None and has_stateful_materialization(method_definition)
+                        and self._continuation_target_state is None and method_state is None):
+                    self._continuation_missing_states.add(op.occurrence)
+                self._continuation_nodes[op.occurrence] = (
+                    recipe, method_definition, method_state if self._continuation_target_state is None else None)
+                for child in op.inputs:
+                    retain(child)
+            retain(root)
 
     @property
     def spec(self) -> SpecTree:
@@ -375,12 +446,15 @@ class PreparedDataset:
         return NativeTrainingCursor(self, preparation, epoch=epoch)
 
     def open(self, *, epoch: int | None = None, start: int | None = None,
+             state: DatasetState[Any] | None = None,
              acceptance: AcceptanceMode = "delivery") -> DatasetTraversal[Any]:
         """Lend finite epoch views from an independent lazy local traversal.
 
         Args:
             epoch: Exact nonnegative logical epoch, default zero.
             start: Exact nonnegative final-output offset within it, default zero.
+            state: Detached DatasetState, or None for a new positional traversal.
+                Omitted positions use the record; explicit positions must match.
             acceptance: ``"delivery"`` or single-candidate ``"explicit"`` acceptance.
 
         Returns:
@@ -391,6 +465,8 @@ class PreparedDataset:
             TypeError, ValueError: Malformed controls or an infinite unsectioned
                 root. Unsupported section combinations fail before acquisition.
                 Positional shortfalls and source/operator failures occur lazily.
+            ContinuationMismatchError: Saved frozen recipe/source/spec evidence
+                differs. Validation is repeated on every open, without acquisition.
 
         Side Effects:
             Creation and unread close acquire no producer. A custom eager fallback
@@ -398,7 +474,7 @@ class PreparedDataset:
         """
         from .traversal import DatasetTraversal
 
-        return DatasetTraversal(self, epoch=epoch, start=start, acceptance=acceptance)
+        return DatasetTraversal(self, epoch=epoch, start=start, state=state, acceptance=acceptance)
 
     def iterate(self, *, epoch: int | None = None, start: int | None = None) -> DatasetCursor[Any]:
         """Return a lazy DatasetCursor owning one selected epoch and its traversal.

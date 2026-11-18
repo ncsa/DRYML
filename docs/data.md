@@ -90,6 +90,172 @@ one epoch. Opaque generator factories receive no new replay or seed requirement.
 A completed `CachedDataset` instead persists one selected realization: repeating
 that cache replays its stored values and does not advance the source's epoch seed.
 
+### Detached traversal continuation
+
+`Dataset.open(*, epoch=None, start=None, state=None, acceptance="delivery")`
+and `PreparedDataset.open(...)` can resume an explicitly captured `DatasetState`.
+The record is an immutable ordinary value, **outside the Object graph**: it has no
+ObjectId, Dataset property, LocalState, Repo, producer, frame, invoker or acceptance
+token. `state.cdef` describes the frozen prepared recipe; `state.state_ref` is
+optional selected-state metadata, not a restoration command or retention grant.
+`state.position`, `state.replay_recovery_policy` and
+`state.replay_recovery_enabled` inspect saved facts without source access.
+
+```python
+from dryml.data import ArrayDataset, DatasetState, Shuffle
+import numpy as np
+
+dataset = Shuffle(ArrayDataset(np.arange(100)), buffer_size=8, seed=17)
+with dataset.open() as traversal:
+    view = traversal.next_epoch()
+    first = next(view)
+    state = traversal.capture_state()  # explicit detachment, not a per-yield cost
+    state.save("input-cut")           # destination must be a new directory
+
+loaded = DatasetState.load("input-cut")
+loaded.validate(dataset)              # metadata compatibility only
+with dataset.open(state=loaded) as resumed:
+    remaining = list(resumed.next_epoch())
+```
+
+The supplied target may be independently materialized but must match the complete
+configuration, occurrence/sharing partition, source selections and required state,
+normalized specs, operator controls, and protocols. Preparation freezes those
+facts; later changes to mutable Dataset controls do not change the prepared record
+binding. A newly prepared edited target is incompatible. Each open revalidates;
+past validation is not authorization. With a record, omitted epoch/start use its
+saved position; explicitly supplied values must equal it. Two opens create
+independent live state and cannot mutate the record or each other.
+
+`load(path)` reads only that directory's metadata and owned bytes. `validate(target)`
+may prepare source-inert selections and inspect supplied array contents, but neither
+API instantiates a Dataset, calls a producer/factory/state hook, restores a referenced
+Object, opens referenced Stores, or imports optional tensor backends to rebuild
+values. Native buffers decode to inert host evidence and reconstruct lazily at
+explicit reattachment. `open(state=...)` selects indexed/direct/replay restoration
+per occurrence; producers remain lazy until ordinary demand.
+
+#### Recovery strategies and replay policy
+
+* **ArrayDataset:** indexed restoration fetches no discarded rows. Prepare/open do
+  not copy the full source. Capture owns its required source bytes, so later
+  producer/consumer mutation cannot alter a saved record. Keep borrowed array
+  contents stable during capture and traversal; concurrent unversioned mutation is
+  unsupported. Readonly views alone do not establish stable ownership. There is no
+  per-yield hash or mutation monitor.
+* **Ordinary GeneratorDataset:** call `traversal.enable_replay_recovery()` or
+  `enable_replay_recovery_if_needed()` to trust deterministic replay. Restoration
+  recreates original initialization with the actual effective seed and physical
+  pass, consumes exactly the saved fetched-source prefix once, and restores
+  downstream buffers/phases independently. A factory may return an inner generator
+  function through the ordinary acquisition path. No suspended frame is serialized.
+* **Direct producer:** subclass the public `RecoverableGenerator` abstract iterator
+  and implement `__next__`, `capture_state() -> ContinuationValue`, and
+  `restore_state(state: ContinuationValue) -> None`. The inherited `__iter__` returns
+  self. State must include the complete next-yield cursor/RNG/buffer state. Capture
+  invokes hooks only on request; restore generates zero historical yields. Hook
+  exceptions propagate. Optional `close()` is called once through cursor ownership.
+* **Other sources/operators:** ordinary live iteration remains available; unsupported
+  exact capture fails explicitly. NPY-file, custom/native-source and dynamically
+  selected Map execution are not certified by this continuation format.
+
+The default traversal-local policy is `"disabled"`. Manual enable selects
+`"enabled"` and is not weakened by the conditional helper. Manual disable selects
+`"disabled"` and cancels future conditional fallback; direct/indexed capability
+and already captured records remain valid. Re-enable uses all retained source
+positions, including work done while disabled. Toggling never consumes/replays or
+reseeds a source, changes the Dataset/preparation, or modifies another traversal.
+Small configuration is frozen once; large unversioned mutable factory arguments
+are identified by bounded structural/byte preflight (256 small entries and at most
+2 KiB per eligible NumPy configuration leaf, with aggregate array bytes charged to
+the structural budget). They
+are borrowed for live iteration and cannot retroactively gain original replay
+evidence. Saved constructor-declared source dependencies can instead carry exact
+SavedNode selections and use the caller's normally materialized target values.
+The record neither embeds live Objects nor implicitly captures their state.
+Stateful Method dependencies likewise need an exact saved target or Method state
+selection; a constructor recipe alone is insufficient. Keep those selected live
+source values unchanged during the traversal. Data does not infer current mutable
+payload contents from an old save receipt or serialize a live Model implicitly.
+
+The conditional helper is source-inert/idempotent: generator-free or declared
+direct-only trees are no-ops; arbitrary factory products are classified only at
+normal acquisition, including future Chain/Repeat/pass occurrences. Direct
+capability requires the **actual consumed iterator** to satisfy the ABC, iterator
+identity, and callable state methods; duck typing or hooks on an unrelated iterable
+wrapper do not qualify. A failed direct restore never falls back to replay.
+`replay_recovery_enabled` is true for explicit enablement or an active conditional
+replay occurrence; an unresolved conditional decision alone is false. An initial
+conditional record can be captured/saved/closed without calling any factory.
+Disabling after opening a record does not cancel its already selected one-time
+source reconstruction.
+
+For mixed Zip trees, indexed, replay and direct branches keep separate fetched
+counts and strategy records, including over-pulls, Shuffle buffers and unequal
+section tails. Shared Dataset slots are independent execution occurrences. Zip
+output offsets are never used to replay the whole tree or duplicate downstream
+transitions. Unknown implicit EOF retains prior physical-pass nonempty evidence;
+observing an empty resumed suffix normalizes its boundary once, with the existing
+handoff holding next-pass acquisition until released.
+
+Notebook functions/classes need retrievable source and supported stable imports.
+A notebook-defined RecoverableGenerator class can be captured from retained cell
+source using its own method filenames/line anchors, reconstructed without the live
+binding in a clean process, and restored directly. Missing/conflicting/ambiguous
+source rejects; a changed captured body is incompatible even under the same name.
+There is no name-only/pickle fallback, IPython requirement, hot reload, or live-class
+migration contract. Target reconstruction is caller-controlled, separate from inert
+DatasetState reading.
+
+#### Capture cuts, values, and publication
+
+Capture and policy mutation require a live owner-thread quiescent cut. An outstanding
+public candidate or in-flight pull raises `TraversalOwnershipError`. Staged but
+unexposed lookahead is represented without accepting it. Raw/converted candidate
+aliases still share one single-use authority. After closure/rejection, capture can
+return only an exactly matching prior record (position, policy and boundary facts);
+otherwise it fails without reopening a source. Dynamic unsupported buffers fail
+capture without rolling back accepted progress or damaging earlier records.
+
+`ContinuationValue` admits Python None/bool/bounded int/float/complex/string/bytes,
+list/tuple/string-keyed dict trees, supported fixed-storage nonobject unstructured
+NumPy arrays/scalars and registered dense native tensor buffers (Torch, TensorFlow,
+JAX). Repeated object aliases within the supported tree are preserved; arbitrary
+overlapping strided-view storage aliases are not a portable contract. PCG64's
+128-bit state is lossless. Live Objects, frames, generators, callables, resources,
+object/structured/metadata-bearing dtypes and opaque values are rejected in buffers.
+Import-bearing enum/type or extension-dtype constructor metadata is not qualified
+for inert continuation IO either; ordinary live execution remains available.
+Writable values retained by buffering operators are owned at their algorithmic
+lifetime boundary; immutable/native-functional buffers avoid indiscriminate copies.
+
+`DatasetState.save(path) -> Path` publishes a new v1 directory, with no overwrite
+mode. A stable sibling name advisory lock covers the authoritative final absence
+check and same-filesystem staged rename. Concurrent cooperating thread/process
+writers produce one complete winner and one `FileExistsError`; readers see no
+destination or a complete inventoried record. Permission, short-write, inventory,
+interruption and cleanup failures preserve prior destinations and primary errors.
+An interruption around rename may leave a complete committed record; inspect that
+destination before retrying. Supported local locking/atomic-rename semantics are
+required, not distributed/network-filesystem coordination.
+
+`ContinuationFormatError` rejects malformed/incomplete/corrupt/unsupported records;
+`ContinuationMismatchError` rejects a different supplied target;
+`UnsupportedContinuationError` rejects unqualified capture. Filesystem, source,
+factory, hook and cleanup failures retain their causal exceptions where possible.
+Standalone saving never publishes a DRYML Object, managed checkpoint, or retention
+root. Keep required external source states under an existing saved owner or explicit
+Repo retention. Reclaimed state must be rematerialized through normal Core rules
+and fails when unavailable; metadata in this directory cannot resurrect it.
+
+Cost boundaries are distinct: ordinary delivery maintains counters/local buffers;
+capture detaches/validates required source and pending bytes (possibly synchronizing
+native leaves); save encodes/publishes files; restore loads chosen snapshots,
+seeks indexed positions, installs direct state, or replays only recorded ordinary
+source prefixes. No capture tree, direct state hook, encoding, source-sized clone,
+or recovery-only device barrier runs on normal yields, with recovery enabled or
+disabled. Consumer/trainer checkpoint association is a separate integration layer.
+
 ### Dynamic Dense Elements
 
 Dense Dataset values may vary in sample dimensions as well as batch size. For

@@ -1,3 +1,10 @@
+"""Import references and trusted source-backed symbols with stable dependencies.
+
+Source capture inspects definitions without executing candidate code. Notebook
+classes require unique retained-source method anchors; resolution is an explicit
+trusted-code execution step and may lazily import captured stable dependencies.
+"""
+
 from __future__ import annotations
 
 import __main__
@@ -5,6 +12,8 @@ import ast
 import importlib
 import inspect
 import json
+import linecache
+import hashlib
 import textwrap
 from dataclasses import dataclass
 from types import FrameType, FunctionType
@@ -236,14 +245,17 @@ class SourceSpec:
         """Capture one non-importable Python class as source and stable imports.
 
         Args:
-            obj: Python class with retrievable file-backed source.
+            obj: Python class with file-backed source or retained execution source
+                uniquely identified by its own method filename/line anchors.
 
         Returns:
             A source specification that resolves the class in a clean namespace.
 
         Raises:
             TypeError: If ``obj`` is not a class.
-            ValueError: If source is unavailable or dependencies are not stable.
+            ValueError: If source is missing/ambiguous, method anchors conflict,
+                or dependencies are not stable imports. No live-class or pickle
+                fallback is used when execution source is unavailable.
 
         Side Effects:
             Inspects source and validates importable dependencies.
@@ -297,16 +309,21 @@ class SourceSpec:
 
         Side Effects:
             Imports captured references and evaluates or executes trusted source.
+            Retains this definition's execution source in linecache with a
+            content-derived filename, preserving rebuilt class method anchors.
         """
 
         live = _matching_live_source(self)
         if live is not None:
             return live
         ns: dict[str, object] = {name: ref.resolve() for name, ref in (self.imports or {}).items()}
+        ns["__name__"] = "__dryml_source__"
+        filename = f"<dryml-source-{hashlib.sha256(self.__stable_leaf_bytes__()).hexdigest()}>"
+        linecache.cache[filename] = (len(self.source), None, self.source.splitlines(True), filename)
         if self.kind == "function" and self.name is None:
-            obj = eval(self.source, ns, ns)
+            obj = eval(compile(self.source, filename, "eval"), ns, ns)
         else:
-            exec(self.source, ns, ns)
+            exec(compile(self.source, filename, "exec"), ns, ns)
             if self.name not in ns:
                 raise ValueError(f"Resolved namespace does not contain symbol {self.name!r}.")
             obj = ns[self.name]
@@ -373,11 +390,51 @@ def _source_spec_from_function(fn: FunctionType, caller_anchor: FrameType | None
 
 def _source_spec_from_class(cls: type, caller_anchor: FrameType | None) -> SourceSpec:
     try:
-        raw_source = inspect.getsource(cls)
-    except (OSError, IOError) as error:
-        raise ValueError("Could not retrieve class source.") from error
+        cell_anchors = any(fn.__code__.co_filename.startswith("<") for _, fn in _class_functions(cls))
+        raw_source = (_anchored_class_source(cls) if cls.__module__ == "__main__" and cell_anchors
+                       else inspect.getsource(cls))
+    except (OSError, IOError, TypeError):
+        raw_source = _anchored_class_source(cls)
     source, name = _extract_named_class_source(cls, raw_source)
     return SourceSpec("class", source, name, _collect_source_imports(cls, source, caller_anchor))
+
+
+def _class_functions(cls):
+    for name, value in vars(cls).items():
+        if isinstance(value, (staticmethod, classmethod)):
+            value = value.__func__
+        functions = (value.fget, value.fset, value.fdel) if isinstance(value, property) else (value,)
+        for function in functions:
+            if inspect.isfunction(function):
+                yield name, function
+
+
+def _anchored_class_source(cls):
+    """Select exactly one AST class from retained own-method execution anchors."""
+    anchors = [(name, fn.__code__) for name, fn in _class_functions(cls)]
+    filenames = {code.co_filename for _, code in anchors}
+    if not anchors or len(filenames) != 1:
+        raise ValueError("Missing or conflicting class source anchors.")
+    lines = linecache.getlines(next(iter(filenames)))
+    if not lines:
+        raise ValueError("Could not retrieve retained class source.")
+    try:
+        tree = ast.parse("".join(lines))
+    except SyntaxError as error:
+        raise ValueError("Invalid retained class source.") from error
+    candidates = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or node.name != cls.__name__:
+            continue
+        methods = {(method.name, min([method.lineno] + [d.lineno for d in method.decorator_list]))
+                   for method in node.body if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        if all((name, code.co_firstlineno) in methods for name, code in anchors):
+            candidates.append(node)
+    if len(candidates) != 1:
+        raise ValueError("Missing or ambiguous class source anchors.")
+    node = candidates[0]
+    start = min([node.lineno] + [d.lineno for d in node.decorator_list])
+    return "".join(lines[start - 1:node.end_lineno])
 
 
 def _lookup_live_name_for_source(obj, name: str, caller_anchor: FrameType | None):
@@ -386,6 +443,13 @@ def _lookup_live_name_for_source(obj, name: str, caller_anchor: FrameType | None
     globals_dict = getattr(obj, "__globals__", None)
     if globals_dict is not None and name in globals_dict:
         return globals_dict[name]
+    if inspect.isclass(obj):
+        dependencies = [fn.__globals__[name] for _, fn in _class_functions(obj)
+                        if name in fn.__globals__]
+        if dependencies:
+            if any(value is not dependencies[0] for value in dependencies):
+                raise KeyError(name)
+            return dependencies[0]
     module_name = getattr(obj, "__module__", None)
     if module_name:
         import sys

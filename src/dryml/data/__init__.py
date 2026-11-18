@@ -21,6 +21,10 @@ from dryml.data.reduction_methods import (
 )
 from dryml.data.structural import Batch, Epoch, Repeat, Shuffle, Skip, Take, Unbatch
 from dryml.data.errors import TraversalError, TraversalOwnershipError
+from dryml.data.errors import UnsupportedContinuationError, ContinuationMismatchError, ContinuationFormatError
+from dryml.data.recovery import RecoverableGenerator, ReplayRecoveryPolicy
+from dryml.data.continuation import ContinuationValue
+from dryml.data.state import DatasetState, StatePath
 from dryml.data.traversal import AcceptanceMode, DatasetTraversal, EpochView, PendingElement, TraversalPosition
 from dryml.data.util import (
     Collect,
@@ -43,6 +47,14 @@ __all__ = [
     "TraversalPosition",
     "TraversalError",
     "TraversalOwnershipError",
+    "UnsupportedContinuationError",
+    "ContinuationMismatchError",
+    "ContinuationFormatError",
+    "RecoverableGenerator",
+    "ReplayRecoveryPolicy",
+    "ContinuationValue",
+    "DatasetState",
+    "StatePath",
     "Epoch",
     "PreparedDataset",
     "NativeTrainingCursor",

@@ -14,6 +14,95 @@ evidence alongside keys in the same bounded LRU; repeated equality avoids
 relabeling without treating a matching digest as proof. These are implementation
 optimizations, with no persistent-format or identity-version change.
 
+## DatasetState continuation directory v1
+
+The Data-owned `DatasetState` format is separate from Object/Store publication.
+It is an immutable detached record with no ObjectId, graph node, retention root,
+Repo descriptor or executable prepared plan. See [Data continuation](data.md#detached-traversal-continuation)
+for the public API, qualified sources and ownership rules. There is no historical
+reader, migration or overwrite mode.
+
+A directory contains exactly `manifest.json`, `record.json`, and the ordered
+payload files `000000.bin`, `000001.bin`, … . The manifest has the closed keys
+`format="dryml-dataset-state"`, exact integer `version=1`, and `files`. Each
+inventory entry has exactly `name`, nonnegative exact integer `size`, and the
+SHA-256 hex digest `sha256`. The first entry is `record.json`; remaining entries
+are contiguous payload ordinals. Missing/extra entries, directories in place of
+files, noncanonical names, integrity mismatches, duplicate JSON keys, and unknown
+schema/protocols are rejected. Metadata is bounded to 16 MiB, total inventory to
+1 GiB, value depth to 48, integers to 4096 bits, and value nodes to 100,000.
+
+`record.json` contains a closed tagged value grammar, with immutable out-of-line
+byte payloads and backward alias references. Scalar tags are `none`, `bool`,
+`int`, `float` (hex spelling), `complex` (two hex components), and `str`.
+Container tags `list`, `tuple`, and `dict` carry alias ordinals; dict keys are
+unique strings. `bytes`, `array`, `scalar` and `native` name owned payload ordinals.
+Array/scalar records retain dtype and shape and require fixed-storage nonobject,
+unstructured, metadata-free representations. Native records retain registered
+backend (`torch`, `tensorflow`, `jax`), dtype, shape, contiguous logical layout
+and required placement plus host bytes. Native decode produces inert host
+records; only explicit reattachment may import the backend and reconstruct a
+tensor. No pickle, arbitrary callable/class instance, frame or Object-buffer tag
+exists. Integer state, including PCG64 128-bit fields, is never narrowed.
+
+The decoded domain envelope has exactly `format`, `version`, `protocol`,
+`target`, `state_ref`, `snapshots`, `position`, `policy`, `active_replay`, `explicit`,
+`pass_nonempty`, `initialized`, `staged`, `staged_boundary`, `boundary_pending`,
+and `execution`. Protocol evidence pins the Python major/minor, NumPy version,
+and replay/codec/kernel integer versions (all currently 1). `position` contains
+the accepted epoch/offset/sequence and completion flags. Target occurrence rows
+include frozen controls, normalized specs, sharing, source evidence and retained
+implementation-selection facts; no invoker or selected function is encoded.
+
+Target CDef/SavedNode metadata uses Core's authenticated canonical Node packets.
+Embedded binary literals are transported as continuation-owned raw byte payloads
+rather than source-sized base64 strings in `record.json`. The original Node binary
+spelling is reinstated before Core validates/authenticates the packet. Node codecs
+that import enum/type or NumPy extension-dtype targets are excluded from this inert
+format; symbol ImportRef/SourceSpec metadata remains unresolved. The directory is
+not a request to materialize its target or restore referenced state.
+
+`policy` is disabled,
+enabled or if_needed. Pending public tokens are never serialized; staged values
+and source/operator buffers represent unexposed work at an accepted cut.
+
+Target occurrence records carry deterministic paths, tags, alias partition,
+frozen controls, normalized full specs/cardinality/boundary evidence, Zip tree
+structure, canonical immutable Node-graph recipe/method/required-state metadata,
+and source declarations. Source initialization has its own closed tree grammar:
+value/list/tuple/dict and saved-node metadata. Saved-node records describe exact
+external constructor dependencies and grant no retention or automatic restoration.
+At acquisition they bind only to the caller's compatible target values. Buffered
+values do not admit live Objects or Node handles. Array `snapshots` own contents;
+indexed positions require zero historical row fetches.
+
+Each execution occurrence has independent epoch/counters, boundary/terminal flags,
+buffer/split state, RNG, phase, child states and optional source state. Source
+strategies are indexed/replay/direct; unresolved declarations remain unacquired.
+Replay state records initial values, actual derived seed, physical pass and total
+fetched count. Direct state additionally names the producer definition and complete
+next-yield hook value. A saved direct failure never falls back to replay. Parent
+Zip phases and branch frontiers are restored independently rather than rerunning
+accepted root transitions. Unknown implicit EOF retains prior-pass nonempty truth
+and its pending handoff, preventing double boundary increments or early reopen.
+
+Capture is explicit; prepare/open and ordinary yields perform no source-sized
+snapshot, full continuation encoding, or direct hook call. Loading and target
+validation are inert metadata/owned-byte operations: no Dataset construction,
+producer/factory call, referenced Store access or Object restoration occurs.
+Independent target equivalence compares complete normalized evidence, not only a
+digest, current Python class name, receiver identity or stale validation result.
+
+The writer privately stages on the destination filesystem, writes/fsyncs files,
+validates its full inventory, and acquires the stable sibling lock
+`.<destination>.dataset-state.lock`. It checks destination absence **inside that
+lock** and holds it through atomic directory rename. The lock is never unlinked
+between cooperating writers. There is no replacement or unlocked fallback.
+Failures clean up only this writer's staging and preserve primary errors; an
+interruption around rename may have committed a complete directory, which a retry
+must not replace. These guarantees require supported local advisory-lock and
+same-filesystem atomic-rename semantics, not hostile-path or distributed races.
+
 ## Object And Store Authority
 
 ### Shared Node Graph V1 / CDef Identity 3

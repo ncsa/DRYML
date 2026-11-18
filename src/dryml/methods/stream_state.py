@@ -11,6 +11,29 @@ from collections.abc import Iterator
 from typing import Any, Protocol
 
 
+def _retain_buffer(value):
+    """Own writable host leaves kept across producer or consumer mutation.
+
+    This is operator buffering ownership, independent of recovery. Immutable/native
+    functional leaves are retained without conversion or device synchronization.
+    """
+    import numpy as np
+    if type(value) is np.ndarray:
+        base = value
+        while isinstance(base, np.ndarray):
+            if base.flags.writeable:
+                return value.copy()
+            base = base.base
+        return value
+    if type(value).__module__.split(".")[0] == "torch" and callable(getattr(value, "clone", None)):
+        return value.clone()
+    if type(value) is dict:
+        return {key: _retain_buffer(v) for key, v in value.items()}
+    if type(value) in (tuple, list):
+        return type(value)(_retain_buffer(v) for v in value)
+    return value
+
+
 class PullKind(IntEnum):
     """Distinguish delivery, a pending section handoff, and root completion.
 

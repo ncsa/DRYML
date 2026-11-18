@@ -15,7 +15,7 @@ from dryml.core.cardinality import Cardinality
 from dryml.core.tensor_spec import SpecTree
 
 from .errors import ImplementationSelectionError
-from .stream_state import PullKind, SourceBinding
+from .stream_state import PullKind, SourceBinding, _retain_buffer
 
 if TYPE_CHECKING:
     from .signature import MethodCallNode
@@ -1455,7 +1455,7 @@ class _SectionExecution(_CursorLifecycle):
             if signal != PullKind.DELIVERY:
                 boundary, root = signal == PullKind.SECTION_END, signal == PullKind.ROOT_END
                 break
-            self.buffer.append(child.value)
+            self.buffer.append(_retain_buffer(child.value))
             if child.section_final or child.root_final:
                 boundary, root = child.section_final, child.root_final
                 break
@@ -1477,7 +1477,7 @@ class _SectionExecution(_CursorLifecycle):
             signal = child.pull()
             if signal != PullKind.DELIVERY:
                 return self._section(root=child.after_boundary_root) if signal == PullKind.SECTION_END else signal
-            self.input_batch = child.value
+            self.input_batch = _retain_buffer(child.value)
             self.input_final, self.input_root = child.section_final, child.root_final
             values = self._call(self.selected, self.input_batch)
             if isinstance(values, (tuple, list)):
@@ -1498,7 +1498,7 @@ class _SectionExecution(_CursorLifecycle):
         final, root = last and self.input_final, last and self.input_root
         if last:
             self.input_final = False
-        return self._deliver(value, final=final, root=root)
+        return self._deliver(_retain_buffer(value), final=final, root=root)
 
     def _shuffle(self, child):
         if self.rng is None:
@@ -1511,7 +1511,7 @@ class _SectionExecution(_CursorLifecycle):
                 if signal != PullKind.DELIVERY:
                     self.phase = "section" if signal == PullKind.SECTION_END else "root"
                     break
-                self.buffer.append(child.value)
+                self.buffer.append(_retain_buffer(child.value))
                 if child.section_final or child.root_final:
                     self.phase = "section" if child.section_final else "root"
                     break

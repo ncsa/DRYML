@@ -77,6 +77,11 @@ class _GeneratorCursor(DatasetCursor):
         self._dataset = dataset
         self._epoch = epoch
         self._values = None
+        self._initial_binding = dataset
+        self._restore = None
+        self._strategy = None
+        self._effective_seed = (_epoch_seed(dataset.seed, epoch, dataset.epoch_seed_version)
+                                if dataset.seed_aware else None)
         self._observed_examples = 0
         declaration = dataset._declared_example_count
         self._validate_observed = (
@@ -89,14 +94,50 @@ class _GeneratorCursor(DatasetCursor):
             if observed != self._dataset._declared_example_count:
                 raise ValueError("GeneratorDataset observed example count conflicts with its declaration.")
 
-    def _read(self):
+    def _acquire(self):
         dataset = self._dataset
         if self._values is None:
             kwargs = dict(dataset.factory_kwargs)
             if dataset.seed_aware:
-                kwargs["seed"] = self._call(_epoch_seed, dataset.seed, self._epoch, dataset.epoch_seed_version)
-            values = self._own(self._call(_fresh_iterable, dataset.gen_factory, *dataset.factory_args, **kwargs))
+                kwargs["seed"] = self._effective_seed
+            if self._restore is not None:
+                from .recovery import _restore_initial
+                args, kwargs = self._call(_restore_initial, self._restore["initial"], self._initial_binding)
+            else:
+                args = dataset.factory_args
+            values = self._own(self._call(_fresh_iterable, dataset.gen_factory, *args, **kwargs))
             self._values = self._own(self._call(iter, values))
+            from .recovery import RecoverableGenerator, _declared_direct, _symbol
+            from .errors import UnsupportedContinuationError, ContinuationMismatchError
+            direct = isinstance(self._values, RecoverableGenerator)
+            if direct and (self._call(iter, self._values) is not self._values
+                           or not callable(getattr(self._values, "capture_state", None))
+                           or not callable(getattr(self._values, "restore_state", None))):
+                raise UnsupportedContinuationError("Direct producer must be its actual stateful iterator.")
+            if _declared_direct(dataset.gen_factory) and not direct:
+                raise UnsupportedContinuationError("Declared direct class returned an incompatible iterator.")
+            self._strategy = "direct" if direct else "replay"
+            if self._restore is not None:
+                saved, self._restore = self._restore, None
+                if saved["strategy"] != self._strategy:
+                    raise ContinuationMismatchError("Saved source strategy no longer matches actual iterator.")
+                if direct:
+                    if _symbol(type(self._values)) != saved["producer"]:
+                        raise ContinuationMismatchError("Saved direct producer definition differs.")
+                    self._call(self._values.restore_state, saved["state"])
+                else:
+                    for _ in range(saved["fetched"]):
+                        try:
+                            self._pull(self._values)
+                        except StopIteration as error:
+                            raise ContinuationMismatchError("Replay source ended before its saved prefix.") from error
+                self._position = saved["fetched"]
+                self._observed_examples = saved["examples"]
+                self._validate_observed = saved["validate_examples"]
+
+    def _read(self):
+        dataset = self._dataset
+        self._acquire()
         if dataset.cardinality.is_finite and self._position >= int(dataset.cardinality):
             self._call(self._validate_end)
             raise StopIteration

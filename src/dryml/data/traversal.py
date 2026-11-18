@@ -18,10 +18,12 @@ from dryml.methods.stream import (
 )
 from dryml.methods.stream_state import PullKind
 from .dataset import DatasetCursor
-from .errors import TraversalOwnershipError
+from .errors import TraversalOwnershipError, UnsupportedContinuationError, ContinuationMismatchError
 
 if TYPE_CHECKING:
     from .native import PreparedDataset
+    from .state import DatasetState
+    from .recovery import ReplayRecoveryPolicy
 
 
 T = TypeVar("T")
@@ -117,6 +119,8 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
         prepared: PreparedDataset retaining qualified descriptors/selections.
         epoch: Exact nonnegative selected epoch, or None for zero.
         start: Exact nonnegative selected final-output offset, or None for zero.
+        state: Optional validated DatasetState; omitted coordinates use its saved
+            position. Reattachment repeats compatibility checks without acquisition.
         acceptance: ``"delivery"`` (default) or ``"explicit"`` reservations.
 
     Sources and positional seeking remain lazy. Explicit sections continue one
@@ -130,8 +134,18 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
     """
 
     def __init__(self, prepared: PreparedDataset, *, epoch: int | None = None, start: int | None = None,
+                 state: DatasetState[T] | None = None,
                  acceptance: AcceptanceMode = "delivery") -> None:
         super().__init__()
+        if state is not None:
+            from .state import DatasetState
+            if not isinstance(state, DatasetState):
+                raise TypeError("state must be a DatasetState or None.")
+            state.validate(prepared)
+            position = state.position
+            if epoch is not None and _count(epoch, "epoch") != position.epoch or start is not None and _count(start, "start") != position.start:
+                raise ContinuationMismatchError("Explicit position differs from DatasetState.")
+            epoch, start = position.epoch, position.start
         self._epoch, self._start = _count(epoch, "epoch"), _count(start, "start")
         if acceptance not in ("delivery", "explicit"):
             raise ValueError("acceptance must be 'delivery' or 'explicit'.")
@@ -156,6 +170,121 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
         self._staged_boundary = False
         self._boundary_pending = False
         self._hold_boundary_handoff = False
+        self._replay_policy = "disabled"
+        self._last_capture = self._last_capture_cut = None
+        if state is not None:
+            from .continuation import rebuild_native
+            from .recovery import _restore_execution, _snapshot_root
+            data = rebuild_native(state._data())
+            self._root = _snapshot_root(self._root, data["snapshots"])
+            self._sequence = data["position"]["sequence"]
+            self._section_complete = data["position"]["section_complete"]
+            self._root_complete = data["position"]["root_complete"]
+            self._replay_policy = data["policy"]
+            self._pass_nonempty = data["pass_nonempty"]
+            self._initialized = data["initialized"]
+            self._staged = data["staged"]
+            self._staged_boundary = data["staged_boundary"]
+            self._boundary_pending = data["boundary_pending"]
+            if data["execution"] is not None:
+                self._execution = self._own(_restore_execution(self._root, data["execution"], data["snapshots"]))
+            self._last_capture, self._last_capture_cut = state, self._capture_cut()
+
+    @property
+    def replay_recovery_policy(self) -> ReplayRecoveryPolicy:
+        """Read traversal-local disabled/enabled/if_needed policy without source IO."""
+        return self._replay_policy
+
+    @property
+    def replay_recovery_enabled(self) -> bool:
+        """Report explicit enablement or a retained conditional replay occurrence.
+
+        An unresolved conditional factory alone is not active replay. Reading
+        neither acquires a source nor extracts producer state.
+        """
+        from .recovery import _active_replay
+        return self._replay_policy == "enabled" or self._replay_policy == "if_needed" and _active_replay(self)
+
+    def _quiescent(self):
+        self._check()
+        if self._pending is not None:
+            raise TraversalOwnershipError("Outstanding public candidate prevents capture/policy change.")
+
+    def enable_replay_recovery(self) -> None:
+        """Trust deterministic factory replay using retained original initialization.
+
+        Returns None; no replay, reseeding, producer acquisition, or Dataset/plan
+        mutation occurs. Requires an owner-thread quiescent live cut. Missing
+        initial evidence raises UnsupportedContinuationError atomically; conflicting
+        work/closure raises TraversalOwnershipError. Direct/indexed recovery remains
+        independent. Policy and ordinary fetched counts belong to this traversal.
+        """
+        from .recovery import _check_policy
+        self._quiescent()
+        _check_policy(self, "enabled")
+        self._replay_policy = "enabled"
+
+    def disable_replay_recovery(self) -> None:
+        """Disable future replay capture, canceling deferred conditional fallback.
+
+        Returns None without changing sources, positions, direct/indexed capability,
+        saved records, or one-time reconstruction of an already selected saved
+        position. Owner-thread quiescent live cuts only; otherwise raises
+        TraversalOwnershipError. Re-enablement uses complete retained history.
+        """
+        self._quiescent()
+        self._replay_policy = "disabled"
+
+    def enable_replay_recovery_if_needed(self) -> None:
+        """Select per-occurrence lazy replay only where direct recovery is absent.
+
+        Generator-free/declared-direct-only trees are source-inert no-ops; unknown
+        factory products are classified only at normal acquisition, including
+        future Chain/Repeat/pass occurrences. Explicit manual enable is preserved.
+        Returns None. Requires a quiescent live owner-thread cut; missing retained
+        initialization fails atomically with UnsupportedContinuationError. Competing
+        work/closure raises TraversalOwnershipError. No source is probed or reset.
+        """
+        from .recovery import _check_policy, _ops, _declared_direct
+        self._quiescent()
+        if self._replay_policy == "enabled":
+            return
+        generators = [op for op in _ops(self._root) if op.kind == "source" and op.source.kind == "generator"] if self._root else []
+        if not generators or all(_declared_direct(op.source.binding.gen_factory) for op in generators):
+            return
+        _check_policy(self, "if_needed")
+        self._replay_policy = "if_needed"
+
+    def _capture_cut(self):
+        return (self.position, self._replay_policy, self._boundary_pending,
+                self._pass_nonempty, self._initialized)
+
+    def capture_state(self) -> DatasetState[T]:
+        """Capture immutable detached next-output state at a quiescent accepted cut.
+
+        Returns a DatasetState without IO, graph identity, or retention grants.
+        Only this request validates/freezes dynamic buffers, owns source snapshots,
+        and calls active direct-producer hooks; ordinary yields do none of these.
+        Outstanding work/in-flight pulls/wrong thread raise TraversalOwnershipError.
+        Unsupported sources/values/evidence raise UnsupportedContinuationError,
+        leaving accepted progress and earlier records intact. Hook errors propagate.
+        A closed/rejected traversal returns only its exactly matching prior capture;
+        otherwise it fails without reopening resources or fabricating an old cut.
+        """
+        if get_ident() != self._thread or self._busy or self._pending is not None:
+            raise TraversalOwnershipError("Capture requires a quiescent owner-thread accepted cut.")
+        if self._closed or self._aborted:
+            if self._last_capture is not None and self._last_capture_cut == self._capture_cut():
+                return self._last_capture
+            raise UnsupportedContinuationError("Closed traversal has no exactly matching captured record.")
+        from .state import _capture
+        self._busy = True
+        try:
+            record = _capture(self)
+            self._last_capture, self._last_capture_cut = record, self._capture_cut()
+            return record
+        finally:
+            self._busy = False
 
     @property
     def position(self) -> TraversalPosition:
@@ -249,6 +378,9 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
         self._busy = True
         try:
             self._seek()
+            if self._staged is not None or self._staged_boundary:
+                self._active = EpochView(self)
+                return self._active
             while not self._root_complete:
                 if limit is not None and self._epoch >= limit:
                     raise StopIteration

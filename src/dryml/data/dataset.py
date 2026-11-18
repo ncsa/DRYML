@@ -15,6 +15,7 @@ from dryml.methods import ImplementationSelectionError
 from dryml.methods.stream import DatasetExhaustedError, _CursorLifecycle
 
 if TYPE_CHECKING:
+    from .state import DatasetState
     from .traversal import AcceptanceMode, DatasetTraversal
 
 
@@ -245,6 +246,7 @@ class Dataset(Object, Generic[T]):
         return PreparedDataset(self)
 
     def open(self, *, epoch: int | None = None, start: int | None = None,
+             state: DatasetState[T] | None = None,
              acceptance: AcceptanceMode = "delivery") -> DatasetTraversal[T]:
         """Prepare and return a lazy, independent local DatasetTraversal.
 
@@ -253,6 +255,8 @@ class Dataset(Object, Generic[T]):
                 seek by consuming earlier sections; implicit finite passes open the
                 selected physical pass directly.
             start: Exact nonnegative final-output offset in that epoch, default zero.
+            state: Optional immutable DatasetState requesting exact resumption.
+                Omitted positions use its saved position; supplied ones must match.
             acceptance: ``"delivery"`` accepts on next; ``"explicit"`` requires
                 reserving and accepting one lightweight candidate at a time.
 
@@ -264,8 +268,10 @@ class Dataset(Object, Generic[T]):
             TypeError, ValueError: Invalid controls, unsupported boundary algebra,
                 or a provably infinite boundary-free root. Seek shortfalls raise
                 DatasetExhaustedError lazily. Source/selection failures propagate.
+            ContinuationMismatchError: Record differs from supplied target. This
+                validates metadata without acquiring or restoring a producer.
         """
-        return self.prepare().open(epoch=epoch, start=start, acceptance=acceptance)
+        return self.prepare().open(epoch=epoch, start=start, state=state, acceptance=acceptance)
 
     def iterate(self, *, epoch: int | None = None, start: int | None = None) -> DatasetCursor[T]:
         """Return an owned one-level cursor over one selected finite epoch.
