@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, TYPE_CHECKING
+from typing import Any, Protocol, TYPE_CHECKING
 
 from dryml.core.tensor_spec import SpecTree
 
@@ -19,8 +19,27 @@ from dryml.methods.stream import DatasetExhaustedError, _CursorLifecycle
 if TYPE_CHECKING:
     from .dataset import Dataset, DatasetCursor
     from dryml.methods.stream import StreamGraphCursor
-    from .traversal import AcceptanceMode, DatasetTraversal
+    from .traversal import AcceptanceMode, DatasetTraversal, EpochView, PendingElement
     from .state import DatasetState
+
+
+class BatchPreparation(Protocol):
+    """Dependency-light retained conversion interface for native training batches."""
+
+    def prepare(self, x: object, y: object) -> tuple[object, object]:
+        """Validate/convert a paired input without accepting traversal progress.
+
+        Args:
+            x: Authored feature value matching captured producer specifications.
+            y: Authored target value matching captured producer specifications.
+        Returns:
+            Converted features/targets matching retained consumer specifications.
+        Raises:
+            TypeError, ValueError: Invalid values; backend conversion errors propagate.
+        Side Effects:
+            May allocate native values using previously selected conversion edges.
+        """
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +388,26 @@ class PreparedDataset:
         """
         return self._count_examples(value)
 
+    def _require_continuation_capability(self) -> None:
+        """Admit frozen exact source/operator declarations without capture or IO.
+
+        Unknown generator products retain conditional acquisition-time checks.
+        This checks capability, not dynamic value saveability, and never clones
+        array bindings or constructs a continuation record.
+        """
+        from .errors import UnsupportedContinuationError
+        from .recovery import _ops, _initial_available
+        if self.execution_level != "stream" or self._continuation_missing_states:
+            raise UnsupportedContinuationError("Input lacks qualified exact continuation evidence.")
+        for op in _ops(self.graph._stream_plan._prepared.root):
+            if op.kind == "custom" or op.kind == "map" and op.selected is None:
+                raise UnsupportedContinuationError("Unqualified continuation operator.")
+            if op.kind == "source":
+                if op.source.kind not in ("array", "generator"):
+                    raise UnsupportedContinuationError(f"Unsupported source continuation: {op.source.kind}.")
+                if op.source.kind == "generator" and not _initial_available(op.source.binding):
+                    raise UnsupportedContinuationError("Factory configuration lacks retained original evidence.")
+
     def _require_declared_selection(self) -> None:
         """Reject Maps needing cursor-local discovery, including eager wrappers."""
         from dryml.methods import Method
@@ -432,7 +471,7 @@ class PreparedDataset:
             return opener(epoch)
         return self.dataset.iterator()
 
-    def training_batches(self, preparation, *, epoch: int = 0) -> "NativeTrainingCursor":
+    def training_batches(self, preparation: BatchPreparation, *, epoch: int = 0) -> NativeTrainingCursor:
         """Open one closeable native-training batch cursor.
 
         Args:
@@ -506,7 +545,8 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
     """Closeable prepared x/y batch cursor whose reads have no progress side effects.
 
     Args:
-        dataset: Prepared Dataset that opens this cursor's independent traversal.
+        dataset: PreparedDataset for an independent pass, or EpochView borrowing
+            an invocation traversal. Borrowed explicit views use reserve/accept.
         preparation: Retained x/y handoff carrier applied exactly once per yield.
         epoch: Exact nonnegative logical epoch forwarded to the Dataset traversal.
 
@@ -521,16 +561,22 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
     before source acquisition, even when output declarations name a native backend.
     """
 
-    def __init__(self, dataset: PreparedDataset, preparation, *, epoch: int = 0) -> None:
+    def __init__(self, dataset: PreparedDataset | EpochView, preparation: BatchPreparation, *, epoch: int = 0) -> None:
         super().__init__()
-        dataset._require_declared_selection()
-        self._dataset = dataset
+        from .traversal import EpochView
+        self._view = dataset if isinstance(dataset, EpochView) else None
+        if self._view is not None and epoch != 0:
+            raise ValueError("A borrowed view already selects its epoch; epoch must be zero.")
+        self._dataset = dataset._owner._prepared if self._view is not None else dataset
+        self._dataset._require_declared_selection()
         self._preparation = preparation
         if type(epoch) is not int or epoch < 0:
             raise ValueError("epoch must be a nonnegative exact int.")
         self._epoch = epoch
         self._cursor = None
-        cardinality = dataset._cardinality
+        if self._view is not None:
+            self._own(self._view)
+        cardinality = self._view.cardinality if self._view is not None else dataset._cardinality
         if cardinality is None:
             cardinality = self._call(dataset.dataset.yield_cardinality)
         self._expected = cardinality.require_finite() if cardinality.is_finite else None
@@ -542,6 +588,15 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
         return self
 
     def _read(self) -> tuple[Any, Any]:
+        if self._view is not None:
+            from .errors import TraversalOwnershipError
+            owner = self._view._owner
+            if owner._acceptance != "delivery":
+                raise TraversalOwnershipError("Explicit acceptance requires reserve(), not next().")
+            candidate = owner._reserve(self._view)
+            value = self._call(self._prepare, candidate.value)
+            owner.accept(candidate)
+            return value
         if self._cursor is None:
             self._cursor = self._own(self._call(self._dataset.iterator, epoch=self._epoch))
         try:
@@ -559,6 +614,34 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
         self._dataset.examples_in((x, y))
         return self._preparation.prepare(x, y)
 
+    def reserve(self) -> PendingElement[tuple[Any, Any]]:
+        """Convert one borrowed explicit candidate without accepting its token.
+
+        Returns PendingElement[tuple[object, object]] sharing the raw candidate's
+        single-use authority. EOF closes only the exhausted view. Conversion or
+        validation failure aborts input without accepted progress; secondary close
+        errors retain the primary failure. Independent-pass cursors reject this
+        operation with TypeError.
+        """
+        if self._view is None:
+            raise TypeError("Reservations require a borrowed EpochView.")
+        if self._closed:
+            raise StopIteration
+        try:
+            candidate = self._view.reserve()
+        except StopIteration:
+            self._observed_eof = True
+            self.close()
+            raise
+        except BaseException as error:
+            self._close_after_failure(error)
+            raise
+        try:
+            return replace(candidate, value=self._call(self._prepare, candidate.value))
+        except BaseException as error:
+            self._close_after_failure(error)
+            raise
+
     def skip(self, n: int) -> None:
         """Skip raw authored batches without executing their conversion edges.
 
@@ -566,7 +649,7 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
             n: Exact nonnegative number of completed batches to discard.
 
         Raises:
-            TypeError: If ``n`` is not an exact integer.
+            TypeError: If ``n`` is not an exact integer or this cursor borrows a view.
             ValueError: If ``n`` is negative.
             DatasetExhaustedError: If fewer than ``n`` batches remain.
 
@@ -576,6 +659,8 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
         """
 
         self._validate_skip_count(n)
+        if self._view is not None:
+            raise TypeError("Borrowed views cannot skip accepted input.")
         if n == 0:
             return
         if self._closed:
@@ -592,4 +677,4 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
         self._yielded += n
 
 
-__all__ = ["NativeTrainingCursor", "PreparedDataset"]
+__all__ = ["BatchPreparation", "NativeTrainingCursor", "PreparedDataset"]

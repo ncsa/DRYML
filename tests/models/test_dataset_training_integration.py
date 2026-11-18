@@ -14,7 +14,7 @@ from dryml.core.node import require_saved
 from dryml.core.repo import default_repo
 from dryml.core.store.dir import DirStore
 from dryml.core.utils.graph.path import GraphPath, Parameter
-from dryml.data import ArrayDataset, Batch, Select, as_supervised
+from dryml.data import ArrayDataset, Batch, RecoverableGenerator, Select, as_supervised
 from dryml.managed import ManagedConfig
 from dryml.models import Experiment, ExperimentData, Model, TrainFunction
 
@@ -40,6 +40,362 @@ class FailingClosePairs:
         """Record one close attempt and raise the secondary cleanup failure."""
         self.closes.append(True)
         raise RuntimeError("source close failed")
+
+
+_dataset_continuation_events = []
+_dataset_continuation_direct_captures = []
+
+
+class DatasetContinuationDirectPairs(RecoverableGenerator):
+    """Tiny infinite direct producer; state extraction is independently counted."""
+
+    def __init__(self):
+        self.index = 0
+
+    def __next__(self):
+        self.index += 1
+        value = np.asarray([self.index], dtype=np.float32)
+        return value, value * 2
+
+    def capture_state(self):
+        _dataset_continuation_direct_captures.append(self.index)
+        return self.index
+
+    def restore_state(self, state):
+        self.index = state
+
+
+def _dataset_continuation_pairs(*, seed):
+    """Record a tiny reproducible source's acquisitions and delivered identifiers."""
+    _dataset_continuation_events.append("open")
+    rng = np.random.default_rng(seed)
+    for identifier in rng.permutation(4):
+        value = np.asarray([identifier + 1], dtype=np.float32)
+        _dataset_continuation_events.append(int(value[0]))
+        yield value, value * 2
+
+
+def _dataset_continuation_experiment(backend, *, repo=None, sectioned=True, epochs=2, validation=False):
+    """Build independently persisted native owners and four tiny paired inputs."""
+    from dryml.data import Epoch, GeneratorDataset
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    data = Batch(GeneratorDataset(_dataset_continuation_pairs, seed=7, seed_aware=True,
+                                 spec=(spec, spec), repo=repo), 1, repo=repo)
+    if sectioned:
+        data = Epoch(data, len=2, repo=repo)
+    if backend == "torch":
+        torch = pytest.importorskip("torch")
+        from dryml.models.torch import Model, Optimizer, Training
+        model = Model(torch.nn.Linear, 1, 1, repo=repo)
+        with torch.no_grad():
+            model.obj.weight.zero_()
+            model.obj.bias.zero_()
+        trainer = Training(optimizer=Optimizer(torch.optim.SGD, target=model, lr=.001,
+                                               momentum=.5, repo=repo),
+                           loss_cls=torch.nn.MSELoss, epochs=epochs, verbose=0, repo=repo)
+    elif backend == "tf":
+        tf = pytest.importorskip("tensorflow")
+        from dryml.models.tf import Model, Optimizer, Training
+        from tests.models.test_tf_training import ZeroKerasModel
+        model = Model(ZeroKerasModel, repo=repo)
+        model.obj(tf.zeros((1, 1)))
+        trainer = Training(optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=.001,
+                                               momentum=.5, repo=repo),
+                           epochs=epochs, verbose=0, repo=repo)
+    else:
+        pytest.importorskip("jax")
+        pytest.importorskip("optax", reason="real Optax is required for native JAX qualification")
+        from dryml.models.jax import Model, Optimizer, Training
+        model = Model(F(_linear_init_factory), F(_linear_apply_factory),
+                      output_spec=TensorSpec("float32", shape=(1,), backend="jax"), repo=repo)
+        trainer = Training(optimizer=Optimizer(F(_adam_factory), repo=repo), loss=_mse,
+                           epochs=epochs, verbose=0, repo=repo)
+    return Experiment(model, trainer, train_data=data, val_data=data if validation else None,
+                      artifacts={}, repo=repo)
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf", "jax"))
+def test_dataset_continuation_native_sections_share_one_source(backend):
+    """Two logical sections retain one factory, RNG, conversion plan and input owner."""
+    exp = _dataset_continuation_experiment(backend)
+    _dataset_continuation_events.clear()
+    exp.train_fn(exp)
+    assert _dataset_continuation_events.count("open") == 1
+    assert len(_dataset_continuation_events) == 5
+    assert (exp.state.step, exp.state.epoch, exp.state.examples_seen) == (4, 2, 4)
+    assert exp.state.input_recovery == "exact"
+    assert exp.state.dataset_state.position == exp.state.input_position
+    assert exp.state._input_provider is None
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf", "jax"))
+def test_dataset_continuation_native_checkpoint_suffix(backend, tmp_path, monkeypatch):
+    """An actual saved Experiment resumes its accepted input cut and native slots."""
+    repo = Repo(DirStore(tmp_path / "native"))
+    exp = _dataset_continuation_experiment(backend, repo=repo)
+    _dataset_continuation_events.clear()
+    saved = []
+    def checkpoint():
+        if exp.state.step == 1:
+            saved.append(repo.save(exp, deep_capture=True))
+        if exp.state.step == 2:
+            raise RuntimeError("unsaved update")
+    with pytest.raises(RuntimeError, match="unsaved update"):
+        exp.train_fn(exp, callbacks=(checkpoint,))
+    loaded = repo.load_state_ref(saved[0], reuse_live="never")
+    assert loaded.state.step == 1
+    from dryml.models.utils import TrainingPreparation
+    received = []
+    original_prepare = TrainingPreparation.prepare
+    def prepare(owner, x, y):
+        received.append(int(x.item()))
+        return original_prepare(owner, x, y)
+    monkeypatch.setattr(TrainingPreparation, "prepare", prepare)
+    _dataset_continuation_events.clear()
+    loaded.train_fn(loaded)
+    assert _dataset_continuation_events.count("open") == 1
+    assert len(_dataset_continuation_events) == 5  # one replayed prefix, three new yields
+    suffix = list(received)
+    received.clear()
+    recovered = loaded.model
+    baseline = _dataset_continuation_experiment(backend)
+    baseline.train_fn(baseline)
+    assert suffix == received[1:]
+    assert loaded.state.step == baseline.state.step == 4
+    if backend == "torch":
+        import torch
+        torch.testing.assert_close(recovered.obj.state_dict(), baseline.model.obj.state_dict())
+        torch.testing.assert_close(loaded.train_fn.optimizer.obj.state_dict(),
+                                   baseline.train_fn.optimizer.obj.state_dict())
+    elif backend == "tf":
+        for actual, expected in zip(recovered.obj.weights, baseline.model.obj.weights):
+            np.testing.assert_allclose(actual.numpy(), expected.numpy())
+        for actual, expected in zip(loaded.train_fn.optimizer.obj.variables,
+                                    baseline.train_fn.optimizer.obj.variables):
+            np.testing.assert_allclose(actual.numpy(), expected.numpy())
+    else:
+        np.testing.assert_allclose(recovered.parameters["weight"], baseline.model.parameters["weight"])
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf", "jax"))
+def test_dataset_continuation_native_implicit_passes(backend):
+    """Finite physical passes reopen exactly once per logical epoch."""
+    exp = _dataset_continuation_experiment(backend, sectioned=False)
+    _dataset_continuation_events.clear()
+    exp.train_fn(exp)
+    assert _dataset_continuation_events.count("open") == 2
+    assert len(_dataset_continuation_events) == 10
+    assert (exp.state.step, exp.state.epoch, exp.state.input_sequence) == (8, 2, 10)
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_dataset_continuation_native_unknown_eof_postlude_reload(backend, tmp_path, monkeypatch):
+    """Saved last-value EOF normalizes once; validation precedes next-pass demand."""
+    import importlib
+    module = importlib.import_module(f"dryml.models.{backend}.base")
+    repo = Repo(DirStore(tmp_path / "eof"))
+    exp = _dataset_continuation_experiment(backend, repo=repo, sectioned=False, validation=True)
+    saved = []
+    def checkpoint():
+        if exp.state.step == 4:
+            saved.append(repo.save(exp, deep_capture=True))
+            raise RuntimeError("saved last value")
+    with pytest.raises(RuntimeError, match="saved last value"):
+        exp.train_fn(exp, callbacks=(checkpoint,))
+    loaded = repo.load_state_ref(saved[0], reuse_live="never")
+    assert (loaded.state.epoch, loaded.state.next_batch, loaded.state.input_sequence) == (0, 4, 4)
+    evaluations = []
+    monkeypatch.setattr(type(loaded.train_fn), "_evaluate",
+                        lambda *a, **k: evaluations.append("validation") or {"loss": 3.})
+    postludes = []
+    class Progress:
+        def __init__(self, **kwargs):
+            pass
+        def update(self, *a, **k):
+            pass
+        def close(self):
+            pass
+        def epoch_end(self, epoch, **kwargs):
+            postludes.append(epoch)
+            if len(postludes) == 1:
+                assert _dataset_continuation_events.count("open") == 1  # saved prefix replay only
+                assert loaded.state.input_sequence == 5
+                assert loaded.state.pending_epoch_postlude_phase == "progress"
+                assert loaded.state.pending_epoch_metrics["loss"] > 0
+                saved.append(repo.save(loaded, deep_capture=True))
+                raise RuntimeError("boundary postlude")
+    monkeypatch.setattr(module, "TrainingProgress", Progress)
+    _dataset_continuation_events.clear()
+    with pytest.raises(RuntimeError, match="boundary postlude"):
+        loaded.train_fn(loaded)
+    resumed = repo.load_state_ref(saved[1], reuse_live="never")
+    assert resumed.state.input_sequence == 5
+    _dataset_continuation_events.clear()
+    resumed.train_fn(resumed)
+    assert evaluations == ["validation", "validation"]  # once per completed epoch
+    assert postludes == [1, 1, 2]
+    assert _dataset_continuation_events.count("open") == 1
+    assert (resumed.state.step, resumed.state.epoch, resumed.state.input_sequence) == (8, 2, 10)
+    assert resumed.state.dataset_state.position == resumed.state.input_position
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_dataset_continuation_native_stale_retry_precedes_setup(backend, monkeypatch):
+    """A callback alone leaves owners valid but cannot authorize uncaptured retry."""
+    exp = _dataset_continuation_experiment(backend)
+    def pause():
+        raise RuntimeError("uncaptured callback")
+    with pytest.raises(RuntimeError, match="uncaptured callback"):
+        exp.train_fn(exp, callbacks=(pause,))
+    assert exp.state.step == exp.state.input_sequence == 1
+    assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
+    monkeypatch.setattr(type(exp.train_data), "prepare", lambda _: pytest.fail("stale input prepared"))
+    monkeypatch.setattr(exp.train_fn, "_make_loss", lambda *a: pytest.fail("stale retry built loss"))
+    with pytest.raises(ValueError, match="current matching record.*durable reload"):
+        exp.train_fn(exp)
+    assert exp.state._input_provider is None
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+@pytest.mark.parametrize("failure_step", (1, 2))
+def test_dataset_continuation_native_mutation_failure_invalidates_owners(backend, failure_step, tmp_path, monkeypatch):
+    """Model and independently saved momentum slots require durable reload after failure."""
+    from dryml.core.repo import RepoSaveError
+    repo = Repo(DirStore(tmp_path / "mutation"))
+    exp = _dataset_continuation_experiment(backend, repo=repo)
+    checkpoint = []
+    def capture():
+        if exp.state.step == 1:
+            checkpoint.append(repo.save(exp, deep_capture=True))
+    optimizer = exp.train_fn.optimizer.obj
+    name = "step" if backend == "torch" else "apply_gradients"
+    original = getattr(type(optimizer), name)
+    calls = []
+    def fail(owner, *args, **kwargs):
+        result = original(owner, *args, **kwargs)
+        calls.append(True)
+        if len(calls) == failure_step:
+            raise RuntimeError("mutated model and slots")
+        return result
+    monkeypatch.setattr(type(optimizer), name, fail)
+    with pytest.raises(RuntimeError, match="mutated model and slots"):
+        exp.train_fn(exp, callbacks=(capture,))
+    assert exp.state.step == exp.state.input_sequence == failure_step - 1
+    for owner in (exp, exp.model, exp.train_fn.optimizer):
+        assert owner._restore_failed
+        with pytest.raises(RepoSaveError, match="invalidated"):
+            repo.save(owner, deep_capture=True)
+    with pytest.raises(RepoSaveError, match="invalidated"):
+        exp.train_fn(exp)
+    if failure_step == 1:
+        assert checkpoint == []  # no usable durable recovery cut was fabricated
+        return
+    monkeypatch.setattr(type(optimizer), name, original)
+    loaded = repo.load_state_ref(checkpoint[0], reuse_live="never")
+    assert loaded.state.step == loaded.state.input_sequence == 1
+    loaded.train_fn(loaded)
+    assert loaded.state.step == 4
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_dataset_continuation_native_direct_hooks_only_at_final_capture(backend, monkeypatch):
+    """Infinite directly recoverable input is bounded by sections without per-step hooks."""
+    from dryml.core.cardinality import Cardinality
+    from dryml.data import Epoch, GeneratorDataset
+    exp = _dataset_continuation_experiment(backend)
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    exp.train_data = Epoch(Batch(GeneratorDataset(DatasetContinuationDirectPairs,
+        cardinality=Cardinality.INFINITE, spec=(spec, spec)), 1), len=2)
+    _dataset_continuation_direct_captures.clear()
+    exp.train_fn(exp, callbacks=(lambda: _dataset_continuation_direct_captures == []
+                                or pytest.fail("direct source snapshot per update"),))
+    assert _dataset_continuation_direct_captures == [4]
+    assert exp.state.input_replay_policy == "disabled"
+    assert exp.state.step == exp.state.input_sequence == 4
+    record = exp.state.dataset_state
+    exp.train_fn.epochs = 0
+    monkeypatch.setattr(type(exp.train_data), "prepare", lambda _: pytest.fail("started zero call prepared"))
+    exp.train_fn(exp)
+    assert exp.state.dataset_state is record and exp.state.input_recovery == "exact"
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_dataset_continuation_native_conversion_failure_preserves_primary(backend, monkeypatch):
+    """Conversion precedes mutation; a failing source close is only secondary evidence."""
+    from dryml.data import GeneratorDataset
+    from dryml.models.utils import TrainingPreparation
+    exp = _dataset_continuation_experiment(backend)
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    exp.train_data = Batch(GeneratorDataset(FailingClosePairs, spec=(spec, spec)), 1)
+    FailingClosePairs.closes.clear()
+    def fail(*args):
+        raise ValueError("conversion before mutation")
+    monkeypatch.setattr(TrainingPreparation, "prepare", fail)
+    with pytest.raises(ValueError, match="conversion before mutation") as caught:
+        exp.train_fn(exp)
+    assert FailingClosePairs.closes == [True]
+    assert exp.state.step == exp.state.input_sequence == exp.state.examples_seen == 0
+    assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
+    assert exp.state._input_provider is None
+    assert any("source close failed" in note for note in caught.value.__notes__)
+
+
+@pytest.mark.parametrize("backend,kind", (("torch", "native"), ("tf", "native"),
+                                         ("torch", "cache"), ("torch", "transient"),
+                                         ("tf", "transient")))
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+def test_dataset_continuation_positional_compatibility(backend, kind, tmp_path, monkeypatch):
+    """Unsupported sources/transient owners keep explicitly positional same-live retry."""
+    from dryml.data import UnsupportedContinuationError
+    exp = _dataset_continuation_experiment(backend, sectioned=False)
+    values = np.arange(3, dtype=np.float32).reshape(-1, 1)
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    if kind == "native":
+        if backend == "torch":
+            import torch
+            from dryml.data import TorchDatasetAdapter
+            from tests.models.test_torch_training import DatasetContinuationTorchPairs
+            native = DatasetContinuationTorchPairs(values)
+            native_spec = TensorSpec("float32", shape=(1,), backend="torch")
+            source = TorchDatasetAdapter(native, spec=(native_spec, native_spec))
+        else:
+            import types
+            import tensorflow as tf
+            from dryml.data import TFDSAdapter
+            options = tf.data.Options()
+            options.threading.private_threadpool_size = 1
+            native = tf.data.Dataset.from_tensor_slices((values, values)).with_options(options)
+            monkeypatch.setitem(sys.modules, "tensorflow_datasets", types.SimpleNamespace(load=lambda *a, **k: native))
+            source = TFDSAdapter("local-test", spec=(spec, spec), as_numpy=True, download=False)
+        exp.train_data = Batch(source, 1)
+    elif kind == "cache":
+        from dryml.artifacts import CachedDataset
+        repo = Repo(DirStore(tmp_path / "cache"))
+        source = CachedDataset(ArrayDataset((values, values)))
+        source.compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
+        assert source.ready
+        exp.train_data = Batch(source, 1)
+    else:
+        if backend == "torch":
+            from dryml.models.torch import Training
+        else:
+            from dryml.models.tf import Training
+        exp.train_fn = Training(epochs=2, verbose=0)
+        exp.train_data = Batch(ArrayDataset((values, values)), 1)
+    with ArrayDataset(values).open() as traversal:
+        record = traversal.capture_state()
+    if kind != "transient":
+        with pytest.raises(UnsupportedContinuationError):
+            exp.train_data.open(state=record)
+    def pause():
+        raise RuntimeError("positional callback")
+    with pytest.raises(RuntimeError, match="positional callback"):
+        exp.train_fn(exp, callbacks=(pause,))
+    assert exp.state.input_recovery == "positional" and exp.state.dataset_state is None
+    assert not exp.model._restore_failed
+    exp.train_fn(exp)
+    assert exp.state.step == exp.state.examples_seen == 6
+    assert exp.state.epoch == 2 and exp.state.dataset_state is None
 
 
 class CountingModel(Model):
@@ -369,7 +725,8 @@ def test_jax_candidate_accounting_does_not_use_train_state_persistence(monkeypat
     with default_repo(Repo()):
         exp.train_fn(exp)
     assert (exp.state.step, exp.state.examples_seen, exp.state.epoch) == (3, 5, 1)
-    assert exp.state.input_started is False and exp.state.dataset_state is None
+    assert exp.state.input_started is True
+    assert exp.state.dataset_state.position == exp.state.input_position
 
 
 @pytest.mark.parametrize("workload", ("W1", "W3"))

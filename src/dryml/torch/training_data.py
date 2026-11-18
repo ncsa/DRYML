@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dryml.data.native import PreparedDataset
+from dryml.data.native import BatchPreparation, NativeTrainingCursor, PreparedDataset
+from dryml.data.traversal import EpochView
 
 
 def as_training_dataset(data: PreparedDataset, preparation):
@@ -70,18 +71,21 @@ def as_data_loader(dataset):
     )
 
 
-def iter_training_batches(data: PreparedDataset, preparation):
+def iter_training_batches(data: PreparedDataset | EpochView, preparation: BatchPreparation,
+                          *, epoch: int = 0) -> NativeTrainingCursor:
     """Return one closeable prepared Torch batch cursor for explicit loops.
 
     Args:
-        data: Dependency-light prepared Dataset pipeline.
+        data: PreparedDataset independent pass or borrowed finite EpochView.
         preparation: Retained x/y handoff prepared for PyTorch.
+        epoch: Independent-pass ordinal; must be zero for a borrowed view.
 
     Returns:
         A closeable iterator yielding native Torch ``(x, y)`` batches.
 
     Raises:
-        TypeError: If ``data`` is not a :class:`PreparedDataset`.
+        TypeError: If ``data`` is not PreparedDataset or EpochView.
+        ValueError: Nonzero epoch supplied with a borrowed view.
         DatasetExhaustedError: During iteration if a finite source ends early.
 
     Side Effects:
@@ -91,9 +95,13 @@ def iter_training_batches(data: PreparedDataset, preparation):
         failures over cleanup errors; closure alone does not prove output EOF.
     """
 
+    if isinstance(data, EpochView):
+        if type(epoch) is not int or epoch != 0:
+            raise ValueError("A borrowed view already selects its epoch.")
+        return data.training_batches(preparation)
     if not isinstance(data, PreparedDataset):
-        raise TypeError("Torch training input requires a PreparedDataset.")
-    return data.training_batches(preparation)
+        raise TypeError("Torch training input requires a PreparedDataset or EpochView.")
+    return data.training_batches(preparation, epoch=epoch)
 
 
 __all__ = ["as_data_loader", "as_training_dataset", "iter_training_batches"]

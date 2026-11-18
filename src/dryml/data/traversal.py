@@ -21,7 +21,7 @@ from .dataset import DatasetCursor
 from .errors import TraversalOwnershipError, UnsupportedContinuationError, ContinuationMismatchError
 
 if TYPE_CHECKING:
-    from .native import PreparedDataset
+    from .native import BatchPreparation, NativeTrainingCursor, PreparedDataset
     from .state import DatasetState
     from .recovery import ReplayRecoveryPolicy
 
@@ -655,6 +655,25 @@ class EpochView(_CursorLifecycle, Iterator[T], Generic[T]):
         if self._owner._acceptance != "explicit":
             raise TraversalOwnershipError("reserve() requires explicit acceptance.")
         return self._owner._reserve(self)
+
+    def training_batches(self, preparation: BatchPreparation) -> NativeTrainingCursor:
+        """Borrow this finite view through retained native x/y preparation.
+
+        Args:
+            preparation: Object exposing prepare(x, y) for retained conversion.
+        Returns:
+            NativeTrainingCursor; explicit reserve converts without acceptance,
+            while delivery iteration accepts only after successful conversion.
+        Raises:
+            TypeError: Missing preparation or unresolved native declarations.
+        Side Effects:
+            No source demand on construction. Unfinished closure aborts the owner;
+            exhausted closure leaves adjacent sections and their execution alive.
+        """
+        from .native import NativeTrainingCursor
+        if not callable(getattr(preparation, "prepare", None)):
+            raise TypeError("Native training data requires a prepared x/y handoff.")
+        return NativeTrainingCursor(self, preparation)
 
     def close(self) -> None:
         """Abort/close the owner if unfinished; no-op after successful exhaustion."""

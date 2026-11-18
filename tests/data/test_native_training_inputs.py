@@ -248,6 +248,67 @@ def test_native_training_cursor_closes_on_preparation_failure_without_progress_s
     assert cursor.observed_eof is False
 
 
+@pytest.mark.parametrize("backend", ("torch", "tf", "jax"))
+def test_dataset_continuation_native_borrowed_tokens_and_epoch_control(backend):
+    """Converted/raw candidates alias authority and exhausted views retain execution."""
+    import importlib
+    from dryml.data import ArrayDataset, Epoch, TraversalOwnershipError
+    adapter = importlib.import_module(f"dryml.{backend}.training_data")
+    values = np.arange(4, dtype=np.float32).reshape(-1, 1)
+    prepared = Epoch(Batch(ArrayDataset((values, values)), 1), len=2).prepare()
+    class Preparation:
+        def prepare(self, x, y):
+            return x + 10, y
+    with prepared.open(acceptance="explicit") as owner:
+        view = owner.next_epoch()
+        for epoch in (1, -1, False, True):
+            with pytest.raises(ValueError, match="epoch"):
+                adapter.iter_training_batches(view, Preparation(), epoch=epoch)
+        with adapter.iter_training_batches(view, Preparation()) as cursor:
+            candidate = cursor.reserve()
+            assert candidate.value[0].item() == 10
+            raw = owner._pending[0]
+            assert raw.value[0].item() == 0
+            assert candidate._token is raw._token
+            owner.accept(candidate)
+            with pytest.raises(TraversalOwnershipError):
+                owner.accept(raw)
+            owner.accept(cursor.reserve())
+            with pytest.raises(StopIteration):
+                cursor.reserve()
+        with adapter.iter_training_batches(owner.next_epoch(), Preparation()) as cursor:
+            assert cursor.reserve().value[0].item() == 12
+
+
+def test_dataset_continuation_capability_admission_is_inert(tmp_path, monkeypatch):
+    """Data's narrow declaration seam excludes unsupported native/custom sources."""
+    from dryml.data import ArrayDataset, NpyFileDataset
+    from dryml.data import UnsupportedContinuationError
+    array = ArrayDataset(np.arange(3))
+    prepared = array.prepare()
+    monkeypatch.setattr(np, "copy", lambda *a, **k: pytest.fail("admission copied array"))
+    prepared._require_continuation_capability()
+    source, _ = _batches()
+    for data in (source, NpyFileDataset(str(tmp_path), spec=TensorSpec("float32", shape=()))):
+        with pytest.raises(UnsupportedContinuationError):
+            data.prepare()._require_continuation_capability()
+    assert source.opens == 0
+
+
+def test_dataset_continuation_borrowed_delivery_conversion_failure_is_unaccepted():
+    """Even delivery-mode native conversion must succeed before accepting a raw value."""
+    source, dataset = _batches()
+    class Preparation:
+        def prepare(self, x, y):
+            raise ValueError("borrowed conversion")
+    with pytest.raises(ValueError, match="borrowed conversion"):
+        with dataset.open() as owner:
+            cursor = owner.next_epoch().training_batches(Preparation())
+            next(cursor)
+    assert owner.position.sequence == owner.position.start == 0
+    assert source.closes == [0]
+
+
 @pytest.mark.parametrize("expected", (0, 1))
 def test_native_count_validation_precedes_eof_and_cleanup_cannot_mask_shortfall(expected):
     """Native count failures retain requested/yielded evidence despite cleanup failure."""

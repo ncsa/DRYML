@@ -20,7 +20,8 @@ from .train_spec import TrainState
 
 if TYPE_CHECKING:
     from dryml.core import Repo
-    from dryml.data import DatasetState, DatasetTraversal, PendingElement
+    from dryml.data import DatasetState, DatasetTraversal, EpochView, PendingElement
+    from dryml.data.native import PreparedDataset
     from .experiment import Experiment
 
 
@@ -34,7 +35,8 @@ class TrainingInputSession:
             always retains its lane and cannot fall back after an exact failure.
         repo: Optional Repo owning retained graph evidence and cache invalidation.
 
-    ``traversal`` is None for zero work/data-free calls. Positive exact sessions
+    ``prepared`` retains the invocation's source-inert PreparedDataset;
+    ``prepared`` and ``traversal`` are None for zero work/data-free calls. Positive exact sessions
     capture before normal closure when their last record is stale or absent.
     Exceptions retain accepted facts; uncertain native mutation invalidates the
     owner graph. No native state copies or extra completion barriers are added.
@@ -50,6 +52,7 @@ class TrainingInputSession:
         self.exp, self.positive, self.exact = exp, positive, exact
         self._state = exp.state
         self.traversal: DatasetTraversal[Any] | None = None
+        self.prepared: PreparedDataset | None = None
         self._repo_context = manage_repo(repo)
         self._repo = self._plan = self._guard = self._candidate = None
         self._thread = None
@@ -84,10 +87,16 @@ class TrainingInputSession:
                 if not self.positive or self.exp.train_data is None:
                     return self
                 prepared = self.exp.train_data.prepare()
+                self.prepared = prepared
                 started = state.input_started
                 lane = state.input_recovery if started else ("exact" if self.exact else "positional")
-                if not started and (prepared.execution_level != "stream" or prepared._continuation_missing_states):
-                    lane = "positional"
+                if lane == "exact":
+                    try:
+                        prepared._require_continuation_capability()
+                    except UnsupportedContinuationError:
+                        if started:
+                            raise
+                        lane = "positional"
                 record = state.dataset_state if lane == "exact" and started else None
                 traversal = prepared.open(state=record, epoch=state.epoch,
                                           start=state.next_batch, acceptance="explicit")
@@ -132,11 +141,13 @@ class TrainingInputSession:
         state.input_replay_policy = self.traversal.replay_recovery_policy
 
     @contextmanager
-    def update(self, candidate: PendingElement[Any]) -> Iterator[None]:
+    def update(self, candidate: PendingElement[Any], *, repairable: bool = False) -> Iterator[None]:
         """Fence one prevalidated candidate through native mutation and acceptance.
 
         Args:
             candidate: Outstanding PendingElement from this session's traversal.
+            repairable: Functional backend guarantees cheap prior-reference repair
+                on installation failure; failed repair must invalidate_native().
         Yields:
             None; perform native mutation and record_train_update in this scope.
         Raises:
@@ -150,6 +161,8 @@ class TrainingInputSession:
             or recovery-only native synchronization occurs per update.
         """
         self._check()
+        if type(repairable) is not bool:
+            raise TypeError("repairable must be an exact bool.")
         if self.traversal is None or self._guard is not None:
             raise TraversalOwnershipError("Update requires one live input reservation.")
         self.traversal._validate_candidate(candidate)
@@ -162,7 +175,7 @@ class TrainingInputSession:
             if not self._accepted:
                 raise RuntimeError("Native update exited without accepted input accounting.")
         except BaseException:
-            if not self._accepted:
+            if not self._accepted and not repairable:
                 self._repo._invalidate_restoration_target(self._plan.nodes)
             raise
         finally:
@@ -223,6 +236,51 @@ class TrainingInputSession:
         if self.exp.state.pending_epoch_postlude is not None:
             raise ValueError("Finish the prior epoch postlude before input handoff.")
         self.traversal._handoff()
+
+    def epoch_views(self, *, stop: int) -> Iterator[tuple[int, EpochView[Any] | None]]:
+        """Yield (epoch, view) including boundary-only restored suffix handoffs.
+
+        ``stop`` is an exclusive logical epoch. A None view reports newly
+        discovered EOF of a previously nonempty saved pass. Consumers finish that
+        epoch's postlude before resuming this iterator. No next-pass acquisition
+        occurs until then. Boundary facts are synchronized without an update;
+        exceptions propagate and never downgrade exact recovery.
+
+        Args:
+            stop: Exclusive exact-integer epoch, at least the current epoch.
+        Yields:
+            Logical epoch and borrowed view, or None for a boundary-only handoff.
+        Raises:
+            TypeError, ValueError: Invalid stop or unfinished prior postlude.
+            TraversalOwnershipError: Missing traversal or inactive/wrong-thread use.
+            Source and boundary synchronization errors propagate without fallback.
+        Side Effects:
+            Advances only invocation input and accepted boundary facts; never
+            creates an optimizer update or captures a record.
+        """
+        self._check()
+        if self.traversal is None:
+            raise TraversalOwnershipError("Epoch views require a positive input session.")
+        if type(stop) is not int:
+            raise TypeError("stop must be an exact integer.")
+        if stop < self.exp.state.epoch:
+            raise ValueError("stop must not precede the current epoch.")
+        while True:
+            if self.traversal._boundary_pending:
+                self.handoff()
+            if self.exp.state.epoch >= stop:
+                return
+            epoch = self.exp.state.epoch
+            try:
+                view = self.traversal.next_epoch()
+            except StopIteration:
+                self.sync_boundary()
+                if self.exp.state.pending_epoch_postlude == epoch:
+                    yield epoch, None
+                    continue
+                return
+            yield epoch, view
+            self.sync_boundary()
 
     def invalidate_native(self) -> None:
         """Retire affected owners after a positively identified delayed native failure.

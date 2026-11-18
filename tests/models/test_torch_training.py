@@ -6,7 +6,7 @@ from dryml import F
 from dryml.core.store.dir import DirStore
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArgMax, ArrayDataset, Batch, Map, Pipe, Project, Select
-from dryml.core import Repo
+from dryml.core import Object, Repo
 from dryml.managed import ManagedConfig
 from dryml.models import AutoEncoder, Experiment
 
@@ -25,6 +25,20 @@ class EffectfulModule(torch.nn.Module):
     def forward(self, value):
         self.calls += 1
         return value
+
+
+class DatasetContinuationTorchPairs(Object, torch.utils.data.Dataset):
+    """Definition-owned native map-style pairs for positional compatibility proof."""
+
+    def __init__(self, values):
+        self.values = values
+
+    def __len__(self):
+        return len(self.values)
+
+    def __getitem__(self, index):
+        value = torch.as_tensor(self.values[index])
+        return value, value
 
 
 def _tiny_tensorflow_pairs():
@@ -64,6 +78,46 @@ def test_torch_basic_training_updates_experiment_state():
     assert optimizer.obj is not None
     assert optimizer.obj.param_groups[0]["lr"] == 0.01
     assert get_default_repo() is None
+
+
+def test_torch_dataset_continuation_zero_epoch_is_source_inert(monkeypatch):
+    """Zero epochs never prepare inputs, construct loss, bind optimizer or capture."""
+    from tests.models.test_dataset_training_integration import _dataset_continuation_experiment
+    exp = _dataset_continuation_experiment("torch", epochs=0)
+    monkeypatch.setattr(type(exp.train_data), "prepare", lambda _: pytest.fail("zero work prepared input"))
+    monkeypatch.setattr(exp.train_fn, "_make_loss", lambda *a: pytest.fail("zero work built loss"))
+    monkeypatch.setattr(exp.train_fn, "_make_optimizer", lambda *a: pytest.fail("zero work bound optimizer"))
+    assert exp.train_fn(exp) == []
+    assert not exp.state.input_started and exp.state.dataset_state is None
+
+
+def test_torch_dataset_continuation_compiled_batches_reuse_execution(monkeypatch):
+    """A tiny real torch.compile path keeps placement and one compile across sections."""
+    from tests.models.test_dataset_training_integration import _dataset_continuation_experiment
+    from dryml.data import DatasetTraversal
+    from dryml.models.utils import TrainingPreparation
+    exp = _dataset_continuation_experiment("torch")
+    compiles, captures, plans = [], [], []
+    def compile_graph(graph, inputs):
+        compiles.append(tuple(str(value.device) for value in inputs))
+        return graph.forward
+    monkeypatch.setattr(exp.model.obj, "forward", torch.compile(exp.model.obj.forward, backend=compile_graph))
+    original_capture = DatasetTraversal.capture_state
+    monkeypatch.setattr(DatasetTraversal, "capture_state",
+                        lambda owner: captures.append(owner.position.sequence) or original_capture(owner))
+    original_plan = TrainingPreparation.from_dataset
+    monkeypatch.setattr(TrainingPreparation, "from_dataset", classmethod(
+        lambda cls, *a, **k: plans.append(True) or original_plan(*a, **k)))
+    original_evidence = Repo._state_graph_evidence
+    evidence = []
+    monkeypatch.setattr(Repo, "_state_graph_evidence", lambda *a, **k:
+                        evidence.append(True) or original_evidence(*a, **k))
+    monkeypatch.setattr(exp.model.obj, "state_dict", lambda *a, **k: pytest.fail("per-update model snapshot"))
+    monkeypatch.setattr(exp.train_fn.optimizer.obj, "state_dict", lambda *a, **k: pytest.fail("per-update slot snapshot"))
+    exp.train_fn(exp, callbacks=(lambda: captures == [] or pytest.fail("logging callback captured input"),))
+    assert len(compiles) == len(plans) == len(evidence) == 1
+    assert all(device == "cpu" for device in compiles[0])
+    assert captures == [4]
 
 
 def test_torch_invocation_telemetry_receives_host_logs_after_accounting(tmp_path):
@@ -354,6 +408,7 @@ def test_torch_training_restore_skips_completed_batch_and_keeps_exposure(tmp_pat
     )
 
     def pause():
+        exp.state._input_provider.capture()
         raise RuntimeError("pause")
 
     with pytest.raises(RuntimeError, match="pause"):
@@ -398,6 +453,7 @@ def test_torch_interrupt_at_step_32_resumes_exact_remaining_epoch(tmp_path):
     def interrupt_at_32():
         seen.append((interrupted.state.step, interrupted.state.epoch, interrupted.state.next_batch))
         if interrupted.state.step == 32:
+            interrupted.state._input_provider.capture()
             raise RuntimeError("pause at retained step 32")
 
     with pytest.raises(RuntimeError, match="step 32"):
@@ -609,6 +665,7 @@ def test_torch_final_callback_resume_runs_one_validation_postlude_without_an_upd
     def interrupt_final_callback():
         if exp.state.step == 2:
             assert (exp.state.epoch, exp.state.next_batch) == (1, 0)
+            exp.state._input_provider.capture()
             raise RuntimeError("final callback")
 
     with pytest.raises(RuntimeError, match="final callback"):
@@ -1038,6 +1095,7 @@ def test_torch_early_stopping_postlude_resume_retains_one_decision(monkeypatch, 
             del args, kwargs
             type(self).attempts += 1
             if type(self).attempts == 2:
+                exp.state._input_provider.capture()
                 raise RuntimeError("progress postlude")
 
         def close(self):

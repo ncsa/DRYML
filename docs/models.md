@@ -78,8 +78,8 @@ example counts, and never reselects to correct metadata per batch.
 output facts only after Method inputs are fully declared. Native cursor
 construction enforces the same admission, even if an unresolved Map declares
 known native outputs. Zero-edge inputs still validate their producer constraints
-without copying, changing identity, or breaking gradients. Experimental
-JAX zero-work admission still precedes Dataset preparation and loss/runtime
+without copying, changing identity, or breaking gradients. Explicit TensorFlow,
+Torch, and experimental JAX zero-work admission precedes Dataset preparation and loss/runtime
 setup. Runtime adapter activation remains lazy and does not require a training
 context merely to recognize or convert a concrete CPU JAX value.
 
@@ -180,9 +180,25 @@ inputs select recovery per occurrence. Fresh statically unqualified preparation
 retains positional compatibility. A backend with transient native owners or
 unsupported execution options must select `exact=False` during fresh admission.
 An established exact lane never falls back after restore/acquisition failure.
-The common helper is available to training procedures; migration of native loops
-to it is a separate integration step. Existing procedures that do not use it
-retain their prior positional contract.
+Torch `Training`, explicit TensorFlow `Training`, and experimental JAX `Training`
+use this boundary. They retain one preparation and one traversal across adjacent
+explicit epochs; finite boundary-free inputs reopen once per implicit pass.
+Data admits frozen source/operator capability without acquiring factories,
+capturing state, or copying array payloads. Existing native-source adapters,
+completed caches, custom sources, and transient TF/Torch optimizers retain the
+positional lane with no continuation. A persisted backend Optimizer is necessary
+for exact optimizer recovery. Keras `BasicTraining` retains its existing adapter
+and positional contract.
+
+Backend `iter_training_batches(data, preparation, *, epoch=0)` accepts either a
+`PreparedDataset` (independent pass) or an `EpochView` (borrowed section, requiring
+`epoch=0`). `view.training_batches(preparation).reserve()` converts a lightweight
+candidate once without accepting it. Converted and raw candidates share one
+single-use token; exhausted cursor closure leaves adjacent sections alive.
+Conversion failure aborts input before exposure/native mutation and preserves its
+primary error if source cleanup also fails.
+`dryml.data.native.BatchPreparation` is the dependency-light structural protocol
+for that retained `prepare(x, y) -> (x, y)` handoff.
 
 Inside the session, reserve from an epoch view and perform each native update
 inside `session.update(candidate)`. Call `record_train_update(...,

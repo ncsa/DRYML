@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import os
 import weakref
+from contextlib import nullcontext
 from dataclasses import fields
 from dataclasses import replace
 
@@ -32,7 +33,6 @@ from dryml.models.train_spec import (
 from dryml.models.utils import (
     TrainingPreparation,
     finite_dataset_len,
-    require_bounded_safe_points,
     require_supervised_dataset,
     validate_training_callbacks,
 )
@@ -819,7 +819,35 @@ class Training(TrainFunction):
             caller callbacks after those updates are truthfully retained. After
             zero-work admission, resolves the Dataset before x/y handoffs and
             source acquisition; validation uses captured output specifications.
+
+        Exact recovery consumes continuous borrowed views and captures only on
+        save/finalization. Same-live retry requires a current accepted record and
+        valid owners. Candidate repair retains input metadata/provider references
+        without encoding records or copying native buffers.
         """
+        callbacks = validate_training_callbacks(callbacks)
+        if observer_session is not None:
+            observer_session.require_callables("JAX")
+        if not isinstance(exp.model, Model):
+            raise TypeError("JAX Training requires an experimental functional or NNX JAX Model.")
+        require_supervised_dataset(exp.train_data, batched=True)
+        if exp.val_data is not None:
+            require_supervised_dataset(exp.val_data, batched=True)
+            if exp.val_data.yield_cardinality().is_infinite:
+                raise ValueError("Validation on an infinite dataset requires an explicit finite bound.")
+            if finite_dataset_len(exp.val_data) == 0:
+                raise ValueError("Cannot validate on an empty dataset.")
+        target = exp.state.target_epoch
+        positive = (target if target is not None else exp.state.epoch + self.epochs) > exp.state.epoch
+        positive = positive or exp.state.pending_epoch_postlude is not None
+        with self.input_session(exp, positive=positive) as inputs:
+            if not positive:
+                exp.state.finish_invocation(exp.state.begin_invocation(self.epochs))
+                return []
+            return self._train_with_input(exp, inputs, callbacks=callbacks, observer_session=observer_session)
+
+    def _train_with_input(self, exp, inputs, *, callbacks, observer_session):
+        """Compute pure native candidates and install their accepted input cut."""
 
         callbacks = validate_training_callbacks(callbacks)
         if observer_session is not None:
@@ -828,7 +856,6 @@ class Training(TrainFunction):
             raise TypeError("JAX Training requires an experimental functional or NNX JAX Model.")
         train_data = exp.train_data
         require_supervised_dataset(train_data, batched=True)
-        require_bounded_safe_points(train_data, callbacks)
         steps_per_epoch = finite_dataset_len(train_data)
         if exp.val_data is not None:
             require_supervised_dataset(exp.val_data, batched=True)
@@ -850,7 +877,7 @@ class Training(TrainFunction):
         # loss factory or enter native training runtime.
         loss_fn = self._loss_callable()
         self._begin_training_preparation_generation()
-        prepared_train = train_data.prepare()
+        prepared_train = inputs.prepared
         training_preparation = TrainingPreparation.from_dataset(
             self, prepared_train, "jax",
         )
@@ -893,21 +920,19 @@ class Training(TrainFunction):
             stopped = self._finish_pending_epoch(
                 jax, exp, prepared_val, loss_fn, progress, target_epoch,
             )
-            for epoch in range(start_epoch, target_epoch):
-                if stopped:
-                    break
-                resume_batch = exp.state.next_batch if epoch == start_epoch else 0
-                if steps_per_epoch is not None and resume_batch > steps_per_epoch:
-                    raise ValueError("Saved JAX batch position exceeds the training epoch.")
-                cursor = iter_training_batches(
-                    prepared_train, self.training_preparation, epoch=epoch,
-                )
+            for epoch, view in (() if stopped else inputs.epoch_views(stop=target_epoch)):
+                resume_batch = view.position if view is not None else 1
+                cursor = iter_training_batches(view, self.training_preparation) if view is not None else None
                 epoch_loss = 0.0
                 epoch_steps = 0
-                with cursor:
-                    if resume_batch:
-                        cursor.skip(resume_batch)
-                    for x, y in cursor:
+                with cursor if cursor is not None else nullcontext():
+                    while cursor is not None:
+                        try:
+                            input_candidate = cursor.reserve()
+                        except StopIteration:
+                            inputs.sync_boundary()
+                            break
+                        x, y = input_candidate.value
                         batch_index = exp.state.next_batch
                         examples = prepared_train.examples_in((x, y))
                         candidate = update(
@@ -921,24 +946,17 @@ class Training(TrainFunction):
                         loss, parameters, mutable_state, rng, slots = candidate
                         _synchronize_tree(candidate, jax)
                         loss_float = self._validated_loss(loss, jax)
-                        complete_epoch = (
-                            steps_per_epoch is not None
-                            and exp.state.next_batch + 1 == steps_per_epoch
-                        )
-                        self._commit_update(
-                            exp,
-                            parameters,
-                            mutable_state,
-                            rng,
-                            slots,
-                            examples=examples,
-                            loss=loss_float,
-                            complete_epoch=complete_epoch,
-                            epoch_metrics=(
-                                {"loss": (epoch_loss + loss_float) / (epoch_steps + 1)}
-                                if complete_epoch else None
-                            ),
-                        )
+                        complete_epoch = input_candidate.section_complete
+                        with inputs.update(input_candidate, repairable=True):
+                            self._commit_update(
+                                exp, parameters, mutable_state, rng, slots,
+                                examples=examples, loss=loss_float,
+                                complete_epoch=complete_epoch,
+                                epoch_metrics=(
+                                    {"loss": (epoch_loss + loss_float) / (epoch_steps + 1)}
+                                    if complete_epoch and not resume_batch else None
+                                ), input_candidate=input_candidate,
+                            )
                         for callback in callbacks:
                             callback()
                         losses.append(loss_float)
@@ -954,7 +972,7 @@ class Training(TrainFunction):
                             "examples_seen": exp.state.examples_seen,
                             "loss": loss_float,
                         })
-                if epoch_steps == 0 and resume_batch == 0:
+                if epoch_steps == 0 and resume_batch == 0 and exp.state.pending_epoch_postlude is None:
                     continue
                 epoch_metrics = {"loss": epoch_loss / epoch_steps} if epoch_steps and not resume_batch else {}
                 stopped = self._finish_epoch(
@@ -968,6 +986,8 @@ class Training(TrainFunction):
                     "stopped": stopped,
                     **epoch_metrics,
                 })
+                if stopped:
+                    break
         except BaseException:
             if fresh_target:
                 try:
@@ -1045,7 +1065,7 @@ class Training(TrainFunction):
 
     def _commit_update(
         self, exp, parameters, mutable_state, rng, slots, *, examples, loss,
-        complete_epoch, epoch_metrics=None,
+        complete_epoch, epoch_metrics=None, input_candidate=None,
     ):
         """Install one completely validated candidate or repair every owner on interruption."""
 
@@ -1076,6 +1096,20 @@ class Training(TrainFunction):
                 postlude_pending=True,
                 metrics=epoch_metrics,
             )
+        provider = exp.state._input_provider if input_candidate is not None else None
+        frontier = None
+        if provider is not None:
+            traversal = provider.traversal
+            traversal._validate_candidate(input_candidate)
+            view = traversal._pending[1]
+            names = ("_epoch", "_start", "_sequence", "_section_complete", "_root_complete",
+                     "_boundary_pending", "_active", "_pending")
+            frontier = tuple((name, getattr(traversal, name)) for name in names)
+            prior_view = view._offset, view._exhausted
+            position = input_candidate.position
+            candidate_state.input_sequence = position.sequence
+            candidate_state.input_section_complete = position.section_complete
+            candidate_state.input_root_complete = position.root_complete
         candidate_state.validate()
         committed = False
         try:
@@ -1086,6 +1120,13 @@ class Training(TrainFunction):
             _training_commit_boundary("after_optimizer")
             _restore_train_state(exp.state, candidate_state)
             _training_commit_boundary("after_accounting")
+            if provider is not None:
+                traversal.accept(input_candidate)
+                provider._install_position()
+                _training_commit_boundary("after_frontier")
+                provider._accepted = True
+                provider._guard.release()
+                provider._guard = None
             committed = True
         except BaseException as error:
             if not committed:
@@ -1100,6 +1141,15 @@ class Training(TrainFunction):
                         repair()
                     except BaseException as repair_error:
                         repair_failures.append(repair_error)
+                if frontier is not None:
+                    if traversal._closed or traversal._aborted:
+                        repair_failures.append(RuntimeError("Input frontier resources cannot be repaired."))
+                    else:
+                        for name, value in frontier:
+                            setattr(traversal, name, value)
+                        view._offset, view._exhausted = prior_view
+                if repair_failures and provider is not None:
+                    provider.invalidate_native()
                 add_note = getattr(error, "add_note", None)
                 if callable(add_note):
                     for repair_error in repair_failures:
@@ -1136,6 +1186,7 @@ class Training(TrainFunction):
             exp.state.finish_epoch(postlude_pending=True)
         if exp.state.pending_epoch_postlude == epoch:
             if exp.state.pending_epoch_postlude_phase == "start":
+                metrics.update(exp.state.pending_epoch_metrics or {})
                 if val_data is not None:
                     metrics.update({f"val_{name}": value for name, value in self._evaluate(jax, exp.model, val_data, loss_fn).items()})
                 exp.state.advance_epoch_postlude(epoch, "progress", metrics=metrics)

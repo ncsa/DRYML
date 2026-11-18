@@ -2,23 +2,26 @@
 
 from __future__ import annotations
 
-from dryml.data.native import PreparedDataset
+from dryml.data.native import BatchPreparation, NativeTrainingCursor, PreparedDataset
+from dryml.data.traversal import EpochView
 
 
-def iter_training_batches(data: PreparedDataset, preparation, *, epoch: int = 0):
+def iter_training_batches(data: PreparedDataset | EpochView, preparation: BatchPreparation,
+                          *, epoch: int = 0) -> NativeTrainingCursor:
     """Return one closeable iterator yielding JAX-native prepared ``(x, y)`` batches.
 
     Args:
-        data: Dependency-light prepared Dataset pipeline.
+        data: PreparedDataset independent pass or borrowed finite EpochView.
         preparation: Retained x/y handoff prepared for JAX.
-        epoch: Logical Dataset epoch used for a supported seed-aware source.
+        epoch: Independent-pass ordinal; must be zero for a borrowed view.
 
     Returns:
         A closeable cursor whose yielded trees retain authored structure, dtype,
         shape, batch axis, and order.
 
     Raises:
-        TypeError: If ``data`` is not a :class:`PreparedDataset`.
+        TypeError: If ``data`` is not PreparedDataset or EpochView.
+        ValueError: Nonzero epoch supplied with a borrowed view.
         DatasetExhaustedError: During iteration if a finite source ends early.
 
     Side Effects:
@@ -29,8 +32,12 @@ def iter_training_batches(data: PreparedDataset, preparation, *, epoch: int = 0)
         failures over cleanup errors; closure alone does not prove output EOF.
     """
 
+    if isinstance(data, EpochView):
+        if type(epoch) is not int or epoch != 0:
+            raise ValueError("A borrowed view already selects its epoch.")
+        return data.training_batches(preparation)
     if not isinstance(data, PreparedDataset):
-        raise TypeError("JAX training input requires a PreparedDataset.")
+        raise TypeError("JAX training input requires a PreparedDataset or EpochView.")
     return data.training_batches(preparation, epoch=epoch)
 
 

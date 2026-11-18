@@ -254,6 +254,24 @@ def _experiment(*, repo=None, epochs=1):
     )
 
 
+def test_jax_dataset_continuation_native_compiled_sections(monkeypatch):
+    """Real Optax/JAX qualification keeps one JIT across adjacent borrowed sections."""
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("optax", reason="real Optax is required for native JAX qualification")
+    from tests.models.test_dataset_training_integration import _dataset_continuation_experiment
+    from dryml.data import DatasetTraversal
+    exp = _dataset_continuation_experiment("jax")
+    captures, jit_calls = [], []
+    original_capture = DatasetTraversal.capture_state
+    monkeypatch.setattr(DatasetTraversal, "capture_state", lambda owner:
+                        captures.append(owner.position.sequence) or original_capture(owner))
+    original_jit = jax.jit
+    monkeypatch.setattr(jax, "jit", lambda *a, **k: jit_calls.append(True) or original_jit(*a, **k))
+    exp.train_fn(exp, callbacks=(lambda: captures == [] or pytest.fail("per-update capture"),))
+    assert jit_calls == [True] and captures == [4]
+    assert exp.state.input_sequence == exp.state.step == 4
+
+
 def test_jax_native_iterator_yields_prepared_authored_batches():
     """The JAX bridge yields native batches and closes an exhausted traversal."""
     jax = pytest.importorskip("jax")
@@ -463,7 +481,7 @@ def test_jax_training_rejects_empty_and_infinite_validation_before_binding():
 
 
 def test_jax_training_admission_matrix_preserves_preacquisition_boundaries():
-    """Declared empty, infinite, unknown-callback, and noncanonical inputs fail early."""
+    """Empty/infinite/noncanonical fail; unknown exact input admits without demand."""
     pytest.importorskip("jax")
 
     spec = TensorSpec("float32", shape=(1,), batch=1, backend="numpy")
@@ -477,14 +495,15 @@ def test_jax_training_admission_matrix_preserves_preacquisition_boundaries():
     assert infinite.train_fn.optimizer.obj is infinite.train_fn.optimizer.state is None
 
     UNKNOWN_SOURCE_OPENS.clear()
-    callback_blocked = _experiment()
-    callback_blocked.train_data = GeneratorDataset(
+    unknown = _experiment()
+    unknown.train_data = GeneratorDataset(
         _unknown_source, cardinality=Cardinality.UNKNOWN, spec=(spec, spec),
     )
-    with pytest.raises(ValueError, match="finite deterministic"):
-        callback_blocked.train_fn(callback_blocked, callbacks=(lambda: None,))
+    with unknown.train_fn.input_session(unknown) as inputs:
+        assert unknown.state.input_recovery == "exact"
+        assert inputs.traversal.position.sequence == 0
     assert UNKNOWN_SOURCE_OPENS == []
-    assert callback_blocked.train_fn.optimizer.obj is callback_blocked.train_fn.optimizer.state is None
+    assert unknown.train_fn.optimizer.obj is unknown.train_fn.optimizer.state is None
 
     known_empty = _experiment()
     zeros = np.zeros((0, 1), dtype=np.float32)
@@ -533,6 +552,7 @@ def test_jax_training_callback_interruption_resumes_without_duplicate_update(tmp
 
     def pause():
         seen.append((interrupted.state.step, interrupted.state.epoch, interrupted.state.next_batch))
+        interrupted.state._input_provider.capture()
         raise RuntimeError("pause after accepted JAX update")
 
     with pytest.raises(RuntimeError, match="accepted JAX update"):
@@ -592,6 +612,7 @@ def test_jax_final_update_retry_runs_postlude_once_then_next_invocation_adds_epo
 
     def pause_on_final_update():
         if exp.state.step == 3:
+            exp.state._input_provider.capture()
             raise RuntimeError("final update accepted")
 
     with pytest.raises(RuntimeError, match="final update accepted"):
@@ -619,6 +640,7 @@ def test_jax_validation_retry_discards_candidate_mutable_and_rng_state(monkeypat
     def fail_once(*args):
         calls.append(True)
         if len(calls) == 1:
+            exp.state._input_provider.capture()
             raise RuntimeError("validation failed")
         return original(*args)
 
@@ -650,14 +672,16 @@ def test_jax_experiments_do_not_share_native_runtime_owners():
     assert (second.state.step, second.state.examples_seen, second.state.epoch) == (0, 0, 0)
 
 
-@pytest.mark.parametrize("stage", ("before_model", "after_model", "after_optimizer", "after_accounting"))
+@pytest.mark.parametrize("stage", ("before_model", "after_model", "after_optimizer", "after_accounting", "after_frontier"))
 def test_jax_candidate_commit_interruptions_repair_all_owners(monkeypatch, stage):
-    """Any interruption before accounting restores model slots and TrainState together."""
+    """Deterministic installation-seam proof; no Optax/native-training qualification."""
     jax = pytest.importorskip("jax")
-    pytest.importorskip("optax")
     import dryml.models.jax.base as jax_base
 
     exp = _experiment()
+    exp.train_fn.optimizer.state = {"count": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
+    from dryml.models import TrainState
+    monkeypatch.setattr(TrainState, "__getstate__", lambda _: pytest.fail("candidate encoded continuation"))
     before = np.asarray(exp.model.parameters["weight"]).copy()
     exp.train_fn.continuation = {"marker": jax.numpy.asarray(7, dtype=jax.numpy.int32)}
 
@@ -667,12 +691,26 @@ def test_jax_candidate_commit_interruptions_repair_all_owners(monkeypatch, stage
 
     monkeypatch.setattr(jax_base, "_training_commit_boundary", interrupt)
     with pytest.raises(RuntimeError, match=stage):
-        exp.train_fn(exp)
+        with exp.train_fn.input_session(exp) as inputs:
+            prior = inputs.capture()
+            candidate = inputs.traversal.next_epoch().reserve()
+            with inputs.update(candidate, repairable=True):
+                exp.train_fn._commit_update(
+                    exp, {"weight": exp.model.parameters["weight"] + 1}, exp.model.mutable_state,
+                    exp.model.rng, {"count": jax.numpy.asarray(1, dtype=jax.numpy.int32)},
+                    examples=2, loss=1., complete_epoch=False, input_candidate=candidate,
+                )
 
     np.testing.assert_array_equal(exp.model.parameters["weight"], before)
     np.testing.assert_array_equal(exp.train_fn.continuation["marker"], np.asarray(7, dtype=np.int32))
     assert exp.train_fn.optimizer.state is not None
     assert (exp.state.step, exp.state.examples_seen, exp.state.next_batch) == (0, 0, 0)
+    assert exp.state.input_sequence == 0 and exp.state.dataset_state is prior
+    assert inputs.traversal.position == prior.position
+    assert exp.state._input_provider is None
+    assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
+    with exp.train_fn.input_session(exp) as inputs:
+        assert inputs.capture() is prior
 
 
 def test_jax_training_apply_contract_fails_before_owner_installation():

@@ -75,6 +75,53 @@ class FactoryTopology(Object):
         self.mirror = mirror
 
 
+def test_tf_dataset_continuation_zero_epoch_is_source_inert(monkeypatch):
+    """Explicit TF zero work never prepares input or constructs loss/optimizer."""
+    from tests.models.test_dataset_training_integration import _dataset_continuation_experiment
+    exp = _dataset_continuation_experiment("tf", epochs=0)
+    monkeypatch.setattr(type(exp.train_data), "prepare", lambda _: pytest.fail("zero work prepared input"))
+    monkeypatch.setattr(exp.train_fn, "_make_loss", lambda *a: pytest.fail("zero work built loss"))
+    monkeypatch.setattr(exp.train_fn, "_make_optimizer", lambda *a: pytest.fail("zero work bound optimizer"))
+    assert exp.train_fn(exp) == []
+    assert not exp.state.input_started and exp.state.dataset_state is None
+
+
+def test_tf_dataset_continuation_compiled_batches_reuse_execution(monkeypatch):
+    """Real tf.function batching retains placement, tracing and one final capture."""
+    from tests.models.test_dataset_training_integration import _dataset_continuation_experiment
+    from dryml.data import DatasetTraversal
+    from dryml.models.utils import TrainingPreparation
+    exp = _dataset_continuation_experiment("tf")
+    devices = []
+    original_call = exp.model.obj.call
+    def call(value):
+        devices.append(value.device)
+        return original_call(value)
+    compiled = tf.function(call)
+    monkeypatch.setattr(exp.model.obj, "call", compiled)
+    captures, plans, evidence = [], [], []
+    original_capture = DatasetTraversal.capture_state
+    monkeypatch.setattr(DatasetTraversal, "capture_state", lambda owner:
+                        captures.append(owner.position.sequence) or original_capture(owner))
+    original_plan = TrainingPreparation.from_dataset
+    monkeypatch.setattr(TrainingPreparation, "from_dataset", classmethod(
+        lambda cls, *a, **k: plans.append(True) or original_plan(*a, **k)))
+    original_evidence = Repo._state_graph_evidence
+    monkeypatch.setattr(Repo, "_state_graph_evidence", lambda *a, **k:
+                        evidence.append(True) or original_evidence(*a, **k))
+    placement = []
+    original_prepare = TrainingPreparation.prepare
+    def prepare(owner, x, y):
+        values = original_prepare(owner, x, y)
+        placement.extend(value.device for value in values)
+        return values
+    monkeypatch.setattr(TrainingPreparation, "prepare", prepare)
+    exp.train_fn(exp, callbacks=(lambda: captures == [] or pytest.fail("logging callback captured input"),))
+    assert len(plans) == len(evidence) == compiled.experimental_get_tracing_count() == 1
+    assert captures == [4]
+    assert len(placement) == 8 and all("CPU" in device for device in placement)
+
+
 def test_tf_basic_training_updates_experiment_state():
     from dryml.models.tf import BasicTraining, Loss, Model, Optimizer
 
@@ -825,6 +872,7 @@ def test_tf_interrupt_at_step_32_resumes_exact_remaining_epoch(tmp_path):
     def interrupt_at_32():
         seen.append((interrupted.state.step, interrupted.state.epoch, interrupted.state.next_batch))
         if interrupted.state.step == 32:
+            interrupted.state._input_provider.capture()
             raise RuntimeError("pause at retained step 32")
 
     with pytest.raises(RuntimeError, match="step 32"):
@@ -1103,6 +1151,7 @@ def test_tf_final_callback_resume_runs_one_validation_postlude_without_an_update
     def interrupt_final_callback():
         if exp.state.step == 2:
             assert (exp.state.epoch, exp.state.next_batch) == (1, 0)
+            exp.state._input_provider.capture()
             raise RuntimeError("final callback")
 
     with pytest.raises(RuntimeError, match="final callback"):

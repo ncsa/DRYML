@@ -4,7 +4,7 @@ import os
 import shutil
 import weakref
 import math
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import replace
 
@@ -1531,7 +1531,26 @@ class Training(BasicTraining):
             acquisition; captured output facts drive validation before the tape
             body. Graph traversal uses a temporary explicit Repo only for
             trainable-variable collection.
+
+        Qualified persisted optimizers use continuous borrowed epoch views and
+        accepted input capture at saves/finalization. Stale exact retries require
+        durable reload; transient optimizers retain positional recovery. Zero work
+        performs metadata admission without preparing data or binding native state.
         """
+        callbacks = validate_training_callbacks(callbacks)
+        require_supervised_dataset(exp.train_data, batched=True)
+        target = exp.state.target_epoch
+        positive = (target if target is not None else exp.state.epoch + self.epochs) > exp.state.epoch
+        positive = positive or exp.state.pending_epoch_postlude is not None
+        with self.input_session(exp, positive=positive,
+                                exact=isinstance(self._optimizer(exp), Optimizer)) as inputs:
+            if not positive:
+                exp.state.finish_invocation(exp.state.begin_invocation(self.epochs))
+                return []
+            return self._train_with_input(exp, inputs, callbacks=callbacks)
+
+    def _train_with_input(self, exp, inputs, *, callbacks):
+        """Execute explicit native work after input and state-owner admission."""
         import tensorflow as tf
 
         callbacks = validate_training_callbacks(callbacks)
@@ -1539,9 +1558,8 @@ class Training(BasicTraining):
         _require_mean_keras_loss(loss_fn)
         self._begin_training_preparation_generation()
         train_data = self._prepare_data(exp.train_data)
-        require_bounded_safe_points(train_data, callbacks)
         train_xy = self._xy_data(train_data)
-        prepared_train = train_xy.prepare()
+        prepared_train = inputs.prepared
         self.training_preparation = TrainingPreparation.from_dataset(
             self, prepared_train, "tf"
         )
@@ -1577,7 +1595,7 @@ class Training(BasicTraining):
             self._finish_pending_epoch(
                 tf, exp, prepared_val, loss_fn, metrics, progress, target_epoch
             )
-            for epoch in range(start_epoch, target_epoch):
+            for epoch, view in inputs.epoch_views(stop=target_epoch):
                 for metric in metrics:
                     _reset_metric(metric)
                 epoch_loss = 0.0
@@ -1585,62 +1603,62 @@ class Training(BasicTraining):
 
                 from dryml.tf.training_data import iter_training_batches
 
-                cursor = iter_training_batches(prepared_train, self.training_preparation)
-                resume_batch = exp.state.next_batch if epoch == start_epoch else 0
-                with cursor:
-                    if resume_batch:
-                        cursor.skip(resume_batch)
-                    for x, y in cursor:
+                cursor = iter_training_batches(view, self.training_preparation) if view is not None else None
+                resume_batch = view.position if view is not None else 1
+                with cursor if cursor is not None else nullcontext():
+                    while cursor is not None:
+                        try:
+                            input_candidate = cursor.reserve()
+                        except StopIteration:
+                            inputs.sync_boundary()
+                            break
+                        x, y = input_candidate.value
                         examples = prepared_train.examples_in((x, y))
 
-                        with tf.GradientTape() as tape:
-                            y_pred = exp.model(x)
-                            loss_value = tf.reduce_mean(loss_fn(y, y_pred))
+                        with inputs.update(input_candidate):
+                            with tf.GradientTape() as tape:
+                                y_pred = exp.model(x)
+                                loss_value = tf.reduce_mean(loss_fn(y, y_pred))
 
-                        if trainable_variables is None:
-                            with manage_repo() as repo:
-                                trainable_variables = _collect_trainable_parameters(exp.model, repo=repo)
-                            if not trainable_variables:
-                                raise ValueError("TensorFlow model graph exposes no trainable parameters.")
-                            if hasattr(optimizer, "build"):
-                                optimizer.build(trainable_variables)
-                            if hasattr(optimizer_wrapper, "restore_pending"):
-                                optimizer_wrapper.restore_pending()
+                            if trainable_variables is None:
+                                with manage_repo() as repo:
+                                    trainable_variables = _collect_trainable_parameters(exp.model, repo=repo)
+                                if not trainable_variables:
+                                    raise ValueError("TensorFlow model graph exposes no trainable parameters.")
+                                if hasattr(optimizer, "build"):
+                                    optimizer.build(trainable_variables)
+                                if hasattr(optimizer_wrapper, "restore_pending"):
+                                    optimizer_wrapper.restore_pending()
 
-                        grads = tape.gradient(loss_value, trainable_variables)
-                        grad_pairs = [
-                            (grad, var)
-                            for grad, var in zip(grads, trainable_variables)
-                            if grad is not None
-                        ]
-                        optimizer.apply_gradients(grad_pairs)
+                            grads = tape.gradient(loss_value, trainable_variables)
+                            grad_pairs = [
+                                (grad, var)
+                                for grad, var in zip(grads, trainable_variables)
+                                if grad is not None
+                            ]
+                            optimizer.apply_gradients(grad_pairs)
 
-                        for metric in metrics:
-                            _update_metric(metric, y, y_pred)
+                            for metric in metrics:
+                                _update_metric(metric, y, y_pred)
 
-                        loss_float = float(metric_value(loss_value))
-                        record_train_update(
-                            exp,
-                            x,
-                            loss_float,
-                            batched=True,
-                            examples=examples,
-                            complete_epoch=(
-                                steps_per_epoch is not None
-                                and exp.state.next_batch + 1 == steps_per_epoch
-                            ),
-                            callbacks=callbacks,
-                        )
+                            loss_float = float(metric_value(loss_value))
+                            step_metrics = {"loss": loss_float}
+                            step_metrics.update(_metric_results(metrics))
+                            record_train_update(
+                                exp, x, loss_float, batched=True, examples=examples,
+                                complete_epoch=input_candidate.section_complete,
+                                input_candidate=input_candidate,
+                            )
+                        for callback in callbacks:
+                            callback()
                         losses.append(loss_float)
                         epoch_loss += loss_float
                         epoch_steps += 1
                         steps += 1
 
-                        step_metrics = {"loss": loss_float}
-                        step_metrics.update(_metric_results(metrics))
                         progress.update(1, step_metrics)
 
-                if epoch_steps == 0 and resume_batch == 0:
+                if epoch_steps == 0 and resume_batch == 0 and exp.state.pending_epoch_postlude is None:
                     continue
 
                 # A resumed suffix cannot truthfully represent a full epoch mean.
@@ -1730,6 +1748,7 @@ class Training(BasicTraining):
             exp.state.finish_epoch(postlude_pending=True)
         if exp.state.pending_epoch_postlude == epoch:
             if exp.state.pending_epoch_postlude_phase == "start":
+                epoch_metrics.update(exp.state.pending_epoch_metrics or {})
                 if val_data is not None:
                     val_metrics = self._evaluate(tf, exp.model, val_data, loss_fn, metrics)
                     epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
