@@ -155,12 +155,78 @@ batches. A restored unfinished invocation completes its retained target rather
 than adding the configured epoch count again; a later call after completion is a
 fresh invocation.
 
-Its closed version-2 persistence state rejects incompatible versions and missing
+Its closed version-3 persistence state rejects incompatible versions and missing
 or unknown fields, and validates finite loss
 facts, exact nonnegative counters, lifecycle enums, pending-postlude coherence,
 and pending-observation type before installing restored progress. Historical
 three-slot `(epoch, step, phase)` and attempt-based payloads are rejected intact;
 there is no automatic conversion or default-filling reader.
+
+### Invocation-owned input recovery
+
+`TrainFunction.input_session(exp, *, positive=True, exact=True, repo=None)` creates
+an invocation-local context manager. The reusable trainer owns no cursor. Enter
+this boundary before loss factories, optimizer binding, or native preparation.
+For fresh zero work, pass `positive=False`: no Dataset preparation/opening or
+continuation capture occurs. Data-free custom training also needs no dummy input
+or record. `TrainState.input_started` is an exact bool independent of optimizer
+step/epoch accounting; later zero-work calls preserve an already started lane.
+
+A positive session opens the existing Dataset with explicit acceptance, or
+restores its last captured `DatasetState` after validating target/source evidence.
+It calls `traversal.enable_replay_recovery_if_needed()` without source-type
+dispatch. Indexed and declared-direct-only inputs do not enable replay; mixed
+inputs select recovery per occurrence. Fresh statically unqualified preparation
+retains positional compatibility. A backend with transient native owners or
+unsupported execution options must select `exact=False` during fresh admission.
+An established exact lane never falls back after restore/acquisition failure.
+The common helper is available to training procedures; migration of native loops
+to it is a separate integration step. Existing procedures that do not use it
+retain their prior positional contract.
+
+Inside the session, reserve from an epoch view and perform each native update
+inside `session.update(candidate)`. Call `record_train_update(...,
+input_candidate=candidate)` before leaving that guard. This endpoint records
+accounting and accepts the input token, normalizes known final boundaries, and
+releases Core's reservation before invoking safe-point callbacks. Candidate
+validation and owner checks precede mutation. Core owner evidence is prepared
+once and read-through freshness/exclusion checks remain active per update; no
+per-update graph reconstruction, SQL, full continuation construction, model
+rollback copy, or extra native completion barrier is introduced.
+
+Unknown EOF/empty-section discovery is installed with `session.sync_boundary()`
+without inventing an optimizer step. Complete the retained epoch postlude before
+`session.handoff()` permits the next physical pass. Repeated synchronization does
+not recount a boundary. Native mutation/accounting/frontier interruptions retire
+all affected owners through Core's existing invalidation/cache eviction boundary;
+recover through fresh durable loading. A backend that positively identifies a
+delayed native mutation failure calls `session.invalidate_native()` even after
+local acceptance. Capture/value failures and callback failures alone do not
+invalidate native owners or fabricate rollback.
+
+`TrainState.dataset_state` is the **last captured record**, separate from cheap
+live input sequence, epoch/offset, completion flags, and replay policy. It may be
+stale while a session is active. Logging-only callbacks do not capture. An actual
+Experiment save requests a matching record through a transient provider; normal
+positive exact completion captures before closure only when the record is absent
+or stale, including initial/no-new-update and boundary-only completion. All exits
+retire the provider. Same-live retry/save after exceptional exact closure requires
+a current matching record **and valid native owners**; otherwise it rejects before
+preparation and requires durable reload. Accepted callback work remains accepted.
+Conflicting-thread saves fail explicitly; they never pull the source on another
+thread or wait for its owner while holding save locks.
+
+Experiment's constructor and graph topology are unchanged. Its existing payload
+hooks write metadata-only TrainState v3 plus one optional `dataset-state/`
+inventory, bound by manifest digest and accepted sequence. Standalone TrainState
+pickle values embed at most one detached record. Providers, locks, live tokens,
+cursors and invokers are excluded from both encodings. `TrainState.validate()`
+validates live accounting independently of persistence and permits stale captured
+references without encoding/copying them; JAX candidate validation uses this path.
+Missing, corrupt, incompatible or mismatched pairs reject before TrainState
+assignment. Version-2 TrainState/Experiment payloads are rejected intact, without
+migration. Core's enclosing inventory and managed checkpoint association remain
+the sole publication authority; a failed capture/save preserves prior checkpoints.
 
 TensorFlow `fit`, explicit TensorFlow loops, and Torch loops validate all DRYML
 callbacks before training work and invoke them only after this retained state is

@@ -587,3 +587,67 @@ def test_artifact_preflight_rejects_invalid_contracts_before_trainer_mutation(
     assert model.value == 0
     assert exp.state.phase is None
     assert exp.train.status(state_repo=repo).checkpoint is None
+
+
+@pytest.mark.parametrize("damage", [
+    "v2", "state-v2", "field", "presence", "missing", "binding", "sequence",
+    "position", "record-version", "truncated",
+])
+def test_v3_experiment_pair_rejects_damage_before_assignment(tmp_path, damage):
+    """One closed progress/bundle pair validates before replacing the live TrainState."""
+    from dryml.core.utils.general import pickle_load, pickle_save
+    from .test_training_transaction import experiment
+    _, exp = experiment()
+    exp.train_fn(exp)
+    payload_dir = tmp_path / "payload"
+    payload_dir.mkdir()
+    exp.save_state_to_dir_imp(payload_dir, codec="pkl")
+    file = payload_dir / "experiment_state.pkl"
+    payload = pickle_load(file)
+    assert payload["version"] == payload["state"]["version"] == 3
+    assert "dataset_state" not in payload["state"]["fields"]
+    assert "_input_provider" not in payload["state"]["fields"]
+    if damage == "v2":
+        payload = {"version": 2, "state": {}}
+    elif damage == "state-v2":
+        payload["state"]["version"] = 2
+    elif damage == "field":
+        payload["state"]["fields"]["dataset_state"] = {"forbidden_embedded_buffers": b"duplicate"}
+    elif damage == "presence":
+        payload["continuation"] = None
+    elif damage == "missing":
+        (payload_dir / "dataset-state").rename(tmp_path / "moved")
+    elif damage == "binding":
+        payload["continuation"]["path"] = "another-record"
+    elif damage == "sequence":
+        payload["continuation"]["sequence"] = True
+    elif damage == "position":
+        payload["state"]["fields"]["input_sequence"] += 1
+        payload["continuation"]["sequence"] += 1
+    elif damage == "record-version":
+        import json
+        manifest = payload_dir / "dataset-state" / "manifest.json"
+        value = json.loads(manifest.read_text())
+        value["version"] = 2
+        manifest.write_text(json.dumps(value))
+        import hashlib
+        payload["continuation"]["manifest_sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    else:
+        (payload_dir / "dataset-state" / "record.json").write_bytes(b"truncated")
+    pickle_save(payload, file)
+    before = exp.state
+    raw = file.read_bytes()
+    with pytest.raises((ValueError, FileNotFoundError)):
+        exp.restore_state_from_dir_imp(payload_dir, codec="pkl")
+    assert exp.state is before and file.read_bytes() == raw
+
+
+def test_v3_experiment_rejects_unexpected_bundle_on_input_unstarted_state(tmp_path):
+    """An absent binding cannot silently hide an extra continuation inventory."""
+    exp = Experiment(CounterModel(), TerminalOnly())
+    exp.save_state_to_dir_imp(tmp_path, codec="pkl")
+    (tmp_path / "dataset-state").mkdir()
+    before = exp.state
+    with pytest.raises(ValueError, match="presence"):
+        exp.restore_state_from_dir_imp(tmp_path, codec="pkl")
+    assert exp.state is before

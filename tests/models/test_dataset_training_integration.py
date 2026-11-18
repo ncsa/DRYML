@@ -359,6 +359,19 @@ def test_jax_trainer_consumes_authored_dataset_batches():
     assert exp.train_fn.training_preparation.consumer_specs[0].backend.value == "jax"
 
 
+def test_jax_candidate_accounting_does_not_use_train_state_persistence(monkeypatch):
+    """The U5 v3 codec cannot introduce per-update continuation serialization."""
+    pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    from dryml.models import TrainState
+    exp = _jax_experiment()
+    monkeypatch.setattr(TrainState, "__getstate__", lambda _: pytest.fail("candidate persistence encoding"))
+    with default_repo(Repo()):
+        exp.train_fn(exp)
+    assert (exp.state.step, exp.state.examples_seen, exp.state.epoch) == (3, 5, 1)
+    assert exp.state.input_started is False and exp.state.dataset_state is None
+
+
 @pytest.mark.parametrize("workload", ("W1", "W3"))
 def test_jax_qualification_model_runs_on_authored_dataset_batches(workload):
     """Qualification JAX factories execute authored batches and supported labels."""

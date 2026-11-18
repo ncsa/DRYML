@@ -7,11 +7,14 @@ return InvocationResult; completed replay performs no consumer work.
 from __future__ import annotations
 
 import inspect
+import hashlib
 import math
 import os
 import sys
 import time
 import warnings
+from pathlib import Path
+from dataclasses import fields
 from asyncio import CancelledError as AsyncCancelledError
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -719,15 +722,81 @@ class Experiment(Serializable):
         return None
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
-        """Write version-2 run-aware TrainState; IO/validation failures propagate."""
-        pickle_save({"version": 2, "state": self.state}, os.path.join(dest_dir, "experiment_state.pkl"))
+        """Write closed v3 progress metadata and one optional continuation directory.
+
+        Args:
+            dest_dir: Core-owned private payload directory.
+            codec: Core-selected codec (the progress envelope uses framed pickle).
+        Raises:
+            ValueError: Exact progress has no current matching detached record.
+            TraversalError: Active input capture fails or is requested off-thread.
+            OSError: Payload IO fails. Core retains publication authority.
+        Side Effects:
+            Requests capture only on an actual save. No provider/cursor is encoded;
+            continuation buffers occur only in dataset-state/, bound by manifest
+            digest and accepted sequence. Failure preserves accepted live progress
+            and prior checkpoints, without claiming successful publication.
+        """
+        provider = self.state._input_provider
+        if provider is not None:
+            provider.capture()
+        metadata = self.state._bundle_state()
+        record = self.state.dataset_state
+        continuation = None
+        if record is not None:
+            if provider is None:
+                record.validate(self.train_data)
+            path = record.save(Path(dest_dir) / "dataset-state")
+            continuation = {
+                "path": "dataset-state",
+                "manifest_sha256": hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest(),
+                "sequence": self.state.input_sequence,
+            }
+        pickle_save({"version": 3, "state": metadata, "continuation": continuation},
+                    os.path.join(dest_dir, "experiment_state.pkl"))
 
     def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
-        """Validate run-aware state before installation; reject old records intact."""
+        """Validate the complete v3 progress/continuation pair before assignment.
+
+        Args:
+            src_dir: Core-validated complete payload directory.
+            codec: Core-selected payload codec.
+        Raises:
+            TypeError/ValueError: Closed schema, presence, binding, sequence or
+                record integrity is inconsistent; v2 is rejected without migration.
+            OSError: Required payload is missing/unreadable.
+        Side Effects:
+            Reads one detached continuation, never opens a producer or substitutes
+            a Dataset. Assigns TrainState only after the pair validates; selected
+            TrainFunction owns target validation and resumption later.
+        """
         payload = pickle_load(os.path.join(src_dir, "experiment_state.pkl"))
-        if type(payload) is not dict or set(payload) != {"version", "state"} or type(payload["version"]) is not int or payload["version"] != 2 or type(payload["state"]) is not TrainState:
+        if (type(payload) is not dict or set(payload) != {"version", "state", "continuation"}
+                or type(payload["version"]) is not int or payload["version"] != 3):
             raise ValueError("Unsupported Experiment state version.")
-        self.state = payload["state"]
+        metadata = payload["state"]
+        names = {item.name for item in fields(TrainState)} - {"dataset_state", "_input_provider"}
+        if (type(metadata) is not dict or set(metadata) != {"version", "fields"}
+                or type(metadata["version"]) is not int or metadata["version"] != 3
+                or type(metadata["fields"]) is not dict or set(metadata["fields"]) != names):
+            raise ValueError("Invalid Experiment TrainState metadata/version.")
+        candidate = TrainState(**metadata["fields"])
+        candidate.validate()
+        binding = payload["continuation"]
+        path = Path(src_dir) / "dataset-state"
+        required = candidate.input_started and candidate.input_recovery == "exact"
+        if (binding is not None) != required or path.exists() != required:
+            raise ValueError("Experiment continuation presence disagrees with input progress.")
+        if required:
+            if (type(binding) is not dict or set(binding) != {"path", "manifest_sha256", "sequence"}
+                    or binding["path"] != "dataset-state" or type(binding["manifest_sha256"]) is not str
+                    or type(binding["sequence"]) is not int or binding["sequence"] != candidate.input_sequence
+                    or hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest() != binding["manifest_sha256"]):
+                raise ValueError("Invalid Experiment continuation binding.")
+            from dryml.data import DatasetState
+            candidate.dataset_state = DatasetState.load(path)
+        candidate._require_current_record()
+        self.state = candidate
 
 
 def _evaluate_experiment_checkpoint(obj, context):

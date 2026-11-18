@@ -145,3 +145,40 @@ def test_run_aware_train_state_rejects_incompatible_records_atomically(damage):
     with pytest.raises((TypeError, ValueError)):
         state.__setstate__(payload)
     assert state.__getstate__() == before
+
+
+@pytest.mark.parametrize("name,value,error", [
+    ("input_started", 1, TypeError),
+    ("input_section_complete", 0, TypeError),
+    ("input_root_complete", None, TypeError),
+    ("input_sequence", True, TypeError),
+    ("input_sequence", -1, ValueError),
+    ("input_recovery", "fallback", ValueError),
+    ("input_replay_policy", "automatic", ValueError),
+    ("dataset_state", {}, ValueError),
+])
+def test_v3_input_fields_validate_exact_types_and_restore_atomically(name, value, error):
+    """Malformed input metadata never partially installs retained progress."""
+    state = TrainState(step=9)
+    before = state.__getstate__()
+    payload = TrainState().__getstate__()
+    assert payload["version"] == 3
+    payload["fields"][name] = value
+    with pytest.raises(error):
+        state.__setstate__(payload)
+    assert state.__getstate__() == before
+
+
+def test_data_free_accounting_can_be_saved_without_starting_input():
+    """Input-unstarted is independent of ordinary custom training progress."""
+    import pickle
+    state = TrainState()
+    state.record_update(examples=4, loss=2.)
+    state.finish_epoch()
+    state._input_provider = lambda: pytest.fail("provider serialized")
+    restored = pickle.loads(pickle.dumps(state))
+    assert restored.__getstate__()["version"] == 3
+    assert (restored.step, restored.epoch, restored.examples_seen) == (1, 1, 4)
+    assert restored.input_started is False
+    assert restored.input_sequence == 0 and restored.dataset_state is None
+    assert restored._input_provider is None

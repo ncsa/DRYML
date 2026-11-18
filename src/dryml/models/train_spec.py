@@ -7,14 +7,17 @@ records atomically. Accounting helpers never publish state or run training.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from math import isfinite
-from typing import ClassVar
+from typing import Any, ClassVar, Literal, TYPE_CHECKING
 
 from dryml.core import Node
 from dryml.core.node import require_saved
 
 from .measurements import TrainingObservation
+
+if TYPE_CHECKING:
+    from dryml.data import DatasetState, TraversalPosition
 
 
 @dataclass(slots=True)
@@ -205,6 +208,13 @@ class TrainState:
     to ExperimentData. Its accompanying time, predecessor, stable run, and terminal
     fields are captured before the managed checkpoint, so retry reuses one history
     occurrence rather than assigning fresh facts after publication.
+
+    ``input_started`` is an exact bool distinguishing source-inert/data-free
+    accounting from a Dataset lifecycle. ``dataset_state`` is the last detached
+    capture, which may lag live progress. Exact saving requires its position,
+    boundary facts and replay policy to match the current input frontier. A live
+    invocation provider is transient and never encoded. Value schema v3 embeds
+    at most one record; Experiment uses a separate metadata-only bundle encoding.
     """
 
     initial: ClassVar[str | None] = None
@@ -232,6 +242,53 @@ class TrainState:
     pending_observation_prev_row_key: str | None = None
     pending_observation_run_id: str | None = None
     pending_observation_terminal: bool = False
+    input_started: bool = False
+    input_recovery: Literal["exact", "positional"] = "positional"
+    input_sequence: int = 0
+    input_section_complete: bool = False
+    input_root_complete: bool = False
+    input_replay_policy: Literal["disabled", "enabled", "if_needed"] = "disabled"
+    dataset_state: DatasetState[Any] | None = None
+    _input_provider: object | None = field(default=None, init=False, repr=False, compare=False)
+
+    @property
+    def input_position(self) -> TraversalPosition:
+        """Return cheap accepted traversal facts without capture or source IO."""
+        from dryml.data import TraversalPosition
+        return TraversalPosition(self.epoch, self.next_batch, self.input_sequence,
+                                 self.input_section_complete, self.input_root_complete)
+
+    def _runtime_fields(self) -> dict[str, object]:
+        """Borrow semantic fields, preserving immutable record references."""
+        return {item.name: getattr(self, item.name) for item in fields(self)
+                if item.name != "_input_provider"}
+
+    def validate(self) -> None:
+        """Validate in-memory accounting without encoding, capture, or buffer copies.
+
+        Raises TypeError/ValueError for invalid fields. A stale detached record is
+        valid live state; persistence separately requires a current matching cut.
+        """
+        self._validate_restored_state(self._runtime_fields())
+
+    def _require_current_record(self) -> None:
+        from dryml.data import DatasetState
+        self.validate()
+        if not self.input_started or self.input_recovery == "positional":
+            if self.dataset_state is not None:
+                raise ValueError("Absent/positional input cannot carry a continuation record.")
+            return
+        record = self.dataset_state
+        if (type(record) is not DatasetState or record.position != self.input_position
+                or record.replay_recovery_policy != self.input_replay_policy):
+            raise ValueError("Exact input requires a current matching record; durable reload is required.")
+
+    def _bundle_state(self) -> dict[str, object]:
+        """Return validated metadata only; Experiment owns the single record bundle."""
+        self._require_current_record()
+        values = self._runtime_fields()
+        del values["dataset_state"]
+        return {"version": 3, "fields": values}
 
     @property
     def is_initial(self) -> bool:
@@ -277,25 +334,39 @@ class TrainState:
                 and self.pending_observation_prev_row_key == other.pending_observation_prev_row_key
                 and self.pending_observation_run_id == other.pending_observation_run_id
                 and self.pending_observation_terminal == other.pending_observation_terminal
+                and self.input_started == other.input_started
+                and self.input_recovery == other.input_recovery
+                and self.input_sequence == other.input_sequence
+                and self.input_section_complete == other.input_section_complete
+                and self.input_root_complete == other.input_root_complete
+                and self.input_replay_policy == other.input_replay_policy
+                and self.dataset_state == other.dataset_state
             )
         if isinstance(other, str) or other is None:
             return self.phase == other
         return NotImplemented
 
     def __getstate__(self) -> dict[str, object]:
-        """Encode the closed version-2 run-aware field mapping without IO.
+        """Encode closed v3 semantic fields and at most one detached record.
 
         Returns:
             A field-name mapping accepted by :meth:`__setstate__`.
 
         Side Effects:
-            None. Incompatible older records are not converted.
+            No IO or capture. Stale exact records raise ValueError; incompatible
+            older records are not converted. Providers never enter this value.
         """
 
-        return {"version": 2, "fields": {item.name: getattr(self, item.name) for item in fields(self)}}
+        self._require_current_record()
+        values = self._runtime_fields()
+        record = self.dataset_state
+        values["dataset_state"] = (None if record is None else
+                                   {"version": 1, "metadata": record._metadata,
+                                    "payloads": record._payloads})
+        return {"version": 3, "fields": values}
 
     def __setstate__(self, state: object) -> None:
-        """Restore a complete version-2 TrainState atomically.
+        """Restore a complete version-3 TrainState value atomically.
 
         Args:
             state: Closed versioned mapping produced by ``__getstate__``.
@@ -309,17 +380,28 @@ class TrainState:
             without changing this receiver or the persisted source.
         """
 
-        if type(state) is not dict or set(state) != {"version", "fields"} or type(state["version"]) is not int or state["version"] != 2:
+        if type(state) is not dict or set(state) != {"version", "fields"} or type(state["version"]) is not int or state["version"] != 3:
             raise ValueError("Unsupported TrainState version.")
         state = state["fields"]
-        field_map = {item.name: item for item in fields(self)}
+        field_map = {item.name: item for item in fields(self) if item.name != "_input_provider"}
         if type(state) is not dict or set(state) != set(field_map):
             raise ValueError("TrainState requires exactly the current fields.")
         values = dict(state)
+        record = values["dataset_state"]
+        if record is not None:
+            from dryml.data import DatasetState
+            if (type(record) is not dict or set(record) != {"version", "metadata", "payloads"}
+                    or type(record["version"]) is not int or record["version"] != 1
+                    or type(record["metadata"]) is not bytes or type(record["payloads"]) is not tuple
+                    or any(type(raw) is not bytes for raw in record["payloads"])):
+                raise ValueError("Invalid TrainState continuation value.")
+            values["dataset_state"] = DatasetState._from_bytes(record["metadata"], record["payloads"])
         self._validate_restored_state(values)
-        for item in fields(self):
-            value = values[item.name]
-            object.__setattr__(self, item.name, value)
+        candidate = TrainState(**values)
+        candidate._require_current_record()
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "_input_provider", None)
 
     @staticmethod
     def _validate_restored_state(values: Mapping[str, object]) -> None:
@@ -358,6 +440,23 @@ class TrainState:
         counter("safe_point_sequence")
         target_epoch = counter("target_epoch", nullable=True)
         postlude = counter("pending_epoch_postlude", nullable=True)
+        counter("input_sequence")
+        for name in ("input_started", "input_section_complete", "input_root_complete"):
+            if type(values[name]) is not bool:
+                raise TypeError(f"TrainState {name} must be an exact bool.")
+        if type(values["input_recovery"]) is not str or values["input_recovery"] not in {"exact", "positional"}:
+            raise ValueError("Invalid input recovery lane.")
+        if type(values["input_replay_policy"]) is not str or values["input_replay_policy"] not in {"disabled", "enabled", "if_needed"}:
+            raise ValueError("Invalid input replay policy.")
+        from dryml.data import DatasetState
+        if values["dataset_state"] is not None and type(values["dataset_state"]) is not DatasetState:
+            raise TypeError("TrainState dataset_state must be a detached DatasetState or None.")
+        if not values["input_started"] and (values["input_sequence"] or values["input_section_complete"]
+                or values["input_root_complete"] or values["dataset_state"] is not None
+                or values["input_replay_policy"] != "disabled"):
+            raise ValueError("Unstarted input requires an absent continuation and zero input frontier.")
+        if values["input_started"] and values["input_recovery"] == "exact" and postlude is not None and not values["input_section_complete"]:
+            raise ValueError("Pending exact input postlude requires section completion.")
         numerator = values["loss_numerator"]
         if type(numerator) not in (int, float) or not isfinite(numerator):
             raise ValueError("TrainState loss_numerator must be finite.")

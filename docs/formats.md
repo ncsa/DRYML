@@ -634,9 +634,37 @@ reader requirement.
 Completed `Value` Artifacts retain their result through the
 `dryml.artifacts.value` v1 envelope. A `TrainState` is ordinary Object state, not
 a separate Store format: its closed pickle state is
-`{"version": 2, "fields": <complete-current-field-map>}`. Missing/unknown fields,
+`{"version": 3, "fields": <complete-current-field-map>}`. Missing/unknown fields,
 prior named/three-slot states, and inconsistent progress are rejected before
-installation. Experiment state wraps this as `{"version": 2, "state": TrainState}`.
+installation. The semantic fields include exact-bool `input_started`, recovery
+lane (`exact` or `positional`), input-frontier sequence, section/root completion
+flags and replay policy. Input-unstarted state has zero input sequence, no input
+boundary, and no continuation, independently of data-free training accounting.
+Started positional state has no continuation. Started exact persistence requires
+the captured record's sequence, epoch/offset, completion flags, and replay policy
+to match the accepted TrainState cut; pending postludes must be compatible.
+
+The standalone TrainState **value** encoding has one optional `dataset_state`
+field, either `None` or the closed mapping `{"version": 1, "metadata": bytes,
+"payloads": tuple[bytes, ...]}`. Decode validates the detached DatasetState v1
+record and the pair before installing fields. In-memory validation/candidate
+copying borrows immutable record references and never uses this persistence path.
+The transient input provider is excluded from the field map.
+
+Experiment's `experiment_state.pkl` is instead the closed envelope
+`{"version": 3, "state": {"version": 3, "fields": <metadata-only-field-map>},
+"continuation": <binding-or-None>}`. The metadata map excludes `dataset_state`
+and the provider. A present binding has exactly `path="dataset-state"`,
+`manifest_sha256=<SHA-256 of dataset-state/manifest.json>`, and
+`sequence=<accepted-input-sequence>`. That fixed directory contains the single
+DatasetState inventory; the pickle never duplicates its buffers. An absent
+binding requires an absent directory. Restore rejects extra fields, illegal
+presence, bad versions, corrupt/truncated inventory, stale digest or mismatched
+sequence/position before assigning the restored TrainState. The existing outer
+Core inventory protects the whole payload, and managed checkpoint association
+remains unchanged. Neither encoding contains live cursors, tokens, guards, locks,
+queues or selected invokers. Version-2 Experiment and TrainState are rejected
+intact without migration; the constructor/Node/Store identity formats do not change.
 Pending observations carry `pending_observation_run_id`, with occurrence keys
 `v2:<run_id>:<sequence>`; resumed invocations reuse those facts. Experiment
 artifact mappings persist individual Template-role Definitions as quotation data
