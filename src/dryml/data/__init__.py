@@ -2,6 +2,7 @@ from dryml.data.dataset import Dataset, DatasetCursor, DatasetExhaustedError, Ma
 from dryml.data.native import NativeTrainingCursor, PreparedDataset
 from dryml.data.source import ArrayDataset, GeneratorDataset, NpyFileDataset, TFDSAdapter, TorchDatasetAdapter
 from dryml.data.combine import Chain, Zip
+from dryml.data.accumulate import Accumulate
 from dryml.data.methods import ArgMax, Cast, Flatten, Pipe, Project, Scale, Select
 from dryml.data.padding import Padding
 from dryml.data.reduction_methods import (
@@ -64,6 +65,7 @@ __all__ = [
     "TFDSAdapter",
     "TorchDatasetAdapter",
     "Map",
+    "Accumulate",
     "StreamDataset",
     "Pipe",
     "Project",

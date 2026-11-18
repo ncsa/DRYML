@@ -79,6 +79,24 @@ def test_accumulator_validates_fixed_carry_independently_of_short_dynamic_batche
         )
 
 
+def test_observation_first_invoker_owns_no_carry_between_independent_calls():
+    """Streaming callers own initialization and carry; the Method only transitions."""
+    class Difference(Accumulator):
+        @traits(backend="numpy")
+        def numpy(self, observation, state):
+            return observation - state
+
+        def infer_output_spec(self, observation_spec, state_spec):
+            return state_spec
+
+    spec = TensorSpec("int64", shape=(), backend="numpy")
+    method = Difference()
+    selected = method.find_implementation(spec, spec, output_spec=spec).prepared_invoker()
+    assert selected(np.int64(7), np.int64(2)) == 5
+    assert selected(np.int64(7), np.int64(10)) == -3
+    assert selected(np.int64(7), np.int64(2)) == 5
+
+
 @pytest.mark.parametrize("structure", ("list", "tuple", "mapping"))
 def test_accumulator_group_preserves_declared_state_structure_and_child_selection(structure):
     """Selected groups retain one child carrier per declared state branch."""

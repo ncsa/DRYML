@@ -706,16 +706,91 @@ recovery Fold applies its saved processed-yield count to a new closeable cursor;
 it never persists or transfers the prior iterator. Exact skipping detects a source
 that now ends before the saved position. Positional continuation assumes a
 re-iterable source but does not claim that a stochastic suffix equals the suffix
-from the interrupted traversal. Trusted version-2 root-output EOF progress needs
+from the interrupted traversal. Trusted version-3 root-output EOF progress needs
 no new source cursor. Cursor closure is not EOF: failed acquisition/read/Map,
 consumer validation, interruption, and strict replay shortfall cannot authorize
-exhausted Fold progress, even when cleanup also fails. Compatible version-1 active
-progress still replays position; ambiguous version-1 exhausted progress requires
-an explicit fresh managed rerun before carry/role/source effects. Legacy snapshots
-are not rewritten or silently relabeled as trustworthy EOF.
+exhausted Fold progress, even when cleanup also fails. Explicit section boundaries
+and early epoch-view closure likewise cannot authorize finalization: Fold uses
+the flattened physical-pass iterator. Version-1/version-2 progress is incompatible
+and rejected before carry/role/source effects; legacy snapshots are not rewritten
+or silently relabeled as trustworthy EOF.
 CachedDataset applies the same positional meaning to retained cache progress: the
 completed prefix remains exact, while a resumed stochastic source may provide a
 fresh suffix after the saved yield count.
+
+## Streaming Accumulation
+
+`Accumulate(src: Dataset[T], *, initial_state: Method,
+accumulator: Accumulator[T, StateT]) -> Accumulate[StateT]` emits one
+post-transition carry for each observation. The initializer receives the first
+real observation, returning fresh carry; the observation-first Accumulator then
+processes that same observation once. There is no extra initial output and no
+finalizer. Empty input and empty sections invoke neither Method.
+
+```python
+import numpy as np
+from dryml.core.tensor_spec import TensorSpec
+from dryml.data import Accumulate, ArrayDataset
+from dryml.methods import Accumulator, Method, traits
+
+class Zero(Method):
+    @traits(backend="numpy")
+    def numpy(self, observation):
+        return np.int64(0)
+
+    def infer_output_spec(self, observation_spec):
+        return TensorSpec("int64", shape=(), backend="numpy")
+
+class Add(Accumulator):
+    @traits(backend="numpy")
+    def numpy(self, observation, state):
+        return state + observation
+
+    def infer_output_spec(self, observation_spec, state_spec):
+        return state_spec
+
+totals = Accumulate(ArrayDataset(np.array([1, 2, 3], dtype=np.int64)),
+                    initial_state=Zero(), accumulator=Add())
+assert list(totals) == [1, 3, 6]
+```
+
+An initializer returning the first observation instead yields `[2, 4, 7]` with
+this additive transition. Declaration infers carry metadata without executing a
+body. Source-inert preparation selects both roles, infers carry spec `S` from
+the selected initializer, and constrains the transition `(observation, S) -> S`.
+Incompatible roles raise `ImplementationSelectionError` before acquisition;
+invalid role types raise `TypeError`. Unqualified custom operator compositions
+raise `NotImplementedError`. Source, inference, Method and cleanup failures
+propagate through the existing cursor lifetime rules.
+
+Output spec is the carry spec, which can be scalar or structured even for
+batched/vector observations. Yield cardinality equals the source's; example
+cardinality follows the **output** carry's batch metadata. Each prepared plan
+retains initializer/transition invokers; each execution occurrence owns independent
+initialization and carry. Explicit sections preserve carry. Reopening an implicit
+full pass resets it. For source `[1, 2]` initialized from zero:
+
+| Composition | Outputs |
+|---|---|
+| `Repeat(Accumulate(source, ...), 2)` | `[1, 3, 1, 3]` |
+| `Accumulate(Repeat(source, 2), ...)` | `[1, 3, 4, 6]` |
+
+Supported mutable array/container emissions are detached from live carry, so
+later in-place transitions or consumer mutations cannot change earlier results.
+Immutable/native-functional leaves share without a recovery-only clone or host
+conversion. `capture_state()` validates and detaches actual carry and pending
+outputs only on request. DatasetState v1 includes an `accumulate` occurrence tag,
+ordered initializer/transition recipe and selection evidence, and the occurrence's
+carry/initialization flag. Restoration installs that carry and buffered outputs
+without replaying accepted transitions, even when source-prefix replay is needed.
+Separate opens of one record have independent mutable carry. Unsupported dynamic
+carry fails capture with `UnsupportedContinuationError`; live accepted progress
+and previously captured records remain truthful and usable.
+
+Accumulate publishes no terminal Value or managed checkpoint. Use
+[`Fold`](artifacts.md) for a terminal reduction; its v3 positive root-output EOF
+contract remains unchanged. Streaming accumulation is optional for all source
+recovery strategies.
 
 ## Structural Operations
 

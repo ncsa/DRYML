@@ -79,7 +79,7 @@ def _validate(data):
         by_path[path] = row
         if path:
             children_by_path.setdefault(path[:-1], []).append(path[-1])
-        if row["kind"] not in {"source", "map", "batch", "unbatch", "take", "skip", "repeat", "shuffle", "chain", "zip", "epoch"}:
+        if row["kind"] not in {"source", "map", "accumulate", "batch", "unbatch", "take", "skip", "repeat", "shuffle", "chain", "zip", "epoch"}:
             raise ContinuationFormatError("Unknown target operator tag.")
         if type(row["alias"]) is not int or row["alias"] < 0 or row["alias"] > len(aliases):
             raise ContinuationFormatError("Invalid target sharing partition.")
@@ -93,12 +93,22 @@ def _validate(data):
             raise ContinuationFormatError("Invalid target specification tree.")
         _metadata_value(row["cardinality"], {"cardinality"})
         _validate_selection(row["selection"])
-        if (row["kind"] in {"map", "batch", "unbatch"}) != (row["selection"] is not None):
+        if (row["kind"] in {"map", "accumulate", "batch", "unbatch"}) != (row["selection"] is not None):
             raise ContinuationFormatError("Missing or unexpected implementation selection.")
+        if (row["kind"] == "accumulate") != (row["selection"] is not None and row["selection"]["kind"] == "accumulate"):
+            raise ContinuationFormatError("Invalid Accumulate selection association.")
         for key in ("recipe", "method", "state"):
-            if row[key] is not None:
+            packets = row[key]
+            if key in {"method", "state"} and row["kind"] == "accumulate":
+                if type(packets) is not list or len(packets) != 2 or key == "method" and any(p is None for p in packets):
+                    raise ContinuationFormatError("Invalid Accumulate role metadata.")
+            else:
+                packets = [packets]
+            for packet in packets:
+                if packet is None:
+                    continue
                 try:
-                    _decode_node(row[key])
+                    _decode_node(packet)
                 except (TypeError, ValueError) as error:
                     raise ContinuationFormatError("Invalid target Node metadata.") from error
         if row["kind"] == "source":
@@ -131,7 +141,7 @@ def _validate(data):
     for path, row in by_path.items():
         if not path and row["recipe"] is None:
             raise ContinuationFormatError("Missing frozen target CDef.")
-        if (row["kind"] == "map") != (row["method"] is not None):
+        if (row["kind"] in {"map", "accumulate"}) != (row["method"] is not None):
             raise ContinuationFormatError("Invalid Method recipe association.")
         sections = row["sections"]
         if not row["sectioned"] and (sections is not None or row["section_bound"] is not None):

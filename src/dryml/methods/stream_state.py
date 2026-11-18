@@ -29,8 +29,11 @@ def _retain_buffer(value):
         return value.clone()
     if type(value) is dict:
         return {key: _retain_buffer(v) for key, v in value.items()}
-    if type(value) in (tuple, list):
-        return type(value)(_retain_buffer(v) for v in value)
+    if type(value) is tuple:
+        retained = tuple(_retain_buffer(v) for v in value)
+        return value if all(a is b for a, b in zip(value, retained)) else retained
+    if type(value) is list:
+        return [_retain_buffer(v) for v in value]
     return value
 
 

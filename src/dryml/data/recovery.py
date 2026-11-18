@@ -382,6 +382,8 @@ def _selection(selected):
     """Export retained selection facts, never the executable invoker/closure."""
     if selected is None:
         return None
+    if type(selected) is tuple:
+        return dict(kind="accumulate", roles=[_selection(role) for role in selected])
     from dryml.methods.implementation import PreparedMethodInvoker
     from dryml.methods.signature import spec_from_node
     from dryml.core._value_json import _value_to_json
@@ -407,6 +409,16 @@ def _validate_selection(value):
         return
     from .state import _fields
     from dryml.core.symbol import ImportRef, SourceSpec
+    if type(value) is dict and value.get("kind") == "accumulate":
+        _fields(value, ("kind", "roles"), "Accumulate selection")
+        roles = value["roles"]
+        if type(roles) is not list or len(roles) != 2:
+            raise ContinuationFormatError("Invalid Accumulate role selections.")
+        for role, arity in zip(roles, (1, 2)):
+            _validate_selection(role)
+            if role is None or role["kind"] != "method" or len(role["inputs"]) != arity:
+                raise ContinuationFormatError("Invalid Accumulate role arity.")
+        return
     if type(value) is not dict or value.get("kind") not in {"method", "buffer-adapter"}:
         raise ContinuationFormatError("Invalid selected implementation tag.")
     if value["kind"] == "buffer-adapter":
@@ -450,8 +462,10 @@ def _evidence(prepared, root=None):
                    cardinality=_value_to_json(op.cardinality, grammar=3),
                    sectioned=op.sectioned, sections=op.sections, section_bound=op.section_bound,
                    recipe=None if op.occurrence or recipe is None else _node_packet(recipe),
-                   method=None if method is None else _node_packet(method),
-                   state=None if state is None else _node_packet(state),
+                   method=([_node_packet(role) for role in method] if op.kind == "accumulate"
+                           else None if method is None else _node_packet(method)),
+                   state=([None if role is None else _node_packet(role) for role in state] if op.kind == "accumulate"
+                          else None if state is None else _node_packet(state)),
                    tree=None if op.tree is None else _tree_evidence(op.tree), source=None,
                    selection=_selection(op.selected))
         if op.kind == "source":
@@ -494,6 +508,8 @@ def _capture_execution(execution, policy):
                   rng=None if execution.rng is None else execution.rng.bit_generator.state,
                   children=[_capture_execution(child, policy) for _, child in sorted(execution.children.items())],
                   source=None)
+    if op.kind == "accumulate":
+        record.update(carry=execution.carry, carry_initialized=execution.carry_initialized)
     if op.kind == "source" and execution.source is not None:
         cursor = execution.source
         if op.source.kind == "array":
@@ -522,6 +538,8 @@ def _validate_execution(record, rows, parent=None):
         return
     from .state import _fields
     expected = set(_COUNTERS + _FLAGS + _VALUES) | {"path", "kind", "phase", "rng", "children", "source"}
+    if type(record) is dict and record.get("kind") == "accumulate":
+        expected |= {"carry", "carry_initialized"}
     _fields(record, expected, "occurrence state")
     path = record["path"]
     if type(path) is not list or any(type(n) is not int or n < 0 for n in path):
@@ -538,6 +556,11 @@ def _validate_execution(record, rows, parent=None):
     if type(record["buffer"]) is not list or type(record["split_values"]) not in (tuple, list) or record["split_index"] > len(record["split_values"]):
         raise ContinuationFormatError("Invalid buffered frontier.")
     kind = record["kind"]
+    if kind == "accumulate":
+        if (type(record["carry_initialized"]) is not bool
+                or record["carry_initialized"] != (record["count"] > 0)
+                or not record["carry_initialized"] and record["carry"] is not None):
+            raise ContinuationFormatError("Invalid Accumulate carry frontier.")
     controls = _controls_value(rows[key])
     if kind == "take" and record["count"] > controls[0] or kind == "skip" and record["index"] > controls[0] or kind == "epoch" and record["within"] > controls[0]:
         raise ContinuationFormatError("Occurrence exceeds frozen control bounds.")
@@ -614,6 +637,9 @@ def _restore_execution(op, record, snapshots):
     execution = _SectionExecution(op, record["epoch"])
     for name in _COUNTERS + _FLAGS + _VALUES + ("phase",):
         setattr(execution, name, record[name])
+    if op.kind == "accumulate":
+        execution.carry = record["carry"]
+        execution.carry_initialized = record["carry_initialized"]
     if record["rng"] is not None:
         execution.rng = np.random.default_rng()
         execution.rng.bit_generator.state = record["rng"]

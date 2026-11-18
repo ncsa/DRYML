@@ -115,6 +115,15 @@ observation against that declared spec, uses the first item to resolve dynamic
 coordinate facts while retaining a dynamic batch axis, then holds coordinate
 shape, backend, and device stable for the invocation.
 
+For intermediate carries use [`dryml.data.Accumulate`](data.md#streaming-accumulation).
+It owns per-occurrence streaming carry and emits one post-transition value per
+input, while Method `Accumulator` remains a stateless observation-first transition
+declaration. Fold remains the terminal managed reduction. In particular, Fold
+consumes the Dataset's flattened physical-pass iterator across every explicit
+section: a section boundary, a selected-epoch view's end, or early closure cannot
+authorize finalization. Only positive **root-output EOF** does so; Fold progress
+stays at version 3 with its existing recovery authority.
+
 `compute(checkpoint_every=1000, store=None)` requires a positive exact checkpoint
 interval. After each successful transition Fold advances `processed_count`; at
 the selected cadence it publishes that count and one bounded carry snapshot

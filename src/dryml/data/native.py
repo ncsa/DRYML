@@ -268,6 +268,8 @@ class PreparedDataset:
     update training progress, checkpoint state, or exposure.
     Preparation and fallback never publish or reset child Method state; failed
     planning cannot leave partial child selections requiring cleanup.
+    Accumulate retains initializer/transition selections here; mutable carry and
+    initialization belong to each execution occurrence, not this shared plan.
 
     Raises:
         ImplementationSelectionError: If a qualified declared Method cannot be
@@ -322,6 +324,16 @@ class PreparedDataset:
                     self._continuation_missing_states.add(op.occurrence)
                 self._continuation_nodes[op.occurrence] = (
                     recipe, method_definition, method_state if self._continuation_target_state is None else None)
+                if op.kind == "accumulate":
+                    roles = (op.dataset.initial_state, op.dataset.accumulator)
+                    definitions = tuple(role.definition for role in roles)
+                    states = tuple(_required_saved_state(role) for role in roles)
+                    if self._continuation_target_state is None and any(
+                            has_stateful_materialization(definition) and state is None
+                            for definition, state in zip(definitions, states)):
+                        self._continuation_missing_states.add(op.occurrence)
+                    self._continuation_nodes[op.occurrence] = (
+                        recipe, definitions, states if self._continuation_target_state is None else (None, None))
                 for child in op.inputs:
                     retain(child)
             retain(root)

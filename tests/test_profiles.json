@@ -26,6 +26,7 @@
           "functions": [
             "test_fold_declaration_is_inert_and_persists_without_source_or_method_calls",
             "test_fold_consumes_one_iterator_once_and_reuses_selected_dynamic_batch_carriers",
+            "test_sectioned_fold_finalizes_only_after_flattened_root_eof",
             "test_fold_rejects_non_lightweight_or_nonfinite_restored_results",
             "test_fold_validates_first_observation_against_declared_source_spec",
             "test_fold_freezes_dynamic_coordinate_shape_from_first_observation"
@@ -252,7 +253,8 @@
           "functions": [
             "test_value_execution_publishes_a_result_only_state_for_a_fresh_reader",
             "test_fold_execution_publishes_a_result_only_state_for_a_fresh_reader",
-            "test_fold_worker_failed_read_repairs_and_returns_exact_completion_receipt"
+            "test_fold_worker_failed_read_repairs_and_returns_exact_completion_receipt",
+            "test_early_sectioned_cursor_close_cannot_authorize_fold_finalization"
           ]
         },
         "tests/artifacts/test_fold_resume.py": {
@@ -261,7 +263,8 @@
              "test_fold_resumes_saved_carry_and_position_without_rerunning_initializer",
              "test_fold_rejects_non_positive_or_non_exact_checkpoint_intervals",
               "test_fold_frozen_progress_rejected_intact_before_carry_use",
-             "test_fold_malformed_progress_does_not_partially_install"
+              "test_fold_malformed_progress_does_not_partially_install",
+              "test_section_boundary_checkpoint_is_active_and_resume_requires_remaining_root"
           ]
         },
         "tests/artifacts/test_cached_dataset.py": {

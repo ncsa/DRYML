@@ -590,7 +590,7 @@ def _dataset_sections(dataset):
                     else tuple(run for child in children for run in child[1]))
             bound = max(bounds) if all(value is not None for value in bounds) else None
         return True, runs, bound
-    if kind not in {"map", "batch", "unbatch", "take", "skip", "repeat", "shuffle"}:
+    if kind not in {"map", "accumulate", "batch", "unbatch", "take", "skip", "repeat", "shuffle"}:
         raise NotImplementedError("Unsupported custom operator over sectioned input.")
     _, runs, bound = children[0]
     if kind == "batch":
@@ -632,7 +632,7 @@ def _dataset_sections(dataset):
 
 
 def _needs_boundary_kernel(op):
-    return op.sectioned or op.kind in {"skip", "repeat", "shuffle", "epoch"} or any(
+    return op.sectioned or op.kind in {"skip", "repeat", "shuffle", "epoch", "accumulate"} or any(
         _needs_boundary_kernel(child) for child in op.inputs)
 
 
@@ -644,8 +644,9 @@ class StreamPlan:
             ``_stream_operator`` and normal Dataset source capabilities.
 
     Planning freezes controls, occurrence topology, specs, source adapters, and
-    selected Map/collate/split invokers but never opens a source. Source payloads
-    retain their ownership contracts; freezing does not clone their bytes.
+    selected Map/initializer/Accumulator/collate/split invokers but never opens a
+    source. Source payloads retain their ownership contracts; freezing does not
+    clone their bytes.
     Each :meth:`iterator` creates isolated cursor/discovery state and therefore
     reopens every source occurrence independently.
     Child Methods retain their own direct-call state. Failed replacement leaves
@@ -690,9 +691,10 @@ class StreamPlan:
             TypeError, ValueError: If specs, source controls, assertions or strategy
                 are incompatible. Source binding/inference failures propagate.
             NotImplementedError: If the graph includes an unqualified operator.
-            ImplementationSelectionError: If a known Map spec cannot select one
-                local implementation. Native collate/split selection errors also
-                propagate, including unavailable declared-backend dependencies.
+            ImplementationSelectionError: If a known Map or Accumulate role spec
+                cannot select a compatible local implementation. Native collate/
+                split selection errors also propagate, including unavailable
+                declared-backend dependencies.
 
         Side Effects:
             Publishes a complete local plan only after selection, inference,
@@ -766,7 +768,7 @@ class StreamPlan:
         kind = type(dataset).__dict__.get("_stream_operator")
         if kind is None:
             kind = "unsupported" if hasattr(dataset, "src") else "source"
-        if kind not in {"source", "map", "batch", "unbatch", "take", "skip", "repeat", "shuffle", "epoch", "zip", "chain", "custom"}:
+        if kind not in {"source", "map", "accumulate", "batch", "unbatch", "take", "skip", "repeat", "shuffle", "epoch", "zip", "chain", "custom"}:
             raise NotImplementedError(f"Dataset graph planning does not support {type(dataset).__name__}.")
         spec = spec_from_node(spec_node(getattr(dataset, "spec")))
         cardinality = dataset.yield_cardinality()
@@ -780,6 +782,23 @@ class StreamPlan:
         if kind == "source":
             records.append(MethodGraphNode(len(records), "source", None, outputs=(MethodPort("iterator", spec_node(spec)),)))
             return operation("source", source=dataset._prepare_stream_source(spec))
+        if kind == "accumulate":
+            child = self._build(dataset.src, records, occurrence + (0,))
+            initializer, initial_nodes = dataset.initial_state._prepare_local(child.spec)
+            spec = spec_from_node(initial_nodes[1].outputs[0].spec)
+            transition, transition_nodes = dataset.accumulator._prepare_local(child.spec, (spec,), spec)
+            from .signature import satisfies
+            if not satisfies(spec_node(spec), transition_nodes[1].outputs[0].spec):
+                raise ImplementationSelectionError("conflict")
+            for nodes in (initial_nodes, transition_nodes):
+                records.extend(replace(node, occurrence=len(records)) for node in nodes if node.kind == "method")
+            records.append(MethodGraphNode(
+                len(records), "method", type(dataset),
+                inputs=(MethodPort("iterator", spec_node(child.spec)),),
+                outputs=(MethodPort("iterator", spec_node(spec)),),
+                stream_node=self._builtin_node("Accumulate", (child.spec,), spec, dataset, ("one_to_one",), 1),
+            ))
+            return operation("accumulate", inputs=(child,), selected=(initializer, transition))
         if kind == "map":
             child = self._build(dataset.src, records, occurrence + (0,))
             method = dataset.method
@@ -1284,6 +1303,8 @@ class _SectionExecution(_CursorLifecycle):
         self.input_root = False
         self.phase = "fill"
         self.rng = None
+        self.carry = None
+        self.carry_initialized = False
 
     def _child(self, index=0, epoch=None):
         if index not in self.children:
@@ -1424,6 +1445,13 @@ class _SectionExecution(_CursorLifecycle):
                                      root=child.root_final)
             if kind == "map":
                 value = self._map(value)
+            elif kind == "accumulate":
+                initializer, transition = self.selected
+                if not self.carry_initialized:
+                    self.carry = self._call(initializer, value)
+                    self.carry_initialized = True
+                self.carry = self._call(transition, value, self.carry)
+                value = _retain_buffer(self.carry)
             return self._deliver(value, final=child.section_final, root=child.root_final)
 
     def _map(self, value):
@@ -1554,7 +1582,7 @@ class _SectionExecution(_CursorLifecycle):
         return self._deliver(self._call(self.op.tree.build, iter(values)), final=final)
 
     def close(self):
-        self.value = self.input_batch = self.source = None
+        self.value = self.input_batch = self.source = self.carry = None
         self.buffer = []
         self.split_values = ()
         try:

@@ -228,6 +228,36 @@ def test_fold_consumes_one_iterator_once_and_reuses_selected_dynamic_batch_carri
     assert accumulator.selections == 1
 
 
+def test_sectioned_fold_finalizes_only_after_flattened_root_eof(tmp_path, monkeypatch):
+    """Section handoffs keep v3 progress active until the entire physical pass ends."""
+    from dryml.artifacts import Fold
+    from dryml.data import ArrayDataset, Batch, Epoch
+
+    source = Batch(Epoch(ArrayDataset(np.arange(1, 7, dtype=np.float32)), len=2), 2)
+    finalizer = FinishTotal()
+    fold = _fold(source, finalizer=finalizer)
+    checkpoints = []
+    original = Fold._checkpoint_progress
+
+    def checkpoint(self, state, count, *args):
+        assert finalizer.calls == 0
+        checkpoints.append((state, count))
+        result = original(self, state, count, *args)
+        assert self._fold_progress_version == 3
+        if state == "exhausted":
+            assert self._fold_progress["eof"] == "root-output-eof"
+        else:
+            assert "eof" not in self._fold_progress
+        return result
+
+    monkeypatch.setattr(Fold, "_checkpoint_progress", checkpoint)
+    fold.compute(checkpoint_every=1, managed=ManagedConfig(state_repo=DirStore(tmp_path / "state")))
+    assert checkpoints == [("active", 1), ("active", 2), ("active", 3), ("exhausted", 3)]
+    assert finalizer.calls == 1
+    assert fold.value() == 21
+    assert fold._fold_progress_version == 3
+
+
 @pytest.mark.parametrize("grouped", (False, True))
 def test_fold_retains_role_invokers_without_per_transition_compilation(tmp_path, monkeypatch, grouped):
     """Five and one hundred observations add no compilation or role reselection."""
