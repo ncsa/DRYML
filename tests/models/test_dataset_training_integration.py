@@ -93,9 +93,11 @@ def _dataset_continuation_experiment(backend, *, repo=None, sectioned=True, epoc
         trainer = Training(optimizer=Optimizer(torch.optim.SGD, target=model, lr=.001,
                                                momentum=.5, repo=repo),
                            loss_cls=torch.nn.MSELoss, epochs=epochs, verbose=0, repo=repo)
-    elif backend == "tf":
+    elif backend in ("tf", "keras"):
         tf = pytest.importorskip("tensorflow")
         from dryml.models.tf import Model, Optimizer, Training
+        if backend == "keras":
+            from dryml.models.tf import BasicTraining as Training
         from tests.models.test_tf_training import ZeroKerasModel
         model = Model(ZeroKerasModel, repo=repo)
         model.obj(tf.zeros((1, 1)))
@@ -114,7 +116,7 @@ def _dataset_continuation_experiment(backend, *, repo=None, sectioned=True, epoc
                       artifacts={}, repo=repo)
 
 
-@pytest.mark.parametrize("backend", ("torch", "tf", "jax"))
+@pytest.mark.parametrize("backend", ("torch", "tf", "jax", "keras"))
 def test_dataset_continuation_native_sections_share_one_source(backend):
     """Two logical sections retain one factory, RNG, conversion plan and input owner."""
     exp = _dataset_continuation_experiment(backend)
@@ -177,7 +179,7 @@ def test_dataset_continuation_native_checkpoint_suffix(backend, tmp_path, monkey
         np.testing.assert_allclose(recovered.parameters["weight"], baseline.model.parameters["weight"])
 
 
-@pytest.mark.parametrize("backend", ("torch", "tf", "jax"))
+@pytest.mark.parametrize("backend", ("torch", "tf", "jax", "keras"))
 def test_dataset_continuation_native_implicit_passes(backend):
     """Finite physical passes reopen exactly once per logical epoch."""
     exp = _dataset_continuation_experiment(backend, sectioned=False)

@@ -36,7 +36,7 @@ T = TypeVar("T")
 StatePath = str | os.PathLike[str]
 _FORMAT = "dryml-dataset-state"
 _VERSION = 1
-_PROTOCOL = dict(python=list(sys.version_info[:2]), numpy=np.__version__, replay=1, codec=1, kernel=1)
+_PROTOCOL = dict(python=list(sys.version_info[:2]), numpy=np.__version__, replay=1, codec=1, kernel=1, training_window=1)
 
 
 def _fields(value, fields, name):
@@ -48,7 +48,7 @@ def _validate(data):
     from .recovery import (_initial_value, _validate_selection, _decode_node,
                            _metadata_value, _spec_value, _symbol_value, _controls_value, _validate_tree)
     _fields(data, ("format", "version", "protocol", "target", "state_ref", "snapshots", "position", "policy", "active_replay",
-                   "explicit", "pass_nonempty", "initialized", "staged", "staged_boundary", "boundary_pending", "execution"), "DatasetState")
+                   "explicit", "pass_nonempty", "initialized", "staged", "staged_boundary", "boundary_pending", "execution", "adapter"), "DatasetState")
     if data["format"] != _FORMAT or type(data["version"]) is not int or data["version"] != _VERSION or canonical_json_bytes(data["protocol"], **_BOUNDS) != canonical_json_bytes(_PROTOCOL, **_BOUNDS):
         raise ContinuationFormatError("Unsupported DatasetState format/protocol version.")
     if data["policy"] not in {"disabled", "enabled", "if_needed"}:
@@ -61,6 +61,30 @@ def _validate(data):
         TraversalPosition(**data["position"])
     except (TypeError, ValueError) as error:
         raise ContinuationFormatError("Invalid traversal position.") from error
+    adapter = data["adapter"]
+    if adapter is not None:
+        _fields(adapter, ("kind", "producer_position", "pending"), "adapter window")
+        if adapter["kind"] != "tf-training-v1" or type(adapter["pending"]) is not list or len(adapter["pending"]) > 1024:
+            raise ContinuationFormatError("Unsupported adapter window.")
+        producer = TraversalPosition(**adapter["producer_position"])
+        previous = TraversalPosition(**data["position"])
+        for entry in adapter["pending"]:
+            _fields(entry, ("value", "position", "stage"), "pending delivery")
+            position = TraversalPosition(**entry["position"])
+            if (entry["stage"] != "converted" or type(entry["value"]) is not tuple or len(entry["value"]) != 2
+                    or position.sequence != previous.sequence + 1
+                    or position.epoch != previous.epoch + int(position.section_complete)
+                    or position.start != (0 if position.section_complete else previous.start + 1)
+                    or previous.root_complete or position.root_complete and not position.section_complete):
+                raise ContinuationFormatError("Invalid pending delivery sequence/stage.")
+            previous = position
+        if producer.sequence < previous.sequence or producer.sequence > previous.sequence + 1:
+            raise ContinuationFormatError("Invalid producer frontier.")
+        if producer.sequence == previous.sequence and producer != previous:
+            raise ContinuationFormatError("Inconsistent producer frontier.")
+        if producer.sequence > previous.sequence and (not producer.section_complete or producer.epoch != previous.epoch + 1
+                                                       or producer.start != 0 or previous.section_complete):
+            raise ContinuationFormatError("Invalid pending boundary.")
     rows = data["target"]
     if data["state_ref"] is not None:
         from dryml.core.node import require_saved
@@ -198,6 +222,10 @@ class DatasetState(Generic[T]):
     selections. Owned snapshots/buffers survive the original traversal; external
     Store selections remain the caller's separate retention responsibility.
     Schema v1 rejects unknown fields/protocols rather than silently converting.
+    The private training-window protocol may bind converted pending deliveries to
+    a producer frontier inside this same record. Such records restore through the
+    owning TensorFlow training adapter; ordinary Dataset.open rejects them rather
+    than repeating conversion or mistaking the producer cut for accepted input.
     """
 
     _metadata: bytes
@@ -463,7 +491,7 @@ def _capture(traversal):
                 active_replay=traversal.replay_recovery_enabled, explicit=traversal._explicit,
                 pass_nonempty=traversal._pass_nonempty, initialized=traversal._initialized,
                 staged=traversal._staged, staged_boundary=traversal._staged_boundary,
-                boundary_pending=traversal._boundary_pending, execution=execution)
+                boundary_pending=traversal._boundary_pending, execution=execution, adapter=None)
     # Unresolved factories require an explicit trusted replay decision unless
     # their declared class provides inert direct capability.
     if traversal._replay_policy == "disabled":
@@ -474,6 +502,33 @@ def _capture(traversal):
                 if current is None or current["source"] is None or current["source"]["strategy"] != "direct":
                     raise UnsupportedContinuationError("Unresolved ordinary generator requires enabled or conditional replay.")
     return DatasetState._from_bytes(*encode_value(data))
+
+
+def _training_window(record, position, pending):
+    """Encode a single accepted cut with its converted, unacknowledged window.
+
+    The producer execution remains in the same Data-owned record. Runtime tokens,
+    leases and providers are deliberately absent; restore allocates fresh authority.
+    This private codec performs detachment only at an explicit capture request.
+    """
+    from dataclasses import asdict
+    data = record._data()
+    data["adapter"] = dict(kind="tf-training-v1", producer_position=data["position"],
+                           pending=[dict(value=e.value, position=asdict(e.position), stage="converted") for e in pending])
+    data["position"] = asdict(position)
+    return DatasetState._from_bytes(*encode_value(data))
+
+
+def _split_training_window(record):
+    """Recover producer state and converted window from one validated record."""
+    if record is None:
+        return None, None
+    data = record._data()
+    window = data["adapter"]
+    if window is None:
+        return record, None
+    data["position"], data["adapter"] = window["producer_position"], None
+    return DatasetState._from_bytes(*encode_value(data)), window
 
 
 def _record_executions(record):

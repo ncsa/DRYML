@@ -189,6 +189,7 @@ def test_keras_invocation_telemetry_uses_native_callbacks_after_accounting(tmp_p
     assert len(epoch_events) == 1
     assert epoch_events[0][1:3] == (0, 1)
     assert all("loss" in event[3] for event in (*batch_events, *epoch_events))
+    assert all(not key.startswith("_dryml_") for event in (*batch_events, *epoch_events) for key in event[3])
     assert events[-1] == ("close",)
     assert "loss" in csv_path.read_text(encoding="utf-8")
     assert exp.train.status(state_repo=repo).final.graph_equal(final)
@@ -951,6 +952,7 @@ def test_keras_resume_later_epoch_and_short_final_batch_keep_target_and_actual_a
     def interrupt_in_second_epoch():
         observed.append((interrupted.state.step, interrupted.state.epoch, interrupted.state.next_batch))
         if interrupted.state.step == 4:
+            interrupted.state._input_provider.capture()
             raise RuntimeError("pause in epoch two")
 
     with pytest.raises(RuntimeError, match="epoch two"):
@@ -1402,7 +1404,8 @@ def test_keras_zero_epoch_does_not_emit_native_lifecycle_callbacks():
     assert exp.state.target_epoch is None
 
 
-def test_tf_setup_failure_and_validation_failure_leave_only_recoverable_targets(monkeypatch):
+@pytest.mark.parametrize("capture_before_failure", [False, True])
+def test_tf_setup_failure_and_validation_failure_leave_only_recoverable_targets(monkeypatch, capture_before_failure):
     from dryml.models.tf import Loss, Model, Optimizer, Training
 
     trainer = Training(
@@ -1428,10 +1431,19 @@ def test_tf_setup_failure_and_validation_failure_leave_only_recoverable_targets(
 
     monkeypatch.setattr(trainer, "_evaluate", fail_once)
     with pytest.raises(RuntimeError, match="validation failed"):
-        exp.train_fn(exp)
+        exp.train_fn(exp, callbacks=(lambda: exp.state._input_provider.capture(),) if capture_before_failure else ())
     assert (exp.state.epoch, exp.state.next_batch, exp.state.pending_epoch_postlude) == (1, 0, 0)
     assert exp.state.target_epoch == 1
     assert exp.state.step == 2
+    assert exp.state._input_provider is None
+    if not capture_before_failure:
+        with pytest.raises(ValueError, match="current matching record.*durable reload"):
+            exp.train_fn(exp)
+        assert calls == ["validation"]
+        assert exp.state.step == 2
+        assert not exp.model._restore_failed
+        assert not exp.train_fn.optimizer._restore_failed
+        return
 
     exp.train_fn(exp)
     assert exp.state.target_epoch is None
@@ -1584,6 +1596,7 @@ def test_keras_strict_stop_telemetry_resumes_without_extra_updates(tmp_path):
         def on_epoch_end(self, epoch, logs=None):
             del epoch, logs
             if trainer.early_stopping.accepted_target is not None:
+                exp.state._input_provider.capture()
                 raise RuntimeError("strict stopped epoch")
 
     with pytest.raises(RuntimeError, match="strict stopped epoch"):

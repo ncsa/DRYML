@@ -142,6 +142,8 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
             if not isinstance(state, DatasetState):
                 raise TypeError("state must be a DatasetState or None.")
             data = state._validated_data(prepared)
+            if data["adapter"] is not None:
+                raise UnsupportedContinuationError("This continuation requires its TensorFlow training window adapter.")
             position = state.position
             if epoch is not None and _count(epoch, "epoch") != position.epoch or start is not None and _count(start, "start") != position.start:
                 raise ContinuationMismatchError("Explicit position differs from DatasetState.")

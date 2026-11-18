@@ -34,6 +34,9 @@ class TrainingInputSession:
         exact: Exact bool requesting qualified fresh-input recovery; started input
             always retains its lane and cannot fall back after an exact failure.
         repo: Optional Repo owning retained graph evidence and cache invalidation.
+        _bridge_factory: Private backend handoff for one inert traversal, accepted
+            position and restored window. The returned owner services capture and
+            cleanup on its sole source thread; it is never serialized.
 
     ``prepared`` retains the invocation's source-inert PreparedDataset;
     ``prepared`` and ``traversal`` are None for zero work/data-free calls. Positive exact sessions
@@ -44,7 +47,7 @@ class TrainingInputSession:
     """
 
     def __init__(self, exp: Experiment, *, positive: bool = True, exact: bool = True,
-                 repo: Repo | None = None) -> None:
+                 repo: Repo | None = None, _bridge_factory=None) -> None:
         if type(positive) is not bool or type(exact) is not bool:
             raise TypeError("positive and exact must be exact bools.")
         if type(exp.state) is not TrainState:
@@ -58,6 +61,7 @@ class TrainingInputSession:
         self._thread = None
         self._entered = self._closed = self._accepted = False
         self._pins = ()
+        self._bridge_factory = _bridge_factory
 
     def __enter__(self) -> TrainingInputSession:
         """Admit owners/retry before preparation, then install one transient provider.
@@ -98,8 +102,13 @@ class TrainingInputSession:
                             raise
                         lane = "positional"
                 record = state.dataset_state if lane == "exact" and started else None
-                traversal = prepared.open(state=record, epoch=state.epoch,
-                                          start=state.next_batch, acceptance="explicit")
+                window = None
+                if self._bridge_factory is not None:
+                    from dryml.data.state import _split_training_window
+                    record, window = _split_training_window(record)
+                traversal = prepared.open(state=record,
+                                          epoch=None if window else state.epoch,
+                                          start=None if window else state.next_batch, acceptance="explicit")
                 self.traversal = traversal
                 if lane == "exact" and not started:
                     try:
@@ -109,6 +118,8 @@ class TrainingInputSession:
                         # exact record never reaches this compatibility decision.
                         lane = "positional"
                 traversal._hold_boundary_handoff = True
+                if self._bridge_factory is not None:
+                    self.traversal = self._bridge_factory(traversal, state.input_position if started else traversal.position, window)
                 state.input_started = True
                 state.input_recovery = lane
                 self._install_position()
@@ -139,6 +150,35 @@ class TrainingInputSession:
         state.input_section_complete = position.section_complete
         state.input_root_complete = position.root_complete
         state.input_replay_policy = self.traversal.replay_recovery_policy
+
+    def _begin_bridge_update(self):
+        """Hold retained native owners until the consumed token is reported.
+
+        Keras selects input inside its compiled function. Its graph assertions
+        validate the token before forward effects; the host lease spans that call
+        and the ordinary native reporting/acceptance callback.
+        """
+        self._check()
+        if self._guard is not None:
+            raise TraversalOwnershipError("A native step is already in progress.")
+        self._guard = self._reserve()
+        self._candidate, self._accepted = None, False
+
+    def _end_bridge_update(self, *, failed=False):
+        """Release an outstanding native lease, invalidating uncertain mutations."""
+        if self._guard is not None:
+            if failed and not self._accepted:
+                self.invalidate_native()
+            self._guard.release()
+        self._guard = self._candidate = None
+
+    def _bridge_completed(self, token):
+        """Bind completed native evidence to one ledger candidate under the lease."""
+        self._check()
+        if self._guard is None:
+            raise TraversalOwnershipError("Completed token has no native owner guard.")
+        self._candidate = self.traversal.candidate(token)
+        return self._candidate
 
     @contextmanager
     def update(self, candidate: PendingElement[Any], *, repairable: bool = False) -> Iterator[None]:
@@ -216,6 +256,9 @@ class TrainingInputSession:
         self._check()
         if self.traversal is None:
             return
+        sync = getattr(self.traversal, "_sync_boundary", None)
+        if sync is not None:
+            sync()
         with self._reserve():
             state, position = self.exp.state, self.traversal.position
             try:
@@ -299,8 +342,10 @@ class TrainingInputSession:
         """Return/install a current detached record at an accepted owner-thread cut.
 
         Reuses an already matching record. Wrong-thread, in-flight native work,
-        invalid owners or mismatched progress fail explicitly without source pulls
-        or waiting. Dynamic capture errors preserve accepted facts and prior records;
+        invalid owners or mismatched progress fail explicitly without source pulls.
+        A private native bridge may wait for a bounded owner-thread capture handshake;
+        timeout retires provider authority and reports pending cleanup. Dynamic
+        capture errors preserve accepted facts and prior records;
         they are save/finalization failures, not fabricated native rollback.
         Core's caller already fences actual payload saving; this adds no save lock.
         """
@@ -319,7 +364,12 @@ class TrainingInputSession:
         try:
             state._require_current_record()
         except ValueError:
-            record = self.traversal.capture_state()
+            try:
+                record = self.traversal.capture_state()
+            except TimeoutError:
+                if self._state._input_provider is self:
+                    self._state._input_provider = None
+                raise
             if (record.position != state.input_position
                     or record.replay_recovery_policy != state.input_replay_policy):
                 raise ValueError("Capture does not match accepted training input.")
@@ -340,6 +390,7 @@ class TrainingInputSession:
             exc_type, error, traceback = sys.exc_info()
             raise
         finally:
+            self._end_bridge_update(failed=True)
             if self._state._input_provider is self:
                 self._state._input_provider = None
             self._closed = True

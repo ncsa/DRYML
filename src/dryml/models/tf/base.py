@@ -437,7 +437,7 @@ def _require_dataset_owned_keras_fit_inputs(fit_args, fit_kwargs) -> None:
         )
 
 
-def _keras_accounting_model(tf, model):
+def _keras_accounting_model(tf, model, *, token_start=None):
     """Wrap one Keras model with owned post-update accounting facts."""
 
     observer = _KERAS_TRAIN_STEP_OBSERVER.get()
@@ -449,12 +449,29 @@ def _keras_accounting_model(tf, model):
             self.completed_loss = tf.Variable(0.0, dtype=tf.float64, trainable=False)
             self.completed_examples = tf.Variable(0, dtype=tf.int64, trainable=False)
             self.has_completed_step = tf.Variable(False, dtype=tf.bool, trainable=False)
+            self.expected_token = tf.Variable(token_start or 0, dtype=tf.int64, trainable=False)
+            self.completed_token = tf.Variable(0, dtype=tf.int64, trainable=False)
 
         def call(self, inputs, training=None):
             return self.base(inputs, training=training)
 
         def train_step(self, data):
+            if token_start is not None:
+                token = data["token"]
+                tf.debugging.assert_type(token, tf.int64)
+                rank = tf.debugging.assert_rank(token, 0, message="Invalid Keras consumed token rank")
+                check = tf.debugging.assert_equal(token, self.expected_token,
+                                                  message="Invalid Keras consumed token")
+                # The scope dominates resource writes in the forward pass as well
+                # as optimizer/metric effects, including models ignoring x entirely.
+                with tf.control_dependencies([rank, check]):
+                    return self._owned_train_step(data["x"], data["y"], None, token)
             x, y, sample_weight = tf.keras.utils.unpack_x_y_sample_weight(data)
+            return self._owned_train_step(x, y, sample_weight, None)
+
+        def _owned_train_step(self, x, y, sample_weight, token):
+            graph = None if tf.executing_eagerly() else tf.compat.v1.get_default_graph()
+            before = len(graph.get_operations()) if graph is not None else 0
             observed_variables = self.base.trainable_variables
             observe_step = observer is not None and bool(observed_variables)
             if observe_step:
@@ -510,8 +527,23 @@ def _keras_accounting_model(tf, model):
             # including regularization and dynamic add_loss contributions.
             first = tf.nest.flatten(x)[0]
             self.completed_examples.assign(tf.cast(tf.shape(first)[0], tf.int64))
-            self.has_completed_step.assign(True)
-            return {metric.name: metric.result() for metric in self.metrics}
+            if token is None:
+                self.has_completed_step.assign(True)
+            results = {metric.name: metric.result() for metric in self.metrics}
+            if token is not None:
+                # Bind completion to *all* actual resource effects, not just an
+                # iterations counter which an optimizer can update independently.
+                effects = ([op for op in graph.get_operations()[before:] if op.op_def.is_stateful]
+                           if graph is not None else [])
+                with tf.control_dependencies(effects):
+                    completed = self.completed_token.assign(token)
+                    expected = self.expected_token.assign(token + 1)
+                    self.has_completed_step.assign(True)
+                with tf.control_dependencies([completed, expected]):
+                    results.update(_dryml_token=tf.identity(completed),
+                                   _dryml_loss=self.completed_loss.read_value(),
+                                   _dryml_examples=self.completed_examples.read_value())
+            return results
 
         def test_step(self, data):
             """Evaluate the wrapped model without entering the owned update step."""
@@ -527,6 +559,10 @@ def _keras_accounting_model(tf, model):
             self.compiled_metrics.update_state(y, y_pred, sample_weight=sample_weight)
             return {metric.name: metric.result() for metric in self.metrics}
 
+        def _get_metrics_result_or_logs(self, logs):
+            public = {key: value for key, value in logs.items() if not key.startswith("_dryml_")}
+            return super()._get_metrics_result_or_logs(public)
+
     return AccountingModel(model)
 
 
@@ -538,11 +574,43 @@ def _keras_accounting_callback(
     callbacks,
     steps_per_epoch,
     batch_offset=0,
+    inputs=None,
 ):
     """Create Keras's post-update accounting callback for one fit segment."""
 
+    initial_step = exp.state.step
+
     class AccountingCallback(tf.keras.callbacks.Callback):
+        def _finish_input_boundary(self):
+            inputs._end_bridge_update()
+            if (steps_per_epoch is not None and exp.state.step - initial_step < steps_per_epoch
+                    and not self.model.stop_training):
+                from dryml.data import DatasetExhaustedError
+                raise DatasetExhaustedError(steps_per_epoch, exp.state.step - initial_step)
+            inputs.sync_boundary()
+
+        def on_train_batch_begin(self, batch, logs=None):
+            if inputs is not None:
+                inputs._begin_bridge_update()
+
         def on_train_batch_end(self, batch, logs=None):
+            if inputs is not None:
+                # Keras already synchronized these facts with its ordinary logs.
+                # Pop before any native/public callback or History sees the map.
+                token = logs.pop("_dryml_token")
+                loss = logs.pop("_dryml_loss")
+                examples = logs.pop("_dryml_examples")
+                candidate = inputs._bridge_completed(int(token))
+                record_train_update(
+                    exp, None, float(loss), batched=True, examples=int(examples),
+                    complete_epoch=candidate.section_complete,
+                    epoch_metrics=_finite_metric_logs(logs) if candidate.section_complete else None,
+                    input_candidate=candidate,
+                )
+                inputs._end_bridge_update()
+                for callback in callbacks:
+                    callback()
+                return
             if not bool(reporter.has_completed_step.numpy()):
                 raise RuntimeError("DRYML Keras accounting did not receive a completed train step.")
             physical_batch = batch_offset + batch
@@ -562,6 +630,13 @@ def _keras_accounting_callback(
             )
 
         def on_epoch_end(self, epoch, logs=None):
+            if inputs is not None:
+                # A failed next(iterator) can follow on_train_batch_begin without
+                # entering a train step. EOF is boundary evidence, not mutation.
+                self._finish_input_boundary()
+                if exp.state.pending_epoch_postlude == epoch:
+                    exp.state.pending_epoch_metrics = _finite_metric_logs(logs)
+                return
             # Unknown finite streams reveal exhaustion only here. Retain the
             # postlude before later native callbacks can fail.
             if steps_per_epoch is None and exp.state.epoch == epoch:
@@ -569,6 +644,10 @@ def _keras_accounting_callback(
                     postlude_pending=True,
                     metrics=_finite_metric_logs(logs),
                 )
+
+        def on_test_begin(self, logs=None):
+            if inputs is not None:
+                self._finish_input_boundary()
 
     return AccountingCallback()
 
@@ -1084,6 +1163,13 @@ class BasicTraining(TrainFunction):
     Side Effects:
         Compiles/trains the Keras adapter, changes model and optimizer state,
         and advances ``Experiment.state`` only after successful updates.
+
+    Persisted Optimizer owners admit exact Dataset continuation through a private
+    bounded, overlapped token bridge. Transient owners retain positional recovery.
+    Eager and compiled execution share the consumed-token contract; saves include
+    native-prefetched unaccepted values. Unknown finite streams require declared
+    finite counts for DRYML safe-point callbacks. Source acknowledgment timeout
+    raises TimeoutError with cleanup_pending evidence, never a partial checkpoint.
     """
 
     def __init__(
@@ -1131,60 +1217,86 @@ class BasicTraining(TrainFunction):
         _keras_telemetry_callbacks(tf, observer_session)
 
     def __call__(self, exp, *, callbacks=(), observer_session=None):
-        """Run or resume one native Keras training invocation.
+        """Fit/resume finite Dataset sections with consumed-input checkpoint cuts.
 
         Args:
-            exp: Experiment providing Keras Model, Dataset, and retained state.
-            callbacks: Truthful post-update DRYML safe-point callbacks.
-            observer_session: Private Experiment-owned invocation telemetry
-                session containing native Keras callbacks, or ``None``.
-
+            exp: Experiment supplying native owners, canonical data and TrainState.
+            callbacks: Zero-argument accepted-update safe points.
+            observer_session: Optional invocation-local native telemetry session.
         Returns:
-            Keras History for the last native segment, or ``None`` when recovery
-            or zero work required no new segment.
-
+            Keras History combined across this call's fit segments, or None when
+            no segment is needed.
         Raises:
-            TypeError: If telemetry observers are not native Keras callbacks.
-            ValueError: If Dataset, accounting, callback-recovery, or retained
-                invocation contracts are incompatible.
-
+            ValueError, TypeError: Unsupported inputs/options before acquisition.
+            TimeoutError: Source-owner acknowledgment timed out; the exception's
+                cleanup_pending flag reports outstanding cooperative cleanup.
+            BaseException: Native/source/callback/capture errors propagate. Uncertain
+                mutation invalidates owners; exact stale retries require reload.
         Side Effects:
-            Trains Model/Optimizer state, advances retained Experiment progress,
-            invokes DRYML safe points, and reports native events after DRYML
-            accounting/behavior hooks. Resolves the Dataset plan before x/y
-            handoffs and source acquisition, using captured output specs for
-            validation. It does not retain telemetry observers.
+            Advances native owners and accepted progress. Exact saves/finalization
+            capture producer state and the complete bounded unconsumed window on
+            its owner thread. Logging creates no continuation. Zero work is inert.
         """
-
         import tensorflow as tf
+        from dryml.models.training_transaction import TrainingInputSession
+        from dryml.tf.training_data import _KerasInputBridge
 
         callbacks = validate_training_callbacks(callbacks)
         telemetry_callbacks = _keras_telemetry_callbacks(tf, observer_session)
         fit_kwargs = dict(self.fit_kwargs)
         _require_dataset_owned_keras_fit_inputs(self.fit_args, fit_kwargs)
-        native_callbacks = _freeze_native_keras_callbacks(tf, self._callbacks(tf), fit_kwargs)
-        if callbacks and (
-            native_callbacks
-            or (exp.val_data is not None and not self._supports_managed_validation())
-        ):
-            raise ValueError(
-                "Keras DRYML safe-point recovery does not support native callbacks or validation."
-            )
+        native = _freeze_native_keras_callbacks(tf, self._callbacks(tf), fit_kwargs)
+        if callbacks and (native or (exp.val_data is not None and not self._supports_managed_validation())):
+            raise ValueError("Keras DRYML safe-point recovery does not support native callbacks or validation.")
         self._validate_training_behavior_data(exp)
-        completed_behavior_stop = self._completed_training_behavior_stop(exp)
         compile_kwargs = self._compile_kwargs(exp)
         _require_supported_keras_accounting(compile_kwargs, fit_kwargs)
         _require_supported_keras_execution(compile_kwargs, _unwrap_backend_obj(self._optimizer(exp)))
-        configured_loss = compile_kwargs.get("loss", self._make_loss(tf, exp))
+        default_strategy = type(tf.distribute.get_strategy())
+        native_owners = (getattr(exp.model, "obj", None), _unwrap_backend_obj(self._optimizer(exp)))
+        strategies = tuple(getattr(owner, "distribute_strategy", None) or
+                           getattr(owner, "_distribution_strategy", None) for owner in native_owners)
+        if tf.distribute.has_strategy() or any(strategy is not None and type(strategy) is not default_strategy
+                                             for strategy in strategies):
+            raise ValueError("Keras distributed training is unsupported by retained input accounting.")
+        require_supervised_dataset(exp.train_data, batched=True)
+        target = exp.state.target_epoch
+        positive = (target if target is not None else exp.state.epoch + self.epochs) > exp.state.epoch
+        positive = positive or exp.state.pending_epoch_postlude is not None
+        if positive:
+            require_bounded_safe_points(exp.train_data, callbacks)
+            if "loss" in compile_kwargs:
+                _require_mean_keras_loss(compile_kwargs["loss"])
+        with TrainingInputSession(
+            exp, positive=positive, exact=isinstance(self._optimizer(exp), Optimizer),
+            _bridge_factory=lambda traversal, position, window: _KerasInputBridge(
+                traversal, position=position, window=window),
+        ) as inputs:
+            if not positive:
+                exp.state.finish_invocation(exp.state.begin_invocation(self.epochs))
+                return None
+            return self._run_keras(exp, inputs, callbacks=callbacks, compile_kwargs=compile_kwargs,
+                                   fit_kwargs=fit_kwargs, native_callbacks=native,
+                                   telemetry_callbacks=telemetry_callbacks)
+
+    def _run_keras(self, exp, inputs, *, callbacks, compile_kwargs, fit_kwargs,
+                   native_callbacks, telemetry_callbacks):
+        """Execute admitted input with one compiled model across finite fit segments."""
+
+        import tensorflow as tf
+
+        completed_behavior_stop = self._completed_training_behavior_stop(exp)
+        configured_loss = compile_kwargs["loss"] if "loss" in compile_kwargs else self._make_loss(tf, exp)
         _require_mean_keras_loss(configured_loss)
+        compile_kwargs.setdefault("loss", configured_loss)
         self._begin_training_preparation_generation()
         train_data = self._prepare_data(exp.train_data)
-        require_bounded_safe_points(train_data, callbacks)
-        train_xy = self._xy_data(train_data)
-        prepared_train = train_xy.prepare()
+        prepared_train = inputs.prepared
         self.training_preparation = TrainingPreparation.from_dataset(
             self, prepared_train, "tf"
         )
+        bridge = inputs.traversal
+        bridge.preparation = self.training_preparation
 
         val_data = None
         val_xy = None
@@ -1199,10 +1311,20 @@ class BasicTraining(TrainFunction):
         else:
             prepared_val = None
 
-        training_model = self._training_model(tf, exp.model, self.training_preparation.consumer_specs[0])
+        training_model = self._training_model(tf, exp.model, self.training_preparation.consumer_specs[0],
+                                              token_start=bridge.token_start)
+        if exp.state.input_recovery == "exact":
+            # Exact optimizer recovery needs slots bound to the restored variables
+            # before fitting. This once-per-invocation symbolic build never pulls
+            # an input and does not repeat at logical section boundaries.
+            training_model(_keras_inputs_from_spec(tf, self.training_preparation.consumer_specs[0]), training=False)
         if compile_kwargs:
             training_model.compile(**compile_kwargs)
             optimizer = self._optimizer(exp)
+            if exp.state.input_recovery == "exact":
+                build = getattr(_unwrap_backend_obj(optimizer), "build", None)
+                if callable(build):
+                    build(training_model.trainable_variables)
             if completed_behavior_stop:
                 training_model(
                     _keras_inputs_from_spec(tf, self.training_preparation.consumer_specs[0]),
@@ -1224,19 +1346,11 @@ class BasicTraining(TrainFunction):
             )
             return None
         fit_kwargs.setdefault("verbose", self.verbose)
-        if "steps_per_epoch" not in fit_kwargs:
-            steps_per_epoch = finite_dataset_len(train_data)
-            if steps_per_epoch is not None:
-                fit_kwargs["steps_per_epoch"] = steps_per_epoch
 
         if val_xy is not None and "validation_steps" not in fit_kwargs:
             validation_steps = finite_dataset_len(val_data)
             if validation_steps is not None:
                 fit_kwargs["validation_steps"] = validation_steps
-
-        ds_train = self._tf_dataset(tf, prepared_train, self.training_preparation)
-        if fit_kwargs.get("steps_per_epoch") is not None:
-            ds_train = ds_train.repeat()
 
         ds_val = None
         if val_xy is not None:
@@ -1245,7 +1359,7 @@ class BasicTraining(TrainFunction):
                 ds_val = ds_val.repeat()
 
         start_epoch = exp.state.epoch
-        steps_per_epoch = fit_kwargs.get("steps_per_epoch")
+        steps_per_epoch = None
         fresh_target = exp.state.target_epoch is None
         initial_step = exp.state.step
         target_epoch = exp.state.begin_invocation(self.epochs)
@@ -1263,8 +1377,9 @@ class BasicTraining(TrainFunction):
                 exp,
                 reporter=training_model,
                 callbacks=callbacks,
-                steps_per_epoch=steps_per_epoch,
+                steps_per_epoch=segment_steps,
                 batch_offset=batch_offset,
+                inputs=inputs,
             )
             return training_model.fit(
                 dataset,
@@ -1295,63 +1410,48 @@ class BasicTraining(TrainFunction):
                 history = None
             elif target_epoch <= start_epoch and exp.state.pending_epoch_postlude is None:
                 history = None
-            elif exp.state.next_batch:
-                if steps_per_epoch is None:
-                    raise ValueError("Keras recovery requires a finite deterministic batch count.")
-                if exp.state.next_batch > steps_per_epoch:
-                    raise ValueError("Saved Keras batch position exceeds the training epoch.")
-                remaining = steps_per_epoch - exp.state.next_batch
-                if remaining:
-                    history = fit_segment(
-                        ds_train.skip(exp.state.next_batch),
-                        initial_epoch=start_epoch,
-                        epochs=start_epoch + 1,
-                        batch_offset=exp.state.next_batch,
-                        segment_steps=remaining,
-                    )
-                else:
-                    # Accept a legacy/external checkpoint captured after the
-                    # final update but before its epoch-normalization bridge.
-                    exp.state.finish_epoch(postlude_pending=True)
-                    _resume_keras_postlude(
-                        exp, training_model, native_callbacks,
-                        validation_data=ds_val,
-                        validation_steps=fit_kwargs.get("validation_steps"),
-                        steps_per_epoch=steps_per_epoch,
-                        finish_behavior_epoch=finish_behavior_epoch,
-                    )
-                    history = None
-                if exp.state.epoch < target_epoch:
-                    history = fit_segment(
-                        ds_train,
-                        initial_epoch=exp.state.epoch,
-                        epochs=target_epoch,
-                        batch_offset=0,
-                        segment_steps=steps_per_epoch,
-                    )
             else:
-                if steps_per_epoch is None:
-                    # Keras does not reopen an exhausted unknown-cardinality
-                    # Dataset for later epochs. Recreate the prepared source per
-                    # epoch without scanning it for a length.
-                    history = None
-                    for epoch in range(start_epoch, target_epoch):
-                        history = fit_segment(
-                            self._tf_dataset(tf, prepared_train, self.training_preparation),
-                            initial_epoch=epoch,
-                            epochs=epoch + 1,
-                            batch_offset=0,
-                            segment_steps=None,
-                        )
-                else:
-                    history = fit_segment(
-                        ds_train,
-                        initial_epoch=start_epoch,
-                        epochs=target_epoch,
+                history = None
+                while exp.state.epoch < target_epoch:
+                    epoch = exp.state.epoch
+                    segment = bridge.next_segment()
+                    if segment is None:
+                        inputs.sync_boundary()
+                        if exp.state.pending_epoch_postlude is None:
+                            break
+                        stopped = _resume_keras_postlude(
+                            exp, training_model, native_callbacks,
+                            validation_data=ds_val, validation_steps=fit_kwargs.get("validation_steps"),
+                            steps_per_epoch=None, finish_behavior_epoch=finish_behavior_epoch)
+                        if stopped:
+                            break
+                        continue
+                    before_step = exp.state.step
+                    segment_history = fit_segment(
+                        segment.dataset,
+                        initial_epoch=epoch,
+                        epochs=epoch + 1,
                         batch_offset=0,
-                        segment_steps=steps_per_epoch,
+                        segment_steps=segment.steps,
                     )
-        except BaseException:
+                    if (segment.steps is not None and exp.state.step - before_step < segment.steps
+                            and not training_model.stop_training):
+                        from dryml.data import DatasetExhaustedError
+                        raise DatasetExhaustedError(segment.steps, exp.state.step - before_step)
+                    if history is None:
+                        history = segment_history
+                    else:
+                        history.epoch.extend(segment_history.epoch)
+                        for key, values in segment_history.history.items():
+                            history.history.setdefault(key, []).extend(values)
+                    if training_model.stop_training:
+                        break
+                    if exp.state.epoch == epoch:
+                        break
+        except BaseException as error:
+            premutation = (isinstance(error, tf.errors.InvalidArgumentError)
+                           and "Invalid Keras consumed token" in str(error))
+            inputs._end_bridge_update(failed=not premutation)
             if fresh_target:
                 try:
                     exp.state.abandon_new_invocation(
@@ -1424,13 +1524,13 @@ class BasicTraining(TrainFunction):
             compile_kwargs["metrics"] = [_unwrap_backend_obj(metric) for metric in metrics]
         return compile_kwargs
 
-    def _training_model(self, tf, model, x_spec):
+    def _training_model(self, tf, model, x_spec, *, token_start=None):
         if hasattr(model, "obj") and isinstance(model.obj, tf.keras.Model):
             base = model.obj
         else:
             inputs = _keras_inputs_from_spec(tf, x_spec)
             base = tf.keras.Model(inputs=inputs, outputs=model(inputs))
-        return _keras_accounting_model(tf, base)
+        return _keras_accounting_model(tf, base, token_start=token_start)
 
     def _prepare_data(self, data):
         """Validate Dataset-owned canonical batches without changing their pipeline."""
