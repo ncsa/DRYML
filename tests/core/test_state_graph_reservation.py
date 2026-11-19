@@ -114,6 +114,32 @@ def test_graph_reservation_revalidates_invalidated_retained_nodes_before_save_ho
     assert CountingReservedState.captures == 0
 
 
+@pytest.mark.parametrize("missing", [False, True])
+def test_graph_reservation_rechecks_runtime_projection_before_save_hooks(tmp_path, monkeypatch, missing):
+    """An unchanged identity handle cannot authorize changed or lost live paths."""
+    from dryml.core.utils.graph.path import GraphPath, Parameter
+
+    repo = Repo(DirStore(tmp_path / "store"))
+    child = CountingReservedState(3, repo=repo)
+    root = StatelessRoot(child, repo=repo)
+    replacement = CountingReservedState(4, repo=repo)
+    path = GraphPath((Parameter("child"),))
+    CountingReservedState.captures = 0
+
+    with repo.reserve_state_graph(root) as reservation:
+        with monkeypatch.context() as patch:
+            if missing:
+                patch.delitem(root._runtime_projection, path)
+            else:
+                patch.setitem(root._runtime_projection, path, replacement)
+            assert root._identity_node is reservation.object_ref
+            with pytest.raises(RepoSaveError, match="runtime binding"):
+                repo.save_object(root, reservation=reservation, deep_capture=True)
+        assert root.graph_at(path) is child
+
+    assert CountingReservedState.captures == 0
+
+
 def test_graph_reservation_rejects_a_token_for_a_different_live_graph(tmp_path):
     repo = Repo(DirStore(tmp_path / "store"))
     first = ReservedState(1, repo=repo)

@@ -294,6 +294,9 @@ def test_cross_thread_save_at_accepted_cut_rejects_without_pulling_source(tmp_pa
 
 
 def test_stable_owner_evidence_is_prepared_once_with_fresh_binding_checks(monkeypatch):
+    from dryml.core.definition import ConcreteNode
+    from dryml.core.node_prepare import NodePreparation
+
     repo, exp = experiment()
     builds = []
     original = repo._state_graph_evidence
@@ -303,10 +306,23 @@ def test_stable_owner_evidence_is_prepared_once_with_fresh_binding_checks(monkey
     monkeypatch.setattr(repo, "_state_graph_evidence", evidence)
     with exp.train_fn.input_session(exp, repo=repo) as session:
         view = session.traversal.next_epoch()
-        for _ in range(2):
-            candidate = view.reserve()
-            with session.update(candidate):
-                record_train_update(exp, candidate.value, 1., batched=False, input_candidate=candidate)
+        work = {"graph_equal": 0, "NodePreparation": 0}
+        graph_equal = ConcreteNode.graph_equal
+        prepare = NodePreparation.__init__
+        def count_equal(node, other):
+            work["graph_equal"] += 1
+            return graph_equal(node, other)
+        def count_prepare(owner, *args, **kwargs):
+            work["NodePreparation"] += 1
+            return prepare(owner, *args, **kwargs)
+        with monkeypatch.context() as patch:
+            patch.setattr(ConcreteNode, "graph_equal", count_equal)
+            patch.setattr(NodePreparation, "__init__", count_prepare)
+            for _ in range(2):
+                candidate = view.reserve()
+                with session.update(candidate):
+                    record_train_update(exp, candidate.value, 1., batched=False, input_candidate=candidate)
+            assert work == {"graph_equal": 0, "NodePreparation": 0}
         assert builds == [exp]
         prior = exp.model
         exp.model = Counter()
@@ -317,6 +333,71 @@ def test_stable_owner_evidence_is_prepared_once_with_fresh_binding_checks(monkey
         exp.model = prior
         with session.update(candidate):
             record_train_update(exp, candidate.value, 1., batched=False, input_candidate=candidate)
+
+
+@pytest.mark.parametrize("equivalent", [True, False])
+def test_replaced_identity_node_is_semantically_revalidated_before_native_update(monkeypatch, equivalent):
+    from dryml.core import ObjectId
+    from dryml.core.definition import ConcreteNode
+    from dryml.core.utils.graph.path import GraphPath, Parameter
+
+    repo, exp = experiment()
+    with exp.train_fn.input_session(exp, repo=repo) as session:
+        retained = session._plan.object_ref
+        replacement = retained.copy_graph()
+        if not equivalent:
+            replacement = replacement.replace_bindings(identities={GraphPath((Parameter("model"),)): ObjectId()})
+        assert replacement is not retained
+        comparisons = []
+        graph_equal = ConcreteNode.graph_equal
+        def compare(node, other):
+            comparisons.append((node, other))
+            return graph_equal(node, other)
+        candidate = session.traversal.next_epoch().reserve()
+        with monkeypatch.context() as patch:
+            patch.setattr(ConcreteNode, "graph_equal", compare)
+            patch.setattr(exp, "_identity_node", replacement)
+            if equivalent:
+                with session.update(candidate):
+                    exp.model.value += int(candidate.value)
+                    record_train_update(exp, candidate.value, 1., batched=False, input_candidate=candidate)
+                assert (exp.model.value, exp.state.step, exp.state.input_sequence) == (1, 1, 1)
+            else:
+                with pytest.raises(RepoSaveError, match="does not cover"):
+                    with session.update(candidate):
+                        exp.model.value += int(candidate.value)
+                assert (exp.model.value, exp.state.step, exp.state.input_sequence) == (0, 0, 0)
+                assert session.traversal.position.sequence == 0
+            assert comparisons
+            assert all(node is replacement and other is retained for node, other in comparisons)
+            assert session._plan.object_ref is retained
+        if not equivalent:
+            with session.update(candidate):
+                exp.model.value += int(candidate.value)
+                record_train_update(exp, candidate.value, 1., batched=False, input_candidate=candidate)
+            assert (exp.model.value, exp.state.step, exp.state.input_sequence) == (1, 1, 1)
+
+
+@pytest.mark.parametrize("failure", ["invalidated", "reserved"])
+def test_retained_owner_update_rechecks_invalidation_and_exclusion(monkeypatch, failure):
+    from contextlib import nullcontext
+
+    repo, exp = experiment()
+    with exp.train_fn.input_session(exp, repo=repo) as session:
+        candidate = session.traversal.next_epoch().reserve()
+        guard = repo.reserve_state_graph(exp) if failure == "reserved" else nullcontext()
+        with guard, monkeypatch.context() as patch:
+            if failure == "invalidated":
+                patch.setattr(exp.model, "_restore_failed", True)
+            with pytest.raises(RepoSaveError, match=failure):
+                with session.update(candidate):
+                    exp.model.value += int(candidate.value)
+            assert (exp.model.value, exp.state.step, exp.state.input_sequence) == (0, 0, 0)
+            assert session.traversal.position.sequence == 0
+        with session.update(candidate):
+            exp.model.value += int(candidate.value)
+            record_train_update(exp, candidate.value, 1., batched=False, input_candidate=candidate)
+        assert (exp.model.value, exp.state.step, exp.state.input_sequence) == (1, 1, 1)
 
 
 def test_two_runs_share_procedure_but_no_cursor_provider_or_record():
