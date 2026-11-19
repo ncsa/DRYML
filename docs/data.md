@@ -492,6 +492,35 @@ not a snapshot of externally mutable payload bytes or of arbitrary Python code.
 Custom source implementations retain their trusted compatibility opener and do
 not gain a frozen-configuration or recovery guarantee.
 
+#### Array source fast path
+
+The local traversal kernel can group an unsectioned `Batch(ArrayDataset(...))`
+when the source is the exact built-in ArrayDataset, its frozen plain dict/list/tuple
+tree contains only exact fixed-storage NumPy arrays with known NumPy or immutable
+bytes owners, and the acquired indexed cursor still uses its admitted reader.
+It copies each mutable leaf's bounded leading-axis slice once per batch, builds
+retained rows from those slices, and invokes the existing selected collator once.
+Readonly stable storage follows the ordinary sharing rules above. Retention is
+complete before collation; collators returning views of retained rows do not
+borrow mutable source bytes.
+
+Preparation/open do not snapshot source bytes. Later batches observe mutations
+to the bound backing arrays between deliveries; changing the original recipe's
+containers or replacing its arrays does not replace an already frozen binding.
+Noncontiguous and nonnative-endian arrays and whole native-batched source items
+retain ordinary values, shapes, dtypes and batch boundaries. Physical source
+positions advance by exactly the consumed row count, including dropped short
+groups, with the same raw last-source value, finality and capture/restore format.
+Separate source occurrences still own separate cursor positions.
+
+Maps remain per authored row, without vectorization or grouped source ownership
+across a Method call. Unknown/custom sources or cursors, subclasses, object or
+other unsupported dtypes, sparse/native-framework values, foreign storage owners,
+changed reader behavior and changed array metadata keep scalar acquisition.
+Acquisition, retention and collator failures abort input and close acquired
+resources once, preserving the primary error and accepted-record freshness.
+This bounded dispatch/copy reduction makes no unmeasured wall-time speed claim.
+
 One graph cursor owns all source and selected output iterator resources it
 acquires. It closes them once in reverse acquisition order on exhaustion,
 explicit close, acquisition/body failure, or a consumer body error. Reusing one

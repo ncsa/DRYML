@@ -45,6 +45,18 @@ class _IndexedDatasetCursor(DatasetCursor):
         self._position += 1
         return value
 
+    _native_read = _read
+    _native_next = DatasetCursor.__next__
+    _native_call = staticmethod(DatasetCursor._call)
+
+    def _matches_native_reader(self, item_at):
+        """Certify that grouped access would bypass no substituted read behavior."""
+        return (type(self) is _IndexedDatasetCursor and self._item_at is item_at
+                and getattr(self._read, "__func__", None) is _IndexedDatasetCursor._native_read
+                and type(self).__next__ is _IndexedDatasetCursor._native_next
+                and self._call is _IndexedDatasetCursor._native_call
+                and not self._closed and not self.observed_eof)
+
     def _skip(self, n: int) -> None:
         """Advance the index without reads, leaving cleanup to the shared boundary."""
 
@@ -56,6 +68,9 @@ class _IndexedDatasetCursor(DatasetCursor):
 
 def _tree_index(x: Any, i: int) -> Any:
     return map_leaves(x, lambda leaf: leaf[i])
+
+
+_NATIVE_TREE_INDEX = _tree_index
 
 
 def _fresh_iterable(factory: Callable[..., Any], *args, **kwargs) -> Iterable[Any]:

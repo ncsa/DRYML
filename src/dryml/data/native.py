@@ -154,11 +154,115 @@ def _small_config(value, budget, active):
 
 @dataclass(frozen=True, slots=True)
 class _SourceBinding:
-    """One inert source declaration and its frozen acquisition callable."""
+    """One inert source declaration and its frozen acquisition callable.
+
+    The optional private retained_batch adapter may decline an actual cursor
+    without consuming it. Otherwise it owns a bounded row list and publishes the
+    raw consumed frontier through the kernel callback, including on copy failure.
+    """
 
     kind: str
     binding: object
     open: object
+    retained_batch: object = None
+
+
+def _numpy_array_storage(value):
+    """Return storage stability for exact arrays, or None for unqualified owners."""
+    import numpy as np
+
+    if (type(value) is not np.ndarray or value.ndim == 0 or value.dtype.hasobject
+            or value.dtype.fields is not None or value.dtype.metadata
+            or value.dtype.kind not in "biufcSUmM" or value.dtype.itemsize == 0):
+        return None
+    owner = value
+    stable = True
+    while type(owner) is np.ndarray:
+        stable = stable and not owner.flags.writeable
+        if owner.base is None:
+            return stable if owner.flags.owndata else None
+        owner = owner.base
+    return stable if type(owner) is bytes else None
+
+
+def _array_row(layout, leaves, index):
+    """Build one row using detached plain topology and already selected leaves."""
+    if type(layout) is int:
+        return leaves[layout][index]
+    if layout.kind is dict:
+        return {key: _array_row(child, leaves, index) for key, child in layout.items}
+    return layout.kind(_array_row(child, leaves, index) for child in layout.items)
+
+
+@dataclass(frozen=True, slots=True)
+class _ArrayBatchReader:
+    """Bounded NumPy slice ownership for an unchanged exact indexed reader.
+
+    No callbacks run between leaf reads. Publish the consumed source frontier
+    before returning owned rows or propagating a copy failure. A failed grouped
+    retention consumes only the first row, as failure retaining that row would in
+    the scalar kernel; no later rows have been delivered to an operator.
+    """
+
+    item_at: object
+    layout: object
+    leaves: tuple
+    metadata: tuple
+    length: int
+
+    @classmethod
+    def prepare(cls, tree, length, item_at):
+        leaves = []
+
+        def layout(value):
+            if isinstance(value, _ConfigTree):
+                if value.kind is dict:
+                    if any(type(key) not in (str, int) for key, _ in value.items):
+                        raise TypeError
+                    return _ConfigTree(dict, tuple((key, layout(child)) for key, child in value.items))
+                return _ConfigTree(value.kind, tuple(layout(child) for child in value.items))
+            if _numpy_array_storage(value) is None or len(value) != length:
+                raise TypeError
+            leaves.append(value)
+            return len(leaves) - 1
+
+        try:
+            shape = layout(tree)
+        except TypeError:
+            return None
+        return cls(item_at, shape, tuple(leaves), tuple((v.shape, v.dtype) for v in leaves), length)
+
+    def __call__(self, cursor, size, publish):
+        from .source import _IndexedDatasetCursor
+        import numpy as np
+
+        if (type(cursor) is not _IndexedDatasetCursor
+                or not cursor._matches_native_reader(self.item_at)
+                or cursor._length != self.length
+                or any((v.shape, v.dtype) != metadata
+                       for v, metadata in zip(self.leaves, self.metadata))):
+            return None
+        stable = tuple(_numpy_array_storage(value) for value in self.leaves)
+        if any(value is None for value in stable):
+            return None
+        start, stop = cursor.position, min(cursor.position + size, self.length)
+        if start == stop:
+            return None
+        # Retain the raw first value before allocation, so failed retention has
+        # the same consumed-row frontier as the generic read-then-retain path.
+        first = _array_row(self.layout, self.leaves, start)
+        try:
+            owned = tuple(value[start:stop] if share else np.copy(value[start:stop], order="K")
+                          for value, share in zip(self.leaves, stable))
+            rows = [_array_row(self.layout, owned, index) for index in range(stop - start)]
+            last = first if stop == start + 1 else _array_row(self.layout, self.leaves, stop - 1)
+        except BaseException:
+            cursor._position = start + 1
+            publish(first, 1)
+            raise
+        cursor._position = stop
+        publish(last, stop - start)
+        return rows
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +318,8 @@ def _prepare_source(dataset, spec):
     """
     from .dataset import Dataset, DatasetCursor
     from .source import (ArrayDataset, GeneratorDataset, NpyFileDataset,
-                         TFDSAdapter, TorchDatasetAdapter, _IndexedDatasetCursor, _tree_index)
+                         TFDSAdapter, TorchDatasetAdapter, _IndexedDatasetCursor,
+                         _tree_index, _NATIVE_TREE_INDEX)
     from dryml.methods.signature import spec_node
 
     if type(dataset) is GeneratorDataset:
@@ -230,12 +335,15 @@ def _prepare_source(dataset, spec):
         return _SourceBinding("generator", binding, binding.open)
     if type(dataset) is ArrayDataset:
         tree, length = _freeze_config(dataset.arrays), dataset._length
+        item_at = partial(_tree_index, _unpack_config(tree))
+        retained = (_ArrayBatchReader.prepare(tree, length, item_at)
+                    if _tree_index is _NATIVE_TREE_INDEX else None)
 
         def open_array(epoch):
-            arrays = _unpack_config(tree)
-            return _IndexedDatasetCursor(length, partial(_tree_index, arrays))
+            return _IndexedDatasetCursor(length, item_at if retained is not None
+                                         else partial(_tree_index, _unpack_config(tree)))
 
-        return _SourceBinding("array", (tree, length), open_array)
+        return _SourceBinding("array", (tree, length), open_array, retained)
     if type(dataset) is NpyFileDataset:
         import numpy as np
 

@@ -1543,6 +1543,12 @@ class _SectionExecution(_CursorLifecycle):
         if child.terminal:
             return PullKind.ROOT_END
         mapper = child if child.op.kind == "map" else None
+        if mapper is None:
+            reader = getattr(child.op.source, "retained_batch", None)
+            if reader is not None:
+                signal = self._batch_array_retained(child, reader)
+                if signal is not None:
+                    return signal
         source = mapper._child() if mapper is not None else child
         source_count, source_value = source.count, source.value
         source_root, source_terminal = source.root_final, source.terminal
@@ -1614,6 +1620,46 @@ class _SectionExecution(_CursorLifecycle):
         value = self._call(self.selected, self.buffer)
         self.buffer = []
         return self._deliver(value, root=root)
+
+    def _batch_array_retained(self, child, reader):
+        """Consume an optional Data-owned grouped reader, or decline unchanged.
+
+        The adapter publishes the exact raw source frontier before returning a
+        retained row list or raising. Selected collation still runs once, only
+        after ownership. No source protocol or continuation schema is required.
+        """
+        size, drop, _ = self.op.controls
+        published = False
+
+        def publish(value, count):
+            nonlocal published
+            published = True
+            child.count += count
+            child.value = value
+            child.section_final = False
+            child.produced = True
+            child.root_final = child.terminal = child.count == child._source_limit
+
+        try:
+            if child._closed:
+                raise RuntimeError("Closed execution cannot advance.")
+            if child.source is None:
+                child.source = child._own(child._call(child.op.source.open, child.epoch))
+            rows = child._call(reader, child.source, size, publish)
+        except BaseException as error:
+            if not published:
+                child.value, child.root_final, child.section_final = None, False, False
+            child._close_after_failure(error)
+            raise
+        if rows is None:
+            return None
+        self.buffer = rows
+        if drop and len(rows) < size:
+            self.buffer = []
+            return PullKind.ROOT_END
+        value = self._call(self.selected, self.buffer)
+        self.buffer = []
+        return self._deliver(value, root=child.root_final)
 
     def _unbatch(self, child):
         while self.split_index == len(self.split_values):
