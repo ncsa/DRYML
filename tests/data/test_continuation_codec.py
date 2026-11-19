@@ -1,7 +1,9 @@
 """Closed codec, aliasing, large integer and host-only native evidence."""
 
 import builtins
+from dataclasses import replace
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -61,6 +63,55 @@ def test_registered_dense_native_buffers_rebuild_exact_values_and_aliases(backen
     actual = np.asarray(rebuilt["first"])
     assert actual.dtype == array.dtype
     np.testing.assert_array_equal(actual, array)
+
+
+def test_tensorflow_rebuild_rejects_soft_placement_fallback():
+    tf = pytest.importorskip("tensorflow")
+    if tf.config.list_logical_devices("GPU"):
+        pytest.skip("Run this regression with GPUs hidden.")
+    previous = tf.config.get_soft_device_placement()
+    try:
+        tf.config.set_soft_device_placement(True)
+        with tf.device("/CPU:0"):
+            native = tf.constant([1, 2], dtype=tf.int32)
+        host = decode_value(*encode_value(native))
+        rebuilt = rebuild_native(host)
+        assert tf.DeviceSpec.from_string(rebuilt.device) == tf.DeviceSpec.from_string(native.device)
+        np.testing.assert_array_equal(rebuilt.numpy(), native.numpy())
+        try:
+            with pytest.raises(ValueError, match="Saved TensorFlow placement"):
+                rebuild_native(replace(host, placement="/GPU:0"))
+        finally:
+            assert tf.config.get_soft_device_placement() is True
+    finally:
+        tf.config.set_soft_device_placement(previous)
+
+
+def test_tensorflow_rebuild_accepts_equivalent_device_spellings():
+    tf = pytest.importorskip("tensorflow")
+    with tf.device("/CPU:0"):
+        native = tf.constant([1, 2], dtype=tf.int32)
+    host = decode_value(*encode_value(native))
+    expected = tf.DeviceSpec.from_string(native.device)
+    reordered = "/" + "/".join(reversed(native.device.strip("/").split("/")))
+    for placement in ("/cpu:0", reordered):
+        rebuilt = rebuild_native(replace(host, placement=placement))
+        assert tf.DeviceSpec.from_string(rebuilt.device) == expected
+        assert rebuilt.dtype == native.dtype
+        np.testing.assert_array_equal(rebuilt.numpy(), native.numpy())
+
+
+@pytest.mark.parametrize("field,value", [("job", "other"), ("replica", 1), ("task", 1)])
+def test_tensorflow_rebuild_checks_fully_qualified_placement(monkeypatch, field, value):
+    tf = pytest.importorskip("tensorflow")
+    with tf.device("/CPU:0"):
+        native = tf.constant([1, 2], dtype=tf.int32)
+    host = decode_value(*encode_value(native))
+    effective = tf.DeviceSpec.from_string(native.device).replace(**{field: value})
+    # Simulate changed effective topology without requiring a distributed TF server.
+    monkeypatch.setattr(tf, "convert_to_tensor", lambda array: SimpleNamespace(device=effective.to_string()))
+    with pytest.raises(ValueError, match="Saved TensorFlow placement"):
+        rebuild_native(host)
 
 
 @pytest.mark.parametrize("value", [object(), iter([1]), np.array([object()], dtype=object), {1: "bad"}])

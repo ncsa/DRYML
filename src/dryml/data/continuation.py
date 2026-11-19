@@ -275,9 +275,12 @@ def rebuild_native(value: ContinuationValue) -> ContinuationValue:
         Independent tree preserving aliases and native dtype/shape/placement.
     Raises:
         ImportError: Required backend is unavailable.
-        ValueError: Saved placement cannot be reconstructed by that backend.
+        ValueError: Saved placement cannot be reconstructed by that backend,
+            including TensorFlow soft-placement fallback that changes any specified
+            device, job, replica, or task component.
     Side Effects:
-        Lazily imports only required backends and allocates their tensors.
+        Lazily imports only required backends and allocates their tensors without
+        changing TensorFlow's process-global soft-placement policy.
     """
     memo = {}
     def rebuild(item):
@@ -290,8 +293,14 @@ def rebuild_native(value: ContinuationValue) -> ContinuationValue:
                 result = torch.from_numpy(array).to(item.placement)
             elif item.backend == "tensorflow":
                 import tensorflow as tf
+                required = tf.DeviceSpec.from_string(item.placement)
                 with tf.device(item.placement):
                     result = tf.convert_to_tensor(array)
+                effective = tf.DeviceSpec.from_string(result.device)
+                if any(getattr(required, field) is not None
+                       and getattr(required, field) != getattr(effective, field)
+                       for field in ("job", "replica", "task", "device_type", "device_index")):
+                    raise ValueError("Saved TensorFlow placement cannot be reconstructed.")
             else:
                 import jax
                 devices = [d for d in jax.devices() if str(d) == item.placement]
