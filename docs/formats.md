@@ -45,11 +45,18 @@ records; only explicit reattachment may import the backend and reconstruct a
 tensor. No pickle, arbitrary callable/class instance, frame or Object-buffer tag
 exists. Integer state, including PCG64 128-bit fields, is never narrowed.
 
+TensorFlow reattachment checks the reconstructed tensor's effective placement
+against every specified saved `DeviceSpec` component, including job, replica and
+task for fully qualified captured devices. Equivalent device spellings are
+accepted; soft-placement fallback to a different required placement raises
+`ValueError`. Reconstruction does not change TensorFlow's process-global
+soft-placement policy.
+
 The decoded domain envelope has exactly `format`, `version`, `protocol`,
 `target`, `state_ref`, `snapshots`, `position`, `policy`, `active_replay`, `explicit`,
 `pass_nonempty`, `initialized`, `staged`, `staged_boundary`, `boundary_pending`,
-and `execution`. Protocol evidence pins the Python major/minor, NumPy version,
-and replay/codec/kernel integer versions (all currently 1). `position` contains
+`execution`, and `adapter`. Protocol evidence pins the Python major/minor, NumPy version,
+and replay/codec/kernel/training_window integer versions (all currently 1). `position` contains
 the accepted epoch/offset/sequence and completion flags. Target occurrence rows
 include frozen controls, normalized specs, sharing, source evidence and retained
 implementation-selection facts; no invoker or selected function is encoded.
@@ -61,6 +68,14 @@ spelling is reinstated before Core validates/authenticates the packet. Node code
 that import enum/type or NumPy extension-dtype targets are excluded from this inert
 format; symbol ImportRef/SourceSpec metadata remains unresolved. The directory is
 not a request to materialize its target or restore referenced state.
+
+`adapter` is normally None. A private Keras `tf-training-v1` window contains
+`kind`, `producer_position`, and `pending`. Each pending entry has `value`,
+`position`, and `stage="converted"`. The outer position is accepted training
+progress; producer position and the complete unacknowledged window can be ahead.
+Native dequeuing is not acceptance. These records require their owning training
+adapter; ordinary `Dataset.open` rejects them instead of silently discarding or
+double-converting pending inputs. They add no public prefetch API.
 
 `policy` is disabled,
 enabled or if_needed. Pending public tokens are never serialized; staged values

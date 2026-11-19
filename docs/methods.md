@@ -377,6 +377,10 @@ separate optional transition out of a pending section, and `StateExport` /
 `StateRestore` describe explicit, domain-validated state transfer. These names
 are submodule exports, not additions to the Methods-root manifest. They define
 local execution capabilities, not a persisted schema or Dataset traversal API.
+Data owns the public `RecoverableGenerator` ABC and detached DatasetState schema;
+Methods does not import those consumers. State hooks are capture-time operations,
+not part of delivery. Fully declared Map, initializer, Accumulator, collator and
+splitter selections are retained across adjacent sections and independent sessions.
 
 `StreamGraphCursor.pull()` is an optional one-pass adapter over the existing
 flattened iterator: it reports delivery/root completion, never section end.

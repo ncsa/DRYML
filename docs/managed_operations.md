@@ -31,6 +31,19 @@ proofs and optional-backend limits are recorded in
 Acquiring low-level admission or constructing metadata alone does not retain
 private state. U15's selected saved-start handshake does acquire physical grants.
 
+### Dataset continuation association
+
+Standalone `DatasetState.save(path)` writes a detached Data-owned v1 directory;
+it does not publish an Object, establish a managed checkpoint, or retain external
+source states. TrainFunction owns one invocation-local input capture provider.
+Experiment's existing payload hook requests its coherent accepted cut and writes
+TrainState/Experiment v3 with one continuation bundle. Logging-only safe points
+request no capture. Core publication and Managed checkpoint association still
+decide which complete consumer state is recoverable; a detached input directory
+alone cannot restore optimizer/model progress. Capture or publication failure must
+preserve prior associated checkpoints. See [input recovery](models.md#invocation-owned-input-recovery)
+for exact versus positional retries and native-owner invalidation.
+
 ### Invocation-local performance and evidence
 
 Snapshot environment evidence is observed lazily before the first capture's state

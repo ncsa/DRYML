@@ -1,5 +1,13 @@
+"""Dataset recipes, independent local traversals, and detached continuation IO.
+
+Importing this surface does not activate optional tensor frameworks. Prepare/open
+retain execution selections without source acquisition; capture explicitly owns
+snapshot costs. DatasetState directory IO publishes no Object or managed checkpoint.
+See ``docs/data.md`` for ownership, recovery qualification, and failure contracts.
+"""
+
 from dryml.data.dataset import Dataset, DatasetCursor, DatasetExhaustedError, Map, StreamDataset
-from dryml.data.native import NativeTrainingCursor, PreparedDataset
+from dryml.data.native import BatchPreparation, NativeTrainingCursor, PreparedDataset
 from dryml.data.source import ArrayDataset, GeneratorDataset, NpyFileDataset, TFDSAdapter, TorchDatasetAdapter
 from dryml.data.combine import Chain, Zip
 from dryml.data.accumulate import Accumulate
@@ -58,6 +66,7 @@ __all__ = [
     "StatePath",
     "Epoch",
     "PreparedDataset",
+    "BatchPreparation",
     "NativeTrainingCursor",
     "GeneratorDataset",
     "ArrayDataset",

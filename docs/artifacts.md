@@ -116,6 +116,10 @@ coordinate facts while retaining a dynamic batch axis, then holds coordinate
 shape, backend, and device stable for the invocation.
 
 For intermediate carries use [`dryml.data.Accumulate`](data.md#streaming-accumulation).
+An epoch view's EOF proves only that section; it cannot authorize Fold's terminal
+publication. DatasetState directory IO likewise publishes no Value or managed
+checkpoint. Fold keeps its v3 root-output-EOF progress contract independently of
+the new Data v1 and TrainState/Experiment v3 continuation formats.
 It owns per-occurrence streaming carry and emits one post-transition value per
 input, while Method `Accumulator` remains a stateless observation-first transition
 declaration. Fold remains the terminal managed reduction. In particular, Fold

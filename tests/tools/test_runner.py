@@ -619,6 +619,12 @@ sys.exit(pytest.main([
         f"{owner}::{function}" for function in (
             "test_native_trainers_consume_authored_dataset_batches[torch]",
             "test_native_trainers_consume_authored_dataset_batches[tf]",
+            "test_dataset_continuation_native_sections_share_one_source[torch]",
+            "test_dataset_continuation_native_sections_share_one_source[tf]",
+            "test_dataset_continuation_native_sections_share_one_source[jax]",
+            "test_dataset_continuation_native_sections_share_one_source[keras]",
+            "test_dataset_continuation_native_direct_hooks_only_at_final_capture[torch]",
+            "test_dataset_continuation_native_direct_hooks_only_at_final_capture[tf]",
             "test_jax_trainer_consumes_authored_dataset_batches",
             "test_jax_qualification_model_runs_on_authored_dataset_batches[W1]",
             "test_jax_qualification_model_runs_on_authored_dataset_batches[W3]",

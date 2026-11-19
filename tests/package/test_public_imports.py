@@ -55,6 +55,60 @@ _EXPECTED_CODE_EXPORTS = [
     "trace",
 ]
 
+
+def test_installed_dataset_continuation_exports_signatures_and_offline_suffix(installed_python):
+    """Exercise installed public records without any optional backend import."""
+    result = _installed_probe(installed_python, '''
+import inspect
+import json
+import sys
+import tempfile
+from pathlib import Path
+import numpy as np
+class RejectNative:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'tensorflow', 'torch', 'jax', 'jaxlib'}:
+            raise AssertionError('unexpected native import: ' + fullname)
+sys.meta_path.insert(0, RejectNative())
+import dryml.data as data
+names = {'DatasetTraversal', 'DatasetState', 'EpochView', 'PendingElement',
+         'TraversalPosition', 'RecoverableGenerator', 'AcceptanceMode',
+         'ReplayRecoveryPolicy', 'ContinuationValue', 'StatePath', 'Epoch',
+         'Accumulate', 'TraversalError', 'TraversalOwnershipError',
+         'UnsupportedContinuationError', 'ContinuationMismatchError',
+         'ContinuationFormatError', 'BatchPreparation'}
+assert names <= set(data.__all__)
+assert all(getattr(data, name) is not None for name in data.__all__)
+assert len(data.__all__) == len(set(data.__all__))
+for cls in (data.Dataset, data.PreparedDataset):
+    signature = inspect.signature(cls.open)
+    assert list(signature.parameters) == ['self', 'epoch', 'start', 'state', 'acceptance']
+    assert [signature.parameters[n].default for n in ('epoch', 'start', 'state', 'acceptance')] == [None, None, None, 'delivery']
+    assert all(p.kind == inspect.Parameter.KEYWORD_ONLY for n, p in signature.parameters.items() if n != 'self')
+dataset = data.Epoch(data.ArrayDataset(np.arange(9)), len=4)
+for value in (True, np.int64(1), 1.0):
+    try:
+        dataset.open(start=value)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError('nonexact count accepted')
+with tempfile.TemporaryDirectory() as directory:
+    with dataset.open() as traversal:
+        view = traversal.next_epoch()
+        assert [next(view), next(view)] == [0, 1]
+        state = traversal.capture_state()
+        state.save(Path(directory) / 'cut')
+    loaded = data.DatasetState.load(Path(directory) / 'cut')
+    loaded.validate(dataset)
+    with dataset.open(state=loaded) as resumed:
+        suffix = [(epoch, [int(value) for value in view]) for epoch, view in resumed.epochs()]
+    assert suffix == [(0, [2, 3]), (1, [4, 5, 6, 7]), (2, [8])]
+    assert not hasattr(loaded, 'object_id')
+print(json.dumps({'suffix': suffix, 'native': [n for n in ('tensorflow', 'torch', 'jax', 'jaxlib') if n in sys.modules]}))
+''')
+    assert json.loads(result.stdout) == {"suffix": [[0, [2, 3]], [1, [4, 5, 6, 7]], [2, [8]]], "native": []}
+
 _EXPECTED_CODE_MODULE_EXPORTS = {
     "dryml.code.algorithms": [
         "LexicalDependencies",

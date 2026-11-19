@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Add independent DatasetTraversal owners, continuous explicit `Epoch` sections,
+  implicit finite passes, selected-epoch `iterate()`, and explicit single-use input
+  acceptance. Export typed session/recovery contracts, including BatchPreparation.
+- Add detached DatasetState v1 no-clobber directory IO, indexed restoration,
+  traversal-local ordinary-generator replay, explicit RecoverableGenerator direct
+  restoration, mixed Zip frontiers, and stable source-backed notebook producers.
+  Source availability and retention remain explicit; no generator frame is saved.
+- Add streaming Accumulate with observation-first Accumulator transitions. Fold
+  remains terminal with its unchanged v3 root-output-EOF authority.
+- Associate accepted input with TrainState/Experiment v3 through existing payload
+  hooks, with capture on save/final exact completion. Historical consumer v2 is
+  rejected without migration. Preserve token-qualified Keras prefetch/overlap and
+  fail-and-restore native-owner boundaries. Standalone input IO is not a managed
+  checkpoint. See [Data](data.md) and [Models](models.md).
+- Add an opt-in fixed CPU JSON comparison and offline installed-package suffix
+  probes. Native parity, accelerator performance and real Optax/JAX training are
+  not certified by work-count or overlap correctness tests; capture copies,
+  positional replay, fit setup and unresolved comparison evidence remain visible.
+
 - Share repeated exact Node value blocks in large managed-control records so
   checkpoint/final-association preparation can fit the existing 1 MiB wire limit.
   Preserve exact nested snapshot CAS bytes, legacy plain records, graph identities

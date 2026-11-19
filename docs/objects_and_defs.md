@@ -16,6 +16,15 @@ matches unordered incidence without using `repr` as identity. Python pickle
 round trips preserve the alias partition and facets, with fresh process-local
 handles rather than handle equality with the source.
 
+`dryml.data.DatasetState` is a detached ordinary continuation value, not a Node or
+Object. Its `cdef` describes the supplied Dataset, and optional `state_ref` records
+required selected-state evidence. Neither field grants graph ownership, automatic
+materialization, or retention. Multiple independent traversals can open one record.
+Experiment persists it through existing state payload hooks without adding a
+constructor dependency or changing ObjectId/Node identity. See
+[Data continuation](data.md#detached-traversal-continuation) for compatibility and
+external source availability requirements.
+
 Constructor values retain distinct list, tuple, set, frozenset and mapping tags.
 `Repo.materialize_boundary` also preserves runtime container families, including
 built-in `frozenset` versus tagged `FrozenSet`, while retaining reference aliases

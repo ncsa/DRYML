@@ -198,7 +198,7 @@ candidate once without accepting it. Converted and raw candidates share one
 single-use token; exhausted cursor closure leaves adjacent sections alive.
 Conversion failure aborts input before exposure/native mutation and preserves its
 primary error if source cleanup also fails.
-`dryml.data.native.BatchPreparation` is the dependency-light structural protocol
+`dryml.data.BatchPreparation` (also `dryml.data.native.BatchPreparation`) is the dependency-light structural protocol
 for that retained `prepare(x, y) -> (x, y)` handoff.
 
 Inside the session, reserve from an epoch view and perform each native update
@@ -244,6 +244,12 @@ Missing, corrupt, incompatible or mismatched pairs reject before TrainState
 assignment. Version-2 TrainState/Experiment payloads are rejected intact, without
 migration. Core's enclosing inventory and managed checkpoint association remain
 the sole publication authority; a failed capture/save preserves prior checkpoints.
+The bounded comparison tool in [Data](data.md#public-types-and-measurement-controls)
+reports input capture separately from normal training. Its direct input/model-SGD
+checkpoint probes are not managed publication qualification. Native grouped Keras
+may report once per 32 updates; that different callback guarantee is an optimized
+native comparison, not evidence of exact per-update DRYML parity. Real JAX training
+qualification requires Optax; pure JAX availability alone is insufficient.
 
 TensorFlow `fit`, explicit TensorFlow loops, and Torch loops validate all DRYML
 callbacks before training work and invoke them only after this retained state is
@@ -385,6 +391,19 @@ model, one compile, and unchanged trace counts `[1, 1, 1]` across three short fi
 segments. That short-section fixture retained two batches / 16 bytes, with capacity
 eight and native prefetch two. Native fit setup still occurs per logical section;
 compilation/preparation is reused.
+Native callbacks and invocation telemetry retain one lifecycle across these fit
+segments: model/parameter setup and `on_train_begin` run once at the first actual
+segment, with `params["epochs"]` equal to the retained invocation target.
+Batch, epoch and validation events keep their native ordering after the relevant
+DRYML accounting. Callback state (including native plateau/early-stop patience)
+survives section boundaries. `on_train_end` runs once after normal completion or
+a native stop, with the final segment's public logs and the same combined
+`model.history` returned by the trainer. As in native Keras, an escaping
+source/native/callback exception does not synthesize `on_train_end`; an admitted
+retry starts a new callback lifecycle. Zero-work calls emit no begin/end or
+callback setup. This does not add persistence/replay for arbitrary native
+callbacks or relax the safe-point restrictions above; saved early-stopping
+behavior remains owned by `BasicEarlyStoppingTraining`.
 `steps_per_execution=1` remains a named pre-existing native parity gap. Comparative
 throughput and optimized native grouped execution belong to U8; these work-count
 proofs do not establish throughput parity.
@@ -941,10 +960,14 @@ epoch to an enclosed seed-aware `Take(...)` boundary; `Take` retains strict
 exhaustion, fixed-prefix, and zero-acquisition behavior. Ordinary non-epoch-aware
 Dataset pipelines retain their normal fresh traversal per epoch.
 
-Training computes a pure JITted parameter-only gradient/Optax candidate, waits
-for its arrays, validates model parameters, mutable state, RNG, and optimizer
-slots, then eagerly installs all owner state and TrainState accounting together.
-Callbacks and managed checkpoints run only after that accepted transition, so a
+Training acquires the input update reservation before reading Model parameters,
+mutable state, RNG, or Optimizer slots. It holds that reservation while computing
+the pure JITted parameter-only gradient/Optax candidate, waiting for its arrays,
+validating state, and eagerly installing all owner state and TrainState accounting
+together. Concurrent updates sharing a Model fail explicitly on contention before
+computing a stale candidate. Pure pre-installation failures leave unchanged owners
+valid; failed installation repair invalidates affected owners. Callbacks and managed
+checkpoints run only after that accepted transition and reservation release, so a
 callback/publication failure retains the truthful update. An interruption during
 the bounded transition repairs the prior Model, Optimizer, TrainFunction, and
 progress state before it propagates. Resume reopens the same logical Dataset epoch

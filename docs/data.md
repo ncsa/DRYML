@@ -228,6 +228,14 @@ Import-bearing enum/type or extension-dtype constructor metadata is not qualifie
 for inert continuation IO either; ordinary live execution remains available.
 Writable values retained by buffering operators are owned at their algorithmic
 lifetime boundary; immutable/native-functional buffers avoid indiscriminate copies.
+For NumPy leaves, readonly flags alone are insufficient: buffering operators and
+the Keras pending window follow ndarray bases and readonly memoryview owners.
+They share only chains ending in immutable `bytes` or readonly NumPy-owned storage;
+callers must not re-enable writes to those NumPy owners while values are retained.
+Writable backing arrays, bytearrays (even behind readonly memoryviews), and unknown
+foreign owners are copied at retention. This does not copy full source arrays at
+prepare/open or convert/synchronize immutable native tensor leaves. Keras retains
+its `Variable.read_value()` snapshot behavior for mutable TensorFlow variables.
 
 `DatasetState.save(path) -> Path` publishes a new v1 directory, with no overwrite
 mode. A stable sibling name advisory lock covers the authoritative final absence
@@ -346,7 +354,7 @@ containers, empty batches, or construction without factory execution.
 
 ### Local Traversals And Epochs
 
-`Dataset.open(*, epoch=None, start=None, acceptance="delivery")` prepares once
+`Dataset.open(*, epoch=None, start=None, state=None, acceptance="delivery")` prepares once
 and returns a lazy `DatasetTraversal`. `PreparedDataset.open(...)` reuses its
 frozen controls, topology, source bindings and selected invokers. Each traversal
 owns independent live cursors, RNGs and buffers; multiple traversals may interleave.
@@ -516,8 +524,8 @@ The qualified plan's output `spec` is returned with detached container structure
 native cursor finite-count checks use the same preparation's captured cardinality,
 not later Dataset edits. Existing independent flattened iteration remains lazy
 and does not extract producer state, build continuation records, serialize values,
-or scalarize a selected native/batched Method. Public continuation/session APIs
-are not supplied by this preparation substrate.
+or scalarize a selected native/batched Method. The same preparation also supplies
+`open(state=...)` and selected-epoch `iterate()`; each open owns its live session.
 
 `PreparedDataset.iterator()` opens an independent closeable cursor each time.
 `training_batches(preparation)` applies one already selected x/y handoff per
@@ -549,6 +557,133 @@ Importing `dryml.data.native` or any training-data plugin imports neither its
 heavy framework nor the unsupported historical `dryml.data.tf` and
 `dryml.data.torch` wrappers. Framework imports occur only when a native adapter
 is requested or a retained handoff executes.
+
+### Public types and measurement controls
+
+`dryml.data` exports `AcceptanceMode` (`"delivery" | "explicit"`),
+`ReplayRecoveryPolicy` (`"disabled" | "enabled" | "if_needed"`), `StatePath`
+(`str | os.PathLike[str]`), `ContinuationValue`, `TraversalPosition`,
+`PendingElement`, `EpochView`, `DatasetTraversal`, `DatasetState`,
+`RecoverableGenerator`, `Epoch`, `Accumulate`, and the continuation errors above.
+`BatchPreparation`, also available from `dryml.data.native`, is a dependency-light
+Protocol: `prepare(x: object, y: object) -> tuple[object, object]` validates/converts
+one pair using retained specifications. Conversion may allocate native values;
+validation/backend errors propagate before input acceptance. No root-package
+aliases or generator-recovery wrapper are added.
+
+The opt-in benchmark is `python -m tests.tools.benchmark_dataset_traversal`.
+`--describe` emits its fixed JSON profile without importing a tensor framework.
+To run locally, archive `pre-dataset-improvement` at
+`9a681eabfe53b66f9d6d1459960ba10b95c1ff1d` into a new directory under
+`/tmp/dryml`, then supply `--baseline-source DIRECTORY --output NEW_JSON_PATH`.
+Repeat `--workload` or `--mode` to select an explicit subset; partial evidence
+never certifies the full comparison. Before launching any worker, an invocation
+reserves its new output name with a nonblocking stable sibling FileLock
+(`.NAME.benchmark.lock`) and checks absence under that lock. Existing outputs and
+competing owners fail before work. The lock remains held through final publication;
+it is never unlinked. Progress and final JSON use unique same-parent staging,
+checked writes, flush/fsync and atomic replace (plus parent-directory fsync on
+POSIX). Failed writes preserve the previous complete JSON; errors around replace
+can leave a complete new snapshot and propagate with that uncertainty noted.
+Cleanup owns only the invocation's stage and preserves primary failures.
+
+Controls remain seed 1729, two warmups, five repetitions, CPU/one producer/one
+native thread, 120 seconds per cell including instrumentation/startup, and 1,200
+seconds overall including failed cells. Keras uses window capacity eight and
+prefetch two. Indexed work is 4,096x8 float32, batch 32, eight passes (1,024
+batches), separately 64 sections of 16. Ordinary/direct/mixed work is 512x8 with
+sections of 16. Training is 4,096x16 to one target, batch 32, 128 updates in four
+sections, with no intermediate checkpoint and cadence 32. Buffered Shuffle uses
+capacity 32 and capture after output 129, then validates the entire resumed suffix.
+
+JSON distinguishes warmups, preparation/first-result, steady windows, end-to-end,
+capture/save/load/restore, and a separate instrumentation pass. Unmeasured copy,
+compile, synchronization, device-memory and pending-window metrics are `null`,
+not inferred zeros. Median/MAD and three times the larger comparison MAD are a
+triage envelope; noisy, timeout, unavailable or mismatched work is not a pass.
+Native runs use native pipelines without DRYML wrappers. Optimized modes preserve
+vectorized work/compilation/prefetch; grouped native Keras changes callback
+granularity and is labeled separately. Training invocation timing includes
+fit/compilation setup where kernel-only timing cannot yet be isolated.
+
+The report carries `dryml-dataset-traversal-applicability-v1`, a closed required
+workload/mode/cadence/instrumentation schema independent of observed results or
+installed dependencies. New modes are required for every workload; old modes
+are required for indexed implicit and all training workloads; native modes are
+required for both indexed workloads and all training workloads. Only old explicit
+sections/recovery and native ordinary/direct/mixed/buffered continuation cells
+are known unsupported: they stay labeled, launch no worker and yield no ratio.
+All applicable cells require exact useful work, two complete warmups, five
+validated windows with matching end-to-end observations, and separate validated
+instrumentation. Missing, duplicate, unavailable, unsupported-required, failed,
+timed-out or incomplete evidence blocks closeout. New/pre-change regressions and
+unresolved noise block; matched/optimized native gaps remain informational ratios
+with named follow-ups, not required parity. Partial selections cannot pass.
+Native Keras cadence and saved step metadata use cumulative optimizer iterations,
+so the four section checkpoints bind weights to updates 32, 64, 96 and 128 in
+both matched and grouped modes.
+
+Throughput parity is not certified by deterministic work counts or the Keras
+barrier test. Capture may copy a full source plus buffered values; replay costs
+the fetched ordinary prefix, and native pending windows add converted value
+storage and a capture handshake. The fixed comparison and real Optax/JAX
+qualification must be resolved independently of the routine correctness gate.
+
+#### Bounded CPU evidence and unresolved gates
+
+The U8 run at base revision `f569da67` used an isolated archive of the pinned
+baseline and the fixed profile above. Initial driver failures consumed 708.19 s;
+one confirmation exhausted the cumulative budget at 1,200.21 s including
+termination/report overhead. It is **unverified**, not a performance pass.
+Five-window confirmation measurements (seconds, median ± MAD) were:
+
+| Work | Pre-change | New | New/pre-change |
+|---|---:|---:|---:|
+| Indexed implicit, 1,024 batches | 3.9448 ± 0.0418 | 4.3464 ± 0.0854 | 1.102 |
+| Torch invocation, 128 updates, no intermediate save | 0.1708 ± 0.0015 | 3.0924 ± 0.0390 | 18.111 |
+| Torch invocation, cadence 32 | 0.1815 ± 0.0035 | 3.4000 ± 0.0720 | 18.728 |
+
+The indexed difference (0.4016 s) exceeds its initial three-max-MAD envelope
+(0.2563 s). Torch compares a labeled equivalent old **manual** four-section loop
+with the new exact session, and includes preparation/final capture in invocation
+time; kernel-only steady training has not been isolated. Its difference also
+exceeds measured noise. These are unresolved regression signals, not accepted
+recovery overhead. A subsequent correction to
+`core.repo_plan.validate_retained_save_plan` reuses the identical admitted immutable
+identity Node while retaining replacement-handle comparison, live-binding checks,
+invalidation and reservation exclusion. A deterministic two-update regression now
+observes zero graph comparisons or `NodePreparation` constructions, replacing six
+comparisons and twelve preparations before the correction. No post-correction
+comparative timing was run, so the historical Torch ratio is neither a current
+measurement nor evidence that the complete regression is resolved. Indexed per-row
+Map validation/collation and section delivery also need investigation without
+weakening membership or ownership.
+
+The NumPy matched/vectorized native indexed windows were 0.001410/0.000151 s;
+the new implicit path was approximately 3,082/28,822 times slower. Native Torch
+matched/compiled windows were 0.06345/0.05659 s, giving new invocation gaps of
+48.74/54.65. These large gaps remain visible; no framework-native pipeline was
+routed through DRYML to close them. NumPy vectorization changes transform grouping,
+and optimized Keras changes callback grouping, so those are separately labeled.
+
+For the buffered Shuffle representative, a full suffix after output 129 validated.
+One confirmation window measured capture 0.01488 s, save 0.02105 s, load 0.01073 s,
+reattachment 0.01174 s, full resumed suffix 0.00468 s, and 50,776 serialized bytes;
+final capture was 0.01298 s. These are individual cost observations, not medians
+or throughput-parity evidence. Ordinary/direct/mixed suffixes also validated.
+
+TF/Keras DRYML driver construction failed before useful training; its corrected
+Sequential recipe has only inert declaration qualification in this run. Budget
+exhaustion prevented another real comparison. Initial native TF/Keras measurements
+cannot establish their missing DRYML ratios. Optax is absent, so real JAX training
+remains unverified. The fixed-profile JAX driver is also unimplemented even if
+Optax is installed; all its cells remain required and explicitly blocking rather
+than being exempted by the applicability schema. Pending-window/compile/copy
+metrics missing from successful instrumentation remain explicitly unknown. The earlier barrier-based Keras
+overlap/capture correctness evidence is independent and is not replaced by these
+timings. Completion still requires regression diagnosis, resolved fixed comparison
+evidence, real available-backend qualification, and the coordinator's measured
+strictly-under-900-second routine gate.
 
 ## Source Datasets
 

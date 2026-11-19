@@ -44,6 +44,14 @@ def test_package_build_tooling_and_subprocesses_are_offline(monkeypatch) -> None
     assert environment["PYTHONPATH"] == ""
 
 _REQUIRED_MODULES = {
+    "dryml/data/accumulate.py",
+    "dryml/data/continuation.py",
+    "dryml/data/errors.py",
+    "dryml/data/recovery.py",
+    "dryml/data/state.py",
+    "dryml/data/traversal.py",
+    "dryml/methods/stream_state.py",
+    "dryml/models/training_transaction.py",
     "dryml/filesystem/__init__.py",
     "dryml/filesystem/_posix.py",
     "dryml/filesystem/_windows.py",
