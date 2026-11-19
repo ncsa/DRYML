@@ -623,6 +623,38 @@ Native Keras cadence and saved step metadata use cumulative optimizer iterations
 so the four section checkpoints bind weights to updates 32, 64, 96 and 128 in
 both matched and grouped modes.
 
+The JAX driver implements all four required modes with the same zero-initialized,
+bias-free 16-to-1 float32 dense model, mean squared error, and constant-rate
+momentum-free Optax SGD (`.001`). Old/new use functional DRYML Model, Optimizer
+and Training owners with importable `F(...)` factories. The pinned baseline uses
+four equivalent manual input slices; new uses one continuous four-section Epoch.
+Matched-native uses native array slice batching and one JIT update/scalar report
+per batch. Optimized-native uses a JIT `lax.scan` over each 32-update section;
+host reporting and synchronization are grouped at section boundaries. Neither
+native mode uses DRYML wrappers or its input bridge.
+
+JAX windows validate all 128 ordered delivery IDs, cumulative exposures, four
+completed sections, finite losses, and weights against deterministic NumPy SGD
+(`rtol=5e-5`, `atol=1e-6`) before returning successful evidence. Weight checksums
+report both actual and NumPy-expected sums. Requested checkpoints associate the
+accepted update count and weights with a current input record: DatasetState for
+new, source arrays and a next-row/batch cursor for native and old manual sections.
+The latter is not a claim of baseline exact Dataset continuation. Constant-rate
+SGD has no Optax slot leaves; the saved count is accepted updates, not an Optax
+slot. Checkpoint snapshots also validate against their corresponding NumPy
+prefixes. Source snapshots are taken only at requested checkpoints/finalization.
+
+For JAX, `prepare_seconds` includes imports and native setup. The invocation
+reported as `steady_seconds` includes first-update JIT compilation and new's
+normal final input capture; fresh owners/functions are built for each window,
+so this is not isolated warmed-kernel time. Cold-import, compile-only and final
+capture-only costs remain unknown (`null`), with that limitation stated in the
+record. Final checkpoint saving is reported separately in `final_save_seconds`,
+outside the intermediate-checkpoint list. The two warmups/five timed windows
+and fixed controls are unchanged. Tiny real numerical builder probes qualify
+correctness only; synthetic 128-update checkpoint tests are not real Optax
+qualification and produce no comparative evidence.
+
 Throughput parity is not certified by deterministic work counts or the Keras
 barrier test. Capture may copy a full source plus buffered values; replay costs
 the fetched ordinary prefix, and native pending windows add converted value
@@ -675,10 +707,16 @@ or throughput-parity evidence. Ordinary/direct/mixed suffixes also validated.
 TF/Keras DRYML driver construction failed before useful training; its corrected
 Sequential recipe has only inert declaration qualification in this run. Budget
 exhaustion prevented another real comparison. Initial native TF/Keras measurements
-cannot establish their missing DRYML ratios. Optax is absent, so real JAX training
-remains unverified. The fixed-profile JAX driver is also unimplemented even if
-Optax is installed; all its cells remain required and explicitly blocking rather
-than being exempted by the applicability schema. Pending-window/compile/copy
+cannot establish their missing DRYML ratios. At that historical run, Optax was
+absent and the fixed-profile JAX driver was unimplemented. Subsequent
+owner-authorized setup installed Optax 0.2.4 and Chex 0.1.89 alongside unchanged
+JAX/JAXlib 0.5.3 and NumPy 2.1.3. The driver is now implemented and has tiny real
+CPU unit qualification, including the actual pinned baseline in an isolated
+source-archive process. Its fixed-profile comparative cells have not been run;
+all remain required, and absent evidence blocks the report. The owner authorized
+one fresh 1,200-second comparison after runtime optimization; this driver work
+does not start that budget or replace the exhausted historical result.
+Pending-window/compile/copy
 metrics missing from successful instrumentation remain explicitly unknown. The earlier barrier-based Keras
 overlap/capture correctness evidence is independent and is not replaced by these
 timings. The complete routine runner subsequently passed 4,978 tests with 30 skips

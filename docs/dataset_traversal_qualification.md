@@ -4,8 +4,8 @@
 
 The traversal, continuation, Accumulate, accepted-training-state, and native
 consumer implementation is present on `fix/real-usage-followups`. The plan is
-**not complete**: required performance and real Optax/JAX qualification remain
-blocking. Passing correctness checks do not waive those requirements.
+**not complete**: required comparative and routine performance qualification
+remain blocking. Passing correctness checks do not waive those requirements.
 
 The canonical decision artifact is
 `docs/plans/2026-11-14-001-feat-dataset-traversal-continuation-plan.md`.
@@ -40,7 +40,8 @@ Its body was not changed during implementation. The annotated local tag
 
 All runs used the existing `big_env` after `source ~/conda.sh`, with
 `CUDA_VISIBLE_DEVICES=-1 JAX_PLATFORMS=cpu TMPDIR=/tmp/dryml`. Resource-intensive
-runs were serial. No dependencies were installed or environment repairs made.
+runs were serial. Those historical runs installed no dependencies or environment
+repairs; subsequent owner-authorized Optax setup is recorded separately below.
 
 ### Bounded affected regression
 
@@ -88,6 +89,40 @@ seek a faster sample.
 - Fourteen deterministic installed-JAX transaction and repair checks passed.
   They do not replace real Optax training qualification.
 
+### Subsequent JAX driver unit qualification
+
+Owner-authorized setup added Optax 0.2.4 and Chex 0.1.89, retaining JAX/JAXlib
+0.5.3 and NumPy 2.1.3. The coordinator reported **55 real JAX/native focused
+checks passed, one optional NNX skip** before this driver work.
+
+The comparative JAX driver now implements old/new functional DRYML training,
+matched-native slice batching, and optimized-native JIT section scans. All use
+the fixed dense/SGD/MSE recipe. Native modes use no DRYML wrappers. All required
+JAX applicability cells remain required; missing JAX/Optax is explicitly
+unavailable, not a qualification exemption.
+
+Proof-first routing regression failed on the original unconditional
+`unsupported` response. After implementation:
+
+```sh
+./tests.sh tests/tools/test_benchmark_dataset_traversal.py --no-cov
+```
+
+Result: **72 passed** (pytest elapsed 10.13 seconds). This comprises synthetic
+protocol checks plus tiny real CPU builder probes (four rows/four SGD updates
+per mode) and construction-only default-recipe/script-import checks. The old probe uses an
+isolated archive of the actual pinned baseline; new's tiny checkpoint restores
+and validates the remaining input suffix. Numerical NumPy protocol fixtures
+check fixed 128-update checkpoint/count/weight associations at cadences 0/32;
+those fixtures are not fake Optax qualification. No real comparison cell,
+warmup, timed repetition, or throughput measurement ran during this driver work.
+
+JAX timing records explicitly include JIT compilation and normal final input
+capture in invocation time, distinguish setup from invocation and final save,
+and leave unisolated cold-import/compile/capture-only costs unknown. See the
+[Data measurement section](data.md#bounded-cpu-evidence-and-unresolved-gates)
+for the retained historical failure and remaining comparison gate.
+
 ## Review corrections
 
 Ten local review lenses completed; one independent validation batch confirmed
@@ -123,12 +158,13 @@ different-model corroboration.
    A later retained-owner fix eliminated repeated graph preparation in a
    deterministic proof, but no post-fix comparison establishes its throughput
    effect. Corrected TF/Keras benchmark recipes lack fresh comparative evidence.
-   A new measurement budget requires an explicit owner decision; the exhausted
-   result must not be relabeled or silently restarted.
-3. **Real JAX training:** Optax is absent from `big_env`. Real optimizer/checkpoint
-   representatives remain skipped. The comparative JAX driver is also explicitly
-   unimplemented even if Optax becomes available; its required cells block the
-   report rather than being exempted.
+    The owner has authorized one fresh fixed 1,200-second comparison after runtime
+    optimization. This driver work has not started it; the exhausted historical
+    result remains unverified and must not be relabeled.
+3. **Comparative JAX evidence:** real Optax is now available and the four-mode
+    driver has tiny numerical unit qualification, but its fixed-profile cells
+    still have no real evidence. They block the report rather than being exempted;
+    coordinator-owned comparison and final verification remain outstanding.
 4. **Remaining evidence limits:** comparative copy/compile/pending-window metrics
    are incomplete. Python 3.10 failure-note behavior was emulated on Python 3.12
    with `add_note` unavailable; no real Python 3.10 run occurred. Accelerator

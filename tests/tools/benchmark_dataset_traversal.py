@@ -568,15 +568,265 @@ def _assert_tree_equal(left, right):
         np.testing.assert_array_equal(left, right)
 
 
+def _jax_init(key):
+    import jax.numpy as jnp
+    del key
+    return {"kernel": jnp.zeros((16, 1), dtype=jnp.float32)}, {}
+
+
+def _jax_apply(parameters, mutable, rng, x, training):
+    del training
+    return x @ parameters["kernel"], mutable, rng
+
+
+def _jax_loss(predictions, targets):
+    import jax.numpy as jnp
+    return jnp.mean((predictions-targets) ** 2)
+
+
+def jax_init_factory():
+    """Build an importable initializer ``(key) -> (float32 16x1 kernel, {})``.
+
+    The key is unused: the bias-free dense kernel is identically zero. Building
+    this callable has no native side effects; invoking it allocates JAX arrays.
+    """
+    return _jax_init
+
+
+def jax_apply_factory():
+    """Build the pure functional dense apply callable for the benchmark Model.
+
+    Accepts parameters, mutable state, RNG, feature batch and training boolean;
+    returns predictions and unchanged mutable/RNG state. Shape errors propagate
+    from native matrix multiplication; no owner state is installed here.
+    """
+    return _jax_apply
+
+
+def jax_loss_factory():
+    """Build ``(predictions, targets) -> scalar mean squared error`` for JAX.
+
+    The returned callable uses float32 input arithmetic, has no state effects,
+    and propagates native incompatible-shape/dtype errors.
+    """
+    return _jax_loss
+
+
+class _JaxDriver:
+    """Untimed builder/runner seam shared by fixed windows and tiny unit probes."""
+
+    def __init__(self, mode, x, y, *, batch=32, sections=4):
+        if mode not in MODES or len(x) != len(y) or len(x) % (batch*sections):
+            raise ValueError("JAX driver requires a known mode and equal complete sections")
+        self.mode, self.x, self.y = mode, x, y
+        self.batch, self.sections = batch, sections
+        self.updates = len(x)//batch
+        self.section_updates = self.updates//sections
+        self.delivery_ids, self.exposures = [], []
+        self.completed_sections = []
+        self.exp = None
+        if mode.endswith("native"):
+            import jax
+            import optax
+            self.parameters = jax.numpy.zeros((16, 1), dtype=jax.numpy.float32)
+            transformation = optax.sgd(.001)
+            self.slots = transformation.init(self.parameters)
+            # Constant-rate momentum-free Optax SGD has no mutable slot leaves.
+            assert not jax.tree_util.tree_leaves(self.slots)
+            self.count = jax.numpy.asarray(0, dtype=jax.numpy.int32)
+            self.native_x, self.native_y = jax.numpy.asarray(x), jax.numpy.asarray(y)
+
+            def update(carry, pair):
+                parameters, slots, count = carry
+                a, b = pair
+                loss, grads = jax.value_and_grad(lambda p: _jax_loss(a @ p, b))(parameters)
+                delta, slots = transformation.update(grads, slots, parameters)
+                return (optax.apply_updates(parameters, delta), slots, count+1), (loss, count+1)
+
+            self.update = jax.jit(update)
+            self.scan = jax.jit(lambda carry, pairs: jax.lax.scan(update, carry, pairs))
+        else:
+            from dryml import F
+            from dryml.core import TensorSpec
+            from dryml.data import ArrayDataset, Batch
+            from dryml.models import Experiment
+            from dryml.models.jax import Model, Optimizer, Training
+            # A script worker still authors factories by their stable import path,
+            # never by __main__, closures, or baseline-owned test fixtures.
+            root = str(Path(__file__).resolve().parents[2])
+            if root not in sys.path:
+                sys.path.insert(0, root)
+            from tests.tools import benchmark_dataset_traversal as factories
+            model = Model(F(factories.jax_init_factory), F(factories.jax_apply_factory),
+                          output_spec=TensorSpec("float32", shape=(1,), backend="jax"), seed=1729)
+            trainer = Training(optimizer=Optimizer(F("sgd", learning_rate=.001)),
+                               loss=F(factories.jax_loss_factory), epochs=1 if mode == "old" else sections, verbose=0)
+            data = Batch(ArrayDataset((x, y)), batch)
+            if mode == "new":
+                from dryml.data import Epoch
+                data = Epoch(data, len=self.section_updates)
+            else:
+                high = self.section_updates*batch
+                data = Batch(ArrayDataset((x[:high], y[:high])), batch)
+            self.exp = Experiment(model, trainer, train_data=data)
+
+    def weights(self):
+        import numpy as np
+        return np.asarray(self.exp.model.parameters["kernel"] if self.exp is not None else self.parameters).copy()
+
+    def train(self, checkpoint, cadence):
+        if self.exp is not None:
+            exp = self.exp
+
+            def report():
+                step = exp.state.step
+                sequence = exp.state.input_sequence if self.mode == "new" else step
+                self.delivery_ids.append(sequence-1)
+                self.exposures.append(exp.state.examples_seen)
+                assert (step, exp.state.examples_seen) == (len(self.delivery_ids), step*self.batch)
+                assert exp.state.epoch == step//self.section_updates
+                if step % self.section_updates == 0:
+                    self.completed_sections.append(exp.state.epoch)
+                if cadence and step % cadence == 0:
+                    checkpoint(step)
+
+            losses = []
+            if self.mode == "old":
+                from dryml.data import ArrayDataset, Batch
+                for section in range(self.sections):
+                    low = section*self.section_updates*self.batch
+                    high = low+self.section_updates*self.batch
+                    exp.train_data = Batch(ArrayDataset((self.x[low:high], self.y[low:high])), self.batch)
+                    losses.extend(exp.train_fn(exp, callbacks=(report,)))
+            else:
+                losses = exp.train_fn(exp, callbacks=(report,))
+            return losses
+        import numpy as np
+        losses = []
+        carry = self.parameters, self.slots, self.count
+        if self.mode == "optimized-native":
+            for section in range(self.sections):
+                low = section*self.section_updates*self.batch
+                high = low+self.section_updates*self.batch
+                pairs = (self.native_x[low:high].reshape(self.section_updates, self.batch, 16),
+                         self.native_y[low:high].reshape(self.section_updates, self.batch, 1))
+                carry, (values, counts) = self.scan(carry, pairs)
+                self.parameters, self.slots, self.count = carry
+                # Materializing reports synchronizes the actual section's work.
+                losses.extend(np.asarray(values).tolist())
+                self.delivery_ids.extend((np.asarray(counts)-1).tolist())
+                self.exposures.extend((np.asarray(counts)*self.batch).tolist())
+                step = int(self.count)
+                self.completed_sections.append(step//self.section_updates)
+                if cadence and step % cadence == 0:
+                    checkpoint(step)
+        else:
+            # Ordinary native slice batching, one JIT update and scalar report
+            # per batch. No Dataset, conversion bridge, or DRYML state owner.
+            for offset in range(0, len(self.x), self.batch):
+                pair = self.native_x[offset:offset+self.batch], self.native_y[offset:offset+self.batch]
+                carry, (loss, count) = self.update(carry, pair)
+                self.parameters, self.slots, self.count = carry
+                losses.append(float(loss))
+                step = int(count)
+                self.delivery_ids.append(offset//self.batch)
+                self.exposures.append(step*self.batch)
+                if step % self.section_updates == 0:
+                    self.completed_sections.append(step//self.section_updates)
+                if cadence and step % cadence == 0:
+                    checkpoint(step)
+        return losses
+
+    def save_input(self, path, step):
+        import numpy as np
+        if self.mode == "new":
+            state = self.exp.state
+            record = state._input_provider.capture() if state._input_provider else state.dataset_state
+            assert record is not None and record.position.sequence == step
+            record.save(path)
+        else:
+            np.savez(path.with_suffix(".npz"), x=self.x, y=self.y,
+                     next_row=np.int64(step*self.batch), next_batch=np.int64(step),
+                     section_updates=np.int64(self.section_updates))
+
+    def validate(self, losses, expected):
+        import numpy as np
+        assert len(losses) == self.updates and np.isfinite(losses).all()
+        assert self.delivery_ids == list(range(self.updates))
+        assert self.exposures == list(range(self.batch, len(self.x)+1, self.batch))
+        assert self.completed_sections == list(range(1, self.sections+1))
+        np.testing.assert_allclose(self.weights(), expected, rtol=5e-5, atol=1e-6)
+        if self.exp is not None:
+            state = self.exp.state
+            assert (state.step, state.examples_seen, state.epoch) == (self.updates, len(self.x), self.sections)
+        else:
+            assert int(self.count) == self.updates
+        return dict(delivery_ids=self.delivery_ids, updates=self.updates, examples_seen=len(self.x),
+                    sections=self.sections, completed_sections=self.completed_sections,
+                    weight_checksum=float(np.sum(self.weights(), dtype=np.float64)),
+                    expected_weight_checksum=float(np.sum(expected, dtype=np.float64)))
+
+
+def _jax_training_window(mode, cadence):
+    import numpy as np
+    rng = np.random.default_rng(1729)
+    x = rng.normal(0, .25, (4096, 16)).astype("float32")
+    y = (x.sum(axis=1, keepdims=True)*np.float32(.125)).astype("float32")
+    expected = np.zeros((16, 1), np.float32)
+    prefixes = []
+    for offset in range(0, 4096, 32):
+        a, b = x[offset:offset+32], y[offset:offset+32]
+        expected -= np.float32(.001)*(np.float32(2/32)*a.T @ (a @ expected-b))
+        prefixes.append(expected.copy())
+    costs = dict(checkpoint_seconds=[], checkpoint_bytes=[], final_capture_seconds=None)
+    with TemporaryDirectory(prefix="traversal-jax-") as directory:
+        started = perf_counter()
+        driver = _JaxDriver(mode, x, y)
+        prepare = perf_counter()-started
+        snapshots = []
+
+        def save(step, name):
+            assert step == (driver.exp.state.step if driver.exp is not None else int(driver.count))
+            assert driver.delivery_ids[-1] == step-1 and driver.exposures[-1] == step*32
+            path = Path(directory)/name
+            path.mkdir()
+            driver.save_input(path/"input", step)
+            weights = driver.weights()
+            # Constant-rate SGD has no slots; this count is accepted updates,
+            # not an invented Optax slot counter.
+            np.savez(path/"model-sgd.npz", weights=weights, step=np.int64(step),
+                     examples_seen=np.int64(step*32))
+            snapshots.append((step, weights))
+            return path
+
+        def checkpoint(step):
+            path, seconds = _timed(lambda: save(step, str(step)))
+            costs["checkpoint_seconds"].append(seconds)
+            costs["checkpoint_bytes"].append(sum(p.stat().st_size for p in path.rglob("*") if p.is_file()))
+
+        losses, steady = _timed(lambda: driver.train(checkpoint, cadence))
+        facts = driver.validate(losses, expected)
+        _, costs["final_save_seconds"] = _timed(lambda: save(128, "final"))
+        for step, weights in snapshots:
+            np.testing.assert_allclose(weights, prefixes[step-1], rtol=5e-5, atol=1e-6)
+        assert [step for step, _ in snapshots] == ([32, 64, 96, 128] if cadence else []) + [128]
+    return dict(status="ok", work=128, steady_seconds=steady, prepare_seconds=prepare,
+                first_result_seconds=None, costs=costs, work_facts=facts,
+                cold_import_seconds=None, compile_seconds=None,
+                model=dict(architecture="Dense(16,1,bias=False,zero kernel)", optimizer="SGD(lr=.001,momentum=0)",
+                           loss="mean squared error", dtype="float32"),
+                timing_limitation="preparation includes cold imports/setup; invocation includes JIT compilation and DRYML final input capture; compile/kernel-only time is not isolated; final save is separate",
+                semantic_difference=("equivalent manual sections; baseline lacks exact input continuation" if mode == "old" else
+                    "JIT scan of 32 updates per section; host reports and synchronization grouped at section boundaries" if mode == "optimized-native" else None))
+
+
 def _training_window(workload, mode, cadence):
-    # Real JAX training qualification requires Optax even if pure JAX is present.
     if workload == "jax":
         import importlib.util
-        if importlib.util.find_spec("optax") is None:
-            return dict(status="unavailable", driver_status="unimplemented",
-                        reason="real Optax/JAX qualification requires missing optax; fixed-profile driver also unimplemented")
-        return dict(status="unsupported", driver_status="unimplemented",
-                    reason="required JAX fixed-profile training driver unimplemented even with Optax installed")
+        missing = [name for name in ("jax", "optax") if importlib.util.find_spec(name) is None]
+        if missing:
+            return dict(status="unavailable", reason="real JAX training requires missing " + ", ".join(missing))
+        return _jax_training_window(mode, cadence)
     import numpy as np
     native = mode.endswith("native")
     optimized = mode == "optimized-native"
@@ -869,7 +1119,7 @@ def _execute(args, argv, publish):
                    prior_elapsed_seconds=prior_elapsed,
                    applicability_schema="dryml-dataset-traversal-applicability-v1",
                    applicability=_applicability(),
-                   driver_limitations=["Required JAX driver is unimplemented even if Optax is installed; missing Optax is an additional blocker."])
+                   driver_limitations=[])
     specs = {_cell_key(s): s for s in report["applicability"]}
     report["elapsed_seconds"] = prior_elapsed+perf_counter()-started
     publish(report)

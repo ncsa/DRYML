@@ -1,8 +1,12 @@
-"""Backend-free qualification of the fixed traversal measurement protocol."""
+"""Synthetic protocol checks and tiny untimed JAX unit qualification, no matrix."""
 
 import json
+import io
+import os
+from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -436,16 +440,267 @@ def test_malformed_required_evidence_is_a_blocker_not_an_aggregation_crash(tmp_p
     assert any(b["reason"] == "required evidence incomplete or invalid" for b in report["blockers"])
 
 
-def test_unimplemented_jax_driver_stays_required_regardless_of_dependency_discovery(monkeypatch):
-    """Discovery branches only: no fake Optax/native qualification or updates."""
+def test_jax_driver_missing_dependencies_stay_required(monkeypatch):
+    """Missing real prerequisites cannot exempt required JAX comparisons."""
     import importlib.util
-    for discovered in (None, object()):
-        monkeypatch.setattr(importlib.util, "find_spec", lambda _: discovered)
-        result = benchmark._training_window("jax", "new", 0)
-        assert result["status"] == ("unavailable" if discovered is None else "unsupported")
-        assert result["driver_status"] == "unimplemented"
-        assert "unimplemented" in result["reason"]
-        assert all(s["required"] for s in benchmark._applicability() if s["workload"] == "jax")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _: None)
+    result = benchmark._training_window("jax", "new", 0)
+    assert result["status"] == "unavailable"
+    assert "missing" in result["reason"]
+    assert all(s["required"] for s in benchmark._applicability() if s["workload"] == "jax")
+
+
+@pytest.mark.parametrize("mode", benchmark.MODES)
+@pytest.mark.parametrize("cadence", [0, 32])
+def test_installed_jax_routes_every_required_cell_to_driver(monkeypatch, mode, cadence):
+    """Routing proof only; the sentinel executes no comparison or native math."""
+    import importlib.util
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _: object())
+    sentinel = {"driver_called": (mode, cadence)}
+    monkeypatch.setattr(benchmark, "_jax_training_window", lambda m, c: sentinel, raising=False)
+    assert benchmark._training_window("jax", mode, cadence) is sentinel
+
+
+@pytest.mark.parametrize("mode", benchmark.MODES)
+def test_jax_driver_tiny_real_unit_qualification(tmp_path, monkeypatch, mode):
+    """Four rows/four genuine SGD updates qualify builders, never fixed timings."""
+    pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    if mode == "old":
+        # The old manual-section recipe belongs to the actual pinned API, not
+        # a current TrainState with its stronger exact-input identity contract.
+        archive = subprocess.check_output(["git", "archive", benchmark.BASELINE_REVISION, "src/dryml"],
+                                          cwd=Path(benchmark.__file__).resolve().parents[2])
+        baseline = tmp_path/"baseline"
+        baseline.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(archive)) as source:
+            source.extractall(baseline, filter="data")
+        script = '''
+import sys
+from pathlib import Path
+import dryml
+import pytest
+assert Path(dryml.__file__).resolve().is_relative_to(Path(sys.argv[1]).resolve())
+from tests.tools.test_benchmark_dataset_traversal import _qualify_tiny_jax_driver
+with pytest.MonkeyPatch.context() as patch:
+    _qualify_tiny_jax_driver(Path(sys.argv[2]), patch, "old")
+'''
+        environment = {**os.environ, "PYTHONPATH": str(baseline/"src"),
+                       "CUDA_VISIBLE_DEVICES": "-1", "JAX_PLATFORMS": "cpu"}
+        result = subprocess.run([sys.executable, "-c", script, str(baseline), str(tmp_path)],
+                                env=environment, capture_output=True, text=True, timeout=45)
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        _qualify_tiny_jax_driver(tmp_path, monkeypatch, mode)
+
+
+def _qualify_tiny_jax_driver(tmp_path, monkeypatch, mode):
+    """Untimed math/continuation probe usable in a pinned-source subprocess."""
+    import builtins
+    import numpy as np
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    rng = np.random.default_rng(1729)
+    x = rng.normal(0, .25, (4, 16)).astype("float32")
+    y = x.sum(axis=1, keepdims=True)*np.float32(.125)
+    expected = np.zeros((16, 1), np.float32)
+    prefixes, expected_losses = [], []
+    for a, b in zip(x, y):
+        expected_losses.append(np.mean((a @ expected-b)**2))
+        expected -= np.float32(.001)*np.float32(2)*a[:, None] @ (a @ expected-b)[None, :]
+        prefixes.append(expected.copy())
+
+    if mode.endswith("native"):
+        original = builtins.__import__
+
+        def native_only(name, *args, **kwargs):
+            assert name != "dryml" and not name.startswith("dryml."), "native path used DRYML"
+            return original(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", native_only)
+    driver = benchmark._JaxDriver(mode, x, y, batch=1, sections=2)
+    np.testing.assert_array_equal(driver.weights(), np.zeros((16, 1), np.float32))
+    if driver.exp is not None:
+        from dryml.core import FactorySpec
+        assert isinstance(driver.exp.model.init_fn, FactorySpec)
+        np.testing.assert_array_equal(jax.random.key_data(driver.exp.model.rng),
+                                      jax.random.key_data(jax.random.split(jax.random.key(1729))[1]))
+        assert dict(driver.exp.train_fn.optimizer.factory.kwargs) == {"learning_rate": .001}
+        assert driver.exp.train_fn.epochs == (1 if mode == "old" else 2)
+        assert driver.exp.train_fn.verbose == 0
+        predictions, mutable, key = driver.exp.model._apply(
+            driver.exp.model.parameters, {}, driver.exp.model.rng, jax.numpy.asarray(x), True)
+        np.testing.assert_array_equal(predictions, np.zeros((4, 1), np.float32))
+        assert mutable == {} and key is driver.exp.model.rng
+    snapshots = []
+
+    def checkpoint(step):
+        snapshots.append((step, driver.weights()))
+        driver.save_input(tmp_path/str(step), step)
+
+    losses = driver.train(checkpoint, 2)
+    facts = driver.validate(losses, expected)
+    assert facts["delivery_ids"] == [0, 1, 2, 3]
+    assert (facts["updates"], facts["examples_seen"], facts["sections"]) == (4, 4, 2)
+    np.testing.assert_allclose(losses, expected_losses, rtol=5e-5, atol=1e-6)
+    assert [step for step, _ in snapshots] == [2, 4]
+    for step, weights in snapshots:
+        np.testing.assert_allclose(weights, prefixes[step-1], rtol=5e-5, atol=1e-6)
+        if mode != "new":
+            with np.load(tmp_path/f"{step}.npz") as state:
+                assert int(state["next_row"]) == int(state["next_batch"]) == step
+                np.testing.assert_array_equal(state["x"], x)
+                np.testing.assert_array_equal(state["y"], y)
+    if mode == "new":
+        from dryml.data import DatasetState
+        record = DatasetState.load(tmp_path/"2")
+        assert record.position.sequence == 2
+        with driver.exp.train_data.prepare().open(state=record) as traversal:
+            pairs = benchmark._consume(traversal)
+        np.testing.assert_array_equal(np.concatenate([a for a, _ in pairs]), x[2:])
+        np.testing.assert_array_equal(np.concatenate([b for _, b in pairs]), y[2:])
+
+
+def test_jax_factory_defaults_are_real_importable_declarations():
+    """Construction-only qualification of the default four-section Model recipe."""
+    import numpy as np
+    pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    # Minimum four default batches; no training invocation or timing window.
+    driver = benchmark._JaxDriver("new", np.zeros((128, 16), np.float32), np.zeros((128, 1), np.float32))
+    assert (driver.batch, driver.sections, driver.exp.train_fn.epochs) == (32, 4, 4)
+    assert driver.weights().dtype == np.float32 and driver.weights().shape == (16, 1)
+    from dryml import F
+    assert F(benchmark.jax_init_factory).build() is benchmark._jax_init
+    assert F(benchmark.jax_apply_factory).build() is benchmark._jax_apply
+    assert F(benchmark.jax_loss_factory).build() is benchmark._jax_loss
+
+
+def test_jax_script_builder_has_stable_factories_outside_repository_cwd(tmp_path):
+    """Construction-only child emulates script loading without a comparison cell."""
+    pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    script = '''
+import runpy
+import sys
+import numpy as np
+module = runpy.run_path(sys.argv[1], run_name="unit_qualification")
+driver = module["_JaxDriver"]("new", np.zeros((4, 16), np.float32), np.zeros((4, 1), np.float32), batch=1, sections=2)
+from tests.tools import benchmark_dataset_traversal as canonical
+assert driver.exp.model._init is canonical._jax_init
+assert driver.exp.model._apply is canonical._jax_apply
+assert driver.exp.train_fn._loss_callable() is canonical._jax_loss
+'''
+    environment = {**os.environ, "PYTHONPATH": str(Path(benchmark.__file__).resolve().parents[2]/"src"),
+                   "CUDA_VISIBLE_DEVICES": "-1", "JAX_PLATFORMS": "cpu"}
+    result = subprocess.run([sys.executable, "-c", script, benchmark.__file__], cwd=tmp_path,
+                            env=environment, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("mode", benchmark.MODES)
+@pytest.mark.parametrize("cadence", [0, 32])
+def test_jax_window_checkpoint_harness_with_numerical_protocol(monkeypatch, mode, cadence):
+    """128-update scheduling/serialization proof, not real Optax qualification.
+
+    The builder is replaced by a NumPy protocol fixture. Native loop/reporting
+    code and the fixed window harness run with a synthetic clock; no real JAX
+    comparison, compilation, warmup or throughput observation occurs.
+    """
+    import numpy as np
+    snapshots, drivers = [], []
+    original_driver = benchmark._JaxDriver
+
+    class NumericalDriver(original_driver):
+        def __init__(self, mode, x, y):
+            self.mode, self.x, self.y = mode, x, y
+            self.batch, self.sections, self.section_updates, self.updates = 32, 4, 32, 128
+            self.exp = None
+            self.parameters, self.slots, self.count = np.zeros((16, 1), np.float32), (), np.int32(0)
+            self.native_x, self.native_y = x, y
+            self.delivery_ids, self.exposures, self.completed_sections = [], [], []
+            drivers.append(self)
+
+            def update(carry, pair):
+                weights, slots, step = carry
+                a, b = pair
+                loss = np.mean((a @ weights-b)**2)
+                weights = weights-np.float32(.001)*(np.float32(2/32)*a.T @ (a @ weights-b))
+                step = np.int32(step+1)
+                return (weights, slots, step), (loss, step)
+
+            def scan(carry, pairs):
+                losses, counts = [], []
+                for a, b in zip(*pairs):
+                    carry, (loss, count) = update(carry, (a, b))
+                    losses.append(loss)
+                    counts.append(count)
+                return carry, (np.array(losses), np.array(counts))
+
+            self.update, self.scan = update, scan
+
+        def save_input(self, path, step):
+            # Only the new record's save API is simulated. Tiny real tests above
+            # qualify its actual capture/save/load/suffix behavior independently.
+            np.savez(path.with_suffix(".npz"), next_batch=np.int64(step), x=self.x, y=self.y)
+
+    original_save = np.savez
+
+    def save(path, **values):
+        if "weights" in values:
+            driver = drivers[-1]
+            snapshots.append((int(values["step"]), int(driver.count), values["weights"].copy()))
+            assert int(values["examples_seen"]) == int(values["step"])*32
+        original_save(path, **values)
+
+    monkeypatch.setattr(benchmark, "_JaxDriver", NumericalDriver)
+    monkeypatch.setattr(np, "savez", save)
+    monkeypatch.setattr(benchmark, "_timed", lambda call: (call(), 1.0))
+    monkeypatch.setattr(benchmark, "perf_counter", lambda: 1.0)
+    result = benchmark._jax_training_window(mode, cadence)
+    assert result["work"] == 128 and result["status"] == "ok"
+    assert result["work_facts"]["delivery_ids"] == list(range(128))
+    assert result["work_facts"]["completed_sections"] == [1, 2, 3, 4]
+    assert result["work_facts"]["examples_seen"] == 4096
+    assert len(result["costs"]["checkpoint_seconds"]) == (4 if cadence else 0)
+    assert result["costs"]["final_save_seconds"] == 1
+    assert all(size > 0 for size in result["costs"]["checkpoint_bytes"])
+    assert [step for step, _, _ in snapshots] == ([32, 64, 96, 128] if cadence else []) + [128]
+    assert all(step == count for step, count, _ in snapshots)
+    driver = drivers[-1]
+    expected = np.zeros((16, 1), np.float32)
+    for step in range(1, 129):
+        a, b = driver.x[(step-1)*32:step*32], driver.y[(step-1)*32:step*32]
+        expected -= np.float32(.001)*(np.float32(2/32)*a.T @ (a @ expected-b))
+        for saved_step, _, weights in snapshots:
+            if saved_step == step:
+                np.testing.assert_allclose(weights, expected, rtol=5e-5, atol=1e-6)
+    assert result["work_facts"]["expected_weight_checksum"] == float(np.sum(expected, dtype=np.float64))
+
+
+@pytest.mark.parametrize("defect", ["losses", "delivery", "exposure", "sections", "weights", "count"])
+def test_jax_work_validation_rejects_wrong_useful_work(defect):
+    """Pure NumPy facts cannot validate duplicate work, wrong accounting or math."""
+    import numpy as np
+    driver = benchmark._JaxDriver.__new__(benchmark._JaxDriver)
+    driver.x, driver.batch, driver.sections, driver.updates = np.zeros((4, 16)), 1, 2, 4
+    driver.exp, driver.parameters, driver.count = None, np.zeros((16, 1), np.float32), 4
+    driver.delivery_ids, driver.exposures, driver.completed_sections = [0, 1, 2, 3], [1, 2, 3, 4], [1, 2]
+    losses = [0.] * 4
+    if defect == "losses":
+        losses.pop()
+    elif defect == "delivery":
+        driver.delivery_ids[-1] = 2
+    elif defect == "exposure":
+        driver.exposures[-1] = 3
+    elif defect == "sections":
+        driver.completed_sections.pop()
+    elif defect == "weights":
+        driver.parameters[0, 0] = .1
+    else:
+        driver.count = 3
+    with pytest.raises(AssertionError):
+        driver.validate(losses, np.zeros((16, 1), np.float32))
 
 
 def test_worker_interruption_retains_complete_progress_and_releases_stable_lock(tmp_path, monkeypatch):
