@@ -1,4 +1,4 @@
-"""Synthetic protocol checks and tiny untimed JAX unit qualification, no matrix."""
+"""Synthetic protocol checks and tiny untimed TF/JAX qualification, no matrix."""
 
 import json
 import io
@@ -140,6 +140,206 @@ def test_historical_protocol_cannot_confirm_or_reuse_instrumentation(tmp_path, m
     assert prior.read_bytes() == before
 
 
+@pytest.mark.parametrize("mode", ["old", "new"])
+@pytest.mark.parametrize("change", ["runtime", "driver", "historical", "cell-missing", "current-unknown"])
+def test_confirmation_remeasures_stale_instrumentation_identity(tmp_path, monkeypatch, mode, change):
+    """Synthetic confirmation charges prior work but cannot borrow stale evidence."""
+    identity = dict(schema="dryml-benchmark-instrumentation-identity-v1",
+                    runtime=dict(revision="current", sha256="runtime-before"),
+                    driver_sha256="driver-before")
+    current = copy.deepcopy(identity)
+    if change == "runtime":
+        current["runtime"]["sha256"] = "runtime-after"
+    elif change == "driver":
+        current["driver_sha256"] = "driver-after"
+    elif change == "current-unknown":
+        current = None
+    timing = _synthetic_cell("indexed-implicit", mode=mode)
+    instrument = dict(_synthetic_cell("indexed-implicit", instrumentation=True),
+                      workload="indexed-implicit", mode=mode, checkpoint_cadence=0)
+    if change not in ("historical", "cell-missing"):
+        instrument["instrumentation_identity"] = None if change == "current-unknown" else identity
+    record = dict(profile=benchmark.fixed_profile(), baseline_revision=benchmark.BASELINE_REVISION,
+                  measurement_protocol=benchmark.MEASUREMENT_PROTOCOL, confirmation_count=0,
+                  elapsed_seconds=894.4321190109476, cells=[timing, instrument])
+    if change != "historical":
+        record["instrumentation_identities"] = {mode: identity}
+    prior = tmp_path/"prior.json"
+    prior.write_text(json.dumps(record))
+    before = prior.read_bytes()
+    baseline = tmp_path/"baseline"
+    (baseline/"src/dryml/data").mkdir(parents=True)
+    calls = []
+
+    def worker(command, **kwargs):
+        calls.append(command)
+        assert 0 < kwargs["timeout"] <= 305.5678809890524
+        return _synthetic_matrix_worker(command, **kwargs)
+
+    monkeypatch.setattr(benchmark, "_instrumentation_identities", lambda *a, **k: {mode: current}, raising=False)
+    monkeypatch.setattr(benchmark, "perf_counter", lambda: 0.0)
+    monkeypatch.setattr(benchmark, "run_worker", worker)
+    output = tmp_path/"confirmation.json"
+    assert benchmark.main(["--confirm", str(prior), "--output", str(output),
+                           "--baseline-source", str(baseline),
+                           "--workload", "indexed-implicit", "--mode", mode]) == 1
+    assert len(calls) == 2, "stale instrumentation was reused instead of remeasured"
+    assert "--instrumentation" not in calls[0] and "--instrumentation" in calls[1]
+    report = json.loads(output.read_text())
+    measured = report["cells"][1]
+    assert measured["instrumentation_identity"] == current
+    assert not measured["reused_instrumentation"]
+    assert measured["instrumentation_reuse_reason"] == (
+        "current runtime/driver identity unavailable (dirty source or missing/unreadable content)" if current is None
+        else "prior instrumentation identity missing" if change in ("historical", "cell-missing")
+        else "runtime or driver content identity changed")
+    assert report["prior_elapsed_seconds"] == report["elapsed_seconds"] == 894.4321190109476
+    assert report["confirmation_count"] == 1 and report["status"] == "unverified"
+    assert prior.read_bytes() == before
+    with pytest.raises(SystemExit, match="no prior confirmation"):
+        benchmark.main(["--confirm", str(output), "--output", str(tmp_path/"second.json")])
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("mode", ["old", "new"])
+def test_confirmation_reuses_matching_identity_but_always_remeasures_timing(tmp_path, monkeypatch, mode):
+    """Identity permits instrumentation reuse only, with unchanged budget charge."""
+    identity = dict(schema="dryml-benchmark-instrumentation-identity-v1",
+                    runtime=dict(kind="clean-git-revision", revision="same"), driver_sha256="same-driver")
+    instrument = dict(_synthetic_cell("indexed-implicit", instrumentation=True),
+                      workload="indexed-implicit", mode=mode, checkpoint_cadence=0,
+                      instrumentation_identity=identity, selection_count=17)
+    prior = tmp_path/"prior.json"
+    prior.write_text(json.dumps(dict(profile=benchmark.fixed_profile(), baseline_revision=benchmark.BASELINE_REVISION,
+        measurement_protocol=benchmark.MEASUREMENT_PROTOCOL, confirmation_count=0,
+        elapsed_seconds=894.4321190109476,
+        cells=[_synthetic_cell("indexed-implicit", mode=mode), instrument])))
+    baseline = tmp_path/"baseline"
+    (baseline/"src/dryml/data").mkdir(parents=True)
+    monkeypatch.setattr(benchmark, "_instrumentation_identities", lambda *a, **k: {mode: identity})
+    monkeypatch.setattr(benchmark, "perf_counter", lambda: 0.0)
+    calls = []
+
+    def worker(command, **kwargs):
+        calls.append(command)
+        assert "--instrumentation" not in command
+        return _synthetic_matrix_worker(command, **kwargs)
+
+    monkeypatch.setattr(benchmark, "run_worker", worker)
+    output = tmp_path/"confirmation.json"
+    assert benchmark.main(["--confirm", str(prior), "--output", str(output),
+        "--baseline-source", str(baseline), "--workload", "indexed-implicit", "--mode", mode]) == 1
+    report = json.loads(output.read_text())
+    assert len(calls) == 1
+    cell = report["cells"][1]
+    assert cell["reused_instrumentation"] and cell["selection_count"] == 17
+    assert cell["confirmation_elapsed_seconds"] == 0
+    assert cell["instrumentation_identity"] == report["instrumentation_identities"][mode] == identity
+    assert cell["instrumentation_reuse_reason"] == "matching trusted runtime and driver content identity"
+    assert report["elapsed_seconds"] == report["prior_elapsed_seconds"] == 894.4321190109476
+    assert report["confirmation_count"] == 1 and report["status"] == "unverified"
+
+
+@pytest.mark.parametrize("identity", [None, {"runtime": "stale", "driver_sha256": "stale"}])
+def test_stale_instrumentation_stays_unverified_when_timing_consumes_remaining_budget(tmp_path, monkeypatch, identity):
+    """A synthetic clock consumes exactly the residual charge, with no real work."""
+    instrument = dict(_synthetic_cell("indexed-implicit", instrumentation=True),
+        workload="indexed-implicit", mode="new", checkpoint_cadence=0, instrumentation_identity=identity)
+    prior = tmp_path/"prior.json"
+    prior.write_text(json.dumps(dict(profile=benchmark.fixed_profile(), baseline_revision=benchmark.BASELINE_REVISION,
+        measurement_protocol=benchmark.MEASUREMENT_PROTOCOL, confirmation_count=0,
+        elapsed_seconds=894.4321190109476, cells=[instrument])))
+    monkeypatch.setattr(benchmark, "_instrumentation_identities", lambda *a, **k: {"new": {"runtime": "current"}})
+    now, calls = [0.0], []
+    monkeypatch.setattr(benchmark, "perf_counter", lambda: now[0])
+
+    def worker(command, **kwargs):
+        calls.append(command)
+        now[0] = 305.5678809890524
+        return dict(status="timeout")
+
+    monkeypatch.setattr(benchmark, "run_worker", worker)
+    output = tmp_path/"confirmation.json"
+    assert benchmark.main(["--confirm", str(prior), "--output", str(output),
+        "--workload", "indexed-implicit", "--mode", "new"]) == 1
+    report = json.loads(output.read_text())
+    assert len(calls) == 1
+    assert report["cells"][1]["status"] == "budget-exhausted"
+    assert not report["cells"][1]["reused_instrumentation"]
+    assert report["status"] == "unverified" and report["blockers"]
+    assert report["prior_elapsed_seconds"] == 894.4321190109476
+    assert report["elapsed_seconds"] == 1200 and report["confirmation_count"] == 1
+
+
+def test_instrumentation_identity_covers_archive_contents_and_current_driver(tmp_path, monkeypatch):
+    """Tiny content fixtures distinguish archived runtime from the current recipe."""
+    script = tmp_path/"current/tests/tools/benchmark.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("recipe-before")
+    archive = tmp_path/"archive"
+    runtime = archive/"src/dryml/__init__.py"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("runtime-before")
+    monkeypatch.setattr(benchmark, "__file__", str(script))
+
+    def identities(*, dirty=False, revision="same-head"):
+        return benchmark._instrumentation_identities(archive, revision, dirty)
+
+    before = identities()
+    assert before["old"]["runtime"]["kind"] == "archived-source-sha256"
+    assert before["old"]["runtime"]["revision"] == benchmark.BASELINE_REVISION
+    assert before["new"]["runtime"] == dict(kind="clean-git-revision", revision="same-head")
+    assert before["new"] == before["matched-native"] == before["optimized-native"]
+    assert identities() == before
+    assert identities(dirty=True)["new"] is None
+    assert identities(dirty=True)["old"] == before["old"]
+    assert identities(revision="other-head")["new"] != before["new"]
+    assert identities(revision="other-head")["old"] == before["old"]
+    runtime.write_text("runtime-after")
+    after_runtime = identities()
+    assert after_runtime["old"] != before["old"] and after_runtime["new"] == before["new"]
+    script.write_text("recipe-after")
+    after_recipe = identities()
+    assert all(after_recipe[mode] != after_runtime[mode] for mode in benchmark.MODES)
+    extra = runtime.with_name("added.py")
+    extra.write_text("new-runtime-module")
+    assert identities()["old"] != after_recipe["old"]
+    extra.unlink()
+    cache = runtime.parent/"__pycache__"
+    cache.mkdir()
+    (cache/"generated.pyc").write_bytes(b"bytecode")
+    assert identities() == after_recipe
+    runtime.unlink()
+    assert identities()["old"] is None
+    assert benchmark._instrumentation_identities(None, "same-head", False)["old"] is None
+    assert benchmark._instrumentation_identities(script.parents[2], "same-head", False)["old"] is None
+    script.unlink()
+    assert all(value is None for value in identities().values())
+
+
+@pytest.mark.parametrize("source_status", [b"", b" M src/dryml/runtime.py\n",
+                                         b"M  src/dryml/runtime.py\n", b"?? src/dryml/added.py\n"])
+def test_source_identity_requires_clean_index_worktree_and_known_source_files(tmp_path, monkeypatch, source_status):
+    """Synthetic Git responses cover staged, unstaged and untracked source changes."""
+    def git_output(command, **kwargs):
+        if command == ["git", "rev-parse", "HEAD"]:
+            return "same-head\n"
+        assert command[:4] == ["git", "status", "--porcelain", "--untracked-files=normal"]
+        return source_status
+
+    monkeypatch.setattr(benchmark.subprocess, "check_output", git_output)
+    monkeypatch.setattr(benchmark, "run_worker", _synthetic_matrix_worker)
+    output = tmp_path/"report.json"
+    assert benchmark.main(["--output", str(output), "--workload", "indexed-implicit", "--mode", "new"]) == 1
+    report = json.loads(output.read_text())
+    assert report["source_dirty"] == bool(source_status)
+    identity = report["instrumentation_identities"]["new"]
+    assert (identity is None) == bool(source_status)
+    assert report["cells"][1]["instrumentation_identity"] == identity
+    if identity is not None:
+        assert identity["runtime"] == dict(kind="clean-git-revision", revision="same-head")
+
+
 def test_fixed_profile_cannot_silently_reduce_work_or_repeats():
     profile = benchmark.fixed_profile()
     assert profile["seed"] == 1729
@@ -248,6 +448,117 @@ def test_tf_layer_declarations_are_factories_for_the_sequential_owner():
     assert dict(definitions[0].kwargs) == {"shape": (16,)}
     assert definitions[1].args == (1,)
     assert dict(definitions[1].kwargs) == {"use_bias": False, "kernel_initializer": "zeros"}
+
+
+@pytest.mark.exhaustive_only
+@pytest.mark.parametrize("mode", ["old", "new"])
+def test_tf_recipe_tiny_real_unit_qualification(tmp_path, mode):
+    """Qualify current builders in isolated real runtimes, never timing cells.
+
+    The old case opts into an existing pinned archive through
+    DRYML_BENCHMARK_BASELINE_SOURCE; no archive is edited or installed.
+    """
+    _run_tiny_tf_qualification(tmp_path, mode)
+
+
+@pytest.mark.exhaustive_only
+def test_old_keras_original_recipe_missing_compile_loss(tmp_path):
+    """Reproduce the original recipe's native missing-loss error on four rows."""
+    _run_tiny_tf_qualification(tmp_path, "old", original=True)
+
+
+def _run_tiny_tf_qualification(tmp_path, mode, *, original=False):
+    root = Path(benchmark.__file__).resolve().parents[2]
+    source = root
+    if mode == "old":
+        configured = os.environ.get("DRYML_BENCHMARK_BASELINE_SOURCE")
+        if not configured:
+            pytest.skip("set DRYML_BENCHMARK_BASELINE_SOURCE to the existing pinned archive")
+        source = Path(configured).resolve()
+        assert (source/"src/dryml/models/tf/base.py").is_file()
+    script = '''
+import sys
+from pathlib import Path
+import dryml
+assert Path(dryml.__file__).resolve().is_relative_to(Path(sys.argv[1]).resolve())
+assert "tensorflow" not in sys.modules
+sys.path.insert(0, sys.argv[2])
+from tests.tools.test_benchmark_dataset_traversal import _qualify_tiny_tf_recipe
+_qualify_tiny_tf_recipe(sys.argv[3], original=sys.argv[4] == "True")
+'''
+    environment = {**os.environ, **benchmark._thread_env(), "PYTHONPATH": str(source/"src"),
+                   "CUDA_VISIBLE_DEVICES": "-1", "JAX_PLATFORMS": "cpu", "TMPDIR": "/tmp/dryml"}
+    result = subprocess.run([sys.executable, "-c", script, str(source), str(root), mode, str(original)],
+                            cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=45)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _qualify_tiny_tf_recipe(mode, *, original=False):
+    """Check explicit compile loss and four genuine updates over two sections."""
+    import numpy as np
+    import tensorflow as tf
+    from dryml.data import ArrayDataset, Batch
+    from dryml.models import Experiment
+
+    rng = np.random.default_rng(1729)
+    x = rng.normal(0, .25, (4, 16)).astype("float32")
+    y = x.sum(axis=1, keepdims=True)*np.float32(.125)
+    expected = np.zeros((16, 1), np.float32)
+    expected_losses = []
+    for a, b in zip(x, y):
+        expected_losses.append(float(np.mean((a @ expected-b)**2)))
+        expected -= np.float32(.001)*np.float32(2)*a[:, None] @ (a @ expected-b)[None, :]
+
+    for workload in (("keras",) if original else ("tf", "keras")):
+        _, default = benchmark._tf_training_recipe(workload, mode)
+        assert default.epochs == (1 if mode == "old" else 4)
+        model, trainer = benchmark._tf_training_recipe(workload, mode, sections=2)
+        data = Batch(ArrayDataset((x[:2], y[:2])), 1)
+        if mode == "new":
+            from dryml.data import Epoch
+            data = Epoch(Batch(ArrayDataset((x, y)), 1), len=2)
+        exp = Experiment(model, trainer, train_data=data)
+        np.testing.assert_array_equal(model.obj.get_weights()[0], np.zeros((16, 1), np.float32))
+        if original:
+            trainer.loss = None
+            assert "loss" not in trainer._compile_kwargs(exp)
+            with pytest.raises(ValueError, match="No loss to compute"):
+                trainer(exp)
+            assert int(trainer.optimizer.obj.iterations.numpy()) == 0
+            return
+
+        compile_kwargs = trainer._compile_kwargs(exp)
+        assert isinstance(compile_kwargs["loss"], tf.keras.losses.MeanSquaredError)
+        assert compile_kwargs["loss"].reduction == "sum_over_batch_size"
+        assert compile_kwargs["loss"] is trainer.loss.obj
+        assert compile_kwargs["optimizer"] is trainer.optimizer.obj
+        assert isinstance(compile_kwargs["optimizer"], tf.keras.optimizers.SGD)
+        assert float(compile_kwargs["optimizer"].learning_rate.numpy()) == pytest.approx(.001)
+        assert float(compile_kwargs["optimizer"].momentum) == 0
+        assert compile_kwargs["run_eagerly"] is compile_kwargs["jit_compile"] is False
+        assert trainer.verbose == 0 and trainer.epochs == (1 if mode == "old" else 2)
+        # Exercise the same mean-MSE callable that compilation and explicit TF use.
+        assert float(compile_kwargs["loss"](y, np.zeros_like(y))) == pytest.approx(float(np.mean(y**2)))
+        accepted = []
+        loss_totals = [0.0]
+
+        def report():
+            accepted.append(exp.state.step)
+            assert exp.state.loss_denominator == exp.state.step
+            loss_totals.append(exp.state.loss_numerator)
+
+        if mode == "old":
+            for section in range(2):
+                low = section*2
+                exp.train_data = Batch(ArrayDataset((x[low:low+2], y[low:low+2])), 1)
+                trainer(exp, callbacks=(report,))
+        else:
+            trainer(exp, callbacks=(report,))
+        assert accepted == [1, 2, 3, 4]
+        assert (exp.state.step, exp.state.examples_seen, exp.state.epoch) == (4, 4, 2)
+        assert int(trainer.optimizer.obj.iterations.numpy()) == 4
+        np.testing.assert_allclose(model.obj.get_weights()[0], expected, rtol=5e-5, atol=1e-6)
+        np.testing.assert_allclose(np.diff(loss_totals), expected_losses, rtol=5e-5, atol=1e-6)
 
 
 def test_interrupted_worker_is_killed_and_reaped(monkeypatch):

@@ -12,12 +12,17 @@ only the closed applicability schema exempts known unsupported comparisons.
 Cost-domain protocol v2 gates comparable old/new steady work. Full-invocation
 and end-to-end comparisons remain separately labeled informational cost signals;
 grouped native work never fabricates a per-update steady interval.
+Confirmation reuses instrumentation only with matching cell-owned runtime and
+driver content identity. Dirty current source and historical cells without an
+identity cannot reuse instrumentation; they must be measured within the remaining
+budget or remain unverified. Timing cells are always measured anew.
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 from contextlib import contextmanager
 from typing import Literal, TypedDict
 import json
@@ -606,6 +611,32 @@ def _tf_layer_defs():
     from dryml import F
     return (F("InputLayer", shape=(16,)),
             F("Dense", 1, use_bias=False, kernel_initializer="zeros"))
+
+
+def _tf_training_recipe(workload, mode, *, sections=4):
+    """Build untimed TF owners for old/new explicit-loop or Keras training.
+
+    ``sections`` defaults to the fixed four-section recipe; tiny functional
+    qualification may supply two. Returns the zero-initialized 16-to-1 model
+    and SGD(.001)/explicit mean-MSE trainer without acquiring data or executing
+    updates. The loss capability also reaches pinned-old Keras compile kwargs.
+    Installs DRYML's import guard before TensorFlow. Native construction errors
+    propagate; unknown workloads/modes raise ValueError before framework imports.
+    """
+    if workload not in ("tf", "keras") or mode not in ("old", "new"):
+        raise ValueError("TF recipe requires tf/keras and old/new")
+    import dryml  # noqa: F401
+    import tensorflow as tf
+    from dryml.models.tf import BasicTraining, Loss, Optimizer, Sequential, Training
+
+    tf.keras.utils.set_random_seed(1729)
+    model = Sequential(layer_defs=_tf_layer_defs())
+    trainer_type = BasicTraining if workload == "keras" else Training
+    trainer = trainer_type(optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=.001),
+                           loss=Loss(tf.keras.losses.MeanSquaredError),
+                           epochs=1 if mode == "old" else sections, verbose=0,
+                           compile_kwargs={"run_eagerly": False, "jit_compile": False})
+    return model, trainer
 
 
 _canary_counts = dict(opens=0, yields=0)
@@ -1199,8 +1230,8 @@ def _training_window(workload, mode, cadence):
                 weights = lambda: model.obj.weight.detach().numpy().T.copy()
         else:
             import tensorflow as tf
-            tf.keras.utils.set_random_seed(1729)
             if native:
+                tf.keras.utils.set_random_seed(1729)
                 model = tf.keras.Sequential([tf.keras.Input((16,)), tf.keras.layers.Dense(1, use_bias=False, kernel_initializer="zeros")])
                 optimizer = tf.keras.optimizers.SGD(.001)
                 dataset = tf.data.Dataset.from_tensor_slices((x, y)).batch(32)
@@ -1244,12 +1275,7 @@ def _training_window(workload, mode, cadence):
                                 checkpoint(step)
                 weights = lambda: model.get_weights()[0].copy()
             else:
-                from dryml.models.tf import BasicTraining, Optimizer, Sequential, Training
-                model = Sequential(layer_defs=_tf_layer_defs())
-                trainer_type = BasicTraining if workload == "keras" else Training
-                trainer = trainer_type(optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=.001),
-                                       epochs=1 if old else 4, verbose=0,
-                                       compile_kwargs={"run_eagerly": False, "jit_compile": False})
+                model, trainer = _tf_training_recipe(workload, mode)
                 weights = lambda: model.obj.get_weights()[0].copy()
         if not native:
             from dryml.data import ArrayDataset, Batch
@@ -1412,6 +1438,61 @@ def _thread_env():
                 NUMEXPR_NUM_THREADS="1", TF_NUM_INTRAOP_THREADS="1", TF_NUM_INTEROP_THREADS="1")
 
 
+def _instrumentation_identities(baseline_source, revision, source_dirty):
+    """Identify actual archived runtime/current clean revision plus current driver.
+
+    A dirty current source has no reusable identity, including staged/untracked
+    changes. Archive fingerprints cover source/resource contents, not generated
+    bytecode. Missing/unreadable content yields unknown identity, never equality
+    of two unknowns. This assumes cooperating processes keep inputs stable during
+    the run; it is not an execution sandbox or a dependency-environment lock.
+    """
+    identities = dict.fromkeys(MODES)
+    try:
+        driver = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        return identities
+
+    def identity(runtime):
+        return dict(schema="dryml-benchmark-instrumentation-identity-v1",
+                    runtime=runtime, driver_sha256=driver)
+
+    if not source_dirty:
+        current = identity(dict(kind="clean-git-revision", revision=revision))
+        identities.update({mode: current for mode in MODES if mode != "old"})
+    if baseline_source is not None and baseline_source.resolve() != Path(__file__).resolve().parents[2]:
+        source = baseline_source/"src/dryml"
+        try:
+            digest = hashlib.sha256()
+            files = sorted(p for p in source.rglob("*") if p.is_file()
+                           and "__pycache__" not in p.relative_to(source).parts
+                           and p.suffix not in (".pyc", ".pyo"))
+            if files:
+                for path in files:
+                    digest.update(path.relative_to(source).as_posix().encode()+b"\0")
+                    digest.update(hashlib.sha256(path.read_bytes()).digest())
+                identities["old"] = identity(dict(kind="archived-source-sha256",
+                    revision=BASELINE_REVISION, sha256=digest.hexdigest()))
+        except OSError:
+            pass
+    return identities
+
+
+def _instrumentation_reuse(prior, key, spec, identity):
+    """Return reusable cell and diagnostic; never retrofit historical identities."""
+    matches = [cell for cell in prior["cells"] if _cell_key(cell) == _cell_key(key)]
+    if identity is None:
+        return None, "current runtime/driver identity unavailable (dirty source or missing/unreadable content)"
+    if len(matches) != 1 or not _valid_evidence(matches[0], spec):
+        return None, "prior instrumentation missing, duplicate or invalid"
+    cell = matches[0]
+    if not cell.get("instrumentation_identity"):
+        return None, "prior instrumentation identity missing"
+    if cell["instrumentation_identity"] != identity:
+        return None, "runtime or driver content identity changed"
+    return cell, "matching trusted runtime and driver content identity"
+
+
 def main(argv: list[str] | None = None) -> int:
     """Emit bounded local JSON evidence; return nonzero unless all gates resolve.
 
@@ -1422,6 +1503,9 @@ def main(argv: list[str] | None = None) -> int:
     contention fails before work. I/O errors and interruptions propagate.
     Required applicability, fixed work, warmups, repeats and instrumentation gate
     closeout; old/new regressions block while native gaps are named follow-ups.
+    Confirmation retains prior charges and allows one attempt. Only instrumentation
+    with matching runtime/driver identity can be reused; dirty current source or
+    missing historical identity forces measurement or an unverified budget result.
     """
     args = parse_args(argv)
     if args.summarize:
@@ -1464,11 +1548,17 @@ def _execute(args, argv, publish):
                 or prior["confirmation_count"] != 0):
             raise SystemExit("confirmation requires matching measurement protocol, fixed profile and no prior confirmation")
         prior_elapsed = prior["elapsed_seconds"]
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    source_dirty = subprocess.run(["git", "diff", "--quiet", "--", "src/dryml"]).returncode != 0
+    root = Path(__file__).resolve().parents[2]
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    source_dirty = bool(subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=normal", "--", "src/dryml",
+         ":(exclude)src/dryml/graph"], cwd=root, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}))
+    identities = _instrumentation_identities(args.baseline_source, revision, source_dirty)
     report = dict(schema="dryml-dataset-traversal-benchmark-v2", measurement_protocol=MEASUREMENT_PROTOCOL,
                   profile=fixed_profile(),
                   baseline_revision=args.baseline_revision, revision=revision, source_dirty=source_dirty,
+                   instrumentation_identities=identities,
+                   instrumentation_identity_policy="clean current source revision or archived source fingerprint, plus current driver SHA-256; unknown identities never reuse",
                    command=[sys.executable, "-m", "tests.tools.benchmark_dataset_traversal", *(argv if argv is not None else sys.argv[1:])],
                    cells=[], comparisons=[], status="unverified", confirmation_count=int(args.confirm is not None),
                    decision_domain="old-new-steady",
@@ -1491,8 +1581,10 @@ def _execute(args, argv, publish):
                     key = dict(workload=workload, mode=mode, checkpoint_cadence=cadence,
                                instrumentation=instrumentation)
                     spec = specs[_cell_key(key)]
-                    reused = next((c for c in prior["cells"] if all(c.get(k) == v for k, v in key.items())
-                                   and _valid_evidence(c, spec)), None) if args.confirm and instrumentation else None
+                    reused, reuse_reason = None, "fresh instrumentation requested"
+                    identity = identities.get(mode)
+                    if args.confirm and instrumentation:
+                        reused, reuse_reason = _instrumentation_reuse(prior, key, spec, identity)
                     if not spec["required"]:
                         result = dict(status="unsupported", reason=spec["reason"])
                     elif reused is not None:
@@ -1513,6 +1605,10 @@ def _execute(args, argv, publish):
                         if instrumentation:
                             command.append("--instrumentation")
                         result = run_worker(command, timeout=min(cell_remaining, remaining), env=environment)
+                    if instrumentation:
+                        result = {**result, "instrumentation_identity": identity,
+                                  "reused_instrumentation": reused is not None and spec["required"],
+                                  "instrumentation_reuse_reason": reuse_reason}
                     report["cells"].append({**result, **key})
                     report["elapsed_seconds"] = prior_elapsed+perf_counter()-started
                     publish(report)
