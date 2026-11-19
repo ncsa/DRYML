@@ -219,9 +219,7 @@ class TrainingInputSession:
                 self._repo._invalidate_restoration_target(self._plan.nodes)
             raise
         finally:
-            if self._guard is not None:
-                self._guard.release()
-            self._guard = self._candidate = None
+            self._end_bridge_update()
 
     def _accept_update(self, candidate, *, examples, loss, complete_epoch, epoch_metrics):
         self._check()

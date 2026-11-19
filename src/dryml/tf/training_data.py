@@ -134,10 +134,12 @@ def _owned_value(value):
 
 
 def _value_bytes(value):
-    if isinstance(value, dict):
-        return sum(map(_value_bytes, value.values()))
-    if isinstance(value, (tuple, list)):
-        return sum(map(_value_bytes, value))
+    from dryml.core.utils.recurse import iter_leaves
+
+    return sum(_leaf_bytes(leaf) for leaf in iter_leaves(value))
+
+
+def _leaf_bytes(value):
     if isinstance(value, np.ndarray):
         return value.nbytes
     shape, dtype = getattr(value, "shape", None), getattr(value, "dtype", None)

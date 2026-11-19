@@ -1290,7 +1290,7 @@ class BasicTraining(TrainFunction):
         _require_mean_keras_loss(configured_loss)
         compile_kwargs.setdefault("loss", configured_loss)
         self._begin_training_preparation_generation()
-        train_data = self._prepare_data(exp.train_data)
+        self._prepare_data(exp.train_data)
         prepared_train = inputs.prepared
         self.training_preparation = TrainingPreparation.from_dataset(
             self, prepared_train, "tf"
@@ -1658,7 +1658,7 @@ class Training(BasicTraining):
         _require_mean_keras_loss(loss_fn)
         self._begin_training_preparation_generation()
         train_data = self._prepare_data(exp.train_data)
-        train_xy = self._xy_data(train_data)
+        self._xy_data(train_data)
         prepared_train = inputs.prepared
         self.training_preparation = TrainingPreparation.from_dataset(
             self, prepared_train, "tf"
