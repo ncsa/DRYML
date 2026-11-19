@@ -562,6 +562,9 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
     Borrowed views validate their exact opening-suffix cardinality, counting only
     successfully converted deliveries/reservations; UNKNOWN membership and separate
     upper bounds do not impose a strict count.
+    Delivery converts under the owner's advancement guard before accepting progress,
+    without allocating a public reservation. Explicit reservations retain their
+    single-use token and conversion-before-acceptance behavior.
     """
 
     def __init__(self, dataset: PreparedDataset | EpochView, preparation: BatchPreparation, *, epoch: int = 0) -> None:
@@ -597,12 +600,10 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
             if owner._acceptance != "delivery":
                 raise TraversalOwnershipError("Explicit acceptance requires reserve(), not next().")
             try:
-                candidate = owner._reserve(self._view)
+                value = owner._deliver_view(self._view, prepare=self._prepare)
             except StopIteration:
                 self._validate_count()
                 raise
-            value = self._call(self._prepare, candidate.value)
-            owner.accept(candidate)
             self._yielded += 1
             return value
         if self._cursor is None:

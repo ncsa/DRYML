@@ -537,18 +537,29 @@ def _zip_sections(branches):
     return tuple(result)
 
 
-def _dataset_sections(dataset):
+def _dataset_sections(dataset, memo=None):
     """Validate one visible axis and prove compact section-size runs, without IO.
 
     A run is (final-output size, repetition count); None repetitions are infinite.
     Unknown sizes remain unknown, separately from an optional per-section bound.
     This metadata seam never selects invokers or treats source lengths as pulls.
+    An optional preparation-local memo shares only completed analysis; failures
+    retain depth-first validation order and no metadata survives into a new learn.
     """
+    if memo is None:
+        memo = {}
+    key = id(dataset)
+    if key not in memo:
+        memo[key] = _analyze_dataset_sections(dataset, memo)
+    return memo[key]
+
+
+def _analyze_dataset_sections(dataset, memo):
     kind = type(dataset).__dict__.get("_stream_operator")
     if kind in {"zip", "chain", "custom"}:
         leaves = []
         _freeze_zip_tree(dataset.sources, leaves)
-        children = [_dataset_sections(child) for child in leaves]
+        children = [_dataset_sections(child, memo) for child in leaves]
     elif kind is None and hasattr(dataset, "sources"):
         def declared_leaves(tree):
             if hasattr(tree, "_stream_operator"):
@@ -556,9 +567,9 @@ def _dataset_sections(dataset):
             elif isinstance(tree, (tuple, list, dict)):
                 for child in (tree.values() if isinstance(tree, dict) else tree):
                     yield from declared_leaves(child)
-        children = [_dataset_sections(child) for child in declared_leaves(dataset.sources)]
+        children = [_dataset_sections(child, memo) for child in declared_leaves(dataset.sources)]
     elif hasattr(getattr(dataset, "src", None), "_stream_operator"):
-        children = [_dataset_sections(dataset.src)]
+        children = [_dataset_sections(dataset.src, memo)]
     else:
         children = []
     modes = [child[0] for child in children]
@@ -607,7 +618,7 @@ def _dataset_sections(dataset):
             bound = None if bound is None else bound * spec.batch
         elif type(dataset.src).__dict__.get("_stream_operator") == "batch":
             batch = dataset.src
-            _, runs, bound = _dataset_sections(batch.src)
+            _, runs, bound = _dataset_sections(batch.src, memo)
             if batch.drop_remainder:
                 runs = None if runs is None else tuple((n // batch.batch_size * batch.batch_size, count) for n, count in runs)
         else:
@@ -651,6 +662,8 @@ class StreamPlan:
     reopens every source occurrence independently.
     Child Methods retain their own direct-call state. Failed replacement leaves
     the previous complete plan and all independently captured cursors usable.
+    Section metadata is analyzed once per recipe within each learn's preflight
+    and reused during occurrence construction; its memo is discarded after learn.
     """
 
     def __init__(self, dataset: object) -> None:
@@ -707,8 +720,9 @@ class StreamPlan:
         if strategy != "local":
             raise ValueError(f"Unsupported Method preparation strategy {strategy!r}; only 'local' is available.")
         records: list[object] = []
-        _dataset_sections(self.dataset)
-        root = self._build(self.dataset, records)
+        section_metadata = {}
+        _dataset_sections(self.dataset, section_metadata)
+        root = self._build(self.dataset, records, section_metadata=section_metadata)
         from .signature import spec_from_node, spec_node
 
         root_specs = tuple(
@@ -758,7 +772,8 @@ class StreamPlan:
             raise ValueError("epoch must be a nonnegative exact int.")
         return StreamGraphCursor(prepared.root, epoch=epoch)
 
-    def _build(self, dataset: object, records: list[object], occurrence: tuple[int, ...] = ()) -> _StreamOp:
+    def _build(self, dataset: object, records: list[object], occurrence: tuple[int, ...] = (),
+               *, section_metadata: dict) -> _StreamOp:
         from .ir import MethodGraphNode, MethodPort
         from .signature import spec_node, spec_from_node
         from dryml.core.tensor_spec import batch_spec_tree, unbatch_spec_tree, merge_spec_trees, Dynamic
@@ -774,7 +789,7 @@ class StreamPlan:
         cardinality = dataset.yield_cardinality()
 
         def operation(kind, **kwargs):
-            sectioned, sections, bound = _dataset_sections(dataset)
+            sectioned, sections, bound = _dataset_sections(dataset, section_metadata)
             return _StreamOp(kind, dataset=dataset, signature=spec_node(spec),
                              occurrence=occurrence, cardinality=cardinality,
                              sectioned=sectioned, sections=sections, section_bound=bound, **kwargs)
@@ -783,7 +798,7 @@ class StreamPlan:
             records.append(MethodGraphNode(len(records), "source", None, outputs=(MethodPort("iterator", spec_node(spec)),)))
             return operation("source", source=dataset._prepare_stream_source(spec))
         if kind == "accumulate":
-            child = self._build(dataset.src, records, occurrence + (0,))
+            child = self._build(dataset.src, records, occurrence + (0,), section_metadata=section_metadata)
             initializer, initial_nodes = dataset.initial_state._prepare_local(child.spec)
             spec = spec_from_node(initial_nodes[1].outputs[0].spec)
             transition, transition_nodes = dataset.accumulator._prepare_local(child.spec, (spec,), spec)
@@ -800,7 +815,7 @@ class StreamPlan:
             ))
             return operation("accumulate", inputs=(child,), selected=(initializer, transition))
         if kind == "map":
-            child = self._build(dataset.src, records, occurrence + (0,))
+            child = self._build(dataset.src, records, occurrence + (0,), section_metadata=section_metadata)
             method = dataset.method
             selected = None
             try:
@@ -826,7 +841,7 @@ class StreamPlan:
                              controls=(getattr(dataset, "preserves_examples", False),
                                        method.find_implementation, dataset._examples_in_spec))
         if kind in {"batch", "unbatch"}:
-            child = self._build(dataset.src, records, occurrence + (0,))
+            child = self._build(dataset.src, records, occurrence + (0,), section_metadata=section_metadata)
             controls = ((dataset.batch_size, dataset.drop_remainder, dataset.ragged)
                         if kind == "batch" else ())
             spec = (batch_spec_tree(child.spec, batch=dataset.batch_size if dataset.drop_remainder else Dynamic,
@@ -848,7 +863,7 @@ class StreamPlan:
             selected = dataset._prepare_stream_selection(kind, child.spec)
             return operation(kind, inputs=(child,), controls=controls, selected=selected)
         if kind == "take":
-            child = self._build(dataset.src, records, occurrence + (0,))
+            child = self._build(dataset.src, records, occurrence + (0,), section_metadata=section_metadata)
             spec = child.spec
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset),
@@ -861,7 +876,7 @@ class StreamPlan:
             ))
             return operation("take", inputs=(child,), controls=(dataset.n, dataset.epoch, dataset.fixed_prefix))
         if kind in {"skip", "repeat", "shuffle", "epoch"}:
-            child = self._build(dataset.src, records, occurrence + (0,))
+            child = self._build(dataset.src, records, occurrence + (0,), section_metadata=section_metadata)
             controls = {"skip": lambda: (dataset.n,), "repeat": lambda: (dataset.count,),
                         "shuffle": lambda: (dataset.buffer_size, dataset.seed),
                         "epoch": lambda: (dataset.length,)}[kind]()
@@ -877,7 +892,8 @@ class StreamPlan:
         if kind == "zip":
             leaves = []
             tree = _freeze_zip_tree(dataset.sources, leaves)
-            children = tuple(self._build(source, records, occurrence + (index,)) for index, source in enumerate(leaves))
+            children = tuple(self._build(source, records, occurrence + (index,), section_metadata=section_metadata)
+                             for index, source in enumerate(leaves))
             spec = tree.build(iter(child.spec for child in children))
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset),
@@ -887,7 +903,8 @@ class StreamPlan:
             ))
             return operation("zip", inputs=children, tree=tree)
         if kind == "chain":
-            children = tuple(self._build(source, records, occurrence + (index,)) for index, source in enumerate(tuple(dataset.sources)))
+            children = tuple(self._build(source, records, occurrence + (index,), section_metadata=section_metadata)
+                             for index, source in enumerate(tuple(dataset.sources)))
             spec = merge_spec_trees([child.spec for child in children])
             records.append(MethodGraphNode(
                 len(records), "method", type(dataset),
@@ -896,7 +913,8 @@ class StreamPlan:
                 stream_node=self._builtin_node("Chain", tuple(child.spec for child in children), spec, dataset, ("declaration_order",) * len(dataset.sources), 0),
             ))
             return operation("chain", inputs=children)
-        children = tuple(self._build(source, records, occurrence + (index,)) for index, source in enumerate(tuple(dataset.sources)))
+        children = tuple(self._build(source, records, occurrence + (index,), section_metadata=section_metadata)
+                         for index, source in enumerate(tuple(dataset.sources)))
         node = dataset.node
         spec = node.output_spec(tuple(child.spec for child in children))
         records.append(MethodGraphNode(
@@ -1280,6 +1298,9 @@ class _SectionExecution(_CursorLifecycle):
     def __init__(self, op, epoch=0):
         super().__init__()
         self.op, self.epoch = op, epoch
+        self._source_limit = (op.cardinality.require_finite()
+                              if op.kind == "source" and op.source.kind in {"array", "npy", "generator"}
+                              and op.cardinality.is_finite else None)
         self.children = {}
         self.source = None
         self.value = None
@@ -1373,12 +1394,11 @@ class _SectionExecution(_CursorLifecycle):
             try:
                 value = self._pull(self.source)
             except StopIteration:
-                if (self.op.source.kind == "generator" and self.op.cardinality.is_finite
-                        and self.count != self.op.cardinality.require_finite()):
-                    raise DatasetExhaustedError(self.op.cardinality.require_finite(), self.count)
+                if (self.op.source.kind == "generator" and self._source_limit is not None
+                        and self.count != self._source_limit):
+                    raise DatasetExhaustedError(self._source_limit, self.count)
                 return PullKind.ROOT_END
-            bounded = self.op.source.kind in {"array", "npy", "generator"}
-            final = bounded and self.op.cardinality.is_finite and self.count + 1 == self.op.cardinality.require_finite()
+            final = self._source_limit is not None and self.count + 1 == self._source_limit
             if final and self.op.source.kind == "generator":
                 # Known membership avoids an EOF pull, not source validation.
                 self._call(self.source._validate_end)

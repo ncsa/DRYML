@@ -542,3 +542,37 @@ def test_steady_map_validation_uses_retained_specs_without_decoding_control_grap
         monkeypatch.setattr(_StreamOp, "spec", property(forbidden))
         assert list(view) == [0, 1]
         assert list(traversal.next_epoch()) == [2, 3]
+
+
+@pytest.mark.parametrize("sectioned", (False, True))
+def test_delivery_allocates_no_public_reservations_or_positions(monkeypatch, sectioned):
+    """Default yields need no public acceptance authority or proposed frontier."""
+    import dryml.data.traversal as implementation
+
+    dataset = source(4, declared=4)
+    if sectioned:
+        dataset = data.Epoch(dataset, len=2)
+    prepared = dataset.prepare()
+    counts = {"candidate": 0, "position": 0}
+    position_init = implementation.TraversalPosition.__init__
+    candidate_init = implementation.PendingElement.__init__
+
+    def position(self, *args, **kwargs):
+        counts["position"] += 1
+        position_init(self, *args, **kwargs)
+
+    def candidate(self, *args, **kwargs):
+        counts["candidate"] += 1
+        candidate_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(implementation.TraversalPosition, "__init__", position)
+    monkeypatch.setattr(implementation.PendingElement, "__init__", candidate)
+    with prepared.open() as traversal:
+        results = [(ordinal, list(view)) for ordinal, view in traversal.epochs(stop=2)]
+        assert results == ([(0, [0, 1]), (1, [2, 3])] if sectioned else
+                           [(0, [0, 1, 2, 3]), (1, [0, 1, 2, 3])])
+        assert counts == {"candidate": 0, "position": 0}
+        assert traversal.position == data.TraversalPosition(2, 0, 4 if sectioned else 8,
+                                                           True, sectioned)
+    assert _events.count("pull") == (4 if sectioned else 8)
+    assert _events.count("open") == _events.count("close") == (1 if sectioned else 2)

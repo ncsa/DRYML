@@ -501,7 +501,11 @@ def test_logging_never_captures_and_dynamic_capture_failure_preserves_prior(tmp_
     from dryml.core.repo import RepoSaveError
 
     repo = Repo(stores=tmp_path)
-    exp = _experiment(eager=True, repo=repo)
+    spec = TensorSpec("float32", shape=(1,), batch=1, backend="numpy")
+    # A nonterminal section boundary keeps the producer hook active for step two;
+    # prefetch may legitimately retire a known terminal producer before capture.
+    data = Epoch(GeneratorDataset(ReusablePairs, cardinality=3, spec=(spec, spec), repo=repo), len=2, repo=repo)
+    exp = _experiment(eager=True, repo=repo, data=data, epochs=2)
     prior = []
     def callback():
         global _capture_failure
@@ -519,6 +523,7 @@ def test_logging_never_captures_and_dynamic_capture_failure_preserves_prior(tmp_
             _capture_failure = False
     exp.train_fn(exp, callbacks=(callback,))
     assert exp.state.step == 3
+    assert [event for event, _ in _source_events if type(event) is int] == [1, 2, 3]
     assert repo.load_state_ref(prior[0], reuse_live="never").state.step == 1
 
 

@@ -125,6 +125,9 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
 
     Sources and positional seeking remain lazy. Explicit sections continue one
     upstream execution; implicit finite passes reopen after a boundary handoff.
+    Default delivery accepts internally without allocating public reservations or
+    proposed positions; those carriers are created only for explicit reservations
+    or requested position reads. Both modes share pull and completion validation.
     Empty implicit passes terminate unless their exact declaration requires outputs,
     in which case DatasetExhaustedError reports the shortfall. TypeError/ValueError
     reject invalid controls and provably infinite unsectioned roots before acquisition. Source/operator
@@ -442,6 +445,13 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
         return _Epochs(self, stop)
 
     def _reserve(self, view):
+        return self._advance_view(view, reserve=True)
+
+    def _deliver_view(self, view, prepare=None):
+        """Accept internal delivery after optional conversion, without public tokens."""
+        return self._advance_view(view, reserve=False, prepare=prepare)
+
+    def _advance_view(self, view, *, reserve, prepare=None):
         if view._exhausted:
             raise StopIteration
         self._check()
@@ -475,6 +485,11 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
                     raise StopIteration
                 value, final, root = self._execution.value, self._execution.section_final, self._execution.root_final
             final = final or (root and not self._explicit)
+            if not reserve:
+                if prepare is not None:
+                    value = self._call(prepare, value)
+                self._accept_delivery(view, final, root)
+                return value
             position = TraversalPosition(self._epoch + 1 if final else self._epoch,
                 0 if final else self._start + 1, self._sequence + 1,
                 final, root and self._explicit)
@@ -495,6 +510,14 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
                 or candidate._owner is not self or candidate._token is not self._pending[0]._token):
             raise TraversalOwnershipError("Stale or foreign consumer candidate.")
 
+    def _accept_delivery(self, view, final, root):
+        self._start += 1
+        self._sequence += 1
+        self._section_complete = False
+        view._offset += 1
+        if final:
+            self._complete(delivery=True, root=root)
+
     def accept(self, candidate: PendingElement[T]) -> None:
         """Accept the single outstanding reservation without capturing state.
 
@@ -508,12 +531,7 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
         try:
             reserved, view, root = self._pending
             self._pending = None
-            self._start += 1
-            self._sequence += 1
-            self._section_complete = False
-            view._offset += 1
-            if reserved.section_complete:
-                self._complete(delivery=True, root=root)
+            self._accept_delivery(view, reserved.section_complete, root)
         except BaseException as error:
             self._abort(error)
             raise
@@ -638,9 +656,7 @@ class EpochView(_CursorLifecycle, Iterator[T], Generic[T]):
         if self._owner._acceptance != "delivery":
             raise TraversalOwnershipError("Explicit acceptance requires reserve(), not next().")
         try:
-            candidate = self._owner._reserve(self)
-            self._owner.accept(candidate)
-            return candidate.value
+            return self._owner._deliver_view(self)
         except (StopIteration, TraversalOwnershipError):
             raise
         except BaseException as error:
@@ -650,6 +666,7 @@ class EpochView(_CursorLifecycle, Iterator[T], Generic[T]):
     def __next__(self) -> T:
         """Deliver/accept one value, or stop permanently after this section ends.
 
+        Acceptance uses internal progress facts, without a public candidate.
         Wrong acceptance mode or thread raises TraversalOwnershipError without
         invalidating the valid borrow. Real pull failures abort the owner.
         """

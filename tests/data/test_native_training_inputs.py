@@ -79,6 +79,34 @@ def _paired_values(values):
     return iter(values)
 
 
+def test_borrowed_delivery_converts_before_acceptance_without_public_carriers(monkeypatch):
+    """Native delivery keeps the acceptance barrier without issuing public tokens."""
+    import dryml.data.traversal as traversal_module
+    from dryml.data import ArrayDataset
+
+    prepared = Batch(ArrayDataset((np.arange(4), np.arange(4) + 10)), 2).prepare()
+    calls = []
+
+    class Handoff:
+        def prepare(self, x, y):
+            calls.append((owner.position.start, owner.position.sequence))
+            return x + 1, y + 1
+
+    with prepared.open() as owner:
+        view = owner.next_epoch()
+        with view.training_batches(Handoff()) as cursor:
+            def forbidden(*args, **kwargs):
+                pytest.fail("default native delivery allocated a public reservation")
+
+            monkeypatch.setattr(traversal_module.PendingElement, "__init__", forbidden)
+            batches = list(cursor)
+            assert cursor.observed_eof
+        assert [x.tolist() for x, _ in batches] == [[1, 2], [3, 4]]
+        assert [y.tolist() for _, y in batches] == [[11, 12], [13, 14]]
+        assert calls == [(0, 0), (1, 1)]
+        assert owner.position.epoch == 1 and owner.position.sequence == 2
+
+
 def test_prepared_dataset_plans_once_reopens_independent_closeable_cursors():
     """Preparation is inert and each prepared traversal owns a fresh graph cursor."""
     from dryml.data.native import PreparedDataset

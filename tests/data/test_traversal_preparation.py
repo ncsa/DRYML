@@ -445,3 +445,59 @@ def test_unqualified_fallback_does_not_require_new_spec_or_count_validation():
     assert dataset.count_reads == 0
     with prepared.iterator() as cursor:
         assert list(cursor) == [0, 1, 2, 3, 4]
+
+
+def test_bounded_source_membership_is_read_once_per_execution(monkeypatch):
+    """Frozen source bounds belong to an occurrence, not each row's bookkeeping."""
+    from dryml.core.cardinality import Cardinality
+    from dryml.methods.stream import _SectionExecution
+    from dryml.methods.stream_state import PullKind
+
+    prepared = source().prepare()
+    root = prepared.graph._stream_plan._prepared.root
+    reads = []
+    require_finite = Cardinality.require_finite
+
+    def counted(value):
+        reads.append(value)
+        return require_finite(value)
+
+    monkeypatch.setattr(Cardinality, "require_finite", counted)
+    for _ in range(2):
+        with _SectionExecution(root) as execution:
+            for value in range(5):
+                assert execution.pull() == PullKind.DELIVERY
+                assert execution.value == value
+                assert execution.root_final is (value == 4)
+            assert execution.pull() == PullKind.ROOT_END
+    assert reads == [root.cardinality, root.cardinality]
+
+
+def test_section_analysis_is_once_per_recipe_per_learn_and_never_stale(monkeypatch):
+    """Nested build occurrences reuse one preflight, then discard its memo."""
+    import dryml.methods.stream as stream
+    from dryml.data import Epoch
+
+    src = Epoch(source(), len=2)
+    first = Chain(src, src)
+    second = Chain(first, src)
+    dataset = Chain(second, src)
+    graph = dataset.method_graph()
+    visits = []
+    freeze = stream._freeze_zip_tree
+
+    def counted(tree, leaves):
+        if tree is first.sources or tree is second.sources or tree is dataset.sources:
+            visits.append(id(tree))
+        return freeze(tree, leaves)
+
+    monkeypatch.setattr(stream, "_freeze_zip_tree", counted)
+    graph.learn()
+    retained = graph._stream_plan._prepared.root
+    assert retained.sections == ((2, 2), (1, 1)) * 4
+    assert len(visits) == 3
+    src.length = 3
+    graph.learn()
+    assert len(visits) == 6
+    assert graph._stream_plan._prepared.root.sections == ((3, 1), (2, 1)) * 4
+    assert retained.sections == ((2, 2), (1, 1)) * 4
