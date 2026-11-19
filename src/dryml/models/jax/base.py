@@ -719,8 +719,10 @@ class Training(TrainFunction):
 
     Training consumes only canonical, explicitly batched ``(inputs, targets)``
     Dataset values from its Experiment. It preserves Dataset ordering and batch
-    boundaries, including short final batches. Candidate native state is computed
-    without owner mutation, synchronized and validated, then installed with Model,
+    boundaries, including short final batches. The input update reservation fences
+    native owner reads through candidate computation, synchronization, validation,
+    and installation. Overlapping updates sharing an owner fail explicitly.
+    Candidate state is computed without owner mutation, then installed with Model,
     Optimizer, TrainFunction, and TrainState accounting in one bounded eager
     transition. This experimental API may change.
 
@@ -823,7 +825,10 @@ class Training(TrainFunction):
         Exact recovery consumes continuous borrowed views and captures only on
         save/finalization. Same-live retry requires a current accepted record and
         valid owners. Candidate repair retains input metadata/provider references
-        without encoding records or copying native buffers.
+        without encoding records or copying native buffers. The update reservation
+        precedes all native candidate reads; pure pre-installation failures leave
+        owners valid, while failed installation repair invalidates affected owners.
+        Safe-point callbacks run after acceptance and reservation release.
         """
         callbacks = validate_training_callbacks(callbacks)
         if observer_session is not None:
@@ -935,19 +940,19 @@ class Training(TrainFunction):
                         x, y = input_candidate.value
                         batch_index = exp.state.next_batch
                         examples = prepared_train.examples_in((x, y))
-                        candidate = update(
-                            exp.model.parameters,
-                            exp.model.mutable_state,
-                            exp.model.rng,
-                            self.optimizer.state,
-                            x,
-                            y,
-                        )
-                        loss, parameters, mutable_state, rng, slots = candidate
-                        _synchronize_tree(candidate, jax)
-                        loss_float = self._validated_loss(loss, jax)
-                        complete_epoch = input_candidate.section_complete
                         with inputs.update(input_candidate, repairable=True):
+                            candidate = update(
+                                exp.model.parameters,
+                                exp.model.mutable_state,
+                                exp.model.rng,
+                                self.optimizer.state,
+                                x,
+                                y,
+                            )
+                            loss, parameters, mutable_state, rng, slots = candidate
+                            _synchronize_tree(candidate, jax)
+                            loss_float = self._validated_loss(loss, jax)
+                            complete_epoch = input_candidate.section_complete
                             self._commit_update(
                                 exp, parameters, mutable_state, rng, slots,
                                 examples=examples, loss=loss_float,

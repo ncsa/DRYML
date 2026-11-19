@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import os
 import subprocess
 import sys
+import textwrap
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import numpy as np
 import pytest
@@ -672,17 +677,232 @@ def test_jax_experiments_do_not_share_native_runtime_owners():
     assert (second.state.step, second.state.examples_seen, second.state.epoch) == (0, 0, 0)
 
 
+def _candidate_transaction():
+    """Execute the real loop transaction without importing unavailable Optax.
+
+    This focused proof extracts the candidate-to-callback statements verbatim;
+    it qualifies reservation/installation only, not native Optax training or the
+    surrounding training loop. Native integration tests retain their real prerequisite.
+    """
+    import dryml.models.jax.base as jax_base
+
+    function = ast.parse(textwrap.dedent(inspect.getsource(jax_base.Training._train_with_input))).body[0]
+    loop = next(node for node in ast.walk(function) if isinstance(node, ast.While))
+    body = loop.body[1:]
+    callback_end = next(index for index, node in enumerate(body)
+                        if isinstance(node, ast.For) and isinstance(node.target, ast.Name)
+                        and node.target.id == "callback")
+    wrapper = ast.parse(
+        "def transaction(self, exp, inputs, input_candidate, update, jax, callbacks=()):\n"
+        "    prepared_train = inputs.prepared\n"
+        "    epoch_loss = epoch_steps = resume_batch = 0\n"
+    ).body[0]
+    wrapper.body.extend(body[:callback_end + 1])
+    namespace = dict(vars(jax_base))
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])),
+                 inspect.getsourcefile(jax_base.Training), "exec"), namespace)
+    return namespace["transaction"]
+
+
+def _pure_candidate(jax, parameters, mutable, rng, slots, x, y):
+    """Return distinct installed JAX arrays using a local non-Optax transition."""
+    del x, y
+    return (jax.numpy.asarray(1.), {"weight": parameters["weight"] + 1}, mutable,
+            jax.random.split(rng)[0], {"count": slots["count"] + 1})
+
+
+def test_jax_candidate_reservation_precedes_shared_model_read():
+    """Real-array transaction overlap rejects contention before a second pure read.
+
+    Separate TrainStates/slot owners share one Model. Events hold the first pure
+    computation open after both sessions admit; no native Optax qualification is claimed.
+    """
+    jax = pytest.importorskip("jax")
+    from dryml.core.repo import RepoSaveError
+
+    transaction = _candidate_transaction()
+    first, second = _experiment(), _experiment()
+    second = Experiment(first.model, second.train_fn, train_data=second.train_data)
+    assert second.model is first.model
+    assert first.state is not second.state
+    for exp in (first, second):
+        exp.train_fn.optimizer.state = {"count": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
+    admitted, start, computing, release = (Event() for _ in range(4))
+    reads, callbacks = [], []
+
+    def held_update(*args):
+        reads.append("first")
+        computing.set()
+        assert release.wait(10), "contender did not release the pure computation"
+        return _pure_candidate(jax, *args)
+
+    def contender_update(*args):
+        reads.append("second")
+        return _pure_candidate(jax, *args)
+
+    def run_first():
+        with first.train_fn.input_session(first) as inputs:
+            candidate = inputs.traversal.next_epoch().reserve()
+            admitted.set()
+            assert start.wait(10), "second input session did not admit"
+
+            def accepted_callback():
+                assert inputs._guard is None and inputs._accepted
+                with inputs._repo.reserve_state_graph(first):
+                    callbacks.append(first.state.step)
+
+            transaction(first.train_fn, first, inputs, candidate, held_update, jax,
+                        (accepted_callback,))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(run_first)
+        try:
+            assert admitted.wait(10), "first input session did not admit"
+            with pytest.raises(RepoSaveError, match="reserved|overlap|in progress"):
+                with second.train_fn.input_session(second) as inputs:
+                    candidate = inputs.traversal.next_epoch().reserve()
+                    start.set()
+                    assert computing.wait(10), "first candidate did not start"
+                    transaction(second.train_fn, second, inputs, candidate, contender_update, jax)
+        finally:
+            start.set()
+            release.set()
+            future.result(timeout=10)
+
+    assert reads == ["first"]
+    assert callbacks == [1]
+    np.testing.assert_array_equal(first.model.parameters["weight"], [[1.]])
+    assert first.state.step == 1 and second.state.step == 0
+    assert int(first.train_fn.optimizer.state["count"]) == 1
+    assert int(second.train_fn.optimizer.state["count"]) == 0
+    assert not first.model._restore_failed
+
+
+@pytest.mark.parametrize("failure", ("compute", "sync", "loss", "model", "slots"))
+def test_jax_pure_transaction_failures_preserve_valid_owners(monkeypatch, failure):
+    """Real-array pre-installation failures release the lease without invalidation.
+
+    The extracted transaction uses a local pure fixture, not Optax training.
+    Prior input records and native references must survive without encoding.
+    """
+    jax = pytest.importorskip("jax")
+    import dryml.models.jax.base as jax_base
+    from dryml.core.state import is_reserved
+    from dryml.models import TrainState
+
+    exp = _experiment()
+    exp.train_fn.optimizer.state = {"count": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
+    prior_parameters, prior_mutable, prior_rng = exp.model.parameters, exp.model.mutable_state, exp.model.rng
+    prior_slots, prior_continuation = exp.train_fn.optimizer.state, exp.train_fn.continuation
+
+    def update(*args):
+        assert is_reserved(exp.model)
+        if failure == "compute":
+            raise RuntimeError("pure compute failed")
+        loss, parameters, mutable, rng, slots = _pure_candidate(jax, *args)
+        if failure == "loss":
+            loss = jax.numpy.asarray(float("nan"))
+        if failure == "model":
+            mutable = {"wrong": jax.numpy.asarray(1)}
+        if failure == "slots":
+            slots = ()
+        return loss, parameters, mutable, rng, slots
+
+    def fail_sync(*args):
+        assert is_reserved(exp.model)
+        raise RuntimeError("pure sync failed")
+
+    if failure == "sync":
+        monkeypatch.setattr(jax_base, "_synchronize_tree", fail_sync)
+    transaction = _candidate_transaction()
+    with pytest.raises((RuntimeError, TypeError, ValueError), match="pure|finite|candidate"):
+        with exp.train_fn.input_session(exp) as inputs:
+            prior = inputs.capture()
+            monkeypatch.setattr(TrainState, "__getstate__", lambda _: pytest.fail("candidate encoded continuation"))
+            candidate = inputs.traversal.next_epoch().reserve()
+            transaction(exp.train_fn, exp, inputs, candidate, update, jax)
+
+    assert inputs._guard is None and not is_reserved(exp.model)
+    assert exp.model.parameters is prior_parameters
+    assert exp.model.mutable_state is prior_mutable and exp.model.rng is prior_rng
+    assert exp.train_fn.optimizer.state is prior_slots
+    assert exp.train_fn.continuation is prior_continuation
+    assert int(prior_slots["count"]) == 0
+    assert (exp.state.step, exp.state.examples_seen, exp.state.next_batch, exp.state.input_sequence) == (0, 0, 0, 0)
+    assert exp.state.dataset_state is prior and inputs.traversal.position == prior.position
+    assert exp.state._input_provider is None
+    assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
+    with exp.train_fn.input_session(exp) as retry:
+        assert retry.capture() is prior
+
+
+@pytest.mark.parametrize("capture", (False, True))
+def test_jax_callback_capture_controls_save_after_provider_retirement(tmp_path, monkeypatch, capture):
+    """Only a live accepted callback capture authorizes later exact save/retry.
+
+    This transaction proof uses local slots; native Optax recovery comparisons
+    remain in the separately prerequisite-gated integration tests below.
+    """
+    jax = pytest.importorskip("jax")
+    from dryml.core.repo import RepoSaveError
+    repo = Repo(DirStore(tmp_path / "store"))
+    exp = _experiment(repo=repo)
+    exp.train_fn.optimizer.state = {"count": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
+    transaction = _candidate_transaction()
+
+    def pause():
+        provider = exp.state._input_provider
+        assert provider._guard is None and provider._accepted
+        assert exp.state.step == exp.state.input_sequence == 1
+        if capture:
+            provider.capture()
+        raise RuntimeError("uncaptured callback" if not capture else "captured callback")
+
+    with pytest.raises(RuntimeError, match="callback"):
+        with exp.train_fn.input_session(exp) as inputs:
+            candidate = inputs.traversal.next_epoch().reserve()
+            transaction(exp.train_fn, exp, inputs, candidate,
+                        lambda *args: _pure_candidate(jax, *args), jax, (pause,))
+
+    assert exp.state._input_provider is None
+    assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
+    assert exp.state.step == exp.state.input_sequence == 1
+    if capture:
+        assert exp.state.dataset_state.position == exp.state.input_position
+        assert repo.save_object(exp, deep_capture=True) is not None
+    else:
+        assert exp.state.dataset_state is None
+        with pytest.raises(RepoSaveError, match="snapshot-local state preparation failed") as error:
+            repo.save_object(exp, deep_capture=True)
+        assert isinstance(error.value.__cause__, ValueError)
+        assert "current matching record; durable reload" in str(error.value.__cause__)
+        monkeypatch.setattr(type(exp.train_data), "prepare", lambda _: pytest.fail("stale input prepared"))
+        with pytest.raises(ValueError, match="current matching record.*durable reload"):
+            exp.train_fn(exp)
+
+
 @pytest.mark.parametrize("stage", ("before_model", "after_model", "after_optimizer", "after_accounting", "after_frontier"))
 def test_jax_candidate_commit_interruptions_repair_all_owners(monkeypatch, stage):
     """Deterministic installation-seam proof; no Optax/native-training qualification."""
     jax = pytest.importorskip("jax")
     import dryml.models.jax.base as jax_base
+    from dryml.models.jax import Model
 
     exp = _experiment()
+    exp = Experiment(
+        Model(F(_stateful_init_factory), F(_stateful_apply_factory), output_spec=_spec()),
+        exp.train_fn, train_data=exp.train_data,
+    )
     exp.train_fn.optimizer.state = {"count": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
     from dryml.models import TrainState
     monkeypatch.setattr(TrainState, "__getstate__", lambda _: pytest.fail("candidate encoded continuation"))
     before = np.asarray(exp.model.parameters["weight"]).copy()
+    prior_parameters, prior_mutable, prior_rng = exp.model.parameters, exp.model.mutable_state, exp.model.rng
+    prior_rng_data = np.asarray(jax.random.key_data(prior_rng)).copy()
+    prior_slots = exp.train_fn.optimizer.state
+    candidate_mutable = {"updates": prior_mutable["updates"] + 1}
+    candidate_rng = jax.random.split(prior_rng)[0]
+    assert not np.array_equal(jax.random.key_data(candidate_rng), prior_rng_data)
     exp.train_fn.continuation = {"marker": jax.numpy.asarray(7, dtype=jax.numpy.int32)}
 
     def interrupt(observed):
@@ -696,14 +916,20 @@ def test_jax_candidate_commit_interruptions_repair_all_owners(monkeypatch, stage
             candidate = inputs.traversal.next_epoch().reserve()
             with inputs.update(candidate, repairable=True):
                 exp.train_fn._commit_update(
-                    exp, {"weight": exp.model.parameters["weight"] + 1}, exp.model.mutable_state,
-                    exp.model.rng, {"count": jax.numpy.asarray(1, dtype=jax.numpy.int32)},
+                    exp, {"weight": exp.model.parameters["weight"] + 1}, candidate_mutable,
+                    candidate_rng, {"count": jax.numpy.asarray(1, dtype=jax.numpy.int32)},
                     examples=2, loss=1., complete_epoch=False, input_candidate=candidate,
                 )
 
     np.testing.assert_array_equal(exp.model.parameters["weight"], before)
+    assert exp.model.parameters is prior_parameters
+    assert exp.model.mutable_state is prior_mutable
+    assert exp.model.rng is prior_rng
+    np.testing.assert_array_equal(exp.model.mutable_state["updates"], np.asarray(0, dtype=np.int32))
+    np.testing.assert_array_equal(jax.random.key_data(exp.model.rng), prior_rng_data)
     np.testing.assert_array_equal(exp.train_fn.continuation["marker"], np.asarray(7, dtype=np.int32))
-    assert exp.train_fn.optimizer.state is not None
+    assert exp.train_fn.optimizer.state is prior_slots
+    np.testing.assert_array_equal(exp.train_fn.optimizer.state["count"], np.asarray(0, dtype=np.int32))
     assert (exp.state.step, exp.state.examples_seen, exp.state.next_batch) == (0, 0, 0)
     assert exp.state.input_sequence == 0 and exp.state.dataset_state is prior
     assert inputs.traversal.position == prior.position
@@ -711,6 +937,38 @@ def test_jax_candidate_commit_interruptions_repair_all_owners(monkeypatch, stage
     assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
     with exp.train_fn.input_session(exp) as inputs:
         assert inputs.capture() is prior
+
+
+def test_jax_candidate_failed_installation_repair_invalidates_owners(monkeypatch):
+    """A local installation/repair failure retires owners instead of claiming rollback."""
+    jax = pytest.importorskip("jax")
+    from dryml.core.repo import RepoSaveError
+
+    exp = _experiment()
+    exp.train_fn.optimizer.state = {"count": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
+    install = exp.model._install_candidate_state
+    calls = []
+
+    def fail_install(*args):
+        calls.append(True)
+        if len(calls) == 1:
+            install(*args)
+            raise RuntimeError("installation failed")
+        raise RuntimeError("repair failed")
+
+    monkeypatch.setattr(exp.model, "_install_candidate_state", fail_install)
+    with pytest.raises(RuntimeError, match="installation failed") as error:
+        with exp.train_fn.input_session(exp) as inputs:
+            inputs.capture()
+            candidate = inputs.traversal.next_epoch().reserve()
+            _candidate_transaction()(exp.train_fn, exp, inputs, candidate,
+                                     lambda *args: _pure_candidate(jax, *args), jax)
+    assert calls == [True, True]
+    assert any("repair failed" in note for note in error.value.__notes__)
+    assert exp.model._restore_failed and exp.train_fn.optimizer._restore_failed
+    assert exp.state._input_provider is None and inputs._guard is None
+    with pytest.raises(RepoSaveError, match="invalidated"):
+        exp.train_fn(exp)
 
 
 def test_jax_training_apply_contract_fails_before_owner_installation():
@@ -861,6 +1119,7 @@ def test_jax_seeded_take_resume_reopens_the_saved_epoch_before_skip(tmp_path):
 
     def pause_in_epoch_one():
         if (interrupted.state.epoch, interrupted.state.next_batch) == (1, 1):
+            interrupted.state._input_provider.capture()
             raise RuntimeError("pause in generated epoch")
 
     with pytest.raises(RuntimeError, match="generated epoch"):
@@ -915,6 +1174,7 @@ def test_jax_rng_and_mutable_state_resume_match_uninterrupted_adam(tmp_path):
     interrupted = make_experiment(repo=repo)
 
     def pause():
+        interrupted.state._input_provider.capture()
         raise RuntimeError("stochastic pause")
 
     with pytest.raises(RuntimeError, match="stochastic pause"):
@@ -982,6 +1242,7 @@ if sys.argv[1] == 'save':
     repo = Repo(DirStore(sys.argv[2]))
     interrupted = experiment(repo)
     def pause():
+        interrupted.state._input_provider.capture()
         raise RuntimeError('pause after accepted update')
     try:
         interrupted.train_fn(interrupted, callbacks=(pause,))
