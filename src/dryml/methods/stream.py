@@ -1326,6 +1326,12 @@ class _SectionExecution(_CursorLifecycle):
         self.rng = None
         self.carry = None
         self.carry_initialized = False
+        if op.kind == "batch" and not op.sectioned:
+            child = op.inputs[0]
+            source = child.inputs[0] if child.kind == "map" and not child.sectioned else child
+            if (source.kind == "source" and not source.sectioned
+                    and source.source.kind == "array" and source.cardinality.is_finite):
+                self._batch = self._batch_array
 
     def _child(self, index=0, epoch=None):
         if index not in self.children:
@@ -1520,6 +1526,94 @@ class _SectionExecution(_CursorLifecycle):
         value = self._call(self.selected, self.buffer)
         self.buffer = []
         return self._deliver(value, final=boundary, root=root)
+
+    def _batch_array(self, child):
+        """Group an unsectioned Array/(Map) edge without per-row kernel signals.
+
+        Keep the ordinary occurrence tree and physical frontier for capture and
+        restoration. Source cursors, Map invokers and the collator retain their
+        validation/lifecycle boundaries; every buffered row is owned before the
+        next producer call. Only the frozen finite Array bound proves finality.
+        Public capture/advance cannot observe children while the parent is busy.
+        Publish their metadata once at the pull boundary, including on failure
+        before parent cleanup, so even failed occurrences retain generic facts.
+        """
+        size, drop, _ = self.op.controls
+        self.buffer = []
+        if child.terminal:
+            return PullKind.ROOT_END
+        mapper = child if child.op.kind == "map" else None
+        source = mapper._child() if mapper is not None else child
+        source_count, source_value = source.count, source.value
+        source_root, source_terminal = source.root_final, source.terminal
+        source_produced = source.produced
+        if mapper is not None:
+            map_count, map_value = mapper.count, mapper.value
+            map_root, map_terminal = mapper.root_final, mapper.terminal
+            map_produced = mapper.produced
+        root = False
+        try:
+            while len(self.buffer) < size:
+                try:
+                    if mapper is not None:
+                        if mapper._closed:
+                            raise RuntimeError("Closed execution cannot advance.")
+                        map_root, map_value = False, None
+                    if source_terminal:
+                        if mapper is not None:
+                            map_terminal = True
+                        root = True
+                        break
+                    if source._closed:
+                        raise RuntimeError("Closed execution cannot advance.")
+                    source_root, source_value = False, None
+                    try:
+                        if source.source is None:
+                            source.source = source._own(source._call(source.op.source.open, source.epoch))
+                        value = source._pull(source.source)
+                    except StopIteration:
+                        source_terminal = True
+                        if mapper is not None:
+                            map_terminal = True
+                        root = True
+                        break
+                    except BaseException as error:
+                        source._close_after_failure(error)
+                        raise
+                    source_count += 1
+                    root = source_count == source._source_limit
+                    source_value = value
+                    source_produced = True
+                    source_root = source_terminal = root
+                    if mapper is not None:
+                        value = mapper._map(value)
+                        map_value = value
+                        map_count += 1
+                        map_produced = True
+                        map_root = map_terminal = root
+                except BaseException as error:
+                    if mapper is not None:
+                        mapper._close_after_failure(error)
+                    raise
+                self.buffer.append(_retain_buffer(value))
+                if root:
+                    break
+        finally:
+            source.count, source.value = source_count, source_value
+            source.section_final = False
+            source.produced = source_produced
+            source.root_final, source.terminal = source_root, source_terminal
+            if mapper is not None:
+                mapper.count, mapper.value = map_count, map_value
+                mapper.section_final = False
+                mapper.produced = map_produced
+                mapper.root_final, mapper.terminal = map_root, map_terminal
+        if not self.buffer or (drop and len(self.buffer) < size):
+            self.buffer = []
+            return PullKind.ROOT_END
+        value = self._call(self.selected, self.buffer)
+        self.buffer = []
+        return self._deliver(value, root=root)
 
     def _unbatch(self, child):
         while self.split_index == len(self.split_values):
