@@ -596,15 +596,20 @@ sections of 16. Training is 4,096x16 to one target, batch 32, 128 updates in fou
 sections, with no intermediate checkpoint and cadence 32. Buffered Shuffle uses
 capacity 32 and capture after output 129, then validates the entire resumed suffix.
 
-JSON distinguishes warmups, preparation/first-result, steady windows, end-to-end,
-capture/save/load/restore, and a separate instrumentation pass. Unmeasured copy,
+JSON uses measurement protocol `dryml-dataset-traversal-cost-domains-v2` and
+benchmark schema v2. It distinguishes complete warmups, preparation/first-result,
+steady windows, full training invocations, end-to-end, capture/save/load/restore,
+and a separate instrumentation pass. Every window and aggregate carries a typed
+timing domain (`name`, `unit`, exact timed `count`, logical `sections`), rather
+than assuming total performed work is the throughput numerator. Unmeasured copy,
 compile, synchronization, device-memory and pending-window metrics are `null`,
 not inferred zeros. Median/MAD and three times the larger comparison MAD are a
 triage envelope; noisy, timeout, unavailable or mismatched work is not a pass.
 Native runs use native pipelines without DRYML wrappers. Optimized modes preserve
 vectorized work/compilation/prefetch; grouped native Keras changes callback
-granularity and is labeled separately. Training invocation timing includes
-fit/compilation setup where kernel-only timing cannot yet be isolated.
+granularity and is labeled separately. Full invocation and end-to-end costs are
+compared independently of the steady-state R28 gate; a different cost domain
+cannot establish or excuse a new same-domain steady regression.
 
 The report carries `dryml-dataset-traversal-applicability-v1`, a closed required
 workload/mode/cadence/instrumentation schema independent of observed results or
@@ -644,16 +649,100 @@ SGD has no Optax slot leaves; the saved count is accepted updates, not an Optax
 slot. Checkpoint snapshots also validate against their corresponding NumPy
 prefixes. Source snapshots are taken only at requested checkpoints/finalization.
 
-For JAX, `prepare_seconds` includes imports and native setup. The invocation
-reported as `steady_seconds` includes first-update JIT compilation and new's
-normal final input capture; fresh owners/functions are built for each window,
-so this is not isolated warmed-kernel time. Cold-import, compile-only and final
-capture-only costs remain unknown (`null`), with that limitation stated in the
-record. Final checkpoint saving is reported separately in `final_save_seconds`,
-outside the intermediate-checkpoint list. The two warmups/five timed windows
-and fixed controls are unchanged. Tiny real numerical builder probes qualify
-correctness only; synthetic 128-update checkpoint tests are not real Optax
-qualification and produce no comparative evidence.
+### Measurement domains and exact timed populations
+
+All training modes still perform **128 accepted updates in four sections** per
+window. Owners/functions are freshly constructed for each of the two complete
+warmups and five timed windows. The warmups do not pretend to make each subsequent
+fresh owner's setup or compilation disappear.
+
+| Metric | Clock boundaries and timed work | Decision role |
+|---|---|---|
+| `steady_seconds`, `accepted-report-within-section-v1` | Sum of accepted report 1→32, 33→64, 65→96, 97→128; **31 updates per section, 124 updates total** | Comparable old/new and matched-native observed steady work; R28 old/new gate |
+| `invocation_seconds`, `full-training-invocation-v1` | Immediately before training/manual section loop until return; **all 128 updates**, configured cadence IO, normal final input capture and postludes | Informational full-invocation cost comparison |
+| `end_to_end_seconds`, `complete-training-window-v1` | Entire window call: input generation/reference calculation, imports/setup, invocation, numerical validation, final save, and temporary-file finalization; **all 128 updates** | Informational complete-cost comparison |
+
+Steady intervals start/end at the first/last **already required accepted-update
+report** within each section, after the backend's ordinary reporting synchronization.
+They exclude each section's first completed update and retain **all** intervening
+input acquisition/conversion, acceptance, fencing, queuing, reporting, and trainer
+work, including any later compilation. They are observed post-first-update intervals,
+not pure kernel time or a promise that a backend never recompiles. Throughput is
+**124 / steady seconds**, never 128 divided by a 124- or 127-update interval.
+Only eight boundary timestamps are collected; no per-yield source/state-hook,
+capture, callable tracing, or extra device fence is added to the timed path.
+
+`report_intervals` lists exact endpoints, seconds and 31-update counts.
+`report_offsets` and `boundary_costs` expose initial setup through first report,
+three last-report→next-section-first-report gaps, and the final report→return tail.
+Those gaps/tail include section setup, first updates, checkpoint callbacks, and
+postludes/final capture where executed; their combined `outside_steady_seconds`
+plus steady time must reconcile to full invocation time. They are **mixed costs**,
+not invented independent compile or capture measurements. `prepare_seconds`
+includes imports/native setup; isolated `cold_import_seconds`, `open_seconds`,
+`compile_seconds`, and training `final_capture_seconds` remain `null` where not
+independently observable. Final capture is retained in the measured invocation
+tail and complete total. `checkpoint_steps`/`checkpoint_seconds` list exactly
+zero or four intermediate saves at 32/64/96/128. `final_save_seconds`/bytes are
+separate from that list and outside invocation time, inside end-to-end time.
+`end_to_end_other_seconds` exposes the complete-window remainder after subtracting
+preparation, invocation and final save, including reference checks and cleanup.
+
+Optimized-native JAX retains JIT `lax.scan` of 32 updates and Keras retains
+`steps_per_execution=32`. These paths expose only four section-end reports.
+Their first **group** latency is `first_group_result_seconds`; first-update
+latency, 124-update steady time/domain, and steady throughput are `null`, with an
+explicit `steady_blocker`. A comparable within-section interval cannot be isolated
+without changing their optimized execution/reporting contract. The tool refuses
+that steady ratio and reports the 128-update invocation/end-to-end ratios instead.
+It does not insert Python batch callbacks, unroll the scan, or remove grouping.
+This limitation cannot waive or mask a measured old/new steady regression.
+
+Dataset windows likewise retain all performed outputs, with post-first-section
+delivery timing (including ordinary cursor EOF/drain overhead) counted exactly:
+1,016/1,024 batches for implicit indexed passes, 960/1,024 for explicit sections,
+480/512 outputs for ordinary/direct/mixed sections, and 511/512 for buffered work.
+Buffered capture remains after output 129; the steady interval is split around
+the capture/restore probe, whose costs remain separate and in end-to-end totals.
+First results, preparation/open, final capture and complete costs remain visible.
+For new-mode Dataset windows, each `section_first_result_seconds` interval starts
+before advancing the epoch enumerator and ends after its first delivery, including
+source acquisition, staging, transformation or buffered fill. The first interval
+also includes enumerator construction; `first_result_seconds` is that first
+observation. `prepare_seconds` and `open_seconds` remain separate, non-overlapping
+costs. `costs.section_first_result_seconds` repeats the same observations for
+compatibility and must not be added a second time. Empty-view and terminal
+enumeration attempts that deliver nothing are measured separately in
+`costs.epoch_enumeration_without_result_seconds`, not charged to a nonexistent
+first result or the post-first numerator. Ordinary view EOF/drain remains inside
+its tail interval. Final capture is measured once outside those intervals; the
+complete-window clock still includes all setup, capture/probe, validation and
+cleanup, including overhead not independently isolated by the component clocks.
+Optimized NumPy still transforms the whole source once before materializing batches;
+it reports full vectorized delivery and end-to-end costs, with no fabricated
+comparable post-first steady interval. Native pipelines gain no DRYML wrappers or
+per-batch Python instrumentation to manufacture timing parity.
+
+The gate checks domain identities/counts in every warmup and timed window,
+report endpoints/counts, full invocation reconciliation, exact cadence work,
+and end-to-end consistency before accepting ratios. Incompatible or missing
+domains return no ratio. Full-invocation/end-to-end regressions remain visible
+informational cost signals; a same-domain old/new steady regression or unresolved
+noise still blocks. Overall status is explicitly scoped by
+`decision_domain="old-new-steady"`; it does not certify absence of total-cost
+regressions. Grouped/vectorized native steady gaps stay explicitly
+unverified named follow-ups, while their full-work costs remain required.
+Historical v1 evidence cannot be confirmed or reused under v2 and is never
+rewritten into v2 performance qualification. The fixed seed, useful work,
+warmup/repetition counts, cadences and deadlines are unchanged. Tiny real builder
+probes qualify numerical correctness only; synthetic clock/backend fixtures do
+not produce comparative evidence or consume the authorized fresh comparison.
+The six real JAX builder, script-import and native-mode matrix cases are marked
+`exhaustive_only` for the routine profile. They remain available through explicit
+focused file/node selections and exhaustive coverage. The routine tool checks
+exercise the backend-free protocol; real JAX training remains represented by the
+named native integration selections. This keeps the new expanded driver matrix
+out of routine qualification without dropping its separately executed evidence.
 
 Throughput parity is not certified by deterministic work counts or the Keras
 barrier test. Capture may copy a full source plus buffered values; replay costs

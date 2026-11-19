@@ -80,16 +80,50 @@ def _paired_values(values):
 
 
 def test_borrowed_delivery_converts_before_acceptance_without_public_carriers(monkeypatch):
-    """Native delivery keeps the acceptance barrier without issuing public tokens."""
+    """Conversion rejects reentrant mutations before token-free delivery accepts."""
     import dryml.data.traversal as traversal_module
-    from dryml.data import ArrayDataset
+    from dryml.data import ArrayDataset, TraversalOwnershipError
+    from dryml.data.source import _IndexedDatasetCursor
 
     prepared = Batch(ArrayDataset((np.arange(4), np.arange(4) + 10)), 2).prepare()
     calls = []
+    source_yields = 0
+    position_allocations = 0
+    source_read = _IndexedDatasetCursor._read
+    position_init = traversal_module.TraversalPosition.__init__
+
+    def counted_read(self):
+        nonlocal source_yields
+        value = source_read(self)
+        source_yields += 1
+        return value
+
+    def counted_position(self, *args, **kwargs):
+        nonlocal position_allocations
+        position_allocations += 1
+        position_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(_IndexedDatasetCursor, "_read", counted_read)
 
     class Handoff:
         def prepare(self, x, y):
-            calls.append((owner.position.start, owner.position.sequence))
+            position = owner.position
+            assert (position.start, position.sequence) == (len(calls), len(calls))
+            calls.append((position.start, position.sequence))
+            yielded = source_yields
+            assert yielded == 2 * len(calls)
+            assert owner.replay_recovery_policy == "disabled"
+            for operation in (
+                lambda: next(view),
+                owner.close,
+                owner.capture_state,
+                owner.enable_replay_recovery,
+            ):
+                with pytest.raises(TraversalOwnershipError):
+                    operation()
+                assert owner.position == position
+                assert source_yields == yielded
+                assert owner.replay_recovery_policy == "disabled"
             return x + 1, y + 1
 
     with prepared.open() as owner:
@@ -99,8 +133,12 @@ def test_borrowed_delivery_converts_before_acceptance_without_public_carriers(mo
                 pytest.fail("default native delivery allocated a public reservation")
 
             monkeypatch.setattr(traversal_module.PendingElement, "__init__", forbidden)
+            monkeypatch.setattr(traversal_module.TraversalPosition, "__init__", counted_position)
             batches = list(cursor)
             assert cursor.observed_eof
+            # Only the five explicit position-property reads per callback allocate.
+            assert position_allocations == 2 * 5
+            assert source_yields == 4
         assert [x.tolist() for x, _ in batches] == [[1, 2], [3, 4]]
         assert [y.tolist() for _, y in batches] == [[11, 12], [13, 14]]
         assert calls == [(0, 0), (1, 1)]

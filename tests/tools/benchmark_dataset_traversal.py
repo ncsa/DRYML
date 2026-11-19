@@ -9,6 +9,9 @@ used. Each child has a startup-inclusive deadline; the parent charges failures,
 instrumentation and startup against one overall deadline. There is no automatic
 retry. Missing required, noisy or incomplete evidence cannot establish a pass;
 only the closed applicability schema exempts known unsupported comparisons.
+Cost-domain protocol v2 gates comparable old/new steady work. Full-invocation
+and end-to-end comparisons remain separately labeled informational cost signals;
+grouped native work never fabricates a per-update steady interval.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from __future__ import annotations
 import argparse
 import copy
 from contextlib import contextmanager
+from typing import Literal, TypedDict
 import json
 import math
 import os
@@ -32,6 +36,80 @@ BASELINE_REVISION = "9a681eabfe53b66f9d6d1459960ba10b95c1ff1d"
 WORKLOADS = ("indexed-implicit", "indexed-explicit", "ordinary", "direct", "mixed",
              "buffered", "torch", "tf", "keras", "jax")
 MODES = ("old", "new", "matched-native", "optimized-native")
+MEASUREMENT_PROTOCOL = "dryml-dataset-traversal-cost-domains-v2"
+TRAINING = ("torch", "tf", "keras", "jax")
+
+
+class TimingDomain(TypedDict):
+    """JSON metric identity; count is timed work, not total performed work.
+
+    ``name`` fixes clock boundaries, ``unit`` fixes the throughput numerator,
+    and ``count``/``sections`` fix the timed population. Unknown domains must not
+    be compared, even when durations and total performed work happen to match.
+    """
+
+    name: str
+    unit: Literal["updates", "batches", "outputs"]
+    count: int
+    sections: int
+
+
+def _training_domain(metric="steady") -> TimingDomain:
+    return dict(name={"steady": "accepted-report-within-section-v1",
+                      "invocation": "full-training-invocation-v1",
+                      "end_to_end": "complete-training-window-v1"}[metric],
+                unit="updates", count=124 if metric == "steady" else 128, sections=4)
+
+
+class _TrainingClock:
+    """Observe only existing first/last accepted reports, never source hooks.
+
+    The four disjoint report-1-to-report-32 intervals each contain 31 completed
+    updates. Their interiors include all ordinary between-report overhead. Gaps
+    and the final tail remain visible as mixed setup/first-update/postlude costs;
+    no claim of an isolated compile or capture duration is made.
+    """
+
+    def __init__(self, *, grouped=False):
+        self.grouped = grouped
+        self.reports = []
+        self.intervals = []
+
+    def report(self, step):
+        if self.grouped:
+            if step % 32 == 0:
+                self.reports.append(dict(step=step, at=perf_counter()))
+        elif step % 32 in (1, 0):
+            self.reports.append(dict(step=step, at=perf_counter()))
+
+    def finish(self, started, finished):
+        expected = list(range(32, 129, 32)) if self.grouped else [s for n in range(0, 128, 32) for s in (n+1, n+32)]
+        assert [r["step"] for r in self.reports] == expected
+        assert all(started <= r["at"] <= finished for r in self.reports)
+        assert all(a["at"] <= b["at"] for a, b in zip(self.reports, self.reports[1:]))
+        if not self.grouped:
+            self.intervals = [dict(first_report_step=a["step"], last_report_step=b["step"],
+                                   timed_updates=b["step"]-a["step"], seconds=b["at"]-a["at"])
+                              for a, b in zip(self.reports[::2], self.reports[1::2])]
+        steady = sum(i["seconds"] for i in self.intervals) if self.intervals else None
+        first = self.reports[0]["at"]-started
+        gaps = [self.reports[i+1]["at"]-self.reports[i]["at"]
+                for i in range(1, len(self.reports)-1, 2)] if not self.grouped else None
+        return dict(steady_seconds=steady,
+                    timing_domain=None if self.grouped else _training_domain(),
+                    invocation_seconds=finished-started, invocation_domain=_training_domain("invocation"),
+                    first_result_seconds=None if self.grouped else first,
+                    first_group_result_seconds=first if self.grouped else None,
+                    report_intervals=self.intervals,
+                    report_offsets=[dict(step=r["step"], seconds=r["at"]-started) for r in self.reports],
+                    boundary_costs=dict(initial_setup_first_report_seconds=first,
+                        between_section_postlude_setup_first_report_seconds=gaps,
+                        final_report_to_return_seconds=finished-self.reports[-1]["at"],
+                        outside_steady_seconds=None if steady is None else finished-started-steady),
+                    steady_blocker=("32-update grouped execution exposes no within-section first-update report; adding Python batch callbacks would change the optimized path"
+                                    if self.grouped else None))
+
+
 _PROFILE = dict(
     seed=1729, warmups=2, repetitions=5, cell_seconds=120, total_seconds=1200,
     device="cpu", producers=1, threads=1,
@@ -55,16 +133,9 @@ def _summary(samples):
     return dict(median_seconds=center, mad_seconds=median(abs(x-center) for x in samples))
 
 
-def _valid(cell):
-    samples = cell.get("samples", [])
-    return (cell.get("status") == "ok" and cell.get("validated") is True
-            and type(cell.get("work")) is int and cell["work"] > 0
-            and isinstance(samples, list) and len(samples) == 5
-            and all(type(x) in (int, float) and math.isfinite(x) and x > 0 for x in samples))
-
-
 def _valid_instrumentation(cell):
     return (cell.get("status") == "ok" and cell.get("instrumentation") is True and cell.get("validated") is True
+            and cell.get("measurement_protocol") == MEASUREMENT_PROTOCOL
             and type(cell.get("work")) is int and cell["work"] > 0
             and type(cell.get("peak_python_bytes")) is int and cell["peak_python_bytes"] >= 0)
 
@@ -73,17 +144,165 @@ def _positive(value):
     return type(value) in (int, float) and math.isfinite(value) and value > 0
 
 
-def _valid_protocol(cell):
+def _nonnegative(value):
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def _dataset_domain(workload, metric="steady") -> TimingDomain:
+    indexed = workload.startswith("indexed")
+    return dict(name={"steady": "post-first-section-delivery-v1",
+                      "end_to_end": "complete-dataset-window-v1"}[metric],
+                unit="batches" if indexed else "outputs",
+                count=(1024 if indexed else 512) - (
+                    64 if workload == "indexed-explicit" else 8 if indexed else 1 if workload == "buffered" else 32
+                ) if metric == "steady" else 1024 if indexed else 512,
+                sections=64 if workload == "indexed-explicit" else 8 if indexed else 1 if workload == "buffered" else 32)
+
+
+def _expected_domain(workload, mode, metric):
+    if workload in TRAINING:
+        if metric == "steady" and mode == "optimized-native" and workload in ("keras", "jax"):
+            return None
+        return _training_domain(metric)
+    if metric == "invocation":
+        return None
+    if metric == "steady" and mode == "optimized-native":
+        return None
+    return _dataset_domain(workload, metric)
+
+
+def _valid_window(window, workload, mode):
+    if not isinstance(window, dict) or window.get("status") != "ok":
+        return False
+    domain = _expected_domain(workload, mode, "steady")
+    if window.get("timing_domain") != domain:
+        return False
+    if (window.get("end_to_end_domain") != _expected_domain(workload, mode, "end_to_end")
+            or not _positive(window.get("end_to_end_seconds"))):
+        return False
+    if domain is None:
+        if window.get("steady_seconds") is not None or not window.get("steady_blocker"):
+            return False
+    elif not _positive(window.get("steady_seconds")):
+        return False
+    if workload not in TRAINING:
+        if domain is None:
+            return (_positive(window.get("delivery_seconds"))
+                    and window["end_to_end_seconds"] >= window["delivery_seconds"]
+                    and window.get("delivery_domain") == {
+                        **_dataset_domain(workload, "end_to_end"), "name": "full-vectorized-dataset-delivery-v1"})
+        intervals = window.get("delivery_intervals")
+        return (isinstance(intervals, list) and bool(intervals)
+                and all(isinstance(i, dict) and type(i.get("count")) is int and i["count"] >= 0
+                        and _nonnegative(i.get("seconds")) for i in intervals)
+                and sum(i["count"] for i in intervals) == domain["count"]
+                and sum(i["seconds"] for i in intervals) == window["steady_seconds"])
+    if (window.get("invocation_domain") != _training_domain("invocation")
+            or not _positive(window.get("invocation_seconds"))):
+        return False
+    costs = window.get("costs")
+    if (not isinstance(costs, dict) or not _nonnegative(costs.get("final_save_seconds"))
+            or not isinstance(costs.get("checkpoint_seconds"), list)
+            or not all(_nonnegative(s) for s in costs["checkpoint_seconds"])
+            or not _nonnegative(window.get("prepare_seconds"))
+            or not _nonnegative(window.get("end_to_end_other_seconds"))
+            or sum(costs["checkpoint_seconds"]) > window["invocation_seconds"]
+            or window["end_to_end_seconds"] < window["invocation_seconds"]+window["prepare_seconds"]+costs["final_save_seconds"]):
+        return False
+    if not math.isclose(window["end_to_end_seconds"], window["invocation_seconds"]+window["prepare_seconds"]
+                        +costs["final_save_seconds"]+window["end_to_end_other_seconds"], abs_tol=1e-12):
+        return False
+    boundary = window.get("boundary_costs")
+    reports = window.get("report_offsets")
+    if not isinstance(boundary, dict) or not isinstance(reports, list):
+        return False
+    expected = list(range(32, 129, 32)) if domain is None else [s for n in range(0, 128, 32) for s in (n+1, n+32)]
+    if (len(reports) != len(expected) or any(not isinstance(r, dict) or type(r.get("step")) is not int or r["step"] != step
+            or not _nonnegative(r.get("seconds")) or r["seconds"] > window["invocation_seconds"]
+            for r, step in zip(reports, expected))
+            or any(a["seconds"] > b["seconds"] for a, b in zip(reports, reports[1:]))):
+        return False
+    initial, tail = boundary.get("initial_setup_first_report_seconds"), boundary.get("final_report_to_return_seconds")
+    if (not _nonnegative(initial) or not _nonnegative(tail)
+            or not math.isclose(initial, reports[0]["seconds"], abs_tol=1e-12)
+            or not math.isclose(tail+reports[-1]["seconds"], window["invocation_seconds"], abs_tol=1e-12)):
+        return False
+    if domain is None:
+        return (window.get("first_result_seconds") is None and window.get("report_intervals") == []
+                and window.get("first_group_result_seconds") == initial)
+    if window.get("first_result_seconds") != initial:
+        return False
+    intervals = window.get("report_intervals")
+    if not isinstance(intervals, list) or len(intervals) != 4:
+        return False
+    for index, interval in enumerate(intervals):
+        if (not isinstance(interval, dict) or interval.get("first_report_step") != 32*index+1
+                or interval.get("last_report_step") != 32*index+32
+                or type(interval.get("timed_updates")) is not int or interval["timed_updates"] != 31
+                or not _positive(interval.get("seconds"))):
+            return False
+        if not math.isclose(interval["seconds"], reports[2*index+1]["seconds"]-reports[2*index]["seconds"], abs_tol=1e-12):
+            return False
+    gaps = boundary.get("between_section_postlude_setup_first_report_seconds")
+    if (not isinstance(gaps, list) or len(gaps) != 3 or not all(_nonnegative(g) for g in gaps)
+            or any(not math.isclose(g, reports[2*i+2]["seconds"]-reports[2*i+1]["seconds"], abs_tol=1e-12)
+                   for i, g in enumerate(gaps))
+            or not _nonnegative(boundary.get("outside_steady_seconds"))
+            or not math.isclose(initial+sum(gaps)+tail+window["steady_seconds"], window["invocation_seconds"], abs_tol=1e-12)
+            or not math.isclose(boundary["outside_steady_seconds"]+window["steady_seconds"], window["invocation_seconds"], abs_tol=1e-12)):
+        return False
+    return (sum(i["seconds"] for i in intervals) == window["steady_seconds"]
+            and window["invocation_seconds"] >= window["steady_seconds"])
+
+
+def _valid_windows(cell):
     warmups, windows, totals = (cell.get(key, []) for key in ("warmups", "windows", "end_to_end_seconds"))
-    return (_valid(cell) and all(isinstance(part, list) for part in (warmups, windows, totals))
+    workload, mode = cell.get("workload"), cell.get("mode")
+    if workload not in WORKLOADS or mode not in MODES:
+        return False
+    samples = cell.get("samples")
+    domain = _expected_domain(workload, mode, "steady")
+    cadence = cell.get("checkpoint_cadence")
+    return (type(cadence) is int and cadence in ((0, 32) if workload in TRAINING else (0,))
+            and cell.get("measurement_protocol") == MEASUREMENT_PROTOCOL
+            and cell.get("status") == "ok" and cell.get("validated") is True
+            and type(cell.get("work")) is int and cell["work"] == _expected_domain(workload, mode, "end_to_end")["count"]
+            and cell.get("timing_domain") == domain
+            and cell.get("invocation_domain") == _expected_domain(workload, mode, "invocation")
+            and cell.get("end_to_end_domain") == _expected_domain(workload, mode, "end_to_end")
+            and isinstance(samples, list) and len(samples) == 5
+            and all(isinstance(part, list) for part in (warmups, windows, totals))
             and len(warmups) == _PROFILE["warmups"]
             and all(isinstance(w, dict) and type(w.get("work")) is int
-                    and w["work"] == cell["work"] and _positive(w.get("elapsed_seconds")) for w in warmups)
+                    and w["work"] == cell.get("work") and _positive(w.get("elapsed_seconds"))
+                    and w["elapsed_seconds"] == w.get("end_to_end_seconds")
+                    and _valid_window(w, workload, mode) for w in warmups)
             and len(windows) == len(totals) == _PROFILE["repetitions"]
-            and all(isinstance(w, dict) and w.get("status") == "ok" and type(w.get("work")) is int
-                    and w["work"] == cell["work"]
-                    and w.get("steady_seconds") == sample and _positive(total) and total >= sample
-                    for w, sample, total in zip(windows, cell["samples"], totals)))
+            and all(_valid_window(w, workload, mode) and type(w.get("work")) is int
+                    and w["work"] == cell.get("work") and w.get("steady_seconds") == sample
+                    and _positive(total) and total == w.get("end_to_end_seconds")
+                    and total >= (w.get("invocation_seconds") or sample or 0)
+                    for w, sample, total in zip(windows, samples, totals))
+            and (workload not in TRAINING or all(
+                w["costs"].get("checkpoint_steps") == ([32, 64, 96, 128] if cadence else [])
+                and len(w["costs"]["checkpoint_seconds"]) == (4 if cadence else 0)
+                for w in warmups+windows)))
+
+
+def _aggregate_metrics(cell):
+    domain, samples, totals = cell["timing_domain"], cell["samples"], cell["end_to_end_seconds"]
+    metrics = dict(summary=_summary(samples) if domain else None,
+                   throughput_per_second=domain["count"]/median(samples) if domain else None,
+                   throughput_unit=domain["unit"]+"/second" if domain else None,
+                   end_to_end_summary=_summary(totals),
+                   end_to_end_throughput_per_second=cell["work"]/median(totals))
+    if cell["workload"] in TRAINING:
+        metrics["invocation_summary"] = _summary([w["invocation_seconds"] for w in cell["windows"]])
+    return metrics
+
+
+def _valid_protocol(cell):
+    return _valid_windows(cell) and all(cell.get(key) == value for key, value in _aggregate_metrics(cell).items())
 
 
 def _applicability():
@@ -112,15 +331,19 @@ def _cell_key(cell):
 
 
 def _valid_evidence(cell, spec):
-    return (cell.get("work") == spec["expected_work"]
-            and (_valid_instrumentation(cell) if spec["instrumentation"] else _valid_protocol(cell)))
+    if cell.get("work") != spec["expected_work"]:
+        return False
+    if spec["instrumentation"]:
+        return _valid_instrumentation(cell)
+    return _valid_protocol(cell)
 
 
 def _qualify_report(report):
     """Rebuild applicability, blockers and comparisons without executing any work."""
     schema = _applicability()
     report.update(applicability_schema="dryml-dataset-traversal-applicability-v1",
-                  applicability=schema, comparisons=[], blockers=[], status="unverified")
+                  applicability=schema, comparisons=[], blockers=[], status="unverified",
+                  decision_domain="old-new-steady", driver_limitations=[])
     specs = {_cell_key(s): s for s in schema}
     cells = {}
     for cell in report["cells"]:
@@ -133,6 +356,10 @@ def _qualify_report(report):
         elif spec["required"]:
             if _valid_evidence(matches[0], spec):
                 valid[key] = matches[0]
+                if not spec["instrumentation"] and matches[0]["timing_domain"] is None:
+                    report["driver_limitations"].append(dict(cell=list(key),
+                        reason=matches[0]["windows"][0]["steady_blocker"],
+                        disposition="steady ratio unavailable; full-work costs required"))
             else:
                 report["blockers"].append(dict(cell=list(key), reason="required evidence incomplete or invalid",
                                                status=matches[0].get("status")))
@@ -156,13 +383,19 @@ def _qualify_report(report):
                     report["blockers"].append(dict(cell=list(key), reason="unresolved old/new comparison",
                                                    status=comparison["status"]))
             report["comparisons"].append(dict(workload=spec["workload"], baseline=mode,
-                checkpoint_cadence=spec["checkpoint_cadence"], purpose=purpose,
+                checkpoint_cadence=spec["checkpoint_cadence"], purpose=purpose, metric="steady",
                 followup=f"{spec['workload']}/{mode}/cadence-{spec['checkpoint_cadence']}-native-gap" if purpose == "native-gap" else None,
-                **comparison))
+                 **comparison))
+            if base_spec["required"]:
+                for metric in (("invocation", "end_to_end") if spec["workload"] in TRAINING else ("end_to_end",)):
+                    report["comparisons"].append(dict(workload=spec["workload"], baseline=mode,
+                        checkpoint_cadence=spec["checkpoint_cadence"], purpose="informational-cost-domain",
+                        metric=metric, **compare(valid.get(base_key, {}), valid.get(key, {}), metric=metric)))
     elapsed = report.get("elapsed_seconds")
-    if (report.get("profile") != fixed_profile() or report.get("baseline_revision") != BASELINE_REVISION
+    if (report.get("measurement_protocol") != MEASUREMENT_PROTOCOL
+            or report.get("profile") != fixed_profile() or report.get("baseline_revision") != BASELINE_REVISION
             or type(elapsed) not in (int, float) or not math.isfinite(elapsed) or not 0 <= elapsed <= 1200):
-        report["blockers"].append(dict(reason="invalid fixed profile, revision or exhausted total budget"))
+        report["blockers"].append(dict(reason="invalid measurement protocol, fixed profile, revision or exhausted total budget"))
     if not report["blockers"]:
         report["status"] = "no-regression-observed"
 
@@ -249,21 +482,35 @@ def _report_writer(output):
             _note(primary, f"Benchmark output lock release failed: {cleanup}")
 
 
-def compare(old: dict, new: dict) -> dict:
-    """Compare validated five-window useful work with a three-max-MAD triage band.
+def compare(old: dict, new: dict, *, metric: str = "steady") -> dict:
+    """Compare five protocol-v2 windows in one identical typed cost domain.
 
-    Returns no ratio for failed, unsupported, nonfinite, incomplete or unequal work.
+    ``metric`` selects steady, invocation, or end_to_end seconds. Returns no ratio
+    for failed, unsupported, nonfinite, incomplete, unequal-work or incompatible
+    domains. The numerator uses exactly the domain's timed work count and unit.
     Positive differences beyond the band are regressions. Differences within a
     nonzero band are unresolved noise, not equivalence or a universal allowance.
+    Invocation/end-to-end comparisons describe total costs, not the R28 steady gate.
     """
-    if not (_valid(old) and _valid(new)) or old["work"] != new["work"]:
-        return dict(status="unverified", ratio=None)
-    a, b = _summary(old["samples"]), _summary(new["samples"])
+    if metric not in ("steady", "invocation", "end_to_end"):
+        raise ValueError("unknown timing metric")
+    if (not (_valid_protocol(old) and _valid_protocol(new)) or old["work"] != new["work"]
+            or old["workload"] != new["workload"] or old.get("checkpoint_cadence") != new.get("checkpoint_cadence")):
+        return dict(status="unverified", ratio=None, reason="incomplete cost-domain protocol evidence")
+    key = "timing_domain" if metric == "steady" else metric+"_domain"
+    domain = old.get(key)
+    if domain is None or domain != new.get(key):
+        return dict(status="unverified", ratio=None, reason="unavailable or incompatible timing domains")
+    seconds = "steady_seconds" if metric == "steady" else metric+"_seconds"
+    samples = [[w[seconds] for w in c["windows"]] for c in (old, new)]
+    a, b = (_summary(s) for s in samples)
     noise = 3 * max(a["mad_seconds"], b["mad_seconds"])
     delta = b["median_seconds"] - a["median_seconds"]
     status = "regression" if delta > noise else "noisy" if noise and abs(delta) <= noise else "no-regression-observed"
     return dict(status=status, ratio=b["median_seconds"] / a["median_seconds"],
-                noise_seconds=noise, delta_seconds=delta, old=a, new=b)
+                timing_domain=domain, noise_seconds=noise, delta_seconds=delta, old=a, new=b,
+                old_throughput_per_second=domain["count"]/a["median_seconds"],
+                new_throughput_per_second=domain["count"]/b["median_seconds"])
 
 
 def run_worker(command: list[str], *, timeout: float, env: dict | None) -> dict:
@@ -452,25 +699,64 @@ def _capture(dataset, traversal, directory, *, stop):
 
 
 def _dataset_window(workload, mode):
+    """Validate one Dataset window with inclusive first delivery and tail clocks.
+
+    New-mode first results include epoch enumeration/staging; initial enumerator
+    construction belongs to the first latency, while preparation/open are separate.
+    Enumeration attempts with no first delivery have their own cost list, never a
+    fabricated first result or steady output. The caller times the complete call.
+    """
+    from itertools import islice
     import numpy as np
     native = mode.endswith("native")
     old = mode == "old"
     indexed = workload.startswith("indexed")
     values = np.arange((4096 if indexed else 512)*8, dtype=np.float32).reshape(-1, 8)
     costs = {}
+    steady, first_results, intervals = 0.0, [], []
+    delivery = None
+    result, saved_suffix = [], None
+
+    def first(view, *, started=None):
+        if started is None:
+            started = perf_counter()
+        value = next(view)
+        seconds = perf_counter()-started
+        first_results.append(seconds)
+        result.append(value)
+
+    def tail(view):
+        nonlocal steady
+        values, seconds = _timed(lambda: list(view))
+        intervals.append(dict(count=len(values), seconds=seconds))
+        result.extend(values)
+        steady += seconds
+
     started = perf_counter()
     if native:
         if not indexed:
             # These modes have no native portable continuation protocol.
             return dict(status="unsupported", reason="native direct/mixed/replay/capture semantics unavailable")
         prepare = perf_counter()-started
-        def consume():
-            if mode == "optimized-native":
-                batches = (values * np.float32(.5)).reshape(128, 32, 8)
-                return [batch for _ in range(8) for batch in batches]
-            return [values[i:i+32] * np.float32(.5) for _ in range(8) for i in range(0, 4096, 32)]
-        result, steady = _timed(consume)
-        first_result = None
+        if mode == "optimized-native":
+            def consume():
+                materialized = (values * np.float32(.5)).reshape(128, 32, 8)
+                return [batch for _ in range(8) for batch in materialized]
+            result, delivery = _timed(consume)
+            steady = None
+        else:
+            length = 16 if workload == "indexed-explicit" else 128
+            for _ in range(8):
+                for low in range(0, 4096, length*32):
+                    value, seconds = _timed(lambda: values[low:low+32]*np.float32(.5))
+                    result.append(value)
+                    first_results.append(seconds)
+                    tail_values, seconds = _timed(lambda: [values[i:i+32]*np.float32(.5)
+                        for i in range(low+32, low+length*32, 32)])
+                    result.extend(tail_values)
+                    intervals.append(dict(count=len(tail_values), seconds=seconds))
+                    steady += seconds
+        open_seconds = None
     else:
         from dryml.data import ArrayDataset, GeneratorDataset, Shuffle, Zip
         from dryml.core import TensorSpec
@@ -495,40 +781,46 @@ def _dataset_window(workload, mode):
         prepared = dataset.prepare()
         prepare = perf_counter()-started
         if old:
-            def consume():
-                return [v for epoch in range(8) for v in prepared.iterator(epoch=epoch)]
-            result, steady = _timed(consume)
-            first_result = None
+            open_seconds = 0.0
+            for epoch in range(8):
+                cursor, seconds = _timed(lambda: prepared.iterator(epoch=epoch))
+                open_seconds += seconds
+                with cursor:
+                    first(cursor)
+                    tail(cursor)
         else:
             opened = perf_counter()
-            with prepared.open() as traversal:
+            traversal = prepared.open()
+            open_seconds = perf_counter()-opened
+            with traversal:
                 traversal.enable_replay_recovery_if_needed()
-                view = traversal.next_epoch()
-                first = next(view)
-                first_result = perf_counter()-opened
-                prefix = [first]
-                if not indexed:
-                    for _ in range(128):
-                        try:
-                            prefix.append(next(view))
-                        except StopIteration:
-                            view = traversal.next_epoch()
-                            prefix.append(next(view))
-                prefix_seconds = perf_counter()-opened
                 with TemporaryDirectory(prefix="traversal-cut-") as directory:
+                    stop = 8 if workload == "indexed-implicit" else 1 if workload == "buffered" else None
+                    epochs = None
+                    no_result_seconds = []
+                    while True:
+                        section_started = perf_counter()
+                        if epochs is None:
+                            epochs = iter(traversal.epochs(stop=stop))
+                        try:
+                            _, view = next(epochs)
+                        except StopIteration:
+                            no_result_seconds.append(perf_counter()-section_started)
+                            break
+                        try:
+                            first(view, started=section_started)
+                        except StopIteration:
+                            no_result_seconds.append(perf_counter()-section_started)
+                            continue
+                        if workload == "buffered":
+                            tail(islice(view, 128))
+                        if not indexed and len(result) == 129:
+                            saved_suffix, costs = _capture(prepared, traversal, Path(directory)/"cut", stop=stop)
+                        tail(view)
                     if not indexed:
-                        saved_suffix, costs = _capture(prepared, traversal, Path(directory)/"cut",
-                                                       stop=1 if workload == "buffered" else None)
-                    def finish():
-                        tail = list(view)
-                        if workload != "buffered":
-                            tail.extend(_consume(traversal, stop=8 if workload == "indexed-implicit" else None))
-                        return tail
-                    suffix, tail_seconds = _timed(finish)
-                    if not indexed:
-                        _assert_tree_equal(saved_suffix, suffix)
-                    result = prefix + suffix
-                    steady = prefix_seconds + tail_seconds
+                        _assert_tree_equal(saved_suffix, result[129:])
+                    costs["section_first_result_seconds"] = first_results
+                    costs["epoch_enumeration_without_result_seconds"] = no_result_seconds
                     _, costs["final_capture_seconds"] = _timed(traversal.capture_state)
     if indexed:
         assert len(result) == 1024
@@ -546,8 +838,17 @@ def _dataset_window(workload, mode):
                     np.testing.assert_array_equal(v[0], values[index])
                     np.testing.assert_array_equal(v[1], v[2])
         work = 512
-    return dict(status="ok", work=work, steady_seconds=steady, prepare_seconds=prepare,
-                first_result_seconds=first_result, costs=costs,
+    domain = _expected_domain(workload, mode, "steady")
+    if domain is not None:
+        assert sum(i["count"] for i in intervals) == domain["count"]
+    return dict(status="ok", work=work, steady_seconds=steady, timing_domain=domain,
+                prepare_seconds=prepare, open_seconds=open_seconds,
+                first_result_seconds=first_results[0] if first_results else None,
+                section_first_result_seconds=first_results,
+                delivery_seconds=delivery,
+                delivery_domain={**_dataset_domain(workload, "end_to_end"), "name": "full-vectorized-dataset-delivery-v1"} if delivery is not None else None,
+                steady_blocker="vectorized whole-source transform precedes batch materialization; isolating post-first work would change the optimized path" if delivery is not None else None,
+                delivery_intervals=intervals, costs=costs,
                 effective_source_seed=(_source_seed() if workload in ("ordinary", "direct", "mixed") else
                                        1729 if workload == "buffered" else None),
                 semantic_difference="vectorized map before batching" if mode == "optimized-native" else None)
@@ -675,11 +976,14 @@ class _JaxDriver:
         return np.asarray(self.exp.model.parameters["kernel"] if self.exp is not None else self.parameters).copy()
 
     def train(self, checkpoint, cadence):
+        clock = getattr(self, "clock", None)
         if self.exp is not None:
             exp = self.exp
 
             def report():
                 step = exp.state.step
+                if clock is not None and step % 32 in (1, 0):
+                    clock.report(step)
                 sequence = exp.state.input_sequence if self.mode == "new" else step
                 self.delivery_ids.append(sequence-1)
                 self.exposures.append(exp.state.examples_seen)
@@ -717,6 +1021,8 @@ class _JaxDriver:
                 self.delivery_ids.extend((np.asarray(counts)-1).tolist())
                 self.exposures.extend((np.asarray(counts)*self.batch).tolist())
                 step = int(self.count)
+                if clock is not None:
+                    clock.report(step)
                 self.completed_sections.append(step//self.section_updates)
                 if cadence and step % cadence == 0:
                     checkpoint(step)
@@ -729,6 +1035,8 @@ class _JaxDriver:
                 self.parameters, self.slots, self.count = carry
                 losses.append(float(loss))
                 step = int(count)
+                if clock is not None and step % 32 in (1, 0):
+                    clock.report(step)
                 self.delivery_ids.append(offset//self.batch)
                 self.exposures.append(step*self.batch)
                 if step % self.section_updates == 0:
@@ -778,11 +1086,12 @@ def _jax_training_window(mode, cadence):
         a, b = x[offset:offset+32], y[offset:offset+32]
         expected -= np.float32(.001)*(np.float32(2/32)*a.T @ (a @ expected-b))
         prefixes.append(expected.copy())
-    costs = dict(checkpoint_seconds=[], checkpoint_bytes=[], final_capture_seconds=None)
+    costs = dict(checkpoint_seconds=[], checkpoint_steps=[], checkpoint_bytes=[], final_capture_seconds=None)
     with TemporaryDirectory(prefix="traversal-jax-") as directory:
         started = perf_counter()
         driver = _JaxDriver(mode, x, y)
         prepare = perf_counter()-started
+        driver.clock = _TrainingClock(grouped=mode == "optimized-native")
         snapshots = []
 
         def save(step, name):
@@ -802,20 +1111,24 @@ def _jax_training_window(mode, cadence):
         def checkpoint(step):
             path, seconds = _timed(lambda: save(step, str(step)))
             costs["checkpoint_seconds"].append(seconds)
+            costs["checkpoint_steps"].append(step)
             costs["checkpoint_bytes"].append(sum(p.stat().st_size for p in path.rglob("*") if p.is_file()))
 
-        losses, steady = _timed(lambda: driver.train(checkpoint, cadence))
+        invocation_started = perf_counter()
+        losses = driver.train(checkpoint, cadence)
+        timing = driver.clock.finish(invocation_started, perf_counter())
         facts = driver.validate(losses, expected)
-        _, costs["final_save_seconds"] = _timed(lambda: save(128, "final"))
+        path, costs["final_save_seconds"] = _timed(lambda: save(128, "final"))
+        costs["final_save_bytes"] = sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
         for step, weights in snapshots:
             np.testing.assert_allclose(weights, prefixes[step-1], rtol=5e-5, atol=1e-6)
         assert [step for step, _ in snapshots] == ([32, 64, 96, 128] if cadence else []) + [128]
-    return dict(status="ok", work=128, steady_seconds=steady, prepare_seconds=prepare,
-                first_result_seconds=None, costs=costs, work_facts=facts,
-                cold_import_seconds=None, compile_seconds=None,
+    return dict(status="ok", work=128, **timing, prepare_seconds=prepare,
+                costs=costs, work_facts=facts,
+                cold_import_seconds=None, compile_seconds=None, open_seconds=None,
                 model=dict(architecture="Dense(16,1,bias=False,zero kernel)", optimizer="SGD(lr=.001,momentum=0)",
                            loss="mean squared error", dtype="float32"),
-                timing_limitation="preparation includes cold imports/setup; invocation includes JIT compilation and DRYML final input capture; compile/kernel-only time is not isolated; final save is separate",
+                timing_limitation="preparation includes imports/setup; first report includes open/setup/first-update compilation; boundary gaps and final tail include postludes and DRYML final input capture; isolated import/open/compile/capture durations are unknown; all remain in invocation/end-to-end costs",
                 semantic_difference=("equivalent manual sections; baseline lacks exact input continuation" if mode == "old" else
                     "JIT scan of 32 updates per section; host reports and synchronization grouped at section boundaries" if mode == "optimized-native" else None))
 
@@ -841,7 +1154,8 @@ def _training_window(workload, mode, cadence):
     for offset in range(0, 4096, 32):
         a, b = x[offset:offset+32], y[offset:offset+32]
         expected -= np.float32(.001) * (np.float32(2/32) * a.T @ (a @ expected-b))
-    costs = dict(checkpoint_seconds=[], checkpoint_bytes=[], final_capture_seconds=None)
+    costs = dict(checkpoint_seconds=[], checkpoint_steps=[], checkpoint_bytes=[], final_capture_seconds=None)
+    clock = _TrainingClock(grouped=optimized and workload == "keras")
     with TemporaryDirectory(prefix="traversal-training-") as directory:
         root = Path(directory)
         prepare_started = perf_counter()
@@ -869,6 +1183,8 @@ def _training_window(workload, mode, cadence):
                         loss.backward()
                         optimizer.step()
                         losses.append(float(loss.detach()))
+                        if step % 32 in (1, 0):
+                            clock.report(step)
                         if cadence and step % cadence == 0:
                             checkpoint(step)
                     return losses
@@ -897,15 +1213,20 @@ def _training_window(workload, mode, cadence):
                                   jit_compile=False, steps_per_execution=32 if optimized else 1)
                     class Reports(tf.keras.callbacks.Callback):
                         def on_train_batch_end(self, batch, logs=None):
+                            step = self.section*32+batch+1
+                            if step % 32 in (1, 0):
+                                clock.report(step)
                             if cadence:
-                                step = int(optimizer.iterations.numpy())
                                 if step % cadence == 0:
+                                    assert step == int(optimizer.iterations.numpy())
                                     checkpoint(step)
                     def train():
                         # Four native fit segments preserve section/report boundaries.
                         for section in range(4):
+                            reports = Reports()
+                            reports.section = section
                             model.fit(dataset.skip(section*32).take(32), epochs=1,
-                                      verbose=0, callbacks=[Reports()])
+                                      verbose=0, callbacks=[reports])
                         assert int(optimizer.iterations.numpy()) == 128
                 else:
                     def update(a, b):
@@ -917,6 +1238,8 @@ def _training_window(workload, mode, cadence):
                     def train():
                         for step, (a, b) in enumerate(dataset, 1):
                             float(update(a, b))  # matched existing per-update reporting
+                            if step % 32 in (1, 0):
+                                clock.report(step)
                             if cadence and step % cadence == 0:
                                 checkpoint(step)
                 weights = lambda: model.get_weights()[0].copy()
@@ -940,9 +1263,12 @@ def _training_window(workload, mode, cadence):
             prepare = perf_counter()-prepare_started
             accepted = []
             def report():
-                accepted.append(exp.state.step)
-                if cadence and exp.state.step % cadence == 0:
-                    checkpoint(exp.state.step)
+                step = exp.state.step
+                if step % 32 in (1, 0):
+                    clock.report(step)
+                accepted.append(step)
+                if cadence and step % cadence == 0:
+                    checkpoint(step)
             def train():
                 if old:
                     # Explicit equivalent manual sections, not old session support.
@@ -952,7 +1278,7 @@ def _training_window(workload, mode, cadence):
                         trainer(exp, callbacks=(report,))
                 else:
                     trainer(exp, callbacks=(report,))
-        def checkpoint(step):
+        def checkpoint(step, *, final=False):
             started = perf_counter()
             path = root / str(len(costs["checkpoint_seconds"]))
             path.mkdir()
@@ -961,21 +1287,29 @@ def _training_window(workload, mode, cadence):
                 state.save(path/"input")
             # Plain SGD has no momentum slots; step plus weights are its full state.
             np.savez(path/"model-sgd.npz", weights=weights(), step=np.int64(step))
-            costs["checkpoint_seconds"].append(perf_counter()-started)
-            costs["checkpoint_bytes"].append(sum(p.stat().st_size for p in path.rglob("*") if p.is_file()))
-        _, steady = _timed(train)
+            seconds = perf_counter()-started
+            size = sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+            if final:
+                costs.update(final_save_seconds=seconds, final_save_bytes=size)
+            else:
+                costs["checkpoint_seconds"].append(seconds)
+                costs["checkpoint_steps"].append(step)
+                costs["checkpoint_bytes"].append(size)
+        invocation_started = perf_counter()
+        train()
+        timing = clock.finish(invocation_started, perf_counter())
         np.testing.assert_allclose(weights(), expected, rtol=5e-5, atol=1e-6)
         if not native:
             assert accepted == list(range(1, 129))
             assert (exp.state.step, exp.state.examples_seen, exp.state.epoch) == (128, 4096, 4)
             if not old:
                 assert exp.state.dataset_state is not None
-        _, costs["final_save_seconds"] = _timed(lambda: checkpoint(128))
-    return dict(status="ok", work=128, steady_seconds=steady, prepare_seconds=prepare,
-                first_result_seconds=None, costs=costs,
+        checkpoint(128, final=True)
+    return dict(status="ok", work=128, **timing, prepare_seconds=prepare,
+                costs=costs, cold_import_seconds=None, compile_seconds=None, open_seconds=None,
                 model=dict(architecture="Dense(16,1,bias=False,zero kernel)", optimizer="SGD(lr=.001,momentum=0)",
                            loss="mean squared error", dtype="float32"),
-                timing_limitation="training invocation includes fit/compile setup; warmed kernel-only time is not isolated",
+                timing_limitation="first report and boundary gaps include setup/compile/first updates; final tail includes postludes/final capture; isolated import/open/compile/capture costs are unknown and retained in full invocation/end-to-end",
                 semantic_difference=("equivalent manual sections; baseline lacks exact input continuation" if old else
                     "grouped native reports every 32 updates" if optimized and workload == "keras" else None))
 
@@ -1023,6 +1357,7 @@ def _worker(args):
         if result["status"] != "ok":
             return result
         return dict(status="ok", instrumentation=True, validated=True,
+                    measurement_protocol=MEASUREMENT_PROTOCOL,
                     work=result["work"], peak_python_bytes=peak,
                     peak_rss_kib=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
                     source_buffer_copied_bytes=None,
@@ -1033,26 +1368,43 @@ def _worker(args):
                     full_capture_seconds=captures, producer_hook_count=None, recovery_only_synchronizations=None,
                     unknown_metrics_reason="not instrumented; never inferred from throughput",
                     costs=result["costs"])
-    warmups, windows, e2e = [], [], []
+    warmups, windows = [], []
     for index in range(7):
         started = perf_counter()
         result = window()
         elapsed = perf_counter()-started
         if result["status"] != "ok":
             return result
+        result["end_to_end_seconds"] = elapsed
+        result["end_to_end_domain"] = _expected_domain(workload, mode, "end_to_end")
+        if workload in TRAINING:
+            result["end_to_end_other_seconds"] = elapsed-result["prepare_seconds"]-result["invocation_seconds"]-result["costs"]["final_save_seconds"]
         if index < 2:
-            warmups.append(dict(work=result["work"], elapsed_seconds=elapsed))
+            warmups.append({**result, "elapsed_seconds": elapsed})
         else:
             windows.append(result)
-            e2e.append(elapsed)
-    samples = [window["steady_seconds"] for window in windows]
-    return dict(status="ok", validated=True, work=result["work"], samples=samples,
-                warmups=warmups, windows=windows, end_to_end_seconds=e2e,
-                summary=_summary(samples), throughput_per_second=result["work"]/median(samples),
+    return dict(**_aggregate_windows(workload, mode, warmups, windows, cadence=args.checkpoint_cadence),
                 versions=versions, python=sys.version, cpu=platform.processor(),
                 dryml_module=getattr(sys.modules.get("dryml"), "__file__", None),
                 threads={key: os.environ.get(key) for key in _thread_env()},
                 semantic_difference=result.get("semantic_difference"))
+
+
+def _aggregate_windows(workload, mode, warmups, windows, *, cadence=0):
+    """Aggregate only identical validated domains; no performed/timed count alias."""
+    samples = [w["steady_seconds"] for w in windows]
+    domain = _expected_domain(workload, mode, "steady")
+    totals = [w["end_to_end_seconds"] for w in windows]
+    cell = dict(status="ok", validated=True, workload=workload, mode=mode, checkpoint_cadence=cadence,
+                measurement_protocol=MEASUREMENT_PROTOCOL,
+                work=windows[0]["work"], timing_domain=domain, samples=samples,
+                invocation_domain=_expected_domain(workload, mode, "invocation"),
+                warmups=warmups, windows=windows, end_to_end_seconds=totals,
+                end_to_end_domain=_expected_domain(workload, mode, "end_to_end"))
+    if not _valid_windows(cell):
+        raise ValueError("invalid or inconsistent per-window timing domain/work count")
+    cell.update(_aggregate_metrics(cell))
+    return cell
 
 
 def _thread_env():
@@ -1086,6 +1438,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.describe:
         print(json.dumps(dict(profile=fixed_profile(), baseline_revision=BASELINE_REVISION,
+                              measurement_protocol=MEASUREMENT_PROTOCOL,
                               workloads=WORKLOADS, modes=MODES,
                               applicability_schema="dryml-dataset-traversal-applicability-v1",
                               applicability=_applicability())))
@@ -1107,15 +1460,18 @@ def _execute(args, argv, publish):
     if args.confirm:
         prior = json.loads(args.confirm.read_text())
         if (prior["profile"] != fixed_profile() or prior["baseline_revision"] != BASELINE_REVISION
+                or prior.get("measurement_protocol") != MEASUREMENT_PROTOCOL
                 or prior["confirmation_count"] != 0):
-            raise SystemExit("confirmation requires matching fixed profile and no prior confirmation")
+            raise SystemExit("confirmation requires matching measurement protocol, fixed profile and no prior confirmation")
         prior_elapsed = prior["elapsed_seconds"]
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     source_dirty = subprocess.run(["git", "diff", "--quiet", "--", "src/dryml"]).returncode != 0
-    report = dict(schema="dryml-dataset-traversal-benchmark-v1", profile=fixed_profile(),
+    report = dict(schema="dryml-dataset-traversal-benchmark-v2", measurement_protocol=MEASUREMENT_PROTOCOL,
+                  profile=fixed_profile(),
                   baseline_revision=args.baseline_revision, revision=revision, source_dirty=source_dirty,
                    command=[sys.executable, "-m", "tests.tools.benchmark_dataset_traversal", *(argv if argv is not None else sys.argv[1:])],
                    cells=[], comparisons=[], status="unverified", confirmation_count=int(args.confirm is not None),
+                   decision_domain="old-new-steady",
                    prior_elapsed_seconds=prior_elapsed,
                    applicability_schema="dryml-dataset-traversal-applicability-v1",
                    applicability=_applicability(),
