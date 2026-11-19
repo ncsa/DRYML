@@ -105,8 +105,8 @@ def test_per_window_timing_domain_and_work_corruption_is_ineligible(defect):
     assert benchmark.compare(cell, cell)["ratio"] is None
 
 
-def test_total_invocation_costs_are_informational_but_same_domain_steady_regresses(tmp_path, monkeypatch):
-    _, report = _synthetic_run(tmp_path, monkeypatch)
+def test_total_invocation_costs_are_informational_but_same_domain_steady_regresses(synthetic_report):
+    _, report = synthetic_report
     target = next(c for c in report["cells"] if c["workload"] == "jax" and c["mode"] == "new"
                   and c["checkpoint_cadence"] == 0 and not c["instrumentation"])
     for window in target["windows"]:
@@ -688,8 +688,44 @@ def _synthetic_run(tmp_path, monkeypatch, worker=_synthetic_matrix_worker):
     return status, json.loads(output.read_text())
 
 
-def test_complete_applicable_evidence_passes_with_labeled_native_gaps(tmp_path, monkeypatch):
-    status, report = _synthetic_run(tmp_path, monkeypatch)
+@pytest.fixture(scope="module")
+def _synthetic_report_seed(tmp_path_factory):
+    """Build canonical evidence through the real CLI/publication path, then freeze it."""
+    directory = tmp_path_factory.mktemp("synthetic-report")
+    original_worker = benchmark.run_worker
+    with pytest.MonkeyPatch.context() as patch:
+        status, report = _synthetic_run(directory, patch)
+    assert benchmark.run_worker is original_worker
+    return status, json.dumps(report, allow_nan=False)
+
+
+@pytest.fixture
+def synthetic_report(_synthetic_report_seed):
+    """Return a deep, independently mutable JSON tree for each report consumer."""
+    status, seed = _synthetic_report_seed
+    return status, json.loads(seed)
+
+
+@pytest.mark.parametrize("consumer", [0, 1])
+def test_synthetic_report_seed_is_built_once_and_copies_are_isolated(
+        tmp_path_factory, _synthetic_report_seed, synthetic_report, consumer):
+    """Two fixture consumers share one real construction without sharing nested state."""
+    status, seed = _synthetic_report_seed
+    assert status == 0 and isinstance(seed, str)
+    assert len(list(tmp_path_factory.getbasetemp().glob("synthetic-report[0-9]*"))) == 1
+    assert synthetic_report == (status, json.loads(seed))
+    _, report = synthetic_report
+    report["cells"][0]["windows"][0]["costs"]["checkpoint_steps"].append(consumer)
+    report["cells"].pop()
+    report["comparisons"].clear()
+    fresh = json.loads(seed)
+    assert fresh["cells"][0]["windows"][0]["costs"]["checkpoint_steps"] == []
+    assert len(fresh["cells"]) == len(report["cells"])+1
+    assert fresh["comparisons"]
+
+
+def test_complete_applicable_evidence_passes_with_labeled_native_gaps(synthetic_report):
+    status, report = synthetic_report
     assert status == 0
     assert report["status"] == "no-regression-observed"
     assert report["decision_domain"] == "old-new-steady"
@@ -706,8 +742,8 @@ def test_complete_applicable_evidence_passes_with_labeled_native_gaps(tmp_path, 
 @pytest.mark.parametrize("defect", ["missing", "duplicate", "wrong-work", "warmup", "repeat", "window",
                                    "instrumentation", "unsupported", "unavailable", "failed", "timeout",
                                    "unvalidated", "regression", "noise"])
-def test_required_evidence_never_waived_for_bad_results(tmp_path, monkeypatch, defect):
-    _, report = _synthetic_run(tmp_path, monkeypatch)
+def test_required_evidence_never_waived_for_bad_results(synthetic_report, defect):
+    _, report = synthetic_report
     target = next(c for c in report["cells"] if c["workload"] == "jax" and c["mode"] == "new"
                   and c["checkpoint_cadence"] == 0 and not c["instrumentation"])
     if defect == "missing":
@@ -1150,8 +1186,8 @@ def test_native_dataset_producer_cost_domains_with_synthetic_clock(monkeypatch, 
 @pytest.mark.parametrize("key,value", [("warmups", None), ("warmups", [1, 2]),
                                       ("windows", None), ("samples", None),
                                       ("end_to_end_seconds", None)])
-def test_malformed_required_evidence_is_a_blocker_not_an_aggregation_crash(tmp_path, monkeypatch, key, value):
-    _, report = _synthetic_run(tmp_path, monkeypatch)
+def test_malformed_required_evidence_is_a_blocker_not_an_aggregation_crash(synthetic_report, key, value):
+    _, report = synthetic_report
     cell = next(c for c in report["cells"] if c["mode"] == "new" and not c["instrumentation"])
     cell[key] = value
     benchmark._qualify_report(report)
