@@ -262,6 +262,40 @@ def test_readonly_views_of_writable_producer_storage_are_not_treated_as_owned():
     assert sorted(result) == [[i, i] for i in range(8)]
 
 
+def readonly_foreign_arrays():
+    storage = bytearray(2 * np.dtype("int64").itemsize)
+    view = np.frombuffer(memoryview(storage).toreadonly(), dtype=np.int64)
+    for i in range(8):
+        storage[:] = np.full(2, i, dtype=np.int64).tobytes()
+        yield view
+
+
+@pytest.mark.parametrize("operator", ("batch", "shuffle"))
+def test_readonly_foreign_buffer_reuse_preserves_values_and_detached_suffix(operator, tmp_path):
+    """Serial producer reuse must not rewrite algorithm buffers or saved suffixes."""
+    spec = TensorSpec("int64", shape=(2,), backend="numpy")
+    def wrap(source):
+        return (data.Batch(source, 3) if operator == "batch" else
+                data.Shuffle(source, buffer_size=4, seed=7))
+    dataset = wrap(data.GeneratorDataset(readonly_foreign_arrays, spec=spec))
+    reference = wrap(data.ArrayDataset(np.repeat(np.arange(8)[:, None], 2, axis=1)))
+    with reference.open() as traversal:
+        expected = tree_list(traversal.next_epoch())
+    with dataset.open() as traversal:
+        traversal.enable_replay_recovery()
+        view = traversal.next_epoch()
+        first = tree_list([next(view)])
+        record = traversal.capture_state()
+        suffix = tree_list(view)
+        record.save(tmp_path / "foreign-buffer")
+    del record, traversal, view
+    gc.collect()
+    record = data.DatasetState.load(tmp_path / "foreign-buffer")
+    with dataset.open(state=record) as resumed:
+        restored_suffix = tree_list(resumed.next_epoch())
+    assert (first + suffix, restored_suffix) == (expected, expected[1:])
+
+
 def test_unbatch_emitted_writable_views_cannot_change_retained_rows_or_record():
     original = np.arange(24).reshape(3, 4, 2)
     spec = TensorSpec("int64", shape=(2,), batch=4, backend="numpy")

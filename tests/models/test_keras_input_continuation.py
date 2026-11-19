@@ -208,6 +208,80 @@ class ReusablePairs(RecoverableGenerator):
         _source_events.append(("close", get_ident()))
 
 
+class ReadonlyForeignPairs(ReusablePairs):
+    """Reuse bytearray storage through a readonly NumPy/memoryview chain."""
+
+    def __init__(self):
+        super().__init__()
+        self.storage = bytearray(np.dtype("float32").itemsize)
+        self.buffer = np.frombuffer(memoryview(self.storage).toreadonly(), dtype=np.float32).reshape(1, 1)
+
+    def __next__(self):
+        if self.index == 3:
+            raise StopIteration
+        self.index += 1
+        self.storage[:] = np.array([self.index], dtype=np.float32).tobytes()
+        return self.buffer, self.buffer
+
+
+def test_readonly_foreign_window_native_prefetch_and_detached_exact_suffix(tmp_path):
+    """Produce A/B/C before native handoff, then restore the unaccepted B/C cut."""
+    from dryml.data import DatasetState
+    from dryml.data.state import _split_training_window
+    from dryml.tf.training_data import _KerasInputBridge
+
+    spec = TensorSpec("float32", shape=(1,), batch=1, backend="numpy")
+    prepared = Epoch(GeneratorDataset(ReadonlyForeignPairs, spec=(spec, spec)), len=3).prepare()
+    bridge = _KerasInputBridge(prepared.open(acceptance="explicit"),
+                               preparation=IdentityPreparation(), capacity=3)
+    try:
+        segment = bridge.next_segment()
+        assert bridge.wait_produced(3, timeout=5)
+        native = iter(segment.dataset.prefetch(2))
+        first = next(native)
+        bridge.accept(bridge.candidate(int(first["token"])))
+        record = bridge.capture_state()
+        assert record.position.start == 1
+        record.save(tmp_path / "foreign-window")
+        actual = [first, *native]
+    finally:
+        bridge.close()
+    del bridge, record, native, segment
+    record = DatasetState.load(tmp_path / "foreign-window")
+    producer, window = _split_training_window(record)
+    restored = _KerasInputBridge(prepared.open(state=producer, acceptance="explicit"),
+        preparation=IdentityPreparation(), position=record.position, window=window)
+    try:
+        suffix = []
+        for entry in restored.next_segment().dataset.prefetch(2):
+            suffix.append((float(entry["x"][0, 0]), float(entry["y"][0, 0])))
+            restored.accept(restored.candidate(int(entry["token"])))
+    finally:
+        restored.close()
+    assert ([float(entry["x"][0, 0]) for entry in actual],
+            [float(entry["y"][0, 0]) for entry in actual], suffix) == (
+                [1, 2, 3], [1, 2, 3], [(2, 2), (3, 3)])
+
+
+def test_window_ownership_keeps_safe_native_identity_and_reads_variables():
+    from dryml.tf.training_data import _owned_value
+
+    tensor = tf.constant([1.0])
+    assert _owned_value(tensor) is tensor
+    variable = tf.Variable([1.0])
+    retained = _owned_value(variable)
+    variable.assign([2.0])
+    np.testing.assert_array_equal(retained.numpy(), [1.0])
+    safe = np.frombuffer(memoryview(np.arange(4).tobytes()), dtype=np.int64)
+    assert _owned_value(safe) is safe
+    owner = np.arange(4)
+    view = owner.view()
+    view.flags.writeable = False
+    retained = _owned_value(view)
+    owner[:] = -1
+    np.testing.assert_array_equal(retained, np.arange(4))
+
+
 @pytest.fixture(autouse=True)
 def _reset_source_controls():
     global _stall_on, _capture_failure
@@ -269,7 +343,8 @@ def test_native_overlap_capture_and_durable_exact_suffix(eager, tmp_path, monkey
             saved.append(repo.save(exp, deep_capture=True))
             window = exp.state.dataset_state._data()["adapter"]
             assert len(window["pending"]) == 2
-            assert window["producer_position"]["start"] == 0 or window["producer_position"]["start"] == 3
+            assert (window["producer_position"]["epoch"], window["producer_position"]["start"]) == (1, 0)
+            assert window["producer_position"]["section_complete"] is True
             assert exp.state.dataset_state.position.start == 1
         elif exp.state.step == 2:
             raise RuntimeError("later callback")
@@ -279,7 +354,9 @@ def test_native_overlap_capture_and_durable_exact_suffix(eager, tmp_path, monkey
     assert not proof.is_alive() and overlap_proved.is_set()
     assert not exp.model._restore_failed
     assert exp.state._input_provider is None
-    assert len(_capture_events) == 1
+    # All three producer values are in the ledger; the known terminal source
+    # needs no direct-state hook to restore its two unconsumed deliveries.
+    assert _capture_events == []
     caller = get_ident()
     assert all(thread != caller for _, thread in _source_events + _capture_events)
     loaded = repo.load_state_ref(saved[0], reuse_live="never")

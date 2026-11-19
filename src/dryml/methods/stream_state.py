@@ -11,20 +11,47 @@ from collections.abc import Iterator
 from typing import Any, Protocol
 
 
+def _retain_numpy_buffer(value):
+    """Retain an ndarray only when its backing chain establishes stable storage.
+
+    Readonly NumPy-owned storage and immutable bytes may be shared, including
+    through readonly ndarray/memoryview chains. Callers must not re-enable writes
+    to those NumPy owners. Writable or unknown foreign owners require a copy;
+    a readonly memoryview only constrains that view, not its underlying owner.
+    Allocation failures propagate. No source-wide snapshot or device work occurs.
+    """
+    import numpy as np
+
+    owner = value
+    while True:
+        if type(owner) is np.ndarray:
+            if owner.flags.writeable:
+                break
+            if owner.base is None:
+                if owner.flags.owndata:
+                    return value
+                break
+            owner = owner.base
+        elif type(owner) is memoryview:
+            if not owner.readonly:
+                break
+            owner = owner.obj
+        elif type(owner) is bytes:
+            return value
+        else:
+            break
+    return value.copy()
+
+
 def _retain_buffer(value):
-    """Own writable host leaves kept across producer or consumer mutation.
+    """Own mutable host leaves kept across producer or consumer mutation.
 
     This is operator buffering ownership, independent of recovery. Immutable/native
     functional leaves are retained without conversion or device synchronization.
     """
     import numpy as np
     if type(value) is np.ndarray:
-        base = value
-        while isinstance(base, np.ndarray):
-            if base.flags.writeable:
-                return value.copy()
-            base = base.base
-        return value
+        return _retain_numpy_buffer(value)
     if type(value).__module__.split(".")[0] == "torch" and callable(getattr(value, "clone", None)):
         return value.clone()
     if type(value) is dict:

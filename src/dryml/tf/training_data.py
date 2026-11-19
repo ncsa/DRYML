@@ -12,6 +12,7 @@ import numpy as np
 from dryml.data.native import BatchPreparation, NativeTrainingCursor, PreparedDataset
 from dryml.data.traversal import EpochView, PendingElement, TraversalPosition
 from dryml.data.errors import TraversalOwnershipError, _add_exception_note
+from dryml.methods.stream_state import _retain_numpy_buffer
 from dryml.tf.tensor_spec import output_signature
 
 
@@ -118,12 +119,7 @@ class _Segment:
 def _owned_value(value):
     """Detach reusable host storage; immutable tensors can safely remain shared."""
     if isinstance(value, np.ndarray):
-        base = value
-        while isinstance(base, np.ndarray):
-            if base.flags.writeable:
-                return value.copy()
-            base = base.base
-        return value
+        return _retain_numpy_buffer(value)
     if isinstance(value, dict):
         return {k: _owned_value(v) for k, v in value.items()}
     if isinstance(value, (tuple, list)):

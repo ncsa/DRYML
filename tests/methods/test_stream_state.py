@@ -100,3 +100,45 @@ for prefix in ('dryml.data', 'dryml.models', 'dryml.artifacts', 'tensorflow', 't
 """
     completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("backing", (
+    "bytes", "bytes-memoryview", "numpy-owned", "numpy-memoryview",
+    "writable", "writable-base", "bytearray", "readonly-memoryview", "foreign",
+))
+def test_retained_numpy_buffer_shares_only_stable_backing(backing):
+    """Readonly flags do not protect storage writable through another owner."""
+    import numpy as np
+    from dryml.methods.stream_state import _retain_buffer
+
+    original = np.arange(4, dtype=np.int64)
+    safe = backing in ("bytes", "bytes-memoryview", "numpy-owned", "numpy-memoryview")
+    if backing in ("bytes", "bytes-memoryview"):
+        owner = original.tobytes()
+        value = np.frombuffer(owner if backing == "bytes" else memoryview(owner), dtype=np.int64)
+    elif backing in ("numpy-owned", "numpy-memoryview"):
+        original.flags.writeable = False
+        value = original if backing == "numpy-owned" else np.frombuffer(memoryview(original), dtype=np.int64)
+    elif backing in ("bytearray", "readonly-memoryview"):
+        owner = bytearray(original.tobytes())
+        view = memoryview(owner)
+        value = np.frombuffer(view if backing == "bytearray" else view.toreadonly(), dtype=np.int64)
+        value.flags.writeable = False
+    elif backing == "foreign":
+        class ForeignOwner:
+            __array_interface__ = dict(original.__array_interface__,
+                                       data=(original.ctypes.data, True))
+        value = np.asarray(ForeignOwner())
+    else:
+        value = original if backing == "writable" else original.view()
+        if backing == "writable-base":
+            value.flags.writeable = False
+    retained = _retain_buffer(value)
+    assert (retained is value) is safe
+    if not safe:
+        assert not np.shares_memory(retained, value)
+        if backing in ("bytearray", "readonly-memoryview"):
+            owner[:] = np.full(4, -1, dtype=np.int64).tobytes()
+        else:
+            original[:] = -1
+    np.testing.assert_array_equal(retained, np.arange(4))
