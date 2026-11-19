@@ -277,6 +277,18 @@ def test_opaque_dynamic_generator_can_declare_its_total_examples_without_reading
     assert Take(dataset, 1).example_cardinality() == Cardinality.UNKNOWN
 
 
+def test_known_final_generator_checks_declared_examples_before_final_delivery():
+    """Known yield membership must not bypass the source's example-count check."""
+    source = GeneratorDataset(dynamic_batches_factory, cardinality=2, example_count=6,
+                              spec=_spec(batch=Dynamic))
+    with source.open(acceptance="explicit") as traversal:
+        view = traversal.next_epoch()
+        traversal.accept(view.reserve())
+        with pytest.raises(ValueError, match="observed example count"):
+            view.reserve()
+        assert (traversal.position.epoch, traversal.position.start) == (0, 1)
+
+
 @pytest.mark.parametrize("factory,spec", (
     (short_dynamic_batches_factory, _spec(batch=Dynamic)),
     (short_object_batches_factory, TensorSpec("object", layout="python", batch=Dynamic)),

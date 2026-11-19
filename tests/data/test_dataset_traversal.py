@@ -132,6 +132,75 @@ def test_unknown_exact_explicit_eof_has_no_phantom_section():
         assert _events.count("pull") == 4
 
 
+@pytest.mark.parametrize("sectioned", (False, True))
+def test_positive_declared_empty_pass_is_a_shortfall_not_terminal_success(sectioned):
+    dataset = source(0, declared=3, close_fail=True)
+    if sectioned:
+        dataset = data.Epoch(dataset, len=2)
+    traversal = dataset.open()
+    with pytest.raises(DatasetExhaustedError) as caught:
+        traversal.next_epoch()
+    assert (caught.value.requested, caught.value.yielded) == (3, 0)
+    assert any("close failed" in note for note in caught.value.__notes__)
+    assert not traversal.position.root_complete
+    assert _events.count("close") == 1
+
+
+@pytest.mark.parametrize("kind", ("source", "chain", "repeat", "zip"))
+def test_finite_generator_final_output_normalizes_without_eof_pull(kind):
+    src = source(2, declared=2)
+    dataset = {"source": lambda: src,
+               "chain": lambda: data.Chain(src, source(1, declared=1)),
+               "repeat": lambda: data.Repeat(src, 2),
+               "zip": lambda: data.Zip(src, source(3, declared=3))}[kind]()
+    expected = {"source": [0, 1], "chain": [0, 1, 0],
+                "repeat": [0, 1, 0, 1], "zip": [(0, 0), (1, 1)]}[kind]
+    prepared = dataset.prepare()
+    src.cardinality = Cardinality.UNKNOWN  # finality belongs to the frozen plan
+    with prepared.open(acceptance="explicit") as traversal:
+        view = traversal.next_epoch()
+        for index, value in enumerate(expected):
+            candidate = view.reserve()
+            assert candidate.value == value
+            assert candidate.section_complete is (index == len(expected) - 1)
+            traversal.accept(candidate)
+        assert (traversal.position.epoch, traversal.position.start) == (1, 0)
+        assert not traversal.position.root_complete
+        assert _events.count("pull") == (4 if kind == "zip" else len(expected))
+        with pytest.raises(StopIteration):
+            view.reserve()
+
+
+@pytest.mark.parametrize("kind", ("chain", "repeat", "zip", "batch"))
+def test_finite_composite_cannot_hide_a_generator_source_shortfall(kind):
+    src = source(2, declared=3)
+    dataset = {"chain": lambda: data.Chain(src, source(1, declared=1)),
+               "repeat": lambda: data.Repeat(src, 2),
+               "zip": lambda: data.Zip(src, source(4, declared=4)),
+               "batch": lambda: data.Batch(src, 2)}[kind]()
+    with dataset.open() as traversal:
+        with pytest.raises(DatasetExhaustedError) as caught:
+            list(traversal.next_epoch())
+        assert (caught.value.requested, caught.value.yielded) == (3, 2)
+        assert not traversal.position.section_complete
+
+
+def test_finite_chain_final_output_does_not_bypass_trailing_source_validation():
+    """Zero-output trailing operators still owe their source's count validation."""
+    dataset = data.Chain(data.Batch(source(1, declared=1), 4),
+                         data.Batch(source(2, declared=3), 4, drop_remainder=True))
+    assert dataset.yield_cardinality() == Cardinality.finite(1)
+    with dataset.open(acceptance="explicit") as traversal:
+        view = traversal.next_epoch()
+        candidate = view.reserve()
+        assert candidate.value == 0 and not candidate.section_complete
+        traversal.accept(candidate)
+        with pytest.raises(DatasetExhaustedError) as caught:
+            view.reserve()
+        assert (caught.value.requested, caught.value.yielded) == (3, 2)
+        assert not traversal.position.section_complete
+
+
 def test_open_and_iterate_endpoint_and_pair_semantics():
     dataset = data.Epoch(source(), len=3)
     with dataset.open(epoch=2, start=1) as traversal:

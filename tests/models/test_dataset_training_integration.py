@@ -75,6 +75,13 @@ def _dataset_continuation_pairs(*, seed):
         yield value, value * 2
 
 
+def _dataset_continuation_short_pairs(actual):
+    """Yield a configurable tiny physical input with no captured environment."""
+    for _ in range(actual):
+        value = np.ones((1,), dtype=np.float32)
+        yield value, value
+
+
 def _dataset_continuation_experiment(backend, *, repo=None, sectioned=True, epochs=2, validation=False):
     """Build independently persisted native owners and four tiny paired inputs."""
     from dryml.data import Epoch, GeneratorDataset
@@ -188,6 +195,39 @@ def test_dataset_continuation_native_implicit_passes(backend):
     assert _dataset_continuation_events.count("open") == 2
     assert len(_dataset_continuation_events) == 10
     assert (exp.state.step, exp.state.epoch, exp.state.input_sequence) == (8, 2, 10)
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+@pytest.mark.parametrize("actual", (0, 2))
+def test_dataset_continuation_native_declared_shortfall_rejects_completion(backend, actual):
+    """Actual explicit trainers cannot finish declared-three, short physical input."""
+    from dryml.data import DatasetExhaustedError, GeneratorDataset
+    exp = _dataset_continuation_experiment(backend, sectioned=False, epochs=1)
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    exp.train_data = Batch(GeneratorDataset(_dataset_continuation_short_pairs, actual,
+                                          cardinality=3, spec=(spec, spec)), 1)
+    with pytest.raises(DatasetExhaustedError) as caught:
+        exp.train_fn(exp)
+    assert (caught.value.requested, caught.value.yielded) == (3, actual)
+    assert (exp.state.step, exp.state.examples_seen, exp.state.epoch) == (actual, actual, 0)
+    assert exp.state._input_provider is None
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_dataset_continuation_native_finite_final_callback_sees_normalized_epoch(backend):
+    """A finite generator's last callback sees the accepted next-epoch frontier."""
+    from dryml.data import GeneratorDataset
+    exp = _dataset_continuation_experiment(backend, sectioned=False, epochs=1)
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    exp.train_data = Batch(GeneratorDataset(_dataset_continuation_pairs, seed=7, seed_aware=True,
+                                          cardinality=4, spec=(spec, spec)), 1)
+    _dataset_continuation_events.clear()
+    seen = []
+    exp.train_fn(exp, callbacks=(lambda: seen.append((exp.state.epoch, exp.state.next_batch)),))
+    assert seen == [(0, 1), (0, 2), (0, 3), (1, 0)]
+    assert _dataset_continuation_events.count("open") == 1
+    assert len(_dataset_continuation_events) == 5
+    assert exp.state.step == exp.state.input_sequence == 4
 
 
 @pytest.mark.parametrize("backend", ("torch", "tf"))

@@ -74,6 +74,11 @@ def _seeded_pairs(*, seed):
         yield value, value
 
 
+def _paired_values(values):
+    """Reopen the small paired fixture without capturing a closure."""
+    return iter(values)
+
+
 def test_prepared_dataset_plans_once_reopens_independent_closeable_cursors():
     """Preparation is inert and each prepared traversal owns a fresh graph cursor."""
     from dryml.data.native import PreparedDataset
@@ -306,7 +311,109 @@ def test_dataset_continuation_borrowed_delivery_conversion_failure_is_unaccepted
             cursor = owner.next_epoch().training_batches(Preparation())
             next(cursor)
     assert owner.position.sequence == owner.position.start == 0
+    assert cursor._yielded == 0
     assert source.closes == [0]
+
+
+@pytest.mark.parametrize("acceptance", ("delivery", "explicit"))
+def test_borrowed_native_finite_resumed_suffix_counts_successful_conversions(acceptance):
+    """A resumed exact suffix validates its own count, not the full source total."""
+    class Preparation:
+        def prepare(self, x, y):
+            return x, y
+
+    pairs = _batches()[0]
+    dataset = GeneratorDataset(_paired_values, pairs.values, cardinality=3, spec=pairs.spec)
+    with dataset.open(start=1, acceptance=acceptance) as owner:
+        cursor = owner.next_epoch().training_batches(Preparation())
+        assert cursor._expected == 2
+        for index in (1, 2):
+            if acceptance == "explicit":
+                candidate = cursor.reserve()
+                assert candidate.value[0].item() == index
+                owner.accept(candidate)
+            else:
+                assert next(cursor)[0].item() == index
+        assert cursor._yielded == 2
+        assert (owner.position.epoch, owner.position.start) == (1, 0)
+        with pytest.raises(StopIteration):
+            cursor.reserve() if acceptance == "explicit" else next(cursor)
+        assert cursor.observed_eof
+
+
+@pytest.mark.parametrize("acceptance", ("delivery", "explicit"))
+@pytest.mark.parametrize("start", (0, 1))
+def test_borrowed_native_shortfall_counts_only_converted_opening_suffix(acceptance, start):
+    """A finite borrowed suffix cannot certify EOF after too few conversions."""
+    from dryml.data import DatasetExhaustedError
+
+    class DeclaredPairs(TrackingDataset):
+        def __len__(self):
+            return Cardinality.finite(3)
+
+        def iterator(self):
+            from dryml.data import DatasetCursor
+            source = self
+            class Resource:
+                def __init__(self):
+                    self.values = iter(source.values)
+                def __next__(self):
+                    return next(self.values)
+                def close(self):
+                    source.closes.append(0)
+                    raise RuntimeError("borrowed cleanup failed")
+            return DatasetCursor(Resource())
+
+    class Preparation:
+        def prepare(self, x, y):
+            return x + 10, y
+
+    source = DeclaredPairs(_batches()[0].values[:2])
+    owner = source.open(start=start, acceptance=acceptance)
+    cursor = owner.next_epoch().training_batches(Preparation())
+    try:
+        for index in range(start, 2):
+            if acceptance == "explicit":
+                candidate = cursor.reserve()
+                assert candidate.value[0].item() == index + 10
+                owner.accept(candidate)
+            else:
+                assert next(cursor)[0].item() == index + 10
+        with pytest.raises(DatasetExhaustedError) as caught:
+            cursor.reserve() if acceptance == "explicit" else next(cursor)
+        assert (caught.value.requested, caught.value.yielded) == (3 - start, 2 - start)
+        assert any("borrowed cleanup failed" in note for note in caught.value.__notes__)
+        assert cursor._yielded == 2 - start
+        assert not cursor.observed_eof
+        assert source.closes == [0]
+    finally:
+        owner.close()
+
+
+@pytest.mark.parametrize("acceptance", ("delivery", "explicit"))
+@pytest.mark.parametrize("sectioned", (False, True))
+def test_borrowed_native_unknown_and_upper_bound_are_not_strict(acceptance, sectioned):
+    """UNKNOWN membership may end below its independent max_elements bound."""
+    from dryml.data import Epoch
+
+    class Preparation:
+        def prepare(self, x, y):
+            return x, y
+
+    values = _batches()[0].values[:2]
+    source = GeneratorDataset(_paired_values, values, spec=_batches()[0].spec)
+    dataset = Epoch(source, len=3) if sectioned else source
+    with dataset.open(acceptance=acceptance) as owner:
+        view = owner.next_epoch()
+        assert view.cardinality.is_unknown
+        assert view.max_elements == (3 if sectioned else None)
+        cursor = view.training_batches(Preparation())
+        for _ in range(2):
+            owner.accept(cursor.reserve()) if acceptance == "explicit" else next(cursor)
+        with pytest.raises(StopIteration):
+            cursor.reserve() if acceptance == "explicit" else next(cursor)
+        assert cursor._yielded == 2
+        assert cursor.observed_eof
 
 
 @pytest.mark.parametrize("expected", (0, 1))

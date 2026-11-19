@@ -125,8 +125,9 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
 
     Sources and positional seeking remain lazy. Explicit sections continue one
     upstream execution; implicit finite passes reopen after a boundary handoff.
-    Empty implicit passes terminate. TypeError/ValueError reject invalid controls
-    and provably infinite unsectioned roots before acquisition. Source/operator
+    Empty implicit passes terminate unless their exact declaration requires outputs,
+    in which case DatasetExhaustedError reports the shortfall. TypeError/ValueError
+    reject invalid controls and provably infinite unsectioned roots before acquisition. Source/operator
     failures abort and close this owner; cleanup never masks a primary error.
     Pulls/mutations require the creating thread and reject recursive advancement.
     Independent traversals may interleave. Context exit and close release acquired
@@ -368,6 +369,8 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
         from root completion. Competing unfinished views/enumerations and recursive
         or foreign-thread advancement raise TraversalOwnershipError. Source and
         positional errors abort the owner and retain their causal identities.
+        DatasetExhaustedError rejects a known-positive empty physical pass before
+        terminal EOF or cleanup can be reported as successful completion.
         """
         return self._next_epoch()
 
@@ -398,6 +401,8 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
                     continue
                 if signal == PullKind.ROOT_END:
                     nonempty = self._pass_nonempty
+                    if not nonempty and self._cardinality.is_finite and self._cardinality.require_finite():
+                        raise DatasetExhaustedError(self._cardinality.require_finite(), 0)
                     self._release_execution()
                     if self._explicit or not nonempty:
                         self._root_complete = True
@@ -448,6 +453,7 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
         try:
             if self._staged_boundary:
                 self._staged_boundary = False
+                view._validate_end()
                 self._complete(root=self._execution.after_boundary_root)
                 raise StopIteration
             if self._staged is not None:
@@ -456,6 +462,7 @@ class DatasetTraversal(_CursorLifecycle, Generic[T]):
             else:
                 signal = self._raw()
                 if signal != PullKind.DELIVERY:
+                    view._validate_end()
                     if signal == PullKind.SECTION_END:
                         self._complete(root=self._execution.after_boundary_root)
                     elif self._explicit or self._pass_nonempty:
@@ -578,13 +585,16 @@ class EpochView(_CursorLifecycle, Iterator[T], Generic[T]):
     before returning; explicit-mode reserve requires an owner accept/reject.
     Exhaustion keeps the explicit upstream alive. Closing an unfinished view
     aborts its owner; closing an exhausted view is a no-op. Source/cleanup errors
-    propagate while context exit preserves an escaping primary exception.
+    propagate while context exit preserves an escaping primary exception. Exact
+    opening-suffix shortfalls raise DatasetExhaustedError before completion and
+    cleanup; UNKNOWN cardinality never treats max_elements as a required count.
     """
 
     def __init__(self, traversal: DatasetTraversal[T]) -> None:
         super().__init__()
         self._owner = traversal
         self._epoch, self._offset = traversal._epoch, traversal._start
+        self._opening_offset = self._offset
         self._exhausted = False
         root = traversal._root
         size = (_section_size(root.sections, self._epoch) if traversal._explicit else
@@ -614,6 +624,13 @@ class EpochView(_CursorLifecycle, Iterator[T], Generic[T]):
     def max_elements(self) -> int | None:
         """Return a proved opening-suffix upper bound, or None; performs no pulls."""
         return self._max_elements
+
+    def _validate_end(self):
+        if self._cardinality.is_finite:
+            expected = self._cardinality.require_finite()
+            yielded = self._offset - self._opening_offset
+            if yielded != expected:
+                raise DatasetExhaustedError(expected, yielded)
 
     def _read(self):
         if self._exhausted:

@@ -559,6 +559,9 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
     over cleanup errors; non-pull StopIteration is a causal RuntimeError.
     Unresolved Map selections raise TypeError during cursor construction,
     before source acquisition, even when output declarations name a native backend.
+    Borrowed views validate their exact opening-suffix cardinality, counting only
+    successfully converted deliveries/reservations; UNKNOWN membership and separate
+    upper bounds do not impose a strict count.
     """
 
     def __init__(self, dataset: PreparedDataset | EpochView, preparation: BatchPreparation, *, epoch: int = 0) -> None:
@@ -593,21 +596,29 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
             owner = self._view._owner
             if owner._acceptance != "delivery":
                 raise TraversalOwnershipError("Explicit acceptance requires reserve(), not next().")
-            candidate = owner._reserve(self._view)
+            try:
+                candidate = owner._reserve(self._view)
+            except StopIteration:
+                self._validate_count()
+                raise
             value = self._call(self._prepare, candidate.value)
             owner.accept(candidate)
+            self._yielded += 1
             return value
         if self._cursor is None:
             self._cursor = self._own(self._call(self._dataset.iterator, epoch=self._epoch))
         try:
             value = self._pull(self._cursor)
-        except StopIteration as error:
-            if self._expected is not None and self._yielded != self._expected:
-                raise DatasetExhaustedError(self._expected, self._yielded) from error
+        except StopIteration:
+            self._validate_count()
             raise
         result = self._call(self._prepare, value)
         self._yielded += 1
         return result
+
+    def _validate_count(self):
+        if self._expected is not None and self._yielded != self._expected:
+            raise DatasetExhaustedError(self._expected, self._yielded)
 
     def _prepare(self, value):
         x, y = value
@@ -621,23 +632,27 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
         single-use authority. EOF closes only the exhausted view. Conversion or
         validation failure aborts input without accepted progress; secondary close
         errors retain the primary failure. Independent-pass cursors reject this
-        operation with TypeError.
+        operation with TypeError. Exact opening-suffix shortfalls raise
+        DatasetExhaustedError before observed_eof is certified; UNKNOWN counts and
+        max_elements-only bounds remain non-strict.
         """
         if self._view is None:
             raise TypeError("Reservations require a borrowed EpochView.")
         if self._closed:
             raise StopIteration
         try:
-            candidate = self._view.reserve()
+            try:
+                candidate = self._view.reserve()
+            except StopIteration:
+                self._validate_count()
+                self._observed_eof = True
+                self.close()
+                raise
+            result = replace(candidate, value=self._call(self._prepare, candidate.value))
+            self._yielded += 1
+            return result
         except StopIteration:
-            self._observed_eof = True
-            self.close()
             raise
-        except BaseException as error:
-            self._close_after_failure(error)
-            raise
-        try:
-            return replace(candidate, value=self._call(self._prepare, candidate.value))
         except BaseException as error:
             self._close_after_failure(error)
             raise

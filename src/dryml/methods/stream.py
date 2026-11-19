@@ -1373,9 +1373,15 @@ class _SectionExecution(_CursorLifecycle):
             try:
                 value = self._pull(self.source)
             except StopIteration:
+                if (self.op.source.kind == "generator" and self.op.cardinality.is_finite
+                        and self.count != self.op.cardinality.require_finite()):
+                    raise DatasetExhaustedError(self.op.cardinality.require_finite(), self.count)
                 return PullKind.ROOT_END
-            indexed = getattr(self.op.source, "kind", None) in {"array", "npy"}
-            final = indexed and self.op.cardinality.is_finite and self.count + 1 == self.op.cardinality.require_finite()
+            bounded = self.op.source.kind in {"array", "npy", "generator"}
+            final = bounded and self.op.cardinality.is_finite and self.count + 1 == self.op.cardinality.require_finite()
+            if final and self.op.source.kind == "generator":
+                # Known membership avoids an EOF pull, not source validation.
+                self._call(self.source._validate_end)
             return self._deliver(value, root=final)
         if kind == "take":
             n, base, fixed = self.op.controls
@@ -1406,7 +1412,8 @@ class _SectionExecution(_CursorLifecycle):
                 if signal == PullKind.SECTION_END:
                     return self._section()
                 # A child root is not the root of its Chain/Repeat parent.
-                return self._deliver(child.value, final=child.section_final)
+                root = child.root_final and limit is not None and self.index + 1 == limit
+                return self._deliver(child.value, final=child.section_final, root=root)
             return PullKind.ROOT_END
         if kind == "zip":
             return self._zip()
@@ -1579,7 +1586,8 @@ class _SectionExecution(_CursorLifecycle):
             return self._section()
         if final:
             self.phase = "drain"
-        return self._deliver(self._call(self.op.tree.build, iter(values)), final=final)
+        return self._deliver(self._call(self.op.tree.build, iter(values)), final=final,
+                             root=any(child.root_final for child in children))
 
     def close(self):
         self.value = self.input_batch = self.source = self.carry = None

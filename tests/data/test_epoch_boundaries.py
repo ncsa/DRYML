@@ -165,6 +165,28 @@ def test_zip_known_boundary_defers_tail_drain_and_close_never_drains():
     assert _events.count("close") == 2
 
 
+@pytest.mark.parametrize("kind", ("chain", "repeat", "zip"))
+def test_finite_generator_sections_distinguish_child_boundary_from_root_final(kind):
+    """Only the parent's final output can certify its physical root completion."""
+    src = data.Epoch(source(3, declared=3), len=2)
+    dataset = {"chain": lambda: Chain(src, data.Epoch(source(1, declared=1), len=2)),
+               "repeat": lambda: Repeat(src, 2),
+               "zip": lambda: Zip(src, data.Epoch(source(4, declared=4), len=2))}[kind]()
+    groups = {"chain": [[0, 1], [2], [0]], "repeat": [[0, 1], [2], [0, 1], [2]],
+              "zip": [[(0, 0), (1, 1)], [(2, 2)]]}[kind]
+    _events.clear()
+    with dataset.open(acceptance="explicit") as traversal:
+        for ordinal, group in enumerate(groups):
+            view = traversal.next_epoch()
+            for index, value in enumerate(group):
+                candidate = view.reserve()
+                assert candidate.value == value
+                assert candidate.section_complete is (index == len(group) - 1)
+                traversal.accept(candidate)
+            assert traversal.position.root_complete is (ordinal == len(groups) - 1)
+        assert _events.count("pull") == (6 if kind == "zip" else sum(map(len, groups)))
+
+
 def test_skip_repeat_shuffle_are_qualified_and_keep_prepared_controls():
     src = ArrayDataset(np.arange(6))
     skipped = Skip(src, 2)
