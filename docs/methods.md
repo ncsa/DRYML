@@ -165,6 +165,20 @@ invoker; retained Map, Fold, and group execution uses it throughout the invocati
 Calling a selected carrier directly remains supported and prepares a fresh
 invocation, without a second global or carrier compilation cache.
 
+Prepared invokers compile pure metadata predicates for simple dense numerical
+NumPy constraints. Every exact `numpy.ndarray` input still has its current dtype,
+physical shape, fixed/Dynamic dimensions and logical leading batch checked on
+every call, including empty arrays and changed metadata on a reused array. Native
+sample-axis labels inherit the declaration as in generic validation. Byte order
+uses the same canonical semantic dtype interpretation as `TensorSpec`; it is not
+an additional constraint. No input values or validation results are cached.
+Structured/subarray/metadata-bearing or unsupported dtypes, ndarray subclasses,
+non-NumPy values, opaque leaves, nested structures, and complex layout constraints
+retain generic runtime normalization and its errors. Declared backend activation
+still precedes input checks. Raw-result validation still runs before publication,
+and each call retains fresh signature normalization and caller-owned Repo/context
+delivery. These immutable predicates introduce no shared mutable validation cache.
+
 ### Dynamic Dense Calls
 
 Known-spec preparation supports Dynamic sample dimensions and Dynamic batch sizes

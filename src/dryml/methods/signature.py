@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 import sys
 from typing import Literal
@@ -10,8 +10,9 @@ from typing import Literal
 import numpy as np
 
 from dryml.core.backend import Backend, _native_backend, backend_testers
+from dryml.core.dtype import DType
 from dryml.core.tensor_spec import (
-    BatchMode, Dynamic, SpecTree, TensorSpec, _python_object_batch_size,
+    BatchMode, Dynamic, Layout, SpecTree, TensorSpec, _python_object_batch_size,
     _python_object_spec, is_spec_tree, iter_specs,
 )
 
@@ -232,6 +233,72 @@ def runtime_node_for_constraint(value: object, constraint: MethodCallNode) -> Me
     """
 
     return _runtime_node_with_schema(value, constraint, retain_batch=True)
+
+
+_DENSE_NUMPY_DTYPE_NAMES = frozenset({
+    "bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+    "float16", "float32", "float64", "complex64", "complex128",
+})
+
+
+def _compile_numpy_constraint(
+    constraint: MethodCallNode,
+) -> Callable[[object], bool | None] | None:
+    """Compile a pure exact-ndarray predicate; None delegates to generic validation.
+
+    Only ordinary dense numerical constraints are compiled. Each invocation reads
+    the actual dtype and physical shape anew, without retaining values or caching
+    results. NumPy dtype names erase byte order just as normalize_dtype does;
+    fields, subarrays, metadata and unrecognized names require the generic path
+    so its normalization errors and interpretation remain authoritative.
+    Activation of declared backends remains the invocation boundary's job.
+    """
+    if type(constraint) is not MethodCallNode or constraint.kind != "tensor":
+        return None
+    expected = constraint.value
+    if (type(expected) is not TensorSpec or expected.layout is not Layout.DENSE
+            or (expected.backend is not None and expected.backend is not Backend.numpy)
+            or type(expected.dtype) is not DType
+            or type(expected.dtype.kind) is not str
+            or (expected.dtype.bits is not None and type(expected.dtype.bits) is not int)
+            or expected.dtype.name not in _DENSE_NUMPY_DTYPE_NAMES
+            or any(field is not None for field in (
+                expected.ragged_rank, expected.row_splits_dtype, expected.sparse_format,
+            ))
+            or (expected.batch is None and expected.batch_axis_name is not None)):
+        return None
+    if ((expected.batch_axis_name is not None and type(expected.batch_axis_name) is not str)
+            or any(name is not None and type(name) is not str for name in expected.axis_names or ())
+            or any(size is not Dynamic and type(size) is not int for size in expected.shape or ())
+            or (expected.batch is not None and expected.batch is not Dynamic and type(expected.batch) is not int)):
+        return None
+
+    dtype_name = expected.dtype.name
+    batched = expected.batch is not None
+    full_shape = expected.full_shape
+    rank = None if full_shape is None else len(full_shape)
+    fixed_axes = tuple((axis, size) for axis, size in enumerate(full_shape or ()) if size is not Dynamic)
+    # Unknown sample rank still has an observable fixed/dynamic leading batch.
+    if full_shape is None and batched and expected.batch is not Dynamic:
+        fixed_axes = ((0, expected.batch),)
+
+    def matches(value: object) -> bool | None:
+        if type(value) is not np.ndarray:
+            return None
+        dtype = value.dtype
+        if dtype.fields is not None or dtype.subdtype is not None or dtype.metadata is not None:
+            return None
+        actual_name = dtype.name
+        if actual_name not in _DENSE_NUMPY_DTYPE_NAMES:
+            return None
+        if actual_name != dtype_name:
+            return False
+        shape = value.shape
+        if (batched and not shape) or (rank is not None and len(shape) != rank):
+            return False
+        return all(size == shape[axis] for axis, size in fixed_axes)
+
+    return matches
 
 
 def _runtime_node_with_schema(value, constraint, *, retain_batch):
