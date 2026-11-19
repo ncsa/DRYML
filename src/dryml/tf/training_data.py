@@ -11,7 +11,7 @@ import numpy as np
 
 from dryml.data.native import BatchPreparation, NativeTrainingCursor, PreparedDataset
 from dryml.data.traversal import EpochView, PendingElement, TraversalPosition
-from dryml.data.errors import TraversalOwnershipError
+from dryml.data.errors import TraversalOwnershipError, _add_exception_note
 from dryml.tf.tensor_spec import output_signature
 
 
@@ -387,7 +387,7 @@ class _KerasInputBridge:
                     if self._failure is None:
                         self._failure = error
                     else:
-                        self._failure.add_note(f"Keras source cleanup failed: {error}")
+                        _add_exception_note(self._failure, f"Keras source cleanup failed: {error}")
             finally:
                 with self._condition:
                     self._closed = True
@@ -516,5 +516,5 @@ class _KerasInputBridge:
         except BaseException as cleanup:
             if error is None:
                 raise
-            error.add_note(f"Keras bridge cleanup failed: {cleanup}")
+            _add_exception_note(error, f"Keras bridge cleanup failed: {cleanup}")
         return False

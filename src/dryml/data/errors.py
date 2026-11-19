@@ -1,6 +1,15 @@
 """Local Dataset traversal failures; producer and cleanup errors remain causal."""
 
 
+def _add_exception_note(error: BaseException, message: str) -> None:
+    """Append a diagnostic to the primary error, including on Python 3.10."""
+    add_note = getattr(error, "add_note", None)
+    if callable(add_note):
+        add_note(message)
+    else:
+        error.__notes__ = [*getattr(error, "__notes__", ()), message]
+
+
 class TraversalError(RuntimeError):
     """Base for local traversal lifecycle failures; contains no saved state."""
 

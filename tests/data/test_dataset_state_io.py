@@ -10,6 +10,67 @@ import pytest
 import dryml.data as data
 
 
+class _LegacyOSError(OSError):
+    add_note = None
+
+
+class _LegacyPermissionError(PermissionError):
+    add_note = None
+
+
+class _LegacyKeyboardInterrupt(KeyboardInterrupt):
+    add_note = None
+
+
+class _LegacyFileExistsError(FileExistsError):
+    add_note = None
+
+
+def private_values(private_value):
+    yield np.uint8(0)
+
+
+def test_record_and_train_state_repr_hide_contents_with_exact_byte_roundtrip(tmp_path):
+    from dryml.core.tensor_spec import TensorSpec
+    from dryml.models.train_spec import TrainState
+
+    metadata_secret = "synthetic-private-initialization-7c53"
+    payload_secret = b"synthetic-private-snapshot-8d64"
+    dataset = data.Chain(
+        data.ArrayDataset(np.frombuffer(payload_secret, dtype=np.uint8)),
+        data.GeneratorDataset(private_values, metadata_secret,
+                              spec=TensorSpec("uint8", shape=(), backend="numpy")),
+    )
+    with dataset.open() as traversal:
+        traversal.enable_replay_recovery()
+        record = traversal.capture_state()
+    assert metadata_secret.encode() in record._metadata
+    assert any(payload_secret in payload for payload in record._payloads)
+    loaded = data.DatasetState.load(record.save(tmp_path / "private-cut"))
+    assert loaded._metadata == record._metadata
+    assert loaded._payloads == record._payloads
+    loaded.validate(dataset)
+    for state in (record, loaded):
+        for display in (repr(state), repr(TrainState(dataset_state=state))):
+            assert metadata_secret not in display
+            assert payload_secret.decode() not in display
+            assert "_metadata=" not in display and "_payloads=" not in display
+        with dataset.open(state=state) as resumed:
+            assert list(resumed.next_epoch()) == list(payload_secret) + [0]
+
+
+def test_validate_type_hints_resolve_with_type_checking_names():
+    from typing import get_type_hints
+    import dryml.data.state as state_module
+    from dryml.data.dataset import Dataset
+    from dryml.data.native import PreparedDataset
+
+    namespace = dict(vars(state_module), Dataset=Dataset, PreparedDataset=PreparedDataset)
+    hints = get_type_hints(data.DatasetState.validate, globalns=namespace)
+    assert hints == {"target": Dataset[state_module.T] | PreparedDataset,
+                     "return": type(None)}
+
+
 def _competing_writer(record, path, barrier, outcomes):
     import dryml.data.state as state_module
     record = data.DatasetState.load(record)
@@ -168,10 +229,14 @@ def test_prepublication_failures_preserve_prior_and_remove_only_own_staging(tmp_
     assert {p.name: p.read_bytes() for p in prior.iterdir()} == before
 
 
-def test_short_write_and_cleanup_failure_preserve_primary_and_prior(tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy_notes", [False, True])
+def test_short_write_and_cleanup_failure_preserve_primary_and_prior(tmp_path, monkeypatch, legacy_notes):
     import dryml.data.state as state_module
     record = _record()
     prior = record.save(tmp_path / "prior")
+    before = {p.name: p.read_bytes() for p in prior.iterdir()}
+    if legacy_notes:
+        monkeypatch.setattr(state_module, "OSError", _LegacyOSError, raising=False)
     original = Path.open
     class ShortWriter:
         def __init__(self, file):
@@ -192,6 +257,7 @@ def test_short_write_and_cleanup_failure_preserve_primary_and_prior(tmp_path, mo
     assert any("cleanup denied" in n for n in caught.value.__notes__)
     assert not (tmp_path / "new").exists()
     assert data.DatasetState.load(prior).position == record.position
+    assert {p.name: p.read_bytes() for p in prior.iterdir()} == before
 
 
 def test_inventory_validation_before_rename_and_interruption_after_rename(tmp_path, monkeypatch):
@@ -220,10 +286,14 @@ def test_inventory_validation_before_rename_and_interruption_after_rename(tmp_pa
         record.save(tmp_path / "committed")
 
 
-def test_name_lock_cleanup_failure_does_not_replace_existing_destination_error(tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy_notes", [False, True])
+def test_name_lock_cleanup_failure_does_not_replace_existing_destination_error(tmp_path, monkeypatch, legacy_notes):
     import dryml.data.state as state_module
     record = _record()
     destination = record.save(tmp_path / "prior")
+    before = {p.name: p.read_bytes() for p in destination.iterdir()}
+    if legacy_notes:
+        monkeypatch.setattr(state_module, "FileExistsError", _LegacyFileExistsError, raising=False)
     original = state_module.FileLock.release
     def failed_release(lock):
         original(lock)
@@ -233,6 +303,59 @@ def test_name_lock_cleanup_failure_does_not_replace_existing_destination_error(t
         record.save(destination)
     assert any("lock cleanup failed" in note for note in caught.value.__notes__)
     assert data.DatasetState.load(destination).position == record.position
+    assert {p.name: p.read_bytes() for p in destination.iterdir()} == before
+    assert not list(tmp_path.glob(".prior.staging-*"))
+
+
+@pytest.mark.parametrize("error_type", [PermissionError, _LegacyPermissionError,
+                                       KeyboardInterrupt, _LegacyKeyboardInterrupt])
+@pytest.mark.parametrize("committed", [False, True])
+def test_rename_failure_preserves_primary_cleanup_order_and_exact_bytes(
+        tmp_path, monkeypatch, error_type, committed):
+    import dryml.data.state as state_module
+
+    record = _record()
+    prior = record.save(tmp_path / "prior")
+    before = {p.name: p.read_bytes() for p in prior.iterdir()}
+    primary = error_type("rename interrupted")
+    primary.__notes__ = ["existing diagnostic"]
+    events = []
+    rename, release, rmtree = state_module.os.rename, state_module.FileLock.release, state_module.shutil.rmtree
+
+    def interrupted(source, target):
+        events.append("rename")
+        if committed:
+            rename(source, target)
+        raise primary
+
+    def released(lock):
+        events.append("release")
+        release(lock)
+
+    def removed(path):
+        events.append("cleanup")
+        assert path.parent == tmp_path and path.name.startswith(".new.staging-")
+        rmtree(path)
+
+    monkeypatch.setattr(state_module.os, "rename", interrupted)
+    monkeypatch.setattr(state_module.FileLock, "release", released)
+    monkeypatch.setattr(state_module.shutil, "rmtree", removed)
+    with pytest.raises(error_type) as caught:
+        record.save(tmp_path / "new")
+    assert caught.value is primary
+    assert primary.__notes__ == ["existing diagnostic",
+        "DatasetState publication may have committed around rename; inspect the destination before retrying."]
+    assert events == (["rename", "release"] if committed else ["rename", "release", "cleanup"])
+    assert not list(tmp_path.glob(".new.staging-*"))
+    assert {p.name: p.read_bytes() for p in prior.iterdir()} == before
+    if committed:
+        loaded = data.DatasetState.load(tmp_path / "new")
+        assert (loaded._metadata, loaded._payloads) == (record._metadata, record._payloads)
+    else:
+        assert not (tmp_path / "new").exists()
+    lock = state_module.FileLock(tmp_path / ".new.dataset-state.lock")
+    assert lock.acquire(blocking=False)
+    lock.release()
 
 
 def test_missing_directory_keeps_filesystem_failure_and_incomplete_directory_is_format_error(tmp_path):

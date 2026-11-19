@@ -55,6 +55,74 @@ class IdentityPreparation:
         return x, y
 
 
+class _LegacyRuntimeError(RuntimeError):
+    add_note = None
+
+
+class _LegacyKeyboardInterrupt(KeyboardInterrupt):
+    add_note = None
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, _LegacyRuntimeError,
+                                       KeyboardInterrupt, _LegacyKeyboardInterrupt])
+def test_bridge_source_cleanup_keeps_primary_with_compatible_notes(error_type):
+    from types import SimpleNamespace
+    from dryml.data import TraversalPosition
+    from dryml.tf.training_data import _KerasInputBridge
+
+    primary = error_type("producer failed")
+    primary.__notes__ = ["existing diagnostic"]
+    events = []
+
+    def reserve():
+        events.append("reserve")
+        raise primary
+
+    def close():
+        events.append("close")
+        raise OSError("source close failed")
+
+    source = SimpleNamespace(position=TraversalPosition(0, 0, 0, False, False),
+                             replay_recovery_policy="disabled", close=close)
+    bridge = _KerasInputBridge(source)
+    bridge._segment = object()
+    bridge._view = SimpleNamespace(reserve=reserve)
+    bridge._run()
+    assert bridge._failure is primary and bridge._retired and bridge._closed
+    assert not bridge._inflight
+    assert events == ["reserve", "close"]
+    assert primary.__notes__ == ["existing diagnostic", "Keras source cleanup failed: source close failed"]
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, _LegacyRuntimeError,
+                                       KeyboardInterrupt, _LegacyKeyboardInterrupt])
+def test_bridge_exit_cleanup_keeps_primary_with_compatible_notes(error_type):
+    from types import SimpleNamespace
+    from dryml.data import TraversalPosition
+    from dryml.tf.training_data import _KerasInputBridge
+
+    primary = error_type("consumer failed")
+    primary.__notes__ = ["existing diagnostic"]
+    events = []
+
+    def close():
+        events.append("close")
+        raise OSError("bridge close failed")
+
+    source = SimpleNamespace(position=TraversalPosition(0, 0, 0, False, False),
+                             replay_recovery_policy="disabled", close=close)
+    bridge = _KerasInputBridge(source)
+    with pytest.raises(error_type) as caught:
+        try:
+            raise primary
+        except BaseException as error:
+            assert bridge.__exit__(type(error), error, error.__traceback__) is False
+            raise
+    assert caught.value is primary and bridge._closed
+    assert events == ["close"]
+    assert primary.__notes__ == ["existing diagnostic", "Keras bridge cleanup failed: bridge close failed"]
+
+
 def test_produces_bc_while_a_update_is_blocked_and_keeps_native_handoffs():
     from dryml.tf.training_data import _KerasInputBridge
 

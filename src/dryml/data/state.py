@@ -22,7 +22,8 @@ import numpy as np
 from dryml.formats.canonical import canonical_json_bytes, canonical_json_load_bytes, json_ready
 from dryml.locking import FileLock
 from .continuation import _BOUNDS, _MAX_BYTES, decode_value, encode_value
-from .errors import ContinuationFormatError, ContinuationMismatchError, UnsupportedContinuationError
+from .errors import (ContinuationFormatError, ContinuationMismatchError,
+                     UnsupportedContinuationError, _add_exception_note)
 from .recovery import _capture_execution, _evidence, _validate_execution
 from .traversal import TraversalPosition
 
@@ -226,10 +227,12 @@ class DatasetState(Generic[T]):
     a producer frontier inside this same record. Such records restore through the
     owning TensorFlow training adapter; ordinary Dataset.open rejects them rather
     than repeating conversion or mistaking the producer cut for accepted input.
+    Repr shows saved progress and replay policy without encoded metadata, source
+    initialization values, snapshots, or pending payload contents.
     """
 
-    _metadata: bytes
-    _payloads: tuple[bytes, ...]
+    _metadata: bytes = field(repr=False)
+    _payloads: tuple[bytes, ...] = field(repr=False)
     _saved_position: TraversalPosition
     _saved_policy: str
     _saved_replay: bool
@@ -302,7 +305,7 @@ class DatasetState(Generic[T]):
         """Return True for manual enablement or an actually retained replay source."""
         return self._saved_replay
 
-    def validate(self, target: Dataset[T] | PreparedDataset[T]) -> None:
+    def validate(self, target: Dataset[T] | PreparedDataset) -> None:
         """Compare complete frozen recipe, sharing, source/spec and protocol evidence.
 
         Args:
@@ -357,6 +360,8 @@ class DatasetState(Generic[T]):
             check and atomic rename. Cleanup owns only this invocation's staging;
             secondary cleanup errors never mask a primary failure. Requires local
             advisory-lock and atomic directory rename filesystem semantics.
+            Secondary diagnostics append exception notes (``__notes__`` on Python
+            3.10) without changing the primary error or cleanup order.
         """
         self._from_bytes(self._metadata, self._payloads)
         path = Path(path).absolute()
@@ -381,12 +386,12 @@ class DatasetState(Generic[T]):
             return path
         except BaseException as error:
             if renamed:
-                error.add_note("DatasetState publication may have committed around rename; inspect the destination before retrying.")
+                _add_exception_note(error, "DatasetState publication may have committed around rename; inspect the destination before retrying.")
             try:
                 if staging.exists():
                     shutil.rmtree(staging)
             except BaseException as cleanup:
-                error.add_note(f"DatasetState staging cleanup failed: {cleanup}")
+                _add_exception_note(error, f"DatasetState staging cleanup failed: {cleanup}")
             raise
 
     @classmethod
@@ -473,7 +478,7 @@ def _name_lock(lock):
         try:
             lock.release()
         except BaseException as cleanup:
-            primary.add_note(f"DatasetState name-lock release failed: {cleanup}")
+            _add_exception_note(primary, f"DatasetState name-lock release failed: {cleanup}")
         raise
     else:
         lock.release()
