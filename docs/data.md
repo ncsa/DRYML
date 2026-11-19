@@ -681,9 +681,12 @@ Optax is installed; all its cells remain required and explicitly blocking rather
 than being exempted by the applicability schema. Pending-window/compile/copy
 metrics missing from successful instrumentation remain explicitly unknown. The earlier barrier-based Keras
 overlap/capture correctness evidence is independent and is not replaced by these
-timings. Completion still requires regression diagnosis, resolved fixed comparison
-evidence, real available-backend qualification, and the coordinator's measured
-strictly-under-900-second routine gate.
+timings. The complete routine runner subsequently passed 4,978 tests with 30 skips
+but took **914.70 seconds** of full wall time, failing the strict under-900-second
+gate. See [implementation qualification](dataset_traversal_qualification.md) for
+the exact command, review corrections, and unresolved gates. Completion still
+requires regression diagnosis, resolved fixed comparison evidence, real
+available-backend qualification, and a successful strictly-under-900-second run.
 
 ## Source Datasets
 
