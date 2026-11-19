@@ -850,3 +850,306 @@ def test_partial_restored_window_precedes_further_production():
         assert converted == list(range(producer.position.start + 1, 6))
     finally:
         restored.close()
+
+
+class _InvocationObserver(tf.keras.callbacks.Callback):
+    """Record native lifecycle and state reset by a real Keras train-begin event."""
+
+    def __init__(self, exp, events, name):
+        super().__init__()
+        self.exp, self.events, self.name = exp, events, name
+        self.begins = self.ends = self.bindings = 0
+        self.parameters = []
+        self.epochs_seen = []
+        self.final_history = self.final_logs = None
+        self.validation_logs = None
+
+    def set_model(self, model):
+        super().set_model(model)
+        self.bindings += 1
+
+    def set_params(self, params):
+        super().set_params(params)
+        self.parameters.append(dict(params))
+
+    def _event(self, name, index=None, logs=None):
+        assert not any(key.startswith("_dryml_") for key in (logs or {}))
+        self.events.append((self.name, name, index, self.exp.state.step,
+                            self.exp.state.epoch, self.exp.state.pending_epoch_postlude))
+
+    def on_train_begin(self, logs=None):
+        self.begins += 1
+        self.epochs_seen = []
+        self._event("begin", logs=logs)
+
+    def on_train_batch_end(self, batch, logs=None):
+        self._event("batch", batch, logs)
+
+    def on_test_begin(self, logs=None):
+        self._event("test_begin", logs=logs)
+
+    def on_test_batch_end(self, batch, logs=None):
+        self._event("test_batch", batch, logs)
+
+    def on_test_end(self, logs=None):
+        self.validation_logs = dict(logs or {})
+        self._event("test_end", logs=logs)
+
+    def on_epoch_end(self, epoch, logs=None):
+        self.epochs_seen.append(epoch)
+        self._event("epoch", epoch, logs)
+
+    def on_train_end(self, logs=None):
+        self.ends += 1
+        self.final_history = self.model.history
+        self.final_logs = dict(logs or {})
+        self._event("end", logs=logs)
+
+
+def _segmented_callback_experiment(*, epochs=4):
+    """Use four continuous finite sections rather than restarting an input pass."""
+    values = np.ones((8, 1, 1), np.float32)
+    spec = (TensorSpec("float32", shape=(1,), batch=1, backend="numpy"),) * 2
+    data = Epoch(ArrayDataset((values, values), spec=spec), len=2)
+    validation = ArrayDataset((values[:1], values[:1]), spec=spec)
+    return _experiment(data=data, epochs=epochs, validation_data=validation)
+
+
+def test_callbacks_and_telemetry_keep_one_invocation_lifecycle_across_four_sections(monkeypatch):
+    """Native and telemetry callbacks share final History without resetting state."""
+    from dryml.models.experiment import _ObserverSession
+
+    exp = _segmented_callback_experiment()
+    events = []
+    native = _InvocationObserver(exp, events, "native")
+    telemetry = _InvocationObserver(exp, events, "telemetry")
+    native_history = tf.keras.callbacks.History()
+    progress = tf.keras.callbacks.ProgbarLogger()
+    progress_callbacks = []
+    original = tf.keras.callbacks.CallbackList.__init__
+
+    def callback_list(owner, *args, **kwargs):
+        original(owner, *args, **kwargs)
+        progress_callbacks.append([callback for callback in owner.callbacks
+                                   if isinstance(callback, tf.keras.callbacks.ProgbarLogger)])
+
+    monkeypatch.setattr(tf.keras.callbacks.CallbackList, "__init__", callback_list)
+    exp.train_fn.verbose = 1
+    exp.train_fn.callbacks = (native, progress)
+    exp.train_fn.fit_kwargs["callbacks"] = [native_history]
+    history = exp.train_fn(exp, observer_session=_ObserverSession((telemetry,), strict=True))
+
+    for callback in (native, telemetry):
+        assert (callback.begins, callback.ends, callback.bindings) == (1, 1, 1)
+        assert callback.epochs_seen == [0, 1, 2, 3]
+        assert len(callback.parameters) == 1 and callback.params["epochs"] == 4
+        assert callback.final_history is history
+        assert callback.final_logs == {key: values[-1] for key, values in history.history.items()}
+    assert history.epoch == native_history.epoch == [0, 1, 2, 3]
+    assert history.params["epochs"] == native_history.params["epochs"] == 4
+    assert progress_callbacks and all(len(callbacks) == 1 for callbacks in progress_callbacks)
+    assert all(callbacks[0].callback is progress for callbacks in progress_callbacks)
+    assert all(len(values) == 4 for values in history.history.values())
+    assert set(history.history) == {"loss", "val_loss"}
+    assert events[:2] == [("native", "begin", None, 0, 0, None),
+                          ("telemetry", "begin", None, 0, 0, None)]
+    for epoch in range(4):
+        section = events[2 + epoch * 12:2 + (epoch + 1) * 12]
+        assert [(name, event, index) for name, event, index, *_ in section] == [
+            (name, event, index) for event, index in (
+                ("batch", 0), ("batch", 1), ("test_begin", None),
+                ("test_batch", 0), ("test_end", None), ("epoch", epoch))
+            for name in ("native", "telemetry")]
+        assert [item[3] for item in section[:4]] == [epoch * 2 + 1] * 2 + [epoch * 2 + 2] * 2
+        assert all(item[3:5] == (epoch * 2 + 2, epoch + 1) for item in section[4:])
+        assert section[-2][-1] == epoch  # native callback precedes the DRYML postlude
+        assert section[-1][-1] is None  # telemetry follows it
+    assert events[-2:] == [("native", "end", None, 8, 4, None),
+                           ("telemetry", "end", None, 8, 4, None)]
+
+
+def test_native_plateau_patience_survives_four_fit_sections(tmp_path):
+    """ReduceLROnPlateau must retain its best value and wait between segments."""
+    exp = _segmented_callback_experiment()
+    rates, waits = [], []
+
+    class ConstantMonitor(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            logs["val_loss"] = 1.0
+
+    plateau = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor="val_loss", mode="min", patience=2, factor=.5)
+
+    class RecordPlateau(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            rates.append(float(self.model.optimizer.learning_rate.numpy()))
+            waits.append(plateau.wait)
+
+    exp.train_fn.callbacks = (ConstantMonitor(), plateau, RecordPlateau())
+    history = exp.train_fn(exp)
+    assert rates == pytest.approx([.001, .001, .0005, .0005])
+    assert waits == [0, 1, 0, 1]
+    assert plateau.best == 1.0 and plateau.wait == 1
+    assert history.history["val_loss"] == [1.0] * 4
+
+    from dryml.core import Repo
+
+    repo = Repo(stores=tmp_path)
+    saved = repo.save_object(exp, deep_capture=True)
+    loaded = repo.load_state_ref(saved, reuse_live="never")
+    loaded.model.obj(tf.ones((1, 1)))
+    loaded.model.restore_pending()
+    loaded.train_fn.optimizer.obj.build(loaded.model.obj.trainable_variables)
+    loaded.train_fn.optimizer.restore_pending()
+    assert float(loaded.train_fn.optimizer.obj.learning_rate.numpy()) == pytest.approx(.0005)
+    assert int(loaded.train_fn.optimizer.obj.iterations.numpy()) == 8
+
+
+def test_native_early_stop_gets_one_end_with_combined_history_before_shortfall_error():
+    """A native stop retains patience but cannot silently shorten BasicTraining."""
+    exp = _segmented_callback_experiment()
+    events = []
+    observer = _InvocationObserver(exp, events, "native")
+
+    class ConstantMonitor(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            logs["val_loss"] = 1.0
+
+    stop = tf.keras.callbacks.EarlyStopping(monitor="val_loss", mode="min", patience=2)
+    exp.train_fn.callbacks = (ConstantMonitor(), stop, observer)
+    with pytest.raises(ValueError, match="ended before its retained invocation target"):
+        exp.train_fn(exp)
+    assert observer.begins == observer.ends == 1
+    assert observer.epochs_seen == observer.final_history.epoch == [0, 1, 2]
+    assert observer.final_history.params["epochs"] == 4
+    assert observer.final_logs["val_loss"] == observer.validation_logs["loss"]
+    assert observer.final_history.history["val_loss"] == [1.0] * 3
+    assert observer.model.stop_training
+    assert stop.wait == 2 and stop.stopped_epoch == 2
+    assert (exp.state.step, exp.state.epoch, exp.state.target_epoch) == (6, 3, 4)
+
+
+def test_callback_failure_retry_gets_a_new_lifecycle_with_the_retained_target():
+    """No synthetic end on error; an admitted exact retry owns a new lifecycle."""
+    from dryml.models.experiment import _ObserverSession
+
+    exp = _segmented_callback_experiment()
+    events = []
+    native = _InvocationObserver(exp, events, "native")
+    telemetry = _InvocationObserver(exp, events, "telemetry")
+    failed = []
+    primary = RuntimeError("accepted callback interruption")
+
+    class FailOnce(tf.keras.callbacks.Callback):
+        def on_train_batch_end(self, batch, logs=None):
+            if exp.state.step == 3 and not failed:
+                exp.state._input_provider.capture()
+                failed.append(True)
+                raise primary
+
+    exp.train_fn.callbacks = (native, FailOnce())
+    with pytest.raises(RuntimeError) as caught:
+        exp.train_fn(exp, observer_session=_ObserverSession((telemetry,), strict=True))
+    assert caught.value is primary
+    assert native.begins == telemetry.begins == 1
+    assert native.ends == telemetry.ends == 0
+    assert native.epochs_seen == telemetry.epochs_seen == [0]
+    assert (exp.state.step, exp.state.epoch, exp.state.next_batch) == (3, 1, 1)
+    assert not exp.model._restore_failed and exp.state._input_provider is None
+
+    history = exp.train_fn(exp, observer_session=_ObserverSession((telemetry,), strict=True))
+    for callback in (native, telemetry):
+        assert (callback.begins, callback.ends, callback.bindings) == (2, 1, 2)
+        assert callback.epochs_seen == [1, 2, 3]
+        assert [params["epochs"] for params in callback.parameters] == [4, 4]
+        assert callback.final_history is history
+    assert history.epoch == [1, 2, 3]
+    assert (exp.state.step, exp.state.epoch, exp.state.target_epoch) == (8, 4, None)
+
+
+@pytest.mark.parametrize("failure_event", ("validation", "end"))
+def test_lifecycle_failures_preserve_primary_and_do_not_deliver_later_ends(failure_event):
+    """Validation errors omit end; final callback errors stop later end delivery."""
+    from dryml.models.experiment import _ObserverSession
+
+    exp = _segmented_callback_experiment()
+    events = []
+    native = _InvocationObserver(exp, events, "native")
+    telemetry = _InvocationObserver(exp, events, "telemetry")
+    primary = RuntimeError(f"native {failure_event} failure")
+
+    class Fail(tf.keras.callbacks.Callback):
+        def on_test_begin(self, logs=None):
+            if failure_event == "validation" and exp.state.epoch == 2:
+                raise primary
+
+        def on_train_end(self, logs=None):
+            if failure_event == "end":
+                raise primary
+
+    exp.train_fn.callbacks = (native, Fail())
+    with pytest.raises(RuntimeError) as caught:
+        exp.train_fn(exp, observer_session=_ObserverSession((telemetry,), strict=True))
+    assert caught.value is primary
+    assert native.begins == telemetry.begins == 1
+    assert native.ends == (1 if failure_event == "end" else 0)
+    assert telemetry.ends == 0
+    assert native.epochs_seen == telemetry.epochs_seen == ([0, 1, 2, 3] if failure_event == "end" else [0])
+    assert exp.state.step == (8 if failure_event == "end" else 4)
+    assert not exp.model._restore_failed and exp.state._input_provider is None
+
+
+def test_zero_work_emits_no_native_or_telemetry_lifecycle_or_binding():
+    """Callback setup and train lifecycle are both inert without a fit segment."""
+    from dryml.models.experiment import _ObserverSession
+
+    exp = _segmented_callback_experiment(epochs=0)
+    events = []
+    native = _InvocationObserver(exp, events, "native")
+    telemetry = _InvocationObserver(exp, events, "telemetry")
+    exp.train_fn.callbacks = (native,)
+    assert exp.train_fn(exp, observer_session=_ObserverSession((telemetry,), strict=True)) is None
+    assert events == []
+    assert native.bindings == telemetry.bindings == 0
+    assert native.parameters == telemetry.parameters == []
+
+
+def test_saved_early_stopping_patience_resumes_with_invocation_local_telemetry(tmp_path):
+    """Saved DRYML patience survives reload; telemetry gets a new suffix lifecycle."""
+    from dryml.core import Repo
+    from dryml.models import Experiment
+    from dryml.models.experiment import _ObserverSession
+    from dryml.models.tf import BasicEarlyStoppingTraining
+
+    repo = Repo(stores=tmp_path)
+    template = _segmented_callback_experiment(epochs=5)
+    trainer = BasicEarlyStoppingTraining(
+        optimizer=template.train_fn.optimizer, epochs=5, verbose=0,
+        monitor="loss", patience=2, min_delta=10.0)
+    exp = Experiment(template.model, trainer, train_data=template.train_data,
+                     val_data=template.val_data)
+    saved = []
+
+    class SavePatience(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            if epoch == 1:
+                assert exp.train_fn.early_stopping.wait == 1
+                saved.append(repo.save_object(exp, deep_capture=True))
+                raise RuntimeError("saved patience")
+
+    with pytest.raises(RuntimeError, match="saved patience"):
+        exp.train_fn(exp, observer_session=_ObserverSession((SavePatience(),), strict=True))
+    loaded = repo.load_state_ref(saved[0], reuse_live="never")
+    assert loaded.train_fn.early_stopping.wait == 1
+    assert loaded.train_fn.early_stopping.best_epoch == 0
+    events = []
+    telemetry = _InvocationObserver(loaded, events, "telemetry")
+    history = loaded.train_fn(loaded, observer_session=_ObserverSession((telemetry,), strict=True))
+    assert telemetry.begins == telemetry.ends == 1
+    assert telemetry.epochs_seen == history.epoch == [2, 3]
+    assert telemetry.params["epochs"] == history.params["epochs"] == 5
+    assert telemetry.final_history is history and telemetry.model.stop_training
+    assert loaded.train_fn.early_stopping.wait == 3
+    assert loaded.train_fn.early_stopping.accepted_target == 4
+    assert loaded.train_fn.early_stopping.restored
+    assert (loaded.state.step, loaded.state.epoch, loaded.state.target_epoch) == (8, 4, None)

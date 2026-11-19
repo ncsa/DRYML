@@ -407,6 +407,92 @@ def _freeze_native_keras_callbacks(tf, configured, fit_kwargs) -> tuple:
     return (*freeze(configured, "callbacks"), *freeze(fit_kwargs.pop("callbacks", ()), "fit callbacks"))
 
 
+class _KerasCallbackLifecycle:
+    """Own native callback setup, lifecycle and History across finite fit segments.
+
+    Batch, epoch and validation hooks stay in their original callback-list slots;
+    only setup and train begin/end belong to the invocation. Like native Keras,
+    an escaping fit or callback error does not synthesize a train-end event.
+    """
+
+    def __init__(self, tf, native_callbacks, telemetry_callbacks, *, target_epoch):
+        self.started = False
+        self.logs = None
+        lifecycle = self
+
+        class CallbackProxy(tf.keras.callbacks.Callback):
+            def __init__(self, callback):
+                super().__init__()
+                self.callback = callback
+                self._bound = self._configured = self._begun = False
+
+            def set_model(self, model):
+                super().set_model(model)
+                if not self._bound:
+                    self.callback.set_model(model)
+                    self._bound = True
+
+            def set_params(self, params):
+                params = {**params, "epochs": target_epoch}
+                super().set_params(params)
+                if not self._configured:
+                    self.callback.set_params(params)
+                    self._configured = True
+
+            def on_train_begin(self, logs=None):
+                if not self._begun:
+                    self.callback.on_train_begin(logs)
+                    self._begun = True
+
+            def on_train_end(self, logs=None):
+                pass
+
+        def forward(name):
+            def method(proxy, *args, **kwargs):
+                return getattr(proxy.callback, name)(*args, **kwargs)
+
+            method.__name__ = name
+            return method
+
+        for name in (
+            "on_test_begin", "on_test_end", "on_predict_begin", "on_predict_end",
+            "on_epoch_begin", "on_epoch_end", "on_train_batch_begin", "on_train_batch_end",
+            "on_test_batch_begin", "on_test_batch_end", "on_predict_batch_begin",
+            "on_predict_batch_end", "on_batch_begin", "on_batch_end",
+        ):
+            setattr(CallbackProxy, name, forward(name))
+
+        class ProgbarProxy(CallbackProxy, tf.keras.callbacks.ProgbarLogger):
+            """Keep Keras from adding a second default progress callback."""
+
+        class InvocationHistory(tf.keras.callbacks.History):
+            def set_params(self, params):
+                super().set_params({**params, "epochs": target_epoch})
+
+            def on_train_begin(self, logs=None):
+                if not lifecycle.started:
+                    super().on_train_begin(logs)
+                    lifecycle.started = True
+
+            def on_train_end(self, logs=None):
+                lifecycle.logs = logs
+
+        def proxy(callback):
+            cls = ProgbarProxy if isinstance(callback, tf.keras.callbacks.ProgbarLogger) else CallbackProxy
+            return cls(callback)
+
+        self.native = tuple(proxy(callback) for callback in native_callbacks)
+        self.telemetry = tuple(proxy(callback) for callback in telemetry_callbacks)
+        self.history = InvocationHistory()
+
+    def finish(self):
+        """Deliver one ordered train-end event after normal completion or stop."""
+
+        if self.started:
+            for proxy in (*self.native, *self.telemetry):
+                proxy.callback.on_train_end(self.logs)
+
+
 def _require_dataset_owned_keras_fit_inputs(fit_args, fit_kwargs) -> None:
     """Reject Keras fit routes that would replace Dataset-owned data policy.
 
@@ -1170,6 +1256,10 @@ class BasicTraining(TrainFunction):
     native-prefetched unaccepted values. Unknown finite streams require declared
     finite counts for DRYML safe-point callbacks. Source acknowledgment timeout
     raises TimeoutError with cleanup_pending evidence, never a partial checkpoint.
+    Native callbacks and telemetry receive one train-begin/end lifecycle across
+    finite fit segments, invocation-target ``params["epochs"]``, and one combined
+    History. Escaping native/source/callback errors retain Keras's no-train-end
+    semantics; a fresh zero-work invocation emits neither lifecycle event.
     """
 
     def __init__(
@@ -1225,7 +1315,8 @@ class BasicTraining(TrainFunction):
             observer_session: Optional invocation-local native telemetry session.
         Returns:
             Keras History combined across this call's fit segments, or None when
-            no segment is needed.
+            no segment is needed. Native train-end callbacks see this same History
+            on their model and the final segment's public logs.
         Raises:
             ValueError, TypeError: Unsupported inputs/options before acquisition.
             TimeoutError: Source-owner acknowledgment timed out; the exception's
@@ -1364,6 +1455,8 @@ class BasicTraining(TrainFunction):
         initial_step = exp.state.step
         target_epoch = exp.state.begin_invocation(self.epochs)
         self._begin_training_behavior(fresh=fresh_target)
+        lifecycle = _KerasCallbackLifecycle(
+            tf, native_callbacks, telemetry_callbacks, target_epoch=target_epoch)
         finish_behavior_epoch = lambda epoch, metrics: self._finish_training_behavior_epoch(
             exp, epoch, metrics
         )
@@ -1389,9 +1482,10 @@ class BasicTraining(TrainFunction):
                 epochs=epochs,
                 callbacks=[
                     accounting,
-                    *native_callbacks,
+                    *lifecycle.native,
                     _keras_postlude_callback(tf, exp, finish_behavior_epoch),
-                    *telemetry_callbacks,
+                    *lifecycle.telemetry,
+                    lifecycle.history,
                 ],
                 **segment_kwargs,
             )
@@ -1427,7 +1521,7 @@ class BasicTraining(TrainFunction):
                             break
                         continue
                     before_step = exp.state.step
-                    segment_history = fit_segment(
+                    history = fit_segment(
                         segment.dataset,
                         initial_epoch=epoch,
                         epochs=epoch + 1,
@@ -1438,16 +1532,11 @@ class BasicTraining(TrainFunction):
                             and not training_model.stop_training):
                         from dryml.data import DatasetExhaustedError
                         raise DatasetExhaustedError(segment.steps, exp.state.step - before_step)
-                    if history is None:
-                        history = segment_history
-                    else:
-                        history.epoch.extend(segment_history.epoch)
-                        for key, values in segment_history.history.items():
-                            history.history.setdefault(key, []).extend(values)
                     if training_model.stop_training:
                         break
                     if exp.state.epoch == epoch:
                         break
+            lifecycle.finish()
         except BaseException as error:
             premutation = (isinstance(error, tf.errors.InvalidArgumentError)
                            and "Invalid Keras consumed token" in str(error))
