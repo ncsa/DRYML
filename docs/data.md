@@ -774,9 +774,9 @@ recovery overhead. A subsequent correction to
 identity Node while retaining replacement-handle comparison, live-binding checks,
 invalidation and reservation exclusion. A deterministic two-update regression now
 observes zero graph comparisons or `NodePreparation` constructions, replacing six
-comparisons and twelve preparations before the correction. No post-correction
-comparative timing was run, so the historical Torch ratio is neither a current
-measurement nor evidence that the complete regression is resolved. Indexed per-row
+comparisons and twelve preparations before the correction. The historical Torch
+ratio is neither a current measurement nor evidence that the complete regression
+is resolved; later cost-domain-v2 evidence is recorded below. Indexed per-row
 Map validation/collation and section delivery also need investigation without
 weakening membership or ownership.
 
@@ -801,16 +801,33 @@ absent and the fixed-profile JAX driver was unimplemented. Subsequent
 owner-authorized setup installed Optax 0.2.4 and Chex 0.1.89 alongside unchanged
 JAX/JAXlib 0.5.3 and NumPy 2.1.3. The driver is now implemented and has tiny real
 CPU unit qualification, including the actual pinned baseline in an isolated
-source-archive process. Its fixed-profile comparative cells have not been run;
-all remain required, and absent evidence blocks the report. The owner authorized
-one fresh 1,200-second comparison after runtime optimization; this driver work
-does not start that budget or replace the exhausted historical result.
+source-archive process. The owner-authorized fresh cost-domain-v2 comparison at
+`fde25998` consumed 894.4321190109476 seconds, observed indexed/Torch/TF/JAX steady
+regressions, and failed old Keras because the shared recipe omitted compile loss.
+The subsequent finite Array/Map-to-Batch kernel reduces child signaling and
+publishes equivalent metadata once per batch, with per-row source advancement,
+retention and validation preserved. The corrected benchmark supplies explicit MSE
+to old/new TF and Keras. Confirmation instrumentation now requires matching
+cell-owned runtime and driver identity; historical evidence is never retrofitted.
+
+The single confirmation at `e393202d` used the same fixed work, warmups and five
+timed windows. It exhausted the cumulative budget at **1,201.22 seconds**, including
+termination/report overhead, and remains **unverified**. Completed steady ratios
+were **1.070 indexed**, **1.278/1.255 Torch** at cadences 0/32, and **1.198 JAX** at
+cadence 0; each slowdown exceeds the initial three-max-MAD envelope. The deadline
+interrupted old JAX cadence 32 and left later Keras/TF/explicit-indexed/source cells
+incomplete. No old throughput or stale instrumentation was substituted to qualify
+them. The recipe's real tiny functional checks do not replace its missing fixed
+comparison. Both authorized comparison attempts are spent; no further measurement
+budget or second confirmation is implied.
 Pending-window/compile/copy
 metrics missing from successful instrumentation remain explicitly unknown. The earlier barrier-based Keras
 overlap/capture correctness evidence is independent and is not replaced by these
-timings. The complete routine runner subsequently passed 4,978 tests with 30 skips
-but took **914.70 seconds** of full wall time, failing the strict under-900-second
-gate. See [implementation qualification](dataset_traversal_qualification.md) for
+timings. The historical complete routine runner passed 4,978 tests with 30 skips
+in **914.70 seconds**. After the material corrections, the full runner at
+`e393202d` passed **5,102 tests with 25 skips** in **929.86 seconds**. Both fail the
+strict under-900-second gate. See
+[implementation qualification](dataset_traversal_qualification.md) for
 the exact command, review corrections, and unresolved gates. Completion still
 requires regression diagnosis, resolved fixed comparison evidence, real
 available-backend qualification, and a successful strictly-under-900-second run.

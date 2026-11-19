@@ -10,7 +10,9 @@ remain blocking. Passing correctness checks do not waive those requirements.
 Latest corrections cover the linear Array/Map-to-Batch kernel, the
 [explicit TF/Keras recipe loss](#fresh-comparison-tfkeras-recipe-loss-correction),
 and confirmation instrumentation identity.
-The first fresh report remains **unverified**; its one confirmation is unused.
+The fresh report and its single confirmation remain **unverified**. Their
+cumulative comparison budget is exhausted, and the latest complete routine
+runner also fails the strict timing gate at **929.86 seconds**.
 
 The canonical decision artifact is
 `docs/plans/2026-11-14-001-feat-dataset-traversal-continuation-plan.md`.
@@ -77,6 +79,41 @@ runner overhead, collection, setup, and both interpreter phases. An exit-zero ru
 at 914.70 seconds is not a passing timing gate. No assertions or representative
 coverage were weakened, and the same expensive suite was not repeated merely to
 seek a faster sample.
+
+### Post-kernel complete routine gate
+
+After material kernel, driver and evidence corrections at `e393202d`, the same
+complete routine command ran with CPU/single-thread controls:
+
+```sh
+/usr/bin/time -o /tmp/dryml/dataset-routine-time-e393202d.txt -f 'exit=%x wall_seconds=%e' ./tests.sh good-enough --ignore tests/old --ignore tests/dev -x tests
+```
+
+| Phase | Passed | Skipped | Pytest elapsed |
+|---|---:|---:|---:|
+| Isolated session/runtime/dispatch phase | 265 | 0 | 47.68 s |
+| Remaining representative maintained selection | 4,837 | 25 | 875.67 s |
+| Complete runner | **5,102** | **25** | **929.86 s full wall time** |
+
+Exit zero establishes correctness for the selected tests, but **R20 still
+fails**. The 47 new linear-kernel cases and 115 backend-free benchmark checks
+remain in the routine selection. Nine expanded real builder probes are opt-in;
+named native training representatives remain selected. No assertions were
+weakened. The runner was not repeated after this failed timing result.
+
+A bounded diagnosis then ran only the two changed test files, retaining all
+their selected cases:
+
+```sh
+./tests.sh tests/tools/test_benchmark_dataset_traversal.py tests/data/test_linear_batch_kernel.py --no-cov -m 'not exhaustive_only' --durations=15
+```
+
+Result: **162 passed, 9 deselected in 34.59 seconds**. Many protocol corruption
+cases each rebuild and atomically publish a complete synthetic matrix, costing
+about 1.2 seconds per case. Shared immutable setup with per-case deep copies is
+a possible test-overhead correction, not an implemented improvement or a waiver
+of the timing gate. Cold native imports also appear in the focused timing; they
+must not be double-counted as independent routine costs.
 
 ### Additional focused evidence
 
@@ -369,6 +406,45 @@ routes were unavailable; the disclosed static local fallback identified the
 stale-instrumentation P1, now corrected and covered by focused tests. No
 independent reviewer or cross-model validation is claimed for this delta.
 
+### Single post-kernel confirmation: budget exhausted, regressions remain
+
+At clean runtime revision `e393202d`, the one authorized confirmation used the
+unchanged profile, all required modes/cells, and a workload order prioritizing
+indexed, Torch, JAX and then corrected Keras evidence. The prior report's
+894.4321190109476-second charge remained binding:
+
+```sh
+/usr/bin/time -o /tmp/dryml/u8-evidence/confirmation-e393202d.wall.txt -f 'exit=%x wall_seconds=%e' python -m tests.tools.benchmark_dataset_traversal --baseline-source /tmp/dryml/u8-baseline-f569da67 --baseline-revision 9a681eabfe53b66f9d6d1459960ba10b95c1ff1d --confirm /tmp/dryml/u8-evidence/comparison-fresh-fde25998.json --output /tmp/dryml/u8-evidence/confirmation-e393202d.json --workload indexed-implicit --workload torch --workload jax --workload keras --workload tf --workload indexed-explicit --workload ordinary --workload direct --workload mixed --workload buffered
+```
+
+Exit **1**, confirmation wall **306.87 seconds**, cumulative tool elapsed
+**1201.2203454473056 seconds**, `confirmation_count=1`, status **unverified**.
+Termination and aggregation overhead are charged, not hidden. Historical
+instrumentation lacks a cell identity and was not reused. No throughput from the
+first report was merged into the confirmation to replace unfinished cells.
+
+Completed comparable steady windows (seconds, median ± MAD):
+
+| Work | Pre-change | New | New/pre-change | Three-max-MAD envelope |
+|---|---:|---:|---:|---:|
+| Indexed implicit, 1,016 post-first batches | 3.714223 ± 0.017297 | 3.974633 ± 0.035538 | 1.070112 | 0.106613 |
+| Torch, 124 timed updates, cadence 0 | 0.126583 ± 0.001491 | 0.161739 ± 0.000332 | 1.277731 | 0.004472 |
+| Torch, 124 timed updates, cadence 32 | 0.129622 ± 0.000182 | 0.162725 ± 0.001355 | 1.255380 | 0.004066 |
+| JAX, 124 timed updates, cadence 0 | 0.149058 ± 0.002093 | 0.178595 ± 0.002101 | 1.198159 | 0.006304 |
+
+Each new-minus-old delta exceeds its noise envelope. **R28 remains failing**;
+the work-count reduction did not resolve these measured regressions. Complete
+training still performs 128 updates/four sections; the steady numerator is 124.
+JAX cadence-zero full invocation and end-to-end totals improved relative to old,
+but those informational domains do not waive its isolated steady regression.
+
+The deadline interrupted old JAX cadence 32; its remaining cells and subsequent
+Keras, TF, explicit-indexed and source/recovery cells are budget-exhausted. The
+corrected Keras loss recipe therefore still lacks post-correction fixed-profile
+evidence, despite its real tiny functional checks. Native gaps and unavailable
+grouped steady domains remain explicitly labeled in JSON. Neither a second
+confirmation nor another independent comparison budget is authorized.
+
 ## Review corrections
 
 Ten local review lenses completed; one independent validation batch confirmed
@@ -397,7 +473,7 @@ different-model corroboration.
 
 1. **Routine performance:** reduce complete runner wall time below 900 seconds
    without weakening representative tests. The current complete result is
-   914.70 seconds.
+   **929.86 seconds** at `e393202d`; historical 914.70 seconds also failed.
 2. **Comparative performance:** the historical fixed 1,200-second comparison
    budget was exhausted. Earlier indexed and Torch regression signals are preserved in
    [the Data measurement section](data.md#bounded-cpu-evidence-and-unresolved-gates).
@@ -406,13 +482,16 @@ different-model corroboration.
    894.4321190109476 seconds and observed indexed, Torch, explicit-TF and JAX
    steady regressions beyond measured noise. Old Keras failed because of the
    recipe loss omission. The subsequent linear kernel and corrected TF/Keras
-   recipe have no post-fix comparative evidence yet. One confirmation remains
-   within the residual 305.5678809890524 seconds; the fresh report remains
+   recipe were then subject to the one authorized confirmation at `e393202d`.
+   It exhausted the cumulative budget at 1201.2203454473056 seconds, retained
+   indexed/Torch/JAX steady regressions, and left later required cells incomplete.
+   No further comparison or confirmation budget remains; both reports are
    unverified and historical failures are not relabeled.
 3. **Comparative JAX evidence:** real Optax is now available and the four-mode
    driver has tiny numerical unit qualification and real fixed-profile evidence
-   at `fde25998`, with new steady regression signals. Post-kernel confirmation
-   and final verification remain outstanding; JAX is not exempted.
+   at `fde25998`. Post-kernel cadence-zero confirmation still observes a steady
+   regression; cadence 32 was interrupted by the total deadline. JAX is not
+   exempted, and its complete comparative qualification remains unresolved.
 4. **Remaining evidence limits:** comparative copy/compile/pending-window metrics
    are incomplete. Python 3.10 failure-note behavior was emulated on Python 3.12
    with `add_note` unavailable; no real Python 3.10 run occurred. Accelerator
