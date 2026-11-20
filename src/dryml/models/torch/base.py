@@ -550,6 +550,11 @@ class Training(TrainFunction):
         Safe-point saves capture matching accepted continuation; stale exact retries
         require durable reload. Transient optimizers retain positional recovery.
         Zero work performs metadata admission without loss/optimizer/input setup.
+        Exact built-in Model instances in eager mode with default_batched=None
+        retain one raw selected signature adapter locally across training batches.
+        Every call still delivers arguments/returns, converts and places tensors,
+        and runs inside the native-owner lease. Mode/default changes are checked
+        each batch and retire that adapter; custom models use ordinary dispatch.
         """
         callbacks = validate_training_callbacks(callbacks)
         if observer_session is not None:
@@ -615,6 +620,7 @@ class Training(TrainFunction):
             return []
         total_steps = None if steps_per_epoch is None else int(steps_per_epoch) * self.epochs
         progress = TrainingProgress(total=total_steps, verbose=self.verbose, desc="Torch training")
+        selected_model = model_invoker = None
 
         try:
             stopped = self._finish_pending_epoch(
@@ -647,7 +653,16 @@ class Training(TrainFunction):
 
                         with inputs.update(input_candidate):
                             optimizer.zero_grad()
-                            y_pred = exp.model(x)
+                            model = exp.model
+                            if type(model) is Model and model.call_mode == "eager" and model.default_batched is None:
+                                Backend.torch.module
+                                if selected_model is not model:
+                                    model_invoker = model.find_implementation(backend="torch").prepared_invoker()
+                                    selected_model = model
+                                y_pred = model_invoker(x)
+                            else:
+                                selected_model = model_invoker = None
+                                y_pred = model(x)
                             loss_value = loss_fn(y_pred, y)
                             loss_value.backward()
                             optimizer.step()

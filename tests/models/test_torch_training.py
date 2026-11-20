@@ -16,6 +16,8 @@ if not hasattr(torch, "Tensor"):
     sys.modules.pop("torch", None)
     pytest.skip("PyTorch is not installed.", allow_module_level=True)
 
+from dryml.models.torch import Model as TorchModel
+
 
 class EffectfulModule(torch.nn.Module):
     def __init__(self):
@@ -25,6 +27,16 @@ class EffectfulModule(torch.nn.Module):
     def forward(self, value):
         self.calls += 1
         return value
+
+
+class DynamicSelectionTorchModel(TorchModel):
+    """Expose per-value custom selection for the training fallback regression."""
+
+    def _runtime_selection_facts(self, args, kwargs):
+        from dryml.core.backend import Backend
+
+        self.selection_shapes.append(tuple(args[0].shape))
+        return Backend.torch, None
 
 
 class DatasetContinuationTorchPairs(Object, torch.utils.data.Dataset):
@@ -443,6 +455,187 @@ def _torch_accounting_experiment(*, repo=None, count=64, batch_size=1, lr=0.01):
         train_data=Batch(ArrayDataset((x, y), repo=repo), batch_size, repo=repo),
         repo=repo,
     )
+
+
+def test_torch_training_retains_raw_selection_and_signature_per_invocation(monkeypatch):
+    from dryml.core.backend import Backend
+    from dryml.models.torch import Model
+    from dryml.methods.implementation import SelectedDescriptorAdapter
+    from dryml.core import signatures
+
+    exp = _torch_accounting_experiment(count=3, batch_size=1)
+    graph = exp.model.method_graph()
+    eager = exp.model._select(Backend.torch, None)
+    canonical = exp.model.find_implementation(backend="torch")
+    assert canonical.name == eager.name == "raw_call"
+    assert canonical.target is eager.target
+    assert canonical.conversion_edge is eager.conversion_edge is None
+    catalogs, compiles, deliveries = [], [], []
+    original_catalog = Model.implementations
+    original_compile = signatures.compile_signature
+    original_prepare = SelectedDescriptorAdapter.prepare
+    original_return = SelectedDescriptorAdapter.invoke_prepared
+
+    def catalog(owner):
+        catalogs.append(owner)
+        return original_catalog(owner)
+
+    def compile(target):
+        if getattr(target, "__name__", None) == "raw_call":
+            compiles.append(target)
+        return original_compile(target)
+
+    def prepare(adapter, args, kwargs):
+        if adapter.name == "raw_call":
+            deliveries.append("args")
+        return original_prepare(adapter, args, kwargs)
+
+    def invoke(adapter, args, kwargs, **controls):
+        result = original_return(adapter, args, kwargs, **controls)
+        if adapter.name == "raw_call":
+            deliveries.append("return")
+        return result
+
+    monkeypatch.setattr(Model, "implementations", catalog)
+    monkeypatch.setattr(signatures, "compile_signature", compile)
+    monkeypatch.setattr(SelectedDescriptorAdapter, "prepare", prepare)
+    monkeypatch.setattr(SelectedDescriptorAdapter, "invoke_prepared", invoke)
+    observed = []
+    for invocation in range(2):
+        losses = exp.train_fn(exp, callbacks=(lambda: observed.append(exp.state.step),))
+        assert len(losses) == 3
+        # Canonical find_implementation reads compatible candidates then selects.
+        assert len(catalogs) == 2 * (invocation + 1)
+        assert len(compiles) == invocation + 1
+        assert exp.model.call_mode == "eager" and exp.model.cached_signature is None
+        assert exp.model.method_graph().nodes == graph.nodes
+        assert exp.model.method_graph().conversion_edges == ()
+    assert deliveries == ["args", "return"] * 6
+    assert observed == list(range(1, 7))
+    assert exp.state.examples_seen == 6 and not exp.model.obj.training
+
+
+@pytest.mark.parametrize("change", ["learning", "prepared", "default"])
+@pytest.mark.parametrize("when", ["initial", "callback"])
+def test_torch_retained_model_call_honors_callback_mode_changes(monkeypatch, change, when):
+    from dryml.methods import Method
+
+    exp = _torch_accounting_experiment(count=3, batch_size=1)
+    modes = []
+    original = Method._alternative_call
+
+    def gateway(receiver, args, kwargs, **controls):
+        if receiver is exp.model:
+            modes.append((receiver.call_mode, receiver.default_batched))
+        return original(receiver, args, kwargs, **controls)
+
+    monkeypatch.setattr(Method, "_alternative_call", staticmethod(gateway))
+
+    def change_mode():
+        if change == "learning":
+            exp.model.learn()
+        elif change == "prepared":
+            exp.model.learn(TensorSpec("float32", shape=(1,), batch=1, backend="torch"))
+        else:
+            exp.model.default_batched = True
+
+    def callback():
+        if when == "callback" and exp.state.step == 1:
+            change_mode()
+
+    if when == "initial":
+        change_mode()
+    exp.train_fn(exp, callbacks=(callback,))
+    calls = 3 if when == "initial" else 2
+    expected = ([("learning", None)] + [("cached", None)] * (calls - 1) if change == "learning" else
+                [("cached", None)] * calls if change == "prepared" else [("eager", True)] * calls)
+    assert modes == expected
+    assert exp.state.step == exp.state.examples_seen == 3
+
+
+def test_torch_retained_call_reselects_after_return_to_default_eager(monkeypatch):
+    from dryml.models.torch import Model
+
+    exp = _torch_accounting_experiment(count=3, batch_size=1)
+    selections = []
+    original = Model.find_implementation
+
+    def select(owner, *args, **kwargs):
+        selections.append((owner.call_mode, owner.default_batched, kwargs))
+        return original(owner, *args, **kwargs)
+
+    monkeypatch.setattr(Model, "find_implementation", select)
+
+    def callback():
+        exp.model.default_batched = True if exp.state.step == 1 else None
+
+    exp.train_fn(exp, callbacks=(callback,))
+    assert selections == [("eager", None, {"backend": "torch"})] * 2
+    assert exp.state.step == 3
+
+
+def test_torch_custom_runtime_selection_stays_dynamic():
+    from dryml.models.torch import Optimizer, Training
+
+    model = DynamicSelectionTorchModel(torch.nn.Linear, 1, 1)
+    model.selection_shapes = []
+    data = Batch(ArrayDataset((np.zeros((3, 1), dtype=np.float32), np.zeros((3, 1), dtype=np.float32))), 2)
+    trainer = Training(optimizer=Optimizer(torch.optim.SGD, target=model, lr=0.0),
+                       loss_cls=torch.nn.MSELoss, epochs=1, verbose=0)
+    exp = Experiment(model, trainer, train_data=data)
+    trainer(exp)
+    assert model.selection_shapes == [(2, 1), (1, 1)]
+    assert exp.state.step == 2 and exp.state.examples_seen == 3
+
+
+def test_torch_retained_raw_training_matches_native_sgd(monkeypatch):
+    from dryml.models.torch import base as torchbase
+
+    monkeypatch.setattr(torchbase, "_resolve_device", lambda torch: torch.device("cpu"))
+    exp = _torch_accounting_experiment(count=3, batch_size=1)
+    native = torch.nn.Linear(1, 1)
+    native.load_state_dict(exp.model.obj.state_dict())
+    optimizer = torch.optim.SGD(native.parameters(), lr=0.01)
+    expected = []
+    for value in torch.arange(3, dtype=torch.float32).reshape(-1, 1, 1) / 10.0:
+        optimizer.zero_grad()
+        loss = torch.nn.functional.mse_loss(native(value), value * 2.0)
+        loss.backward()
+        optimizer.step()
+        expected.append(loss.item())
+
+    actual = exp.train_fn(exp)
+    assert actual == pytest.approx(expected)
+    torch.testing.assert_close(exp.model.obj.state_dict(), native.state_dict())
+    assert all(parameter.grad is not None for parameter in exp.model.obj.parameters())
+
+
+def test_torch_retained_call_keeps_native_lease_and_invalidates_forward_failure(monkeypatch):
+    from dryml.core.repo import RepoSaveError
+    from dryml.models.torch import base as torchbase
+
+    monkeypatch.setattr(torchbase, "_resolve_device", lambda torch: torch.device("cpu"))
+    exp = _torch_accounting_experiment(count=3, batch_size=1)
+    repo = Repo()
+    original = exp.model.obj.forward
+    calls = []
+
+    def forward(value):
+        assert value.device.type == "cpu" and exp.model.obj.training
+        with pytest.raises(RepoSaveError, match="reserved"):
+            repo.reserve_state_graph(exp)
+        calls.append(exp.state.step)
+        if len(calls) == 2:
+            raise RuntimeError("native forward failed")
+        return original(value)
+
+    monkeypatch.setattr(exp.model.obj, "forward", forward)
+    with pytest.raises(RuntimeError, match="native forward failed"):
+        exp.train_fn(exp)
+    assert calls == [0, 1]
+    assert exp.state.step == exp.state.input_sequence == exp.state.examples_seen == 1
+    assert exp.model._restore_failed and exp._restore_failed
+    assert exp.state._input_provider is None and not exp.model.obj.training
 
 
 def test_torch_interrupt_at_step_32_resumes_exact_remaining_epoch(tmp_path):
@@ -907,9 +1100,11 @@ def test_torch_early_stopping_reports_stop_then_closes_telemetry(tmp_path):
     assert trainer.early_stopping.accepted_target == 2
 
 
-def test_torch_strict_stop_telemetry_resumes_without_extra_updates(tmp_path):
-    """A persisted completed stop finalizes without reopening training data."""
+@pytest.mark.parametrize("checkpoint_requested", [True, False])
+def test_torch_strict_stop_telemetry_resumes_without_extra_updates(tmp_path, checkpoint_requested):
+    """A stopped observer failure permits recovery only with a requested current record."""
 
+    from dryml.core.repo import RepoSaveError
     from dryml.models.torch import EarlyStoppingTraining, Model, Optimizer
 
     repo = Repo(DirStore(tmp_path / "state"))
@@ -935,6 +1130,8 @@ def test_torch_strict_stop_telemetry_resumes_without_extra_updates(tmp_path):
 
     def fail_stopped_epoch(logs):
         if logs["event"] == "epoch_end" and logs["stopped"]:
+            if checkpoint_requested:
+                repo.save(exp, deep_capture=True)
             raise RuntimeError("strict stopped epoch")
 
     with pytest.raises(RuntimeError, match="strict stopped epoch"):
@@ -956,7 +1153,26 @@ def test_torch_strict_stop_telemetry_resumes_without_extra_updates(tmp_path):
     stopped_optimizer_steps = [
         int(state["step"].item()) for state in optimizer.obj.state.values()
     ]
-    checkpoint = repo.save_object(exp, deep_capture=True)
+    assert exp.state._input_provider is None
+    assert exp.state.input_started and exp.state.input_recovery == "exact"
+    if not checkpoint_requested:
+        assert exp.state.dataset_state is None
+        with pytest.raises(RepoSaveError) as failure:
+            repo.save(exp, deep_capture=True)
+        assert isinstance(failure.value.__cause__, ValueError)
+        assert "current matching record" in str(failure.value.__cause__)
+        with pytest.raises(ValueError, match="current matching record"):
+            trainer(exp)
+        assert (exp.state.epoch, exp.state.step, exp.state.target_epoch) == (2, 4, 5)
+        assert exp.state.dataset_state is None
+        torch.testing.assert_close(model.obj.state_dict(), stopped_model)
+        assert [
+            int(state["step"].item()) for state in optimizer.obj.state.values()
+        ] == stopped_optimizer_steps
+        return
+
+    assert exp.state.dataset_state.position == exp.state.input_position
+    checkpoint = repo.save(exp, deep_capture=True)
     resumed = repo.load_state_ref(checkpoint, reuse_live="never")
 
     final = resumed.train(managed=ManagedConfig(

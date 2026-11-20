@@ -95,13 +95,16 @@
           ]
         },
         "tests/models/test_training_transaction.py": {
-          "rationale": "Small backend-free accepted-cut, input-unstarted, stale-retry and provider-lifetime representatives; persisted fault-window products remain opt-in.",
+          "rationale": "Small backend-free accepted-cut, input-unstarted, stale-retry, provider-lifetime and native-boundary validation representatives; persisted fault-window products remain opt-in.",
           "functions": [
             "test_positive_completion_captures_once_without_per_update_capture",
             "test_fresh_zero_work_is_source_inert_and_value_encoding_is_v3",
             "test_exception_without_current_capture_rejects_retry_before_prepare",
             "test_provider_retirement_survives_replaced_train_state_binding",
-            "test_positional_lane_keeps_weaker_retry_and_has_no_record"
+            "test_positional_lane_keeps_weaker_retry_and_has_no_record",
+            "test_update_validates_retained_plan_only_before_native_and_at_acceptance",
+            "test_acceptance_rechecks_owner_binding_after_native_work",
+            "test_boundary_hook_requires_fresh_validation_before_reservation"
           ]
         },
         "tests/metrics/test_reduction_metrics.py": {

@@ -138,6 +138,10 @@ class TrainingInputSession:
 
     def _reserve(self):
         self._check()
+        return self._reserve_checked()
+
+    def _reserve_checked(self):
+        """Reserve immediately checked evidence without intervening user/native work."""
         return self._repo._reserve_state_graph_evidence(
             self._plan, self._plan.nodes, self._plan.object_ids)
 
@@ -161,7 +165,7 @@ class TrainingInputSession:
         self._check()
         if self._guard is not None:
             raise TraversalOwnershipError("A native step is already in progress.")
-        self._guard = self._reserve()
+        self._guard = self._reserve_checked()
         self._candidate, self._accepted = None, False
 
     def _end_bridge_update(self, *, failed=False):
@@ -199,6 +203,8 @@ class TrainingInputSession:
             Acquires a nonblocking Core lease from retained evidence, released
             before callbacks. No graph reconstruction, SQL, capture, rollback copy,
             or recovery-only native synchronization occurs per update.
+            Read-through validation runs before native work and again at acceptance;
+            immediate lease acquisition reuses only the preceding local check.
         """
         self._check()
         if type(repairable) is not bool:
@@ -208,7 +214,7 @@ class TrainingInputSession:
         self.traversal._validate_candidate(candidate)
         if self.exp.state.input_position != self.traversal.position:
             raise ValueError("Training accounting does not match its accepted input cut.")
-        self._guard = self._reserve()
+        self._guard = self._reserve_checked()
         self._candidate, self._accepted = candidate, False
         try:
             yield

@@ -588,7 +588,7 @@ def test_good_enough_collects_prepared_numpy_validation_regressions(tmp_path):
 
 
 def test_good_enough_collects_native_regressions_without_eager_framework_imports(tmp_path):
-    """Fresh routine collection retains exact native cases without backend activation."""
+    """Routine collection retains native and transaction cases without backend activation."""
     report_path = tmp_path / "native-collection.json"
     script = r'''
 import importlib.abc
@@ -616,6 +616,7 @@ owners = {
     "./tests/models/test_dataset_training_integration.py",
     "./tests/models/test_tf_training.py",
     "./tests/models/test_torch_training.py",
+    "./tests/models/test_training_transaction.py",
 }
 selected_files = [
     path for path in test_buckets.select_profile_files(
@@ -659,7 +660,10 @@ sys.exit(pytest.main([
     assert result.returncode == 0, result.stdout + result.stderr
     report = json.loads(report_path.read_text())
     assert report["exitstatus"] == 0
-    assert report["selected_files"] == ["./tests/models/test_dataset_training_integration.py"]
+    assert report["selected_files"] == [
+        "./tests/models/test_dataset_training_integration.py",
+        "./tests/models/test_training_transaction.py",
+    ]
     owner = "tests/models/test_dataset_training_integration.py"
     expected = {
         f"{owner}::{function}" for function in (
@@ -680,6 +684,20 @@ sys.exit(pytest.main([
             "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
         )
     }
+    owner = "tests/models/test_training_transaction.py"
+    expected.update(
+        f"{owner}::{function}" for function in (
+            "test_positive_completion_captures_once_without_per_update_capture",
+            "test_fresh_zero_work_is_source_inert_and_value_encoding_is_v3",
+            "test_exception_without_current_capture_rejects_retry_before_prepare",
+            "test_provider_retirement_survives_replaced_train_state_binding",
+            "test_positional_lane_keeps_weaker_retry_and_has_no_record",
+            "test_update_validates_retained_plan_only_before_native_and_at_acceptance[False]",
+            "test_update_validates_retained_plan_only_before_native_and_at_acceptance[True]",
+            "test_acceptance_rechecks_owner_binding_after_native_work",
+            "test_boundary_hook_requires_fresh_validation_before_reservation",
+        )
+    )
     assert len(report["nodeids"]) == len(expected)
     assert set(report["nodeids"]) == expected
     assert report["tiers"] == {nodeid: ["medium"] for nodeid in expected}

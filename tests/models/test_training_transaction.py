@@ -74,6 +74,64 @@ def test_positive_completion_captures_once_without_per_update_capture(monkeypatc
     assert exp.state._input_provider is None
 
 
+@pytest.mark.parametrize("bridge", [False, True])
+def test_update_validates_retained_plan_only_before_native_and_at_acceptance(monkeypatch, bridge):
+    from dryml.models import training_transaction
+
+    _, exp = experiment()
+    with exp.train_fn.input_session(exp) as session:
+        view = session.traversal.next_epoch()
+        checks = []
+        original = training_transaction.validate_retained_save_plan
+
+        def validate(*args):
+            checks.append(exp.state.step)
+            return original(*args)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(training_transaction, "validate_retained_save_plan", validate)
+            for _ in range(2):
+                candidate = view.reserve()
+                if bridge:
+                    session._begin_bridge_update()
+                    session._candidate = candidate
+                    record_train_update(exp, candidate.value, 1., batched=False, input_candidate=candidate)
+                    session._end_bridge_update()
+                else:
+                    with session.update(candidate):
+                        record_train_update(exp, candidate.value, 1., batched=False, input_candidate=candidate)
+            assert checks == [0, 0, 1, 1]
+
+
+def test_acceptance_rechecks_owner_binding_after_native_work():
+    _, exp = experiment()
+    original = exp.model
+    with pytest.raises(RepoSaveError, match="binding"):
+        with exp.train_fn.input_session(exp) as session:
+            candidate = session.traversal.next_epoch().reserve()
+            with session.update(candidate):
+                original.value += 1
+                exp.model = Counter()
+                record_train_update(exp, candidate.value, 1., batched=False, input_candidate=candidate)
+    assert original._restore_failed and exp._restore_failed
+    assert exp.state.step == exp.state.input_sequence == 0
+
+
+def test_boundary_hook_requires_fresh_validation_before_reservation(monkeypatch):
+    _, exp = experiment()
+    original = exp.model
+    with exp.train_fn.input_session(exp) as session:
+        def change_binding():
+            exp.model = Counter()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(session.traversal, "_sync_boundary", change_binding, raising=False)
+            with pytest.raises(RepoSaveError, match="binding"):
+                session.sync_boundary()
+        exp.model = original
+        assert exp.state.step == exp.state.input_sequence == 0
+
+
 def test_fresh_zero_work_is_source_inert_and_value_encoding_is_v3(tmp_path, monkeypatch):
     repo, exp = experiment(tmp_path)
     monkeypatch.setattr(type(exp.train_data), "prepare", lambda _: pytest.fail("prepared zero work"))

@@ -210,6 +210,22 @@ validation and owner checks precede mutation. Core owner evidence is prepared
 once and read-through freshness/exclusion checks remain active per update; no
 per-update graph reconstruction, SQL, full continuation construction, model
 rollback copy, or extra native completion barrier is introduced.
+The immediate reservation reuses its preceding local check only where no user or
+native effect intervenes. Acceptance still revalidates after native work; boundary
+synchronization retains both checks around its possible hook. Owner-thread,
+binding, invalidation, and Core exclusion checks remain active across updates.
+
+Torch training retains an invocation-local raw selected adapter only for exact
+built-in `dryml.models.torch.Model` instances in eager mode with
+`default_batched=None`. It uses canonical `find_implementation(backend="torch")`
+without forcing batched intent. Each value still crosses argument and return
+signature delivery and the existing tensor-conversion/device-placement body under
+the native-owner lease. Each training batch checks the current mode/default;
+learning, cached, or explicit batch defaults retire the local adapter and use
+ordinary dispatch. A subsequent eligible batch selects afresh. Custom/subclass and
+composite models retain ordinary dispatch. No shared Method mode, learned graph,
+or per-value validation result is cached by this optimization. These bounded
+work-count reductions do not establish a throughput improvement.
 
 Unknown EOF/empty-section discovery is installed with `session.sync_boundary()`
 without inventing an optimizer step. Complete the retained epoch postlude before
