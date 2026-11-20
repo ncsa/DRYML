@@ -861,6 +861,18 @@ the exact command, review corrections, and unresolved gates. Completion still
 requires regression diagnosis, resolved fixed comparison evidence, real
 available-backend qualification, and a successful strictly-under-900-second run.
 
+Subsequent owner-directed optimization shared immutable test setup, compiled
+exact-NumPy input predicates, grouped pure Array batch ownership, and retained
+eligible native model-call setup. The complete routine runner at `238a2cbd`
+passed **5,149 tests with 25 skips in 898.23 seconds**. The complete comparison at
+`3d1df5e7` measured indexed steady time at **0.824319 times baseline**; its
+post-correction training confirmation at `238a2cbd` measured Torch at
+**0.900239/0.899465** for cadences 0/32. That round still exhausted its total
+budget and retained TF/JAX regressions and unresolved Keras noise. Later TF
+selection and JAX placement-only compilation corrections have focused tests but
+still need comparative and final-tree routine qualification. See the current
+evidence section of the qualification document; no historical report is relabeled.
+
 ## Source Datasets
 
 Common source dataset classes:

@@ -4,21 +4,121 @@
 
 The traversal, continuation, Accumulate, accepted-training-state, and native
 consumer implementation is present on `fix/real-usage-followups`. The plan is
-**not complete**: required comparative and routine performance qualification
-remain blocking. Passing correctness checks do not waive those requirements.
+**not complete**: comparative performance qualification remains blocking.
+The complete routine gate passed at `238a2cbd`; final verification of subsequent
+backend corrections remains pending. Passing correctness checks do not waive
+comparative requirements.
 
 Latest corrections cover the linear Array/Map-to-Batch kernel, the
 [explicit TF/Keras recipe loss](#fresh-comparison-tfkeras-recipe-loss-correction),
 and confirmation instrumentation identity.
-The fresh report and its single confirmation remain **unverified**. Their
-cumulative comparison budget is exhausted, and the latest complete routine
-runner also fails the strict timing gate at **929.86 seconds**.
+Earlier exhausted reports remain **unverified**. The latest complete routine
+runner passed **5,149 tests with 25 skips in 898.23 seconds**. Current evidence
+and the owner's continued-execution direction are recorded below.
 
 The canonical decision artifact is
 `docs/plans/2026-11-14-001-feat-dataset-traversal-continuation-plan.md`.
 Its body was not changed during implementation. The annotated local tag
 `pre-dataset-improvement` pins baseline
 `9a681eabfe53b66f9d6d1459960ba10b95c1ff1d`.
+
+## Continued optimization and current evidence
+
+After the exhausted `e393202d` confirmation, the owner directed continued work
+until interrupted. Subsequent comparison rounds retain the fixed profile and
+1,200-second cumulative bound, including at most one confirmation each. Rounds
+follow material corrections; historical results remain immutable, and unchanged
+broad tests or comparisons are not repeated merely to seek favorable samples.
+
+Implemented and focused-verified corrections:
+
+- `9b26a325`: one real synthetic matrix publication per module, with immutable
+  JSON seed and independent decoded trees for all corruption cases. Worker
+  protocol-file runner observations fell from 34.23 to 4.96 seconds; coordinator
+  protocol/runner verification passed 145 checks. No cases or assertions removed.
+- `2c554147`: pure prepared exact-NumPy input predicates retain per-call metadata
+  validation without reconstructing TensorSpec/MethodCallNode objects. Generic
+  fallback, backend activation, raw-result validation and ambient delivery remain.
+  Coordinator verified 129 Methods/Dataset checks.
+- `3b636fa6`: bounded owned NumPy slices for pure Array-to-Batch inputs. Eleven
+  rows/two leaves use six slice copies instead of 22 row copies; Map remains
+  per-row. Coordinator verified 216 continuation/native-integration checks.
+- `3d1df5e7`: routine representatives and executable collection proof; changed
+  source metadata fallback matches generic values and failure frontiers.
+- `238a2cbd`: remove immediately duplicated pre-reservation validation and retain
+  eligible Torch raw-call selection per invocation. Fresh native-boundary checks,
+  per-call signature delivery and mode/default fallback remain. Coordinator
+  verified 96 transaction/Torch checks and 45 review-fix checks.
+- `6b3701cc`: equivalent retained forward selection for TF explicit training,
+  verified with 11 coordinator checks, including native SGD and collection.
+- `ff9e72aa`: stable JAX argument commitment only with a committed single-device
+  anchor, avoiding the second placement-only compilation. Uncommitted calls retain
+  `jax.default_device` inference. Coordinator verified 32 checks before review
+  and **14** final checks afterward, including two virtual CPU devices (the commit
+  message's final count of 13 is a transcription error). All existing candidate
+  validation, finite checks, synchronization and repair remain.
+- `dd8e2fc6`: framework CI manifest includes both new TF parity cases; three
+  coordinator checks passed without skips.
+
+Three seven-lens local reviews completed under `/tmp/dryml/ce-code-review/`:
+`hotpath-3b636fa6`, `training-hotpath-3d1df5e7`, and
+`native-placement-6b3701cc`. Their independent validator batches confirmed and
+subsequent commits corrected routine allowlist/tier omissions, CPU test controls,
+TF CI-manifest omission, and all-uncommitted JAX default-device handling. No
+cross-provider independence is claimed. A simplification pass made no changes.
+
+One legacy Torch strict-observer-stop test expected save/retry after failure
+without requesting a matching input record. A temporary committed-method control
+reproduced the failure before the current optimization. The repaired test covers
+both explicit checkpoint-before-error recovery and no-checkpoint fail-closed
+behavior; model/optimizer, accepted progress and no-extra-update assertions remain.
+
+### Complete routine pass at 238a2cbd
+
+```sh
+/usr/bin/time -o /tmp/dryml/dataset-routine-time-238a2cbd.txt -f 'exit=%x wall_seconds=%e' ./tests.sh good-enough --ignore tests/old --ignore tests/dev -x tests
+```
+
+CPU-only, single native-library thread controls, activated `big_env`:
+
+| Phase | Passed | Skipped | Pytest elapsed |
+|---|---:|---:|---:|
+| Isolated phase | 265 | 0 | 46.04 s |
+| Remaining routine selection | 4,884 | 25 | 845.99 s |
+| Entire runner | **5,149** | **25** | **898.23 s full wall** |
+
+Exit zero and strictly below 900 seconds: **R20 passed at this revision**.
+Later TF/JAX changes require final-tree verification; this result is not erased
+by older failing timings or silently extended to untested changes.
+
+### Comparison round at 3d1df5e7 and confirmation at 238a2cbd
+
+The complete fixed matrix at `3d1df5e7` finished all required timing cells without
+failure in **914.6028693858534 seconds** (914.72 full wall). Its report is
+`/tmp/dryml/u8-evidence/comparison-3d1df5e7.json`. Indexed steady new/old improved
+to **0.824319**; Torch remained **1.152521/1.141811** at cadences 0/32, TF was
+**0.972622/1.045081**, and Keras/JAX were noisy. All numerical work checks and
+native reference modes remain represented; overall status was unverified.
+
+The one confirmation after native-update corrections selected old/new training
+workloads only, retaining the prior charge:
+
+```sh
+python -m tests.tools.benchmark_dataset_traversal --baseline-source /tmp/dryml/u8-baseline-f569da67 --baseline-revision 9a681eabfe53b66f9d6d1459960ba10b95c1ff1d --confirm /tmp/dryml/u8-evidence/comparison-3d1df5e7.json --output /tmp/dryml/u8-evidence/confirmation-238a2cbd.json --workload torch --workload jax --workload tf --workload keras --mode old --mode new
+```
+
+All selected timing cells completed; cumulative elapsed reached
+**1200.1271082949825 seconds**, including final overhead, so the report remains
+unverified. No missing cell was filled with stale evidence. Torch steady ratios
+**0.900239/0.899465** resolved its measured regression. TF **1.050100/1.031355**
+and JAX **1.052803/1.090686** still regressed. Keras cadence zero remained noisy
+at **0.910618**; cadence 32 observed no regression at **0.867939**. This partial,
+budget-exhausted confirmation does not establish whole-matrix completion.
+
+The later TF/JAX corrections address identified repeated selection and native
+compilation. Their throughput effect remains unmeasured pending a separately
+labeled bounded round; all fixed workloads, repetitions, instrumentation and
+acceptance conditions remain unchanged.
 
 ## Implemented boundaries
 
@@ -471,9 +571,9 @@ different-model corroboration.
 
 ## Unresolved qualification
 
-1. **Routine performance:** reduce complete runner wall time below 900 seconds
-   without weakening representative tests. The current complete result is
-   **929.86 seconds** at `e393202d`; historical 914.70 seconds also failed.
+1. **Final-tree routine verification:** `238a2cbd` passed in **898.23 seconds**;
+   repeat only after integrating the subsequent material TF/JAX corrections.
+   Historical 929.86 and 914.70-second failures remain recorded.
 2. **Comparative performance:** the historical fixed 1,200-second comparison
    budget was exhausted. Earlier indexed and Torch regression signals are preserved in
    [the Data measurement section](data.md#bounded-cpu-evidence-and-unresolved-gates).
@@ -485,12 +585,15 @@ different-model corroboration.
    recipe were then subject to the one authorized confirmation at `e393202d`.
    It exhausted the cumulative budget at 1201.2203454473056 seconds, retained
    indexed/Torch/JAX steady regressions, and left later required cells incomplete.
-   No further comparison or confirmation budget remains; both reports are
-   unverified and historical failures are not relabeled.
+   Both reports remain unverified. The subsequent owner-directed round at
+   `3d1df5e7` and its confirmation at `238a2cbd` are recorded above; their total
+   budget is also spent. Later material backend corrections await separate
+   bounded qualification under the continued-execution direction.
 3. **Comparative JAX evidence:** real Optax is now available and the four-mode
    driver has tiny numerical unit qualification and real fixed-profile evidence
-   at `fde25998`. Post-kernel cadence-zero confirmation still observes a steady
-   regression; cadence 32 was interrupted by the total deadline. JAX is not
+   at `fde25998` and later revisions. Latest measured old/new JAX timings at
+   `238a2cbd` still regress; the committed placement-only recompilation correction
+   has focused correctness evidence but no comparative timing yet. JAX is not
    exempted, and its complete comparative qualification remains unresolved.
 4. **Remaining evidence limits:** comparative copy/compile/pending-window metrics
    are incomplete. Python 3.10 failure-note behavior was emulated on Python 3.12
