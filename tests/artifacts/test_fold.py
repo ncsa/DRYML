@@ -185,6 +185,7 @@ def _run_native_fold_test_in_subprocess(request, backend):
     return True
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_fold_declaration_is_inert_and_persists_without_source_or_method_calls(tmp_path):
     """A declared Fold retains source/Methods without traversal or helper construction."""
 
@@ -207,6 +208,7 @@ def test_fold_declaration_is_inert_and_persists_without_source_or_method_calls(t
     assert state is not None
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_fold_consumes_one_iterator_once_and_reuses_selected_dynamic_batch_carriers(tmp_path):
     """The first batch initializes once then transitions exactly once in one traversal."""
 
@@ -228,6 +230,7 @@ def test_fold_consumes_one_iterator_once_and_reuses_selected_dynamic_batch_carri
     assert accumulator.selections == 1
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_sectioned_fold_finalizes_only_after_flattened_root_eof(tmp_path, monkeypatch):
     """Section handoffs keep v3 progress active until the entire physical pass ends."""
     from dryml.artifacts import Fold

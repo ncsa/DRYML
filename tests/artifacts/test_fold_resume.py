@@ -247,6 +247,7 @@ def _stop_after_checkpoint(_obj, _context):
     raise RuntimeError("stop after checkpoint")
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_section_boundary_checkpoint_is_active_and_resume_requires_remaining_root(tmp_path, monkeypatch):
     """A checkpoint at a section end cannot bypass the remaining observations."""
     from dryml.artifacts import Fold

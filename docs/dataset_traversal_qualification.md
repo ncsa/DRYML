@@ -306,6 +306,30 @@ plausible routine savings including avoided incidental JAX inventory, not a
 passing full-suite estimate. Further corrections remain necessary before
 another routine measurement is justified.
 
+A second bounded pass added seven explicit existing-fixture opt-ins across Fold,
+partial-state build/apply and local qualification tests. The same twelve
+diagnostic nodes retained **17 snapshot captures** while incidental default
+host observations/inventories fell **10 to zero**. The directly attributed
+observer cost was **4.113 seconds**; runner wall changed **47.050 to 40.688
+seconds**, whose larger delta also includes serialization cost and ordinary
+variance. The sectioned Fold still performs one initializer, three native NumPy
+transitions, one finalizer, four progress checkpoints and five publications.
+
+Every original test body, assertion, workload, checkpoint cadence and subprocess
+boundary is unchanged; an AST comparison verified that only the seven fixture
+decorators were added. Existing explicit-observer/clock/lineage/failure fixture
+self-checks pass. Coordinator verification passed **13 checks in 21.86 seconds**.
+Details are in `/tmp/dryml/incidental-snapshot-fixtures-1e908d63.md`.
+
+Together the two corrections support only approximately **21-22 seconds** of
+conservatively attributed routine savings. The remaining sectioned Fold cases
+still take about 8.4-8.8 seconds each, with measured work in managed associations,
+Store/SQLite maintenance, authority projection and graph/control serialization.
+These are production operations, not demonstrated redundant fixture setup.
+Broader Core/Store or TensorFlow staging implementation changes are outside the
+fixture-only approval. No further full routine or fixed comparison was run on
+the strength of these partial savings.
+
 ## Implemented boundaries
 
 - Frozen, source-inert preparation retains operator topology, controls, specs,

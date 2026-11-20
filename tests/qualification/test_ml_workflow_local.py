@@ -385,6 +385,7 @@ def test_all_workload_artifact_definitions_preflight_without_framework_imports(
     )
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_workload_cache_uses_selected_control_store(tmp_path, monkeypatch):
     """W1/W2 cache creation retains the request's distinct control authority."""
 
@@ -436,6 +437,7 @@ def test_workload_cache_uses_selected_control_store(tmp_path, monkeypatch):
     assert captured["managed"].control_store is control
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_case_is_closed_and_carries_manifest_environment_seed_and_fixture_identity(tmp_path):
     """Fresh request decoding rejects missing/extra fields and retains exact W3 identity."""
 
