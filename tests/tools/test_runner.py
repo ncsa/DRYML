@@ -587,6 +587,72 @@ def test_good_enough_collects_prepared_numpy_validation_regressions(tmp_path):
     assert selected == expected, result.stdout
 
 
+def test_framework_manifest_collects_tf_retained_selection_without_eager_imports(tmp_path):
+    """Focused @manifest collection selects both TF cases without loading backends."""
+    owner = "tests/models/test_dataset_training_integration.py"
+    function = "test_tf_training_retains_raw_selection_signature_and_native_sgd"
+    selection = f"{owner}::{function}"
+    control = f"{owner}::test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache"
+    manifest = tmp_path / "framework-subset.txt"
+    manifest.write_text("\n".join(
+        line for line in (ROOT / "tests/framework_tests.txt").read_text().splitlines()
+        if line.split("[", 1)[0] in {selection, control}
+    ) + "\n")
+    report_path = tmp_path / "framework-collection.json"
+    (tmp_path / "framework_manifest_guard.py").write_text(r'''
+import importlib.abc
+import json
+import os
+from pathlib import Path
+import sys
+
+frameworks = {
+    "tensorflow", "tensorflow_datasets", "keras", "torch", "jax", "jaxlib",
+    "flax", "optax", "ray",
+}
+attempts = []
+
+class RejectFrameworkImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] in frameworks:
+            attempts.append(fullname)
+            raise AssertionError("eager framework collection import: " + fullname)
+
+sys.meta_path.insert(0, RejectFrameworkImports())
+
+def pytest_sessionfinish(session, exitstatus):
+    Path(os.environ["DRYML_FRAMEWORK_COLLECTION_REPORT"]).write_text(json.dumps({
+        "nodeids": [item.nodeid for item in session.items],
+        "framework_import_attempts": attempts,
+        "framework_modules": sorted(
+            name for name in sys.modules if name.split(".", 1)[0] in frameworks
+        ),
+    }))
+''')
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("tests.sh integration requires Bash")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(ROOT), env.get("PYTHONPATH", "")))
+    env["DRYML_FRAMEWORK_COLLECTION_REPORT"] = str(report_path)
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("DRYML_TEST_BOOTSTRAP_CONTEXTS", None)
+    result = subprocess.run(
+        [
+            bash, "./tests.sh", f"@{manifest}", "--collect-only", "-q", "--no-cov",
+            "-k", function, "-p", "framework_manifest_guard",
+            "-o", f"cache_dir={tmp_path / 'cache'}",
+        ],
+        cwd=ROOT, env=env, text=True, capture_output=True, check=False, timeout=120,
+    )
+    assert report_path.exists(), result.stdout + result.stderr
+    report = json.loads(report_path.read_text())
+    assert report["nodeids"] == [f"{selection}[{kind}]" for kind in ("model", "sequential")], result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert report["framework_import_attempts"] == []
+    assert report["framework_modules"] == []
+
+
 def test_good_enough_collects_native_regressions_without_eager_framework_imports(tmp_path):
     """Routine collection retains native and transaction cases without backend activation."""
     report_path = tmp_path / "native-collection.json"
