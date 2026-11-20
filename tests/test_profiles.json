@@ -259,11 +259,16 @@
           ]
         },
         "tests/methods/test_preparation.py": {
-          "rationale": "Retain known-spec validation and direct reprepare clearing semantics without optional backends.",
+          "rationale": "Retain known-spec/reprepare semantics plus bounded NumPy generic-oracle, mutable-metadata/concurrency, work-count/failure, activation-order/fallback and Dataset integration proofs without optional backends.",
           "functions": [
             "test_known_spec_learning_selects_without_a_body_and_validates_dynamic_batches",
             "test_failed_direct_reprepare_clears_old_plan_without_partial_publication",
-            "test_learning_conversion_failure_keeps_published_signature"
+            "test_learning_conversion_failure_keeps_published_signature",
+            "test_compiled_numpy_validation_matches_generic_oracle",
+            "test_prepared_numpy_rereads_mutated_metadata_and_keeps_no_values_or_receiver",
+            "test_prepared_numpy_validation_work_counts_and_failure_boundaries",
+            "test_compiled_numpy_preserves_activation_order_and_fallback_errors",
+            "test_prepared_map_batch_eliminates_per_row_input_reconstruction"
           ]
         },
         "tests/methods/test_stream_ir.py": {

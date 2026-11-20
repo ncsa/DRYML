@@ -541,6 +541,52 @@ def test_real_profile_is_stable_and_filters_cannot_resample_matrix(tmp_path):
     assert filtered.returncode == pytest.ExitCode.NO_TESTS_COLLECTED
 
 
+def test_good_enough_collects_prepared_numpy_validation_regressions(tmp_path):
+    """Real routine collection retains old representatives and bounded validation proofs."""
+    owner = "tests/methods/test_preparation.py"
+    selected_files = test_buckets.select_profile_files(
+        test_buckets.load_baseline(test_buckets.DEFAULT_BASELINE),
+        {"smoke", "medium"},
+        test_buckets.load_baseline(test_buckets.DEFAULT_PROFILES)["profiles"]["good-enough"],
+    )
+    assert f"./{owner}" in selected_files
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("tests.sh integration requires Bash")
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("DRYML_TEST_BOOTSTRAP_CONTEXTS", None)
+    result = subprocess.run(
+        [
+            bash, "./tests.sh", owner, "--collect-only", "-q", "--no-cov",
+            "--dryml-runner-tiers=smoke,medium", "--dryml-test-profile=good-enough",
+            "-o", f"cache_dir={tmp_path / 'cache'}",
+        ],
+        cwd=ROOT, env=env, text=True, capture_output=True, check=False, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = {
+        f"{owner}::{function}" for function in (
+            "test_known_spec_learning_selects_without_a_body_and_validates_dynamic_batches",
+            "test_failed_direct_reprepare_clears_old_plan_without_partial_publication",
+            "test_learning_conversion_failure_keeps_published_signature",
+            "test_prepared_numpy_rereads_mutated_metadata_and_keeps_no_values_or_receiver",
+            "test_compiled_numpy_preserves_activation_order_and_fallback_errors",
+            "test_prepared_map_batch_eliminates_per_row_input_reconstruction",
+        )
+    }
+    expected.update(
+        f"{owner}::test_compiled_numpy_validation_matches_generic_oracle[{group}]"
+        for group in ("dtypes", "shapes", "layouts", "fallbacks", "structures")
+    )
+    expected.update(
+        f"{owner}::test_prepared_numpy_validation_work_counts_and_failure_boundaries[{case}]"
+        for case in ("valid", "shape", "dtype", "empty", "batch", "nested", "subclass", "metadata", "raw")
+    )
+    selected = {line for line in result.stdout.splitlines() if line.startswith(f"{owner}::")}
+    assert selected == expected, result.stdout
+
+
 def test_good_enough_collects_native_regressions_without_eager_framework_imports(tmp_path):
     """Fresh routine collection retains exact native cases without backend activation."""
     report_path = tmp_path / "native-collection.json"

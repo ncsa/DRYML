@@ -144,6 +144,100 @@ def test_grouped_array_owns_before_collation_and_observes_between_batch_mutation
     assert runs[0] == runs[1]
 
 
+@pytest.mark.parametrize("mutation", ("shape", "dtype", "shortened"))
+def test_grouped_array_metadata_mutation_falls_back_at_generic_frontiers(monkeypatch, mutation):
+    """Changed bound metadata declines grouping before scalar reads, even on failure."""
+    from dryml.data.native import _ArrayBatchReader
+    from dryml.data.source import _IndexedDatasetCursor
+
+    pull = _SectionExecution._pull
+    read_batch = _ArrayBatchReader.__call__
+    close_after_failure = _SectionExecution._close_after_failure
+    scalar_reads, grouped_reads, failures = [], [], []
+
+    def pulled(execution, iterator):
+        if type(iterator) is _IndexedDatasetCursor:
+            scalar_reads.append(iterator.position)
+        return pull(execution, iterator)
+
+    def grouped(reader, cursor, size, publish):
+        assert cursor._matches_native_reader(reader.item_at)
+        position = cursor.position
+        unchanged = all((value.shape, value.dtype) == metadata
+                        for value, metadata in zip(reader.leaves, reader.metadata))
+        rows = read_batch(reader, cursor, size, publish)
+        grouped_reads.append((position, unchanged, rows is None))
+        if rows is None:
+            assert cursor.position == position
+        return rows
+
+    def before_cleanup(execution, error):
+        if execution.op.kind == "batch":
+            failures.append(_frontier(execution))
+        return close_after_failure(execution, error)
+
+    monkeypatch.setattr(_SectionExecution, "_pull", pulled)
+    monkeypatch.setattr(_ArrayBatchReader, "__call__", grouped)
+    monkeypatch.setattr(_SectionExecution, "_close_after_failure", before_cleanup)
+    runs = []
+    for generic in (True, False):
+        values = np.arange(14, dtype=np.int64).reshape(7, 2)
+        source = data.ArrayDataset(values)
+        source.arrays = values
+        root = _root(data.Batch(source, 3))
+        reader = root.inputs[0].source.retained_batch
+        assert reader is not None and reader.leaves[0] is values
+        root = replace(root, selected=_plain)
+        scalar_reads.clear()
+        grouped_reads.clear()
+        with _generic(monkeypatch) if generic else nullcontext():
+            with _SectionExecution(root) as execution:
+                states = [_frontier(execution)]
+                assert execution.pull() == PullKind.DELIVERY
+                first = execution.value
+                assert first == [[0, 1], [2, 3], [4, 5]]
+                states.append(_frontier(execution))
+                assert scalar_reads == (list(range(3)) if generic else [])
+                assert grouped_reads == ([] if generic else [(0, True, False)])
+                scalar_reads.clear()
+                grouped_reads.clear()
+                if mutation == "dtype":
+                    values.dtype = np.float64
+                else:
+                    values.shape = (7, 1, 2) if mutation == "shape" else (2, 7)
+                expected = _plain(values[3:])
+                suffix = []
+                error = None
+                if mutation == "shortened":
+                    with pytest.raises(IndexError) as caught:
+                        execution.pull()
+                    error = (type(caught.value), str(caught.value))
+                    assert execution._closed
+                    assert scalar_reads == [3]
+                else:
+                    while True:
+                        signal = execution.pull()
+                        states.append((signal, _frontier(execution)))
+                        if signal == PullKind.ROOT_END:
+                            break
+                        suffix.extend(execution.value)
+                    assert suffix == expected
+                    child = execution.children[0]
+                    assert child.count == child.source.position == 7
+                    assert not child.source.observed_eof
+                    assert scalar_reads == [3, 4, 5, 6]
+                assert first == [[0, 1], [2, 3], [4, 5]]
+                declines = [(3, False, True)]
+                if mutation != "shortened":
+                    declines.append((6, False, True))
+                assert grouped_reads == ([] if generic else declines)
+                runs.append((states, suffix, error))
+    assert runs[0] == runs[1]
+    assert len(failures) == (2 if mutation == "shortened" else 0)
+    if failures:
+        assert failures[0] == failures[1]
+
+
 def test_grouped_array_strided_endian_batched_tree_cross_restores(monkeypatch):
     """Both kernels exchange records while preserving whole native source items."""
     values = np.arange(132, dtype=">i8").reshape(11, 3, 4)[:, :, ::2]
