@@ -549,6 +549,13 @@ including reads/captures/restores affected by that mutation. Core's exclusive
 state-IO reservations still protect actual overlapping capture/restore/reuse;
 they are not an operation-lifetime lock.
 
+Finalization freshly confirms its exact result/capture publication receipts,
+adopted retention grants and operation-scoped control/preparation acknowledgements.
+It does not require the shared Store to have no unrelated pending mutations:
+another operation may publish between those confirmations and completion. Such
+work retains its own journal and index invalidation; it cannot substitute for
+this operation's prerequisites or completion's separately acknowledged CAS.
+
 An ownership token belongs to its creating process, thread and asyncio task.
 Inherited, foreign and retired tokens cannot mutate authority or release another
 token's lock. Active invocation ID and generation are mandatory owner fences for

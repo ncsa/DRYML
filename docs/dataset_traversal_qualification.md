@@ -5,10 +5,14 @@
 The traversal, continuation, Accumulate, accepted-training-state, and native
 consumer implementation is present on `fix/real-usage-followups`. The plan is
 **not complete**: comparative performance and updated-tree routine qualification
-remain blocking. The routine run at `8549015a` now passes all **5,160 tests with
-25 skips**, but its **1081.11-second** complete wall time fails the strict
-under-900-second gate. The earlier `314c9057` collection-inventory failure is
-corrected; successful assertions do not waive the timing requirement.
+remain blocking. The latest routine attempt at `9ac8d274` stopped on a shared-Store
+finalization failure after **4,492 passes and 23 skips**, at **928.17 seconds**.
+That supported-concurrency defect has a deterministic reproduction and a focused
+verified correction below; no post-correction routine pass is claimed. The last
+complete run at `8549015a` passed **5,160 tests with 25 skips** in **1081.11 seconds**,
+which also fails the strict under-900-second gate. The earlier `314c9057`
+collection-inventory failure is corrected; successful assertions do not waive
+the timing requirement.
 
 Latest corrections cover retained native call preparation, JAX argument
 commitment, and redundant explicit-TF scalar loss reduction. Earlier corrections
@@ -444,6 +448,74 @@ obsolete test identifiers. Review artifacts are under
 `/tmp/dryml/ce-code-review/test-consolidation-f5dc2154/`; the reviewers were local,
 without cross-provider independence. No new complete routine or fixed comparison
 was run for this small consolidation. R20 and R28 remain open.
+
+### Routine attempt at 9ac8d274 and shared-Store finalization correction
+
+After the fixture, TF metadata and duplicate-test corrections had passed their
+affected checks, one current-tree routine attempt used the unchanged command
+and CPU/thread settings, adding only `PYTEST_ADDOPTS=--durations=50` for attribution.
+The isolated phase passed **265 checks in 36.61 seconds**. The remaining phase
+stopped at the shared-Store concurrency test with **4,227 passed, 23 skipped and
+one failure in 885.75 seconds**. Complete runner wall was **928.17 seconds, exit1**.
+Logs are `/tmp/dryml/dataset-routine-9ac8d274.log` and
+`/tmp/dryml/dataset-routine-time-9ac8d274.txt`. This incomplete run is not a timing
+improvement or qualifying pass.
+
+The existing `_confirm_final` required every connected Store's entire pending
+mutation list to be empty. A second independent operation could publish its
+control CAS after the first operation confirmed its exact result/capture receipts
+and adopted grants, falsely causing `pending_finalization`. The check predates
+this plan (`12b631d4`). The original two-spawn-worker test now deterministically
+holds that real publication-to-index-acknowledgement interval. It reproduced the
+original failure before the correction (**1 failed in 6.16 seconds**).
+
+Final confirmation now uses the existing fresh operation-scoped pending reader
+for its own current/preparation debt. Exact result/capture receipts, retention
+grants, authority reads, interruption/generation fences and completion's separately
+acknowledged CAS remain mandatory. The test retains both concurrent operations,
+all checkpoints and original assertions, adds exact final-association checks,
+and separately proves real own-operation pending debt still rejects confirmation.
+Worker verification passed **30 checks**; coordinator affected verification passed
+**35 checks in 59.02 seconds**, including additional crash windows, stale final
+evidence, multi-Store routing, interruption and selected-final retention.
+
+Five local review lenses found no actionable defect in this correction. The
+precise overlap combined with separate Stores, no-index operation, managed-start
+debt or recovery-only finalization was not separately added to the regression;
+those remain bounded coverage limits. Artifacts:
+`/tmp/dryml/shared-store-finalization-9ac8d274.md` and
+`/tmp/dryml/ce-code-review/shared-store-9ac8d274/`. No independent-provider review
+or post-fix routine/comparative qualification is claimed.
+
+### Remaining import-I/O qualification blocker
+
+The same routine's TensorFlow image test passed but consumed **284.40 seconds**.
+Two bounded diagnostic attempts preserved its original body and assertions but
+reached external deadlines before `pytest.importorskip("tensorflow")` returned;
+neither reached explicit DRYML registration or native arithmetic. They consumed
+**85.004 seconds total**, and neither is passing evidence. The second instrumented
+call observed **39.502 seconds wall / 0.902 seconds process CPU**, including
+**28.791 seconds reading installed import files**, **4.583 seconds opening them**,
+and **5.136 seconds loading native extensions**. Measured GC and Python import-lock
+time were negligible. These observations locate current waits, not every second
+of the original full-run outlier.
+
+A subsequent read-only host check located the conda environment on `/dev/sdb1`
+(`ext4`, `/data1`) and reported I/O pressure `some avg300=38.06`,
+`full avg300=34.62`; this is corroborating host-pressure evidence, not attribution
+to a particular competing process or a complete storage root cause. No environment
+or test-policy workaround was applied. Receipt:
+`/tmp/dryml/tf-image-outlier-9ac8d274.md`. Further full timing/comparison work is
+blocked on resolving or avoiding the observed installed-environment I/O stalls;
+another unchanged run is not a correction.
+
+A separate bounded publication-preparation investigation found that the two
+preparation passes serve different semantic views. Its smallest safe local
+signature-reuse candidate saved only **0.0379 seconds** of directly measured work
+in nine publications, and was not adopted as a material budget correction.
+`/tmp/dryml/publication-preparation-attribution-9ac8d274.md` records the unchanged
+root digests and authority work, seven diagnostic passes and remaining limits.
+R20 and R28 remain open.
 
 ## Implemented boundaries
 
