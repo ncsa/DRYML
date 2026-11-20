@@ -3,9 +3,14 @@
 ## Status
 
 The traversal, continuation, Accumulate, accepted-training-state, and native
-consumer implementation is present on `fix/real-usage-followups`. The plan is
-**not complete**: comparative performance and updated-tree routine qualification
-remain blocking. The latest routine attempt at `9ac8d274` stopped on a shared-Store
+consumer implementation is present on `fix/real-usage-followups`. On November 20,
+2026, the owner accepted the current work as good enough and identified substantial
+parallel work on this host as the cause of the observed I/O pressure. **Further
+qualification is deferred for this run under that acceptance.** R20's updated-tree
+routine gate and R28's complete comparative evidence remain unverified; the
+acceptance does not turn the recorded measurements into passing results.
+
+The latest routine attempt at `9ac8d274` stopped on a shared-Store
 finalization failure after **4,492 passes and 23 skips**, at **928.17 seconds**.
 That supported-concurrency defect has a deterministic reproduction and a focused
 verified correction below; no post-correction routine pass is claimed. The last
@@ -21,7 +26,7 @@ include the linear Array/Map-to-Batch kernel, the
 and confirmation instrumentation identity.
 Earlier exhausted reports remain **unverified**. The last under-budget complete
 routine runner passed **5,149 tests with 25 skips in 898.23 seconds**. Current
-evidence and the owner's continued-execution direction are recorded below.
+evidence and the owner's earlier continued-execution direction are recorded below.
 
 The canonical decision artifact is
 `docs/plans/2026-11-14-001-feat-dataset-traversal-continuation-plan.md`.
@@ -506,8 +511,10 @@ A subsequent read-only host check located the conda environment on `/dev/sdb1`
 to a particular competing process or a complete storage root cause. No environment
 or test-policy workaround was applied. Receipt:
 `/tmp/dryml/tf-image-outlier-9ac8d274.md`. Further full timing/comparison work is
-blocked on resolving or avoiding the observed installed-environment I/O stalls;
-another unchanged run is not a correction.
+dependent on resolving or avoiding the observed installed-environment I/O stalls;
+another unchanged run is not a correction. The owner subsequently attributed
+this pressure to substantial parallel host work and accepted stopping here, so
+further host diagnosis and timing qualification are deferred for this run.
 
 A separate bounded publication-preparation investigation found that the two
 preparation passes serve different semantic views. Its smallest safe local
@@ -959,7 +966,9 @@ in subsequent commits:
 - Exclusive atomic benchmark evidence publication, applicability-aware verdicts,
   and cumulative native checkpoint numbering.
 
-The remaining P1 finding is incomplete qualification, not an accepted waiver.
+That review left one P1 finding for incomplete qualification. It remained open
+through the subsequent corrections and is now deferred under the owner acceptance
+recorded in Status; it is not described as fixed or as passing qualification.
 Review and validation artifacts are under
 `/tmp/dryml/ce-code-review/20261119-001028-b9f6bcd4/`; the original review report
 describes the pre-fix findings, and this document records their application.
@@ -968,11 +977,17 @@ different-model corroboration.
 
 ## Unresolved qualification
 
+The following evidence gaps remain recorded under the owner-accepted deferral.
+Their original verification criteria are unchanged.
+
 1. **Final-tree routine verification:** `238a2cbd` passed in **898.23 seconds**;
    the subsequent `314c9057` run failed at **1019.93 seconds** with a stale test
    inventory. After correction, `8549015a` passes **5,160 tests with 25 skips** but
-   takes **1081.11 seconds**. A complete successful run strictly below 900 seconds
-   is still required. Historical 929.86 and 914.70-second failures remain recorded.
+   takes **1081.11 seconds**. The `9ac8d274` attempt then failed at **928.17 seconds**;
+   its concurrency defect was corrected and focused-verified in `243ba2d6`.
+   A complete successful updated-tree run strictly below 900 seconds remains
+   unverified and deferred. Historical 929.86 and 914.70-second failures remain
+   recorded.
 2. **Comparative performance:** the historical fixed 1,200-second comparison
    budget was exhausted. Earlier indexed and Torch regression signals are preserved in
    [the Data measurement section](data.md#bounded-cpu-evidence-and-unresolved-gates).
