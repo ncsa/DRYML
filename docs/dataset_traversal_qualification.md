@@ -9,7 +9,9 @@ The complete routine gate passed at `238a2cbd`; final verification of subsequent
 backend corrections remains pending. Passing correctness checks do not waive
 comparative requirements.
 
-Latest corrections cover the linear Array/Map-to-Batch kernel, the
+Latest corrections cover retained native call preparation, JAX argument
+commitment, and redundant explicit-TF scalar loss reduction. Earlier corrections
+include the linear Array/Map-to-Batch kernel, the
 [explicit TF/Keras recipe loss](#fresh-comparison-tfkeras-recipe-loss-correction),
 and confirmation instrumentation identity.
 Earlier exhausted reports remain **unverified**. The latest complete routine
@@ -115,10 +117,64 @@ and JAX **1.052803/1.090686** still regressed. Keras cadence zero remained noisy
 at **0.910618**; cadence 32 observed no regression at **0.867939**. This partial,
 budget-exhausted confirmation does not establish whole-matrix completion.
 
-The later TF/JAX corrections address identified repeated selection and native
-compilation. Their throughput effect remains unmeasured pending a separately
-labeled bounded round; all fixed workloads, repetitions, instrumentation and
-acceptance conditions remain unchanged.
+### Comparison and confirmation at 3153003b
+
+After the retained TF selection and JAX commitment corrections, the complete
+fixed matrix consumed **953.0229556770064 seconds**. Its immutable report is
+`/tmp/dryml/u8-evidence/comparison-3153003b.json`. Indexed implicit steady time
+was **0.797490** times baseline; JAX cadences 0/32 were **0.828590/0.856285**, all
+classified no-regression-observed. Torch cadence 32, both TF cadences and Keras
+cadence zero remained noisy; the report was **unverified**.
+
+The same-revision single confirmation selected old/new Torch, TF and Keras,
+reusing only identity-matched instrumentation. It consumed a cumulative
+**1074.811164646875 seconds**, `confirmation_count=1`; the report is
+`/tmp/dryml/u8-evidence/confirmation-3153003b.json`.
+
+| Steady work | New/pre-change | Decision |
+|---|---:|---|
+| Torch, cadence 0 / 32 | 0.922084 / 0.876633 | No regression observed |
+| TF, cadence 0 | 0.881448 | No regression observed |
+| TF, cadence 32 | **1.226797** | **Regression** |
+| Keras, cadence 0 / 32 | 0.838015 / 0.823268 | No regression observed |
+
+TF cadence 32 measured old/new medians **0.713653519/0.875508134 seconds**.
+The **0.161854615-second** difference exceeds its three-max-MAD envelope of
+**0.149415965 seconds**. This is a regression under the unchanged decision rule,
+not a passing noise result. Keras cadence-32 full-invocation/end-to-end ratios
+**1.121633/1.172677** remain separately visible informational regressions.
+The partial confirmation has no automatic timing merge with the initial matrix
+and remains unverified. Its unused **125.188835353125 seconds** do not permit a
+second confirmation. Both reports are preserved.
+
+### Explicit TensorFlow scalar-loss correction
+
+The explicit training and validation loops inspect every actual loss result.
+Exact native eager CPU float32/64 scalars use Identity instead of redundant Mean;
+other types, ranks, dtypes, devices and symbolic/unknown-rank results retain
+`tf.reduce_mean`. Training's default unit-seeded gradient is preserved. There is
+no cached shape assumption, device readback, admission relaxation, or change to
+compiled Keras training, native-owner reservation, acceptance or capture.
+
+Proof-first native SGD parity passed before the new work assertion failed on
+three scalar Mean operations over three updates. The isolated scalar/gradient
+probe then reduced dispatched operations from **five to one**: Range, Mean,
+Reshape, Tile and RealDiv become Identity. Signed zero, subnormals, finite extremes,
+infinities and NaN retain bit-level values, unit-seeded gradients, dtype and device.
+Per-call scalar/vector/scalar tests retain SGD and example-weighted accounting.
+These are work/correctness proofs, not throughput evidence.
+
+Coordinator verification passed **14 native correctness/recovery checks in
+13.95 seconds**, then **5 checks in 6.98 seconds** after review fixes. Two
+explicit GPU/cross-device cases skipped because no GPU was visible; that hardware
+behavior remains unverified. Actual routine collection retained both SGD cases
+and the scalar/fallback proof, excluding the two opt-in accelerator cases.
+The six-lens local review and independent validator are retained at
+`/tmp/dryml/ce-code-review/tf-scalar-loss-3153003b/`. Findings #1/#2 were corrected
+by CPU-scoping native setup/execution and adding conditional GPU fallback tests.
+Three simplification lenses requested no change. No cross-provider independence
+is claimed. The material runtime correction awaits a separately labeled bounded
+comparison and final-tree routine run under the continued-execution direction.
 
 ## Implemented boundaries
 
@@ -585,16 +641,18 @@ different-model corroboration.
    recipe were then subject to the one authorized confirmation at `e393202d`.
    It exhausted the cumulative budget at 1201.2203454473056 seconds, retained
    indexed/Torch/JAX steady regressions, and left later required cells incomplete.
-   Both reports remain unverified. The subsequent owner-directed round at
+    Both reports remain unverified. The subsequent owner-directed round at
    `3d1df5e7` and its confirmation at `238a2cbd` are recorded above; their total
-   budget is also spent. Later material backend corrections await separate
-   bounded qualification under the continued-execution direction.
+    budget is also spent. The subsequent `3153003b` matrix and single confirmation
+    clear several steady comparisons but retain the explicit-TF cadence-32
+    regression recorded above. Scalar-loss work reduction awaits fresh bounded
+    qualification under the continued-execution direction.
 3. **Comparative JAX evidence:** real Optax is now available and the four-mode
    driver has tiny numerical unit qualification and real fixed-profile evidence
-   at `fde25998` and later revisions. Latest measured old/new JAX timings at
-   `238a2cbd` still regress; the committed placement-only recompilation correction
-   has focused correctness evidence but no comparative timing yet. JAX is not
-   exempted, and its complete comparative qualification remains unresolved.
+    at `fde25998` and later revisions. The `3153003b` complete matrix measures
+    no old/new JAX steady regression at either cadence after the placement-only
+    recompilation correction. This does not waive the remaining whole-matrix gate
+    or qualify unmeasured accelerator/distributed behavior.
 4. **Remaining evidence limits:** comparative copy/compile/pending-window metrics
    are incomplete. Python 3.10 failure-note behavior was emulated on Python 3.12
    with `add_note` unavailable; no real Python 3.10 run occurred. Accelerator

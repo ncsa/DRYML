@@ -868,10 +868,15 @@ passed **5,149 tests with 25 skips in 898.23 seconds**. The complete comparison 
 `3d1df5e7` measured indexed steady time at **0.824319 times baseline**; its
 post-correction training confirmation at `238a2cbd` measured Torch at
 **0.900239/0.899465** for cadences 0/32. That round still exhausted its total
-budget and retained TF/JAX regressions and unresolved Keras noise. Later TF
-selection and JAX placement-only compilation corrections have focused tests but
-still need comparative and final-tree routine qualification. See the current
-evidence section of the qualification document; no historical report is relabeled.
+budget and retained TF/JAX regressions and unresolved Keras noise. After TF
+selection and JAX placement-only compilation corrections, the full `3153003b`
+matrix measured JAX at **0.828590/0.856285** times baseline with no steady
+regression observed. Its single confirmation cleared Torch and Keras steady
+comparisons but retained TF cadence-32 regression at **1.226797**. A subsequent
+explicit-TF scalar-loss correction has focused numerical and recovery proofs;
+fresh comparative and final-tree routine qualification remain pending. See the
+current evidence section of the qualification document; no historical report is
+relabeled.
 
 ## Source Datasets
 

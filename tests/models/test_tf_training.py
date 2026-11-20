@@ -1964,9 +1964,18 @@ def test_tf_unknown_stream_retains_validation_metrics_across_progress_retry(monk
     assert Progress.received == [retained_metrics, retained_metrics]
 
 
-def test_tf_validation_loss_weights_a_short_final_batch_by_examples(monkeypatch):
-    """Validation loss remains an example mean for uneven authored batches."""
+@pytest.fixture
+def tf_cpu():
+    """Keep native setup and execution on CPU for the scalar validation proof."""
+    with tf.device("/CPU:0"):
+        yield tf
+
+
+def test_tf_validation_loss_weights_a_short_final_batch_by_examples(monkeypatch, tf_cpu):
+    """Uneven validation batches keep mean accounting and per-call loss rank checks."""
+    tf = tf_cpu
     from dryml.models.tf import Loss, Model, Optimizer, Training
+    from tensorflow.python.framework import op_callbacks
     import dryml.models.tf.base as tf_base
 
     class Progress:
@@ -1998,8 +2007,32 @@ def test_tf_validation_loss_weights_a_short_final_batch_by_examples(monkeypatch)
         np.asarray([[0.0], [0.0], [3.0]], dtype=np.float32),
     )), 2)
 
-    trainer(Experiment(
-        Model(ZeroKerasModel), trainer, train_data=train_data, val_data=val_data,
-    ))
+    native_loss = tf.keras.losses.MeanSquaredError()
+    ranks, scalar_means = [], []
 
-    assert Progress.received[0]["val_loss"] == pytest.approx(3.0)
+    def loss(target, prediction):
+        value = native_loss(target, prediction)
+        assert all("/device:CPU:0" in tensor.device for tensor in (target, prediction, value))
+        if len(ranks) == 1:
+            value = tf.stack([value, value + 2.])
+        ranks.append(value.shape.rank)
+        return value
+
+    loss.reduction = "sum_over_batch_size"
+    monkeypatch.setattr(trainer, "_make_loss", lambda *args: loss)
+
+    def observe(op_type, inputs, attrs, outputs, op_name=None, graph=None):
+        if op_type == "Mean" and inputs[0].shape.rank == 0:
+            scalar_means.append(op_type)
+
+    op_callbacks.add_op_callback(observe)
+    try:
+        trainer(Experiment(
+            Model(ZeroKerasModel), trainer, train_data=train_data, val_data=val_data,
+        ))
+    finally:
+        op_callbacks.remove_op_callback(observe)
+
+    assert ranks == [0, 1, 0]
+    assert Progress.received[0]["val_loss"] == pytest.approx(11 / 3)
+    assert scalar_means == []

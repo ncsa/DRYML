@@ -123,10 +123,19 @@ def _dataset_continuation_experiment(backend, *, repo=None, sectioned=True, epoc
                       artifacts={}, repo=repo)
 
 
-@pytest.mark.parametrize("model_kind", ("model", "sequential"))
-def test_tf_training_retains_raw_selection_signature_and_native_sgd(model_kind, monkeypatch):
-    """Exact built-ins select once per invocation and still deliver every batch."""
+@pytest.fixture
+def tf_cpu():
+    """Keep native setup and execution on CPU for opt-in specialization proofs."""
     tf = pytest.importorskip("tensorflow")
+    with tf.device("/CPU:0"):
+        yield tf
+
+
+@pytest.mark.parametrize("model_kind", ("model", "sequential"))
+def test_tf_training_retains_raw_selection_signature_and_native_sgd(model_kind, monkeypatch, tf_cpu):
+    """Retained calls keep native SGD parity without scalar reduction work."""
+    tf = tf_cpu
+    from tensorflow.python.framework import op_callbacks
     from dryml.core import signatures
     from dryml.core.backend import Backend
     from dryml.methods.implementation import SelectedDescriptorAdapter
@@ -146,6 +155,23 @@ def test_tf_training_retains_raw_selection_signature_and_native_sgd(model_kind, 
     exp = Experiment(model, Training(optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=.01),
                                     epochs=1, verbose=0),
                      train_data=Batch(ArrayDataset((x, y)), 2))
+    native_gradients, actual_gradients = [], []
+
+    def record_gradients(optimizer, sink):
+        original = optimizer.apply_gradients
+
+        def apply(pairs):
+            pairs = list(pairs)
+            for gradient, variable in pairs:
+                assert "/device:CPU:0" in gradient.device
+                assert "/device:CPU:0" in variable.handle.device
+            sink.append([gradient.numpy().copy() for gradient, _ in pairs])
+            return original(pairs)
+
+        monkeypatch.setattr(optimizer, "apply_gradients", apply)
+
+    record_gradients(native_optimizer, native_gradients)
+    record_gradients(exp.train_fn.optimizer.obj, actual_gradients)
     graph = model.method_graph()
     eager = model._select(Backend.tf, None)
     canonical = model.find_implementation(backend="tf")
@@ -189,18 +215,49 @@ def test_tf_training_retains_raw_selection_signature_and_native_sgd(model_kind, 
     monkeypatch.setattr(SelectedDescriptorAdapter, "prepare", prepare)
     monkeypatch.setattr(SelectedDescriptorAdapter, "invoke_prepared", invoke)
     observed = []
+    scalar_means = []
+    expected_numerator = 0.
+
+    def observe_op(op_type, inputs, attrs, outputs, op_name=None, graph=None):
+        if op_type == "Mean" and inputs[0].shape.rank == 0:
+            scalar_means.append(op_type)
+
     for invocation in range(2):
+        native_loss = loss_fn
+        mixed_ranks = []
+        if invocation:
+            def changing_loss(ranks):
+                def loss(target, prediction):
+                    value = loss_fn(target, prediction)
+                    if len(ranks) % 3 == 1:
+                        value = tf.stack([value, value * 3])
+                    ranks.append(value.shape.rank)
+                    return value
+                loss.reduction = "sum_over_batch_size"
+                return loss
+
+            native_loss = changing_loss([])
+            mixed_loss = changing_loss(mixed_ranks)
+            monkeypatch.setattr(exp.train_fn, "_make_loss", lambda *args: mixed_loss)
         expected = []
         for start in range(0, len(x), 2):
             with tf.GradientTape() as tape:
-                loss = tf.reduce_mean(loss_fn(y[start:start + 2], native(x[start:start + 2])))
+                loss = tf.reduce_mean(native_loss(y[start:start + 2], native(x[start:start + 2])))
             native_optimizer.apply_gradients(zip(tape.gradient(loss, native.trainable_variables),
                                                 native.trainable_variables))
             expected.append(float(loss.numpy()))
-        actual = exp.train_fn(exp, callbacks=(lambda: observed.append(exp.state.step),))
+        op_callbacks.add_op_callback(observe_op)
+        try:
+            actual = exp.train_fn(exp, callbacks=(lambda: observed.append(exp.state.step),))
+        finally:
+            op_callbacks.remove_op_callback(observe_op)
         assert actual == pytest.approx(expected)
         for value, expected_value in zip(model.obj.get_weights(), native.get_weights()):
             np.testing.assert_allclose(value, expected_value)
+        assert len(actual_gradients) == len(native_gradients) == 3 * (invocation + 1)
+        for actual_step, expected_step in zip(actual_gradients, native_gradients):
+            for actual_gradient, expected_gradient in zip(actual_step, expected_step):
+                np.testing.assert_allclose(actual_gradient, expected_gradient)
         assert len(compiles) == invocation + 1
         assert selections == [{"backend": "tf"}] * (invocation + 1)
         # Canonical selection reads compatible candidates, then selects from the catalog.
@@ -209,9 +266,170 @@ def test_tf_training_retains_raw_selection_signature_and_native_sgd(model_kind, 
         assert model.default_batched is None
         assert model.method_graph().nodes == graph.nodes
         assert model.method_graph().conversion_edges == ()
+        assert scalar_means == [], "already-scalar native losses must not execute Mean"
+        if invocation:
+            assert mixed_ranks == [0, 1, 0]
+        expected_numerator += sum(a * n for a, n in zip(expected, (2, 2, 1)))
+        assert exp.state.loss_denominator == 5 * (invocation + 1)
+        assert exp.state.loss_numerator == pytest.approx(expected_numerator)
     assert deliveries == ["args", "return"] * 6
     assert observed == list(range(1, 7))
     assert exp.state.examples_seen == 10 and exp.state.epoch == 2
+
+
+def test_tf_dataset_continuation_scalar_loss_values_gradients_and_fallback(monkeypatch, tf_cpu):
+    """Scalar specialization matches native values/gradients and keeps fallback dispatch."""
+    tf = tf_cpu
+    from tensorflow.python.framework import op_callbacks
+    from dryml.models.tf.base import _mean_tf_loss
+
+    def differentiate(reduce, value):
+        ops = []
+
+        def observe(op_type, inputs, attrs, outputs, op_name=None, graph=None):
+            ops.append(op_type)
+
+        op_callbacks.add_op_callback(observe)
+        try:
+            with tf.GradientTape() as tape:
+                tape.watch(value)
+                result = reduce(value)
+            gradient = tape.gradient(result, value)
+        finally:
+            op_callbacks.remove_op_callback(observe)
+        return result, gradient, ops
+
+    for dtype in (tf.float32, tf.float64):
+        info = np.finfo(dtype.as_numpy_dtype)
+        values = (0., -0., 1.25, -2.5, info.max, info.tiny, info.smallest_subnormal,
+                  -info.smallest_subnormal, float("inf"), -float("inf"), float("nan"))
+        for value in values:
+            tensor = tf.convert_to_tensor(np.array(value, dtype=dtype.as_numpy_dtype))
+            assert "/device:CPU:0" in tensor.device
+            expected, expected_grad, before = differentiate(tf.reduce_mean, tensor)
+            actual, actual_grad, after = differentiate(lambda v: _mean_tf_loss(tf, v), tensor)
+            assert actual.numpy().tobytes() == expected.numpy().tobytes()
+            np.testing.assert_array_equal(actual_grad.numpy(), expected_grad.numpy())
+            assert actual.dtype == expected.dtype == dtype
+            assert actual.device == expected.device == tensor.device
+            assert actual_grad.device == expected_grad.device == tensor.device
+            assert before.count("Mean") == 1 and after.count("Mean") == 0
+            assert before.count("RealDiv") == 1 and after.count("RealDiv") == 0
+            assert len(after) < len(before)
+
+    original_mean = tf.reduce_mean
+    fallbacks = []
+
+    def mean(value):
+        fallbacks.append(value)
+        return original_mean(value)
+
+    monkeypatch.setattr(tf, "reduce_mean", mean)
+
+    class ScalarLike:
+        def __tf_tensor__(self, dtype=None, name=None):
+            return tf.constant(2., dtype=dtype, name=name)
+
+    values = (
+        tf.constant([1., 3.]), tf.constant([[1., 3.]]), tf.constant([], dtype=tf.float32),
+        tf.constant(3, dtype=tf.int32), tf.constant(1., dtype=tf.float16),
+        tf.constant(1., dtype=tf.bfloat16), tf.constant(1 + 2j, dtype=tf.complex64),
+        tf.Variable(2.), np.float32(2.), np.array(2., dtype=np.float64), [1., 3.],
+        tf.ragged.constant([[1.], [2., 3.]]), ScalarLike(),
+    )
+    for value in values:
+        expected = original_mean(value)
+        actual = _mean_tf_loss(tf, value)
+        assert fallbacks[-1] is value
+        np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+        assert actual.dtype == expected.dtype and actual.device == expected.device
+
+    for value in (tf.constant(True), tf.constant("invalid"), object()):
+        with pytest.raises((TypeError, ValueError, tf.errors.InvalidArgumentError)) as expected:
+            original_mean(value)
+        with pytest.raises(type(expected.value)):
+            _mean_tf_loss(tf, value)
+        assert fallbacks[-1] is value
+
+    value = tf.constant(2.)
+    with monkeypatch.context() as patch:
+        patch.delattr(tf.__internal__, "EagerTensor")
+        assert _mean_tf_loss(tf, value).numpy() == original_mean(value).numpy()
+        assert fallbacks[-1] is value
+
+    @tf.function(input_signature=[tf.TensorSpec(shape=(), dtype=tf.float32)], autograph=False)
+    def symbolic_scalar(value):
+        return _mean_tf_loss(tf, value)
+
+    assert symbolic_scalar(value).numpy() == original_mean(value).numpy()
+    assert any(op.type == "Mean" for op in symbolic_scalar.get_concrete_function().graph.get_operations())
+
+    @tf.function(input_signature=[tf.TensorSpec(shape=None, dtype=tf.float32)], autograph=False)
+    def unknown_rank(value):
+        assert value.shape.rank is None
+        return _mean_tf_loss(tf, value)
+
+    for value in (tf.constant(-0.), tf.constant([1., 3.])):
+        np.testing.assert_array_equal(unknown_rank(value).numpy(), original_mean(value).numpy())
+    assert unknown_rank.experimental_get_tracing_count() == 1
+    assert any(op.type == "Mean" for op in unknown_rank.get_concrete_function().graph.get_operations())
+
+
+@pytest.mark.exhaustive_only
+@pytest.mark.parametrize("input_device", ("/GPU:0", "/CPU:0"),
+                         ids=("gpu-input", "cpu-input-gpu-ops"))
+def test_tf_scalar_loss_gpu_fallback_and_native_operation_placement(monkeypatch, input_device):
+    """Opt-in GPU proof of fallback identity and native cross-device value/gradient parity.
+
+    Skip without a visible TensorFlow GPU; CPU input under a GPU operation scope
+    also checks that specialization preserves native operation placement.
+    """
+    tf = pytest.importorskip("tensorflow")
+    from dryml.models.tf.base import _mean_tf_loss
+
+    if not tf.config.list_logical_devices("GPU"):
+        pytest.skip("requires a visible TensorFlow GPU; GPU behavior not exercised")
+
+    original_mean = tf.reduce_mean
+    forwarded = []
+
+    def mean(value):
+        forwarded.append(value)
+        return original_mean(value)
+
+    monkeypatch.setattr(tf, "reduce_mean", mean)
+
+    def differentiate(reduce, value):
+        with tf.GradientTape() as tape:
+            tape.watch(value)
+            result = reduce(value)
+        return result, tape.gradient(result, value)
+
+    for dtype in (tf.float32, tf.float64):
+        info = np.finfo(dtype.as_numpy_dtype)
+        values = (0., -0., 1.25, -2.5, info.max, info.tiny, info.smallest_subnormal,
+                  -info.smallest_subnormal, float("inf"), -float("inf"), float("nan"))
+        for value in values:
+            with tf.device(input_device):
+                tensor = tf.convert_to_tensor(np.array(value, dtype=dtype.as_numpy_dtype))
+            assert type(tensor) is tf.__internal__.EagerTensor
+            assert tensor.shape.rank == 0 and tensor.dtype == dtype
+            assert f"/device:{input_device[1:]}" in tensor.device
+            forwarded.clear()
+            with tf.device("/GPU:0"):
+                expected, expected_grad = differentiate(original_mean, tensor)
+                actual, actual_grad = differentiate(lambda v: _mean_tf_loss(tf, v), tensor)
+            if input_device == "/GPU:0":
+                assert len(forwarded) == 1 and forwarded[0] is tensor
+            else:
+                assert forwarded == []
+            assert actual.numpy().tobytes() == expected.numpy().tobytes()
+            np.testing.assert_array_equal(actual_grad.numpy(), expected_grad.numpy())
+            np.testing.assert_array_equal(actual_grad.numpy(), np.array(1., dtype=dtype.as_numpy_dtype))
+            assert actual.dtype == expected.dtype == dtype
+            assert actual_grad.dtype == expected_grad.dtype == dtype
+            assert actual.device == expected.device
+            assert actual_grad.device == expected_grad.device
 
 
 @pytest.mark.parametrize("backend", ("torch", "tf", "jax", "keras"))

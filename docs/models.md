@@ -366,6 +366,16 @@ wrappers that require one. In all cases adapter reads, including native
 read-ahead, do not advance retained progress: post-update trainer hooks own that
 state.
 
+The explicit TensorFlow `Training` loop inspects each actual loss result rather
+than caching its shape from the loss configuration. Native eager CPU float32/64
+scalars use a native identity for training and validation, preserving their values,
+dtype and native placement while avoiding a redundant `Mean` and its gradient work.
+Training differentiates that scalar target with the native default unit seed. Vectors,
+symbolic tensors (including unknown rank), custom/non-tensor results, other
+dtypes and devices retain `tf.reduce_mean`, including its failure behavior.
+Mean-loss admission and example-weighted accounting are unchanged. This scoped
+work reduction does not establish throughput or native-performance qualification.
+
 #### Keras consumed-input window
 
 One invocation owns a dedicated source thread and a private window (default eight

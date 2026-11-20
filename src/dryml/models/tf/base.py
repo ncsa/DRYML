@@ -336,6 +336,27 @@ def _require_mean_keras_loss(loss) -> None:
         )
 
 
+def _mean_tf_loss(tf, value):
+    """Reduce an actual loss result, specializing native CPU float32/64 scalars.
+
+    Forward qualified tensors through Identity, preserving signed zero, subnormals
+    and native operation placement.
+    The explicit loop differentiates this scalar target with the default unit
+    seed; Mean's scalar gradient would only divide that seed by one. This is not
+    a general replacement for reductions with arbitrary upstream gradients.
+    Inspect each result's native type, dtype, rank and device without a readback.
+    All other values, including symbolic/unknown-rank tensors, custom types and
+    unsupported devices/dtypes, retain ``tf.reduce_mean`` and its failures. A
+    TensorFlow version without the exact native eager type also uses that fallback.
+    """
+    if (type(value) is getattr(getattr(tf, "__internal__", None), "EagerTensor", None)
+            and value.dtype in (tf.float32, tf.float64)
+            and value.shape.rank == 0
+            and "/device:CPU:" in value.device):
+        return tf.identity(value)
+    return tf.reduce_mean(value)
+
+
 def _require_supported_keras_accounting(compile_kwargs, fit_kwargs) -> None:
     """Reject Keras objective options that cannot retain an honest loss mean."""
 
@@ -1691,7 +1712,11 @@ class BasicTraining(TrainFunction):
 
 
 class Training(BasicTraining):
-    """Low-level TensorFlow training loop for arbitrary TF-callable DRYML models."""
+    """Train arbitrary TF-callable DRYML models with explicit gradient tapes.
+
+    Each actual loss result uses the scalar specialization or native reduction
+    fallback documented by :meth:`__call__`, independently of loss configuration.
+    """
 
     def __call__(self, exp, *, callbacks=()):
         """Train one Experiment with TensorFlow gradient tapes.
@@ -1731,6 +1756,12 @@ class Training(BasicTraining):
         still run on every call under the native-owner lease. Each batch checks
         mode/default changes and retires that adapter; custom/subclass models
         retain ordinary dynamic dispatch.
+        Each actual loss result is inspected independently: native eager CPU
+        float32/64 scalars use a native identity as the tape's unit-seeded loss target,
+        preserving values (including signed zero/subnormals) and gradients.
+        Other ranks, symbolic or custom values, devices and dtypes retain
+        tf.reduce_mean and its failures in training and validation; loss admission
+        is unchanged.
         """
         callbacks = validate_training_callbacks(callbacks)
         require_supervised_dataset(exp.train_data, batched=True)
@@ -1824,7 +1855,7 @@ class Training(BasicTraining):
                                 else:
                                     selected_model = model_invoker = None
                                     y_pred = model(x)
-                                loss_value = tf.reduce_mean(loss_fn(y, y_pred))
+                                loss_value = _mean_tf_loss(tf, loss_fn(y, y_pred))
 
                             if trainable_variables is None:
                                 with manage_repo() as repo:
@@ -1973,6 +2004,7 @@ class Training(BasicTraining):
         progress.epoch_end(epoch + 1, epochs=target_epoch, metrics=epoch_metrics)
 
     def _evaluate(self, tf, model, val_data, loss_fn, metrics):
+        """Evaluate example-weighted means with the per-result scalar specialization."""
         for metric in metrics:
             _reset_metric(metric)
         total_loss = 0.0
@@ -1984,7 +2016,7 @@ class Training(BasicTraining):
             for x, y in cursor:
                 examples = val_data.examples_in((x, y))
                 y_pred = model(x)
-                loss_value = tf.reduce_mean(loss_fn(y, y_pred))
+                loss_value = _mean_tf_loss(tf, loss_fn(y, y_pred))
                 total_loss += float(metric_value(loss_value)) * examples
                 total_examples += examples
                 for metric in metrics:

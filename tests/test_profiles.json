@@ -208,6 +208,7 @@
             "test_jax_managed_subprocess_restores_exact_graph",
             "test_torch_update_failure_survives_source_cleanup_with_accepted_prefix",
             "test_tf_training_retains_raw_selection_signature_and_native_sgd",
+            "test_tf_dataset_continuation_scalar_loss_values_gradients_and_fallback",
             "test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
             "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache"
           ]
