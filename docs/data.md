@@ -873,10 +873,13 @@ selection and JAX placement-only compilation corrections, the full `3153003b`
 matrix measured JAX at **0.828590/0.856285** times baseline with no steady
 regression observed. Its single confirmation cleared Torch and Keras steady
 comparisons but retained TF cadence-32 regression at **1.226797**. A subsequent
-explicit-TF scalar-loss correction has focused numerical and recovery proofs;
-fresh comparative and final-tree routine qualification remain pending. See the
-current evidence section of the qualification document; no historical report is
-relabeled.
+explicit-TF scalar-loss correction at `314c9057` measured TF steady ratios
+**0.894977/0.918846**, with no regression observed. Its single confirmation still
+has unresolved Torch/Keras noise; the whole comparison remains unverified. The
+routine run at that revision stopped on a subsequently corrected collection
+inventory after **1019.93 seconds**, so final-tree routine qualification also
+remains open. See the current evidence section of the qualification document;
+no historical report is relabeled.
 
 ## Source Datasets
 

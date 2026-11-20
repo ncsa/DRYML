@@ -588,15 +588,17 @@ def test_good_enough_collects_prepared_numpy_validation_regressions(tmp_path):
 
 
 def test_framework_manifest_collects_tf_retained_selection_without_eager_imports(tmp_path):
-    """Focused @manifest collection selects both TF cases without loading backends."""
+    """Focused @manifest collection selects retained TF cases and scalar proof lazily."""
     owner = "tests/models/test_dataset_training_integration.py"
     function = "test_tf_training_retains_raw_selection_signature_and_native_sgd"
     selection = f"{owner}::{function}"
+    scalar_function = "test_tf_dataset_continuation_scalar_loss_values_gradients_and_fallback"
+    scalar_selection = f"{owner}::{scalar_function}"
     control = f"{owner}::test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache"
     manifest = tmp_path / "framework-subset.txt"
     manifest.write_text("\n".join(
         line for line in (ROOT / "tests/framework_tests.txt").read_text().splitlines()
-        if line.split("[", 1)[0] in {selection, control}
+        if line.split("[", 1)[0] in {selection, scalar_selection, control}
     ) + "\n")
     report_path = tmp_path / "framework-collection.json"
     (tmp_path / "framework_manifest_guard.py").write_text(r'''
@@ -640,14 +642,17 @@ def pytest_sessionfinish(session, exitstatus):
     result = subprocess.run(
         [
             bash, "./tests.sh", f"@{manifest}", "--collect-only", "-q", "--no-cov",
-            "-k", function, "-p", "framework_manifest_guard",
+            "-k", f"{function} or {scalar_function}", "-p", "framework_manifest_guard",
             "-o", f"cache_dir={tmp_path / 'cache'}",
         ],
         cwd=ROOT, env=env, text=True, capture_output=True, check=False, timeout=120,
     )
     assert report_path.exists(), result.stdout + result.stderr
     report = json.loads(report_path.read_text())
-    assert report["nodeids"] == [f"{selection}[{kind}]" for kind in ("model", "sequential")], result.stdout
+    assert report["nodeids"] == [
+        *(f"{selection}[{kind}]" for kind in ("model", "sequential")),
+        scalar_selection,
+    ], result.stdout
     assert result.returncode == 0, result.stdout + result.stderr
     assert report["framework_import_attempts"] == []
     assert report["framework_modules"] == []
@@ -752,6 +757,7 @@ sys.exit(pytest.main([
             "test_torch_update_failure_survives_source_cleanup_with_accepted_prefix",
             "test_tf_training_retains_raw_selection_signature_and_native_sgd[model]",
             "test_tf_training_retains_raw_selection_signature_and_native_sgd[sequential]",
+            "test_tf_dataset_continuation_scalar_loss_values_gradients_and_fallback",
             "test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
             "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
         )

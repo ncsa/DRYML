@@ -4,19 +4,20 @@
 
 The traversal, continuation, Accumulate, accepted-training-state, and native
 consumer implementation is present on `fix/real-usage-followups`. The plan is
-**not complete**: comparative performance qualification remains blocking.
-The complete routine gate passed at `238a2cbd`; final verification of subsequent
-backend corrections remains pending. Passing correctness checks do not waive
-comparative requirements.
+**not complete**: comparative performance and updated-tree routine qualification
+remain blocking. The complete routine gate passed at `238a2cbd`, but the later
+`314c9057` run failed a stale collection inventory and exceeded 900 seconds.
+The inventory is corrected below; passing focused checks does not waive either
+completion gate.
 
 Latest corrections cover retained native call preparation, JAX argument
 commitment, and redundant explicit-TF scalar loss reduction. Earlier corrections
 include the linear Array/Map-to-Batch kernel, the
 [explicit TF/Keras recipe loss](#fresh-comparison-tfkeras-recipe-loss-correction),
 and confirmation instrumentation identity.
-Earlier exhausted reports remain **unverified**. The latest complete routine
-runner passed **5,149 tests with 25 skips in 898.23 seconds**. Current evidence
-and the owner's continued-execution direction are recorded below.
+Earlier exhausted reports remain **unverified**. The last successful complete
+routine runner passed **5,149 tests with 25 skips in 898.23 seconds**. Current
+evidence and the owner's continued-execution direction are recorded below.
 
 The canonical decision artifact is
 `docs/plans/2026-11-14-001-feat-dataset-traversal-continuation-plan.md`.
@@ -173,8 +174,62 @@ The six-lens local review and independent validator are retained at
 `/tmp/dryml/ce-code-review/tf-scalar-loss-3153003b/`. Findings #1/#2 were corrected
 by CPU-scoping native setup/execution and adding conditional GPU fallback tests.
 Three simplification lenses requested no change. No cross-provider independence
-is claimed. The material runtime correction awaits a separately labeled bounded
-comparison and final-tree routine run under the continued-execution direction.
+is claimed. The subsequent fixed comparison and routine attempt are below.
+
+### Scalar-loss comparison at 314c9057
+
+With the same CPU/single-thread controls and `PYTHONDONTWRITEBYTECODE=1`:
+
+```sh
+/usr/bin/time -o /tmp/dryml/u8-evidence/comparison-314c9057.wall.txt -f 'exit=%x wall_seconds=%e' python -m tests.tools.benchmark_dataset_traversal --baseline-source /tmp/dryml/u8-baseline-f569da67 --baseline-revision 9a681eabfe53b66f9d6d1459960ba10b95c1ff1d --output /tmp/dryml/u8-evidence/comparison-314c9057.json --workload tf --workload keras --workload torch --workload jax --workload indexed-implicit --workload indexed-explicit --workload ordinary --workload direct --workload mixed --workload buffered
+/usr/bin/time -o /tmp/dryml/u8-evidence/confirmation-314c9057.wall.txt -f 'exit=%x wall_seconds=%e' python -m tests.tools.benchmark_dataset_traversal --baseline-source /tmp/dryml/u8-baseline-f569da67 --baseline-revision 9a681eabfe53b66f9d6d1459960ba10b95c1ff1d --confirm /tmp/dryml/u8-evidence/comparison-314c9057.json --output /tmp/dryml/u8-evidence/confirmation-314c9057.json --workload torch --workload keras --workload jax --mode old --mode new
+```
+
+The initial complete matrix consumed **998.7260040468536 seconds** (998.84 full
+wall). TF steady ratios **0.894977/0.918846** at cadences 0/32 both classify
+no-regression-observed, resolving the prior TF slowdown in this round. Indexed
+implicit was **0.489795**. Torch cadence zero, Keras cadence 32 and both JAX
+cadences were noisy; no resolved old/new regression was observed.
+
+The sole confirmation reached cumulative **1092.1976065519266 seconds**. It
+reused identity-matched instrumentation, never timing windows:
+
+| Work | Cadence 0 ratio / status | Cadence 32 ratio / status |
+|---|---|---|
+| Torch | 0.846131 / no regression observed | 0.862730 / noisy |
+| Keras | 0.949693 / noisy | 0.912711 / no regression observed |
+| JAX | 0.879115 / no regression observed | 0.843200 / no regression observed |
+
+Although the initially noisy cells cleared, two other measured pairs became
+noisy. Their favorable initial windows are not substituted to conceal that
+uncertainty. The partial confirmation also omits 88 required matrix cells and
+does not automatically combine timing evidence. **R28 remains unverified**.
+The single confirmation allowance is spent despite approximately 107.8 unused
+seconds; no unchanged repeat or second confirmation is implied.
+
+### Routine failure and collection-inventory correction
+
+```sh
+/usr/bin/time -o /tmp/dryml/dataset-routine-time-314c9057.txt -f 'exit=%x wall_seconds=%e' ./tests.sh good-enough --ignore tests/old --ignore tests/dev -x tests
+```
+
+The isolated phase passed **265 tests in 47.69 seconds**. The ordinary phase
+stopped with **4,835 passed, 25 skipped, one failed in 965.77 seconds**. Complete
+runner wall time was **1019.93 seconds**, exit 1: both completion and strict
+wall-time requirements failed. The stale exact inventory in
+`test_good_enough_collects_native_regressions_without_eager_framework_imports`
+expected 34 nodes instead of the correctly selected 35 after adding the scalar
+loss proof. This is a test-inventory defect, not an excluded or disabled test.
+
+Focused reproduction observed the same 35-versus-34 failure. The correction adds
+the new node to the exact expected set and extends the executable `@manifest`
+guard to collect it alongside both retained-call cases. Exact set/count/tier,
+control filtering and zero-framework-import assertions remain. Coordinator
+verification of the entire affected `tests/tools/test_runner.py` passed
+**30 checks in 25.00 seconds**. This mechanical inventory synchronization does
+not claim the full wall-time gate is repaired. The old untracked medium timing
+file describes a different, smaller selection and cannot attribute this run's
+elapsed time; it is preserved.
 
 ## Implemented boundaries
 
@@ -628,8 +683,10 @@ different-model corroboration.
 ## Unresolved qualification
 
 1. **Final-tree routine verification:** `238a2cbd` passed in **898.23 seconds**;
-   repeat only after integrating the subsequent material TF/JAX corrections.
-   Historical 929.86 and 914.70-second failures remain recorded.
+   the subsequent `314c9057` run failed at **1019.93 seconds** with a stale test
+   inventory. The inventory correction passes its affected subsystem; a complete
+   successful run strictly below 900 seconds is still required. Historical
+   929.86 and 914.70-second failures remain recorded.
 2. **Comparative performance:** the historical fixed 1,200-second comparison
    budget was exhausted. Earlier indexed and Torch regression signals are preserved in
    [the Data measurement section](data.md#bounded-cpu-evidence-and-unresolved-gates).
@@ -645,8 +702,9 @@ different-model corroboration.
    `3d1df5e7` and its confirmation at `238a2cbd` are recorded above; their total
     budget is also spent. The subsequent `3153003b` matrix and single confirmation
     clear several steady comparisons but retain the explicit-TF cadence-32
-    regression recorded above. Scalar-loss work reduction awaits fresh bounded
-    qualification under the continued-execution direction.
+    regression recorded above. The `314c9057` scalar-loss round resolves that
+    regression, but its single confirmation still has Torch/Keras noise and
+    partial matrix coverage. Both reports remain unverified.
 3. **Comparative JAX evidence:** real Optax is now available and the four-mode
    driver has tiny numerical unit qualification and real fixed-profile evidence
     at `fde25998` and later revisions. The `3153003b` complete matrix measures
