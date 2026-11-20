@@ -986,8 +986,19 @@ exhaustion, fixed-prefix, and zero-acquisition behavior. Ordinary non-epoch-awar
 Dataset pipelines retain their normal fresh traversal per epoch.
 
 Training acquires the input update reservation before reading Model parameters,
-mutable state, RNG, or Optimizer slots. It holds that reservation while computing
-the pure JITted parameter-only gradient/Optax candidate, waiting for its arrays,
+mutable state, RNG, or Optimizer slots. Inside that reservation, native arguments
+with a committed anchor whose existing shardings agree on one device receive
+explicit placement before the JIT call; already committed arrays pass through
+unchanged. Entirely uncommitted arguments and missing, mixed or multi-device
+placement retain ordinary JAX inference, including `jax.default_device` policy.
+This prevents a placement-only second specialization when committed prepared
+batches make the first candidate committed. Placement retains dtype, weak type,
+typed-key implementation, and device/sharding choice; repeated leaf references share one
+placement result within that call. Host-backed restored typed keys use the same
+single-device placement, preserving their bits and implementation.
+No placement evidence or candidate arrays are cached across updates or callbacks.
+It holds that reservation while computing the pure JITted parameter-only
+gradient/Optax candidate, waiting for its arrays,
 validating state, and eagerly installing all owner state and TrainState accounting
 together. Concurrent updates sharing a Model fail explicitly on contention before
 computing a stale candidate. Pure pre-installation failures leave unchanged owners

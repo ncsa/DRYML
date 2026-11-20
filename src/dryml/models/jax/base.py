@@ -724,7 +724,10 @@ class Training(TrainFunction):
     and installation. Overlapping updates sharing an owner fail explicitly.
     Candidate state is computed without owner mutation, then installed with Model,
     Optimizer, TrainFunction, and TrainState accounting in one bounded eager
-    transition. This experimental API may change.
+    transition. Homogeneous single-device native arguments with a committed anchor
+    use explicit placement so the first result does not introduce a placement-only
+    JIT specialization. Entirely uncommitted arguments retain JAX device inference.
+    This experimental API may change.
 
     Raises:
         TypeError: If construction or invocation values violate the documented
@@ -1031,7 +1034,16 @@ class Training(TrainFunction):
 
     @staticmethod
     def _native_update(jax, optax, model, transformation, loss_fn):
-        """Return the sole JITted pure parameter-only native update function."""
+        """Return a pure update using one JIT and stable per-call array placement.
+
+        Homogeneous single-device arguments with a committed anchor receive explicit
+        placement inside the call, after the caller acquires its owner reservation.
+        Already committed arrays pass through unchanged; host-backed restored keys
+        use that same device. Entirely uncommitted arguments and missing, mixed or
+        multi-device placement retain ordinary JAX inference.
+        Alias references and flattened leaves are retained only within this call;
+        no array or placement evidence is cached across calls.
+        """
 
         def transition(parameters, mutable_state, rng, slots, x, y):
             def objective(candidate_parameters):
@@ -1055,7 +1067,33 @@ class Training(TrainFunction):
             )
             return loss, candidate_parameters, candidate_mutable, candidate_rng, candidate_slots
 
-        return jax.jit(transition)
+        compiled = jax.jit(transition)
+
+        def update(*args):
+            leaves, tree = jax.tree_util.tree_flatten(args)
+            if not any(getattr(leaf, "committed", False) for leaf in leaves):
+                return compiled(*args)
+            shardings = [getattr(leaf, "sharding", None) for leaf in leaves]
+            placement = next((value for value in shardings if value is not None), None)
+            if (
+                placement is None
+                or len(placement.device_set) != 1
+                or any(value is not None and value != placement for value in shardings)
+            ):
+                return compiled(*args)
+            placed = {}
+
+            def place(leaf):
+                if getattr(leaf, "committed", False):
+                    return leaf
+                identity = id(leaf)
+                if identity not in placed:
+                    placed[identity] = jax.device_put(leaf, placement)
+                return placed[identity]
+
+            return compiled(*jax.tree_util.tree_unflatten(tree, [place(leaf) for leaf in leaves]))
+
+        return update
 
     @staticmethod
     def _validated_loss(value, jax) -> float:

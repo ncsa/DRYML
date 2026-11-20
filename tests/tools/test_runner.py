@@ -617,6 +617,8 @@ owners = {
     "./tests/models/test_tf_training.py",
     "./tests/models/test_torch_training.py",
     "./tests/models/test_training_transaction.py",
+    "./tests/models/test_jax_candidate_work.py",
+    "./tests/models/test_jax_training.py",
 }
 selected_files = [
     path for path in test_buckets.select_profile_files(
@@ -662,6 +664,8 @@ sys.exit(pytest.main([
     assert report["exitstatus"] == 0
     assert report["selected_files"] == [
         "./tests/models/test_dataset_training_integration.py",
+        "./tests/models/test_jax_candidate_work.py",
+        "./tests/models/test_jax_training.py",
         "./tests/models/test_training_transaction.py",
     ]
     owner = "tests/models/test_dataset_training_integration.py"
@@ -698,6 +702,24 @@ sys.exit(pytest.main([
             "test_update_validates_retained_plan_only_before_native_and_at_acceptance[True]",
             "test_acceptance_rechecks_owner_binding_after_native_work",
             "test_boundary_hook_requires_fresh_validation_before_reservation",
+        )
+    )
+    owner = "tests/models/test_jax_candidate_work.py"
+    expected.update(
+        f"{owner}::{function}" for function in (
+            "test_native_placement_is_local_preserves_aliases_and_skips_committed_arrays",
+            "test_native_placement_failure_precedes_pure_computation",
+            "test_native_placement_requires_committed_anchor[uncommitted]",
+            "test_native_placement_requires_committed_anchor[no_sharding]",
+            "test_native_placement_keeps_mixed_and_multidevice_inference[devices0]",
+            "test_native_placement_keeps_mixed_and_multidevice_inference[devices1]",
+        )
+    )
+    owner = "tests/models/test_jax_training.py"
+    expected.update(
+        f"{owner}::{function}" for function in (
+            "test_jax_training_updates_first_class_flax_nnx_model",
+            "test_jax_native_transition_reuses_equal_batch_signature",
         )
     )
     assert len(report["nodeids"]) == len(expected)

@@ -26,6 +26,12 @@ from dryml.models.utils import TrainingPreparation
 
 
 UNKNOWN_SOURCE_OPENS = []
+_NATIVE_DEFAULT_DEVICE_PAIR = None
+
+
+def _native_default_device_pairs():
+    """Yield the unchanged native buffers installed only by the two-CPU child."""
+    yield _NATIVE_DEFAULT_DEVICE_PAIR
 
 
 def _unknown_source():
@@ -275,6 +281,305 @@ def test_jax_dataset_continuation_native_compiled_sections(monkeypatch):
     exp.train_fn(exp, callbacks=(lambda: captures == [] or pytest.fail("per-update capture"),))
     assert jit_calls == [True] and captures == [4]
     assert exp.state.input_sequence == exp.state.step == 4
+
+
+def test_jax_native_transition_reuses_equal_batch_signature(monkeypatch, caplog):
+    """Tiny real SGD keeps one cache entry, full validation and both barriers."""
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    import dryml.models.jax.base as jax_base
+    from dryml.core.state import is_reserved
+    from tests.tools.benchmark_dataset_traversal import _JaxDriver
+    x = np.arange(96 * 16, dtype=np.float32).reshape(96, 16) / 10000
+    y = x.sum(axis=1, keepdims=True) / 8
+    exp = _JaxDriver("new", x, y, sections=1).exp
+    traces, signatures, cache_sizes = [], [], []
+    barriers, validations, puts, update_puts = [], [], [], []
+    compiled_updates = []
+    original_jit = jax.jit
+    original_put = jax.device_put
+    original_sync = jax_base._synchronize_tree
+    original_validate = exp.model._validate_candidate_state
+    original_apply = exp.model._training_apply
+    original_update = exp.train_fn._native_update
+    prior_rng = np.asarray(jax.random.key_data(exp.model.rng)).copy()
+
+    def device_put(value, device=None, *args, **kwargs):
+        puts.append(value)
+        return original_put(value, device, *args, **kwargs)
+
+    def synchronize(*args):
+        assert is_reserved(exp.model)
+        barriers.append(True)
+        return original_sync(*args)
+
+    def validate(*args):
+        validations.append(True)
+        return original_validate(*args)
+
+    def jit(*args, **kwargs):
+        compiled = original_jit(*args, **kwargs)
+        compiled_updates.append(compiled)
+        return compiled
+
+    def apply(*args):
+        traces.append(True)
+        return original_apply(*args)
+
+    def native_update(*args):
+        update = original_update(*args)
+
+        def call(*values):
+            assert is_reserved(exp.model)
+            signatures.append([
+                (leaf.shape, str(leaf.dtype), getattr(leaf, "weak_type", False), str(leaf.sharding),
+                 str(getattr(leaf, "layout", None)), leaf.committed)
+                for leaf in jax.tree_util.tree_leaves(values)
+            ])
+            before = len(puts)
+            candidate = update(*values)
+            update_puts.append(len(puts) - before)
+            cache_sizes.append(compiled_updates[0]._cache_size())
+            return candidate
+
+        return call
+
+    monkeypatch.setattr(exp.model, "_training_apply", apply)
+    monkeypatch.setattr(exp.model, "_validate_candidate_state", validate)
+    monkeypatch.setattr(jax_base, "_synchronize_tree", synchronize)
+    monkeypatch.setattr(jax, "device_put", device_put)
+    monkeypatch.setattr(jax, "jit", jit)
+    monkeypatch.setattr(exp.train_fn, "_native_update", native_update)
+    with jax.log_compiles(True):
+        exp.train_fn(exp)
+    assert len(traces) == 1, signatures
+    assert len(compiled_updates) == 1
+    compiles = [record.getMessage() for record in caplog.records
+                if record.getMessage().startswith("Compiling transition ")]
+    assert len(compiles) == 1, compiles
+    assert cache_sizes == [1, 1, 1], signatures
+    assert update_puts == [2, 0, 0]
+    assert len(barriers) == len(validations) == 6
+    assert exp.state.step == 3 and exp.state.examples_seen == 96
+    expected = np.zeros((16, 1), dtype=np.float32)
+    for start in range(0, 96, 32):
+        a, b = x[start:start + 32], y[start:start + 32]
+        expected -= np.float32(.001) * (2 * a.T @ (a @ expected - b) / 32)
+    np.testing.assert_allclose(exp.model.parameters["kernel"], expected, rtol=1e-6)
+    np.testing.assert_array_equal(jax.random.key_data(exp.model.rng), prior_rng)
+
+
+@pytest.mark.exhaustive_only
+def test_jax_native_uncommitted_training_respects_default_device():
+    """Fresh two-CPU training preserves the original pure JIT's device inference."""
+    pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    script = textwrap.dedent('''
+        import json
+        from unittest.mock import patch
+        from dryml import F
+        from dryml.core import TensorSpec
+        from dryml.data import GeneratorDataset
+        from dryml.models.jax import Optimizer, Training
+        from tests.models import test_jax_training as fixtures
+        import jax
+        import numpy as np
+
+        a, b = jax.devices()
+        assert a.platform == b.platform == "cpu" and a != b
+
+        with jax.default_device(a):
+            exp = fixtures._experiment()
+            exp.train_fn.optimizer = Optimizer(F("optax.sgd", 0.1))
+            transformation = exp.train_fn.optimizer.bind(exp.model)
+            assert jax.tree_util.tree_leaves(transformation.init(exp.model.parameters)) == []
+            x = jax.numpy.ones((2, 1), dtype=jax.numpy.float32)
+            y = x * 2
+            fixtures._NATIVE_DEFAULT_DEVICE_PAIR = (x, y)
+            spec = TensorSpec("float32", shape=(1,), batch=2, backend="jax")
+            exp.train_data = GeneratorDataset(
+                fixtures._native_default_device_pairs, cardinality=1, spec=(spec, spec),
+            )
+
+        original_jit = jax.jit
+        original_update = Training._native_update
+        candidates = []
+
+        def native_update(*args):
+            compiled = []
+
+            def jit(transition):
+                pure = original_jit(transition)
+                compiled.append(pure)
+                return pure
+
+            with patch.object(jax, "jit", jit):
+                update = original_update(*args)
+            assert len(compiled) == 1
+
+            def checked(*values):
+                leaves = jax.tree_util.tree_leaves(values)
+                assert leaves and all(not leaf.committed and leaf.device == a for leaf in leaves)
+                assert values[4] is x and values[5] is y
+                expected = compiled[0](*values)
+                actual = update(*values)
+                expected_leaves = jax.tree_util.tree_leaves(expected)
+                actual_leaves = jax.tree_util.tree_leaves(actual)
+                proof = {
+                    "initial_device": str(a), "default_device": str(b),
+                    "initial_all_uncommitted": True,
+                    "pure_jit_devices": [str(leaf.device) for leaf in expected_leaves],
+                    "actual_devices": [str(leaf.device) for leaf in actual_leaves],
+                }
+                print(json.dumps(proof), flush=True)
+                assert all(leaf.device == b for leaf in expected_leaves)
+                assert all(leaf.device == b for leaf in actual_leaves), proof
+                for actual_leaf, expected_leaf in zip(actual_leaves, expected_leaves):
+                    if jax.dtypes.issubdtype(actual_leaf.dtype, jax.dtypes.prng_key):
+                        assert jax.random.key_impl(actual_leaf) == jax.random.key_impl(expected_leaf)
+                        actual_leaf = jax.random.key_data(actual_leaf)
+                        expected_leaf = jax.random.key_data(expected_leaf)
+                    np.testing.assert_array_equal(actual_leaf, expected_leaf)
+                candidates.append(actual)
+                return actual
+
+            return checked
+
+        with patch.object(Training, "_native_update", staticmethod(native_update)):
+            with jax.default_device(b):
+                exp.train_fn(exp)
+        assert len(candidates) == exp.state.step == exp.state.input_sequence == 1
+        assert exp.state.examples_seen == 2
+        assert exp.model.parameters["weight"].device == exp.model.rng.device == b
+        assert not x.committed and x.device == a and not y.committed and y.device == a
+    ''')
+    environment = os.environ.copy()
+    environment.update({
+        "JAX_PLATFORMS": "cpu", "JAX_ENABLE_X64": "false",
+        "XLA_FLAGS": "--xla_force_host_platform_device_count=2 --xla_cpu_multi_thread_eigen=false",
+        "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+        "TF_NUM_INTRAOP_THREADS": "1", "TF_NUM_INTEROP_THREADS": "1",
+    })
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=environment, capture_output=True,
+        text=True, check=False, timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    print(result.stdout, end="")
+
+
+def test_jax_native_placement_failure_preserves_owners_and_frontier(monkeypatch):
+    """A reserved placement failure cannot install owners or accept source input."""
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    from dryml.core.state import is_reserved
+
+    exp = _experiment()
+    prior = exp.model.parameters, exp.model.mutable_state, exp.model.rng
+    exp.train_fn.optimizer.bind(exp.model)
+    prior_slots = exp.train_fn.optimizer.state
+    original_put = jax.device_put
+    failed = []
+
+    def device_put(value, *args, **kwargs):
+        if value is prior[0]["weight"]:
+            assert is_reserved(exp.model)
+            failed.append(True)
+            raise RuntimeError("native placement failed")
+        return original_put(value, *args, **kwargs)
+
+    monkeypatch.setattr(jax, "device_put", device_put)
+    with exp.train_fn.input_session(exp) as inputs:
+        record = inputs.capture()
+    with pytest.raises(RuntimeError, match="native placement failed"):
+        exp.train_fn(exp)
+    assert failed == [True] and not is_reserved(exp.model)
+    assert exp.model.parameters is prior[0] and exp.model.mutable_state is prior[1]
+    assert exp.model.rng is prior[2] and exp.train_fn.optimizer.state is prior_slots
+    assert exp.state.step == exp.state.input_sequence == 0
+    assert exp.state.dataset_state is record
+    assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
+    with exp.train_fn.input_session(exp) as inputs:
+        assert inputs.capture() is record
+
+
+@pytest.mark.parametrize("implementation", ("threefry2x32", "rbg"))
+def test_jax_native_placement_retains_host_backed_keys_and_weak_types(monkeypatch, implementation):
+    """Native admission preserves restored key bits/implementation and weak scalars."""
+    jax = pytest.importorskip("jax")
+    from dryml.models.jax import Training
+
+    key = jax.random.key(17, impl=implementation)
+    host_bits = np.asarray(jax.random.key_data(key)).copy()
+    host_key = jax.random.wrap_key_data(host_bits, impl=implementation)
+    scalar = jax.numpy.asarray(1.)
+    ready = jax.device_put(jax.numpy.ones((1,)), jax.devices()[0])
+    monkeypatch.setattr(jax, "jit", lambda transition: lambda *args: args)
+    update = Training._native_update(jax, None, None, None, None)
+    result = update({"weight": scalar}, {}, host_key, (), ready, ready)
+    placed_scalar, placed_key = result[0]["weight"], result[2]
+    assert placed_scalar.committed and placed_key.committed
+    assert placed_scalar.weak_type == scalar.weak_type
+    assert placed_scalar.shape == scalar.shape and placed_scalar.dtype == scalar.dtype
+    assert placed_scalar.sharding == scalar.sharding
+    assert placed_key.shape == host_key.shape and placed_key.dtype == host_key.dtype
+    assert jax.random.key_impl(placed_key) == jax.random.key_impl(host_key)
+    np.testing.assert_array_equal(jax.random.key_data(placed_key), host_bits)
+    assert jax.random.key_data(host_key) is host_bits
+    assert result[4] is result[5] is ready
+
+
+@pytest.mark.parametrize("failure", (
+    "parameter_dtype", "parameter_topology", "parameter_nonfinite",
+    "mutable_nonfinite", "slot_dtype", "slot_topology", "slot_nonfinite", "rng",
+))
+def test_jax_direct_commit_retains_complete_candidate_checks(failure):
+    """Direct commits reject invalid complete candidates before changing any owner."""
+    jax = pytest.importorskip("jax")
+    exp = _experiment()
+    exp.model.mutable_state = {"value": jax.numpy.asarray(0., dtype=jax.numpy.float32)}
+    exp.train_fn.optimizer.state = {"slot": jax.numpy.asarray(0., dtype=jax.numpy.float32)}
+    prior = exp.model.parameters, exp.model.mutable_state, exp.model.rng
+    prior_slots = exp.train_fn.optimizer.state
+    parameters, mutable, rng, slots = *prior, prior_slots
+    if failure == "parameter_dtype":
+        parameters = {"weight": jax.numpy.zeros((1, 1), dtype=jax.numpy.int32)}
+    elif failure == "parameter_topology":
+        parameters = [parameters["weight"]]
+    elif failure == "parameter_nonfinite":
+        parameters = {"weight": jax.numpy.full((1, 1), float("nan"))}
+    elif failure == "mutable_nonfinite":
+        mutable = {"value": jax.numpy.asarray(float("inf"), dtype=jax.numpy.float32)}
+    elif failure == "slot_dtype":
+        slots = {"slot": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
+    elif failure == "slot_topology":
+        slots = ()
+    elif failure == "slot_nonfinite":
+        slots = {"slot": jax.numpy.asarray(float("nan"), dtype=jax.numpy.float32)}
+    else:
+        rng = jax.random.key_data(rng)
+    with pytest.raises((TypeError, ValueError), match="candidate"):
+        exp.train_fn._commit_update(
+            exp, parameters, mutable, rng, slots,
+            examples=2, loss=1., complete_epoch=False,
+        )
+    assert exp.model.parameters is prior[0] and exp.model.mutable_state is prior[1]
+    assert exp.model.rng is prior[2] and exp.train_fn.optimizer.state is prior_slots
+    assert exp.state.step == exp.state.examples_seen == 0
+
+
+def test_jax_candidate_validation_keeps_shared_leaf_topology():
+    """Shared identity is checked in addition to otherwise identical leaf metadata."""
+    jax = pytest.importorskip("jax")
+    from dryml.models.jax.base import _validate_tree_like
+
+    shared = jax.numpy.zeros((1, 1), dtype=jax.numpy.float32)
+    template = {"left": shared, "right": shared}
+    _validate_tree_like(template, template, "parameters", jax)
+    with pytest.raises(TypeError, match="topology"):
+        _validate_tree_like(
+            {"left": shared, "right": shared + 0}, template, "parameters", jax,
+        )
 
 
 def test_jax_native_iterator_yields_prepared_authored_batches():

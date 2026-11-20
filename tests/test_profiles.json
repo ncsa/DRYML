@@ -220,9 +220,10 @@
           ]
         },
         "tests/models/test_jax_training.py": {
-          "rationale": "Retain one first-class Flax NNX training representative in the routine qualified stack.",
+          "rationale": "Retain first-class Flax NNX training and one tiny real SGD placement/cache regression in the routine qualified stack.",
           "functions": [
-            "test_jax_training_updates_first_class_flax_nnx_model"
+            "test_jax_training_updates_first_class_flax_nnx_model",
+            "test_jax_native_transition_reuses_equal_batch_signature"
           ]
         },
         "tests/models/test_qualification_persistence_fixtures.py": {
