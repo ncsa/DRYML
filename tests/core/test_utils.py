@@ -87,16 +87,6 @@ def walk_structure(val):
     return 1
 
 
-def test_cycle_detect_rejects_both_arg_pos_and_kwarg_name():
-    with pytest.raises(ValueError, match="Specify only one"):
-        cycle_detect(arg_pos=0, kwarg_name="x")
-
-
-def test_cycle_detect_requires_one_of_arg_pos_or_kwarg_name():
-    with pytest.raises(ValueError, match="Specify one"):
-        cycle_detect(arg_pos=None, kwarg_name=None)
-
-
 def test_cycle_detect_detects_simple_container_cycle():
     a = []
     a.append(a)

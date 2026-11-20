@@ -201,20 +201,6 @@ def test_cycle_detect_allows_acyclic_recursive_walk():
     assert walk(x) == "ok"
 
 
-def test_cycle_detect_raises_on_list_self_cycle():
-    @cycle_detect(arg_pos=0)
-    def walk(x):
-        if isinstance(x, list):
-            for v in x:
-                walk(v)
-
-    x = []
-    x.append(x)
-
-    with pytest.raises(CycleError):
-        walk(x)
-
-
 def test_cycle_detect_raises_on_dict_cycle():
     @cycle_detect(arg_pos=0)
     def walk(x):

@@ -230,7 +230,6 @@
         "tests/models/test_qualification_persistence_fixtures.py": {
            "rationale": "Retain intact incompatible history/progress refusal, current observation fidelity and unchanged Value receipt compatibility.",
             "functions": [
-                 "test_experiment_data_v1_fixture_is_rejected_without_partial_install",
                  "test_value_receipt_fixture_round_trips_actual_value_reader_input",
                  "test_current_history_preserves_original_fixture_facts_and_missing_columns",
                  "test_train_state_old_named_and_tuple_vectors_are_rejected_atomically",

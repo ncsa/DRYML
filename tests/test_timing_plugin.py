@@ -584,7 +584,7 @@ def test_good_enough_policy_retains_required_boundary_proofs():
             "test_qualification_case_round_trip_retains_exact_w3_reference_without_live_handles",
         },
         "tests/models/test_qualification_persistence_fixtures.py": {
-            "test_experiment_data_v1_fixture_is_rejected_without_partial_install",
+            "test_qualification_frozen_inputs_remain_immutable_after_reader_refusal",
             "test_current_history_preserves_original_fixture_facts_and_missing_columns",
             "test_value_receipt_fixture_round_trips_actual_value_reader_input",
         },

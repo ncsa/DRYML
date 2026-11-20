@@ -416,6 +416,35 @@ inventory. TensorFlow 2.19.0 is the qualified version; private test-only AutoGra
 instrumentation remains version-sensitive. No new complete routine or fixed
 comparison has been run, and neither R20 nor R28 is claimed resolved.
 
+### Proven duplicate-test consolidation
+
+The source-level redundancy assessment at `f5dc2154` identified four removable
+routine invocations. The old-history refusal body now remains as a private
+helper called by the existing stronger fixture-byte-immutability test, with the
+same fresh Store, complete refusal assertions and fixture-integrity checks.
+Two identical cycle-detector configuration tests and a weaker list-self-cycle
+test were removed; their exact inputs and exception expectations remain in the
+recursive utility tests, including the stronger diagnostic-message assertion.
+
+The three owning files' actual routine collection fell from **39 to 35 nodes**;
+all four retained covering nodes remain selected. Exactly one obsolete profile
+entry and four tier entries were removed. No product behavior, fixture payload,
+native-process boundary or distinct workload was changed, and no material
+runtime saving is established. The mapping and assessment limits are recorded in
+`/tmp/dryml/maintained-test-redundancy-f5dc2154.md`.
+
+Three simplification lenses and four local review lenses completed. The standards
+review exposed a selection-policy verification gap: the required-boundary test
+still named the removed collected refusal test. A focused run reproduced that
+failure (**1 failed in 0.17 seconds**); the guard now pins the stronger retained
+wrapper instead. All other required-proof checks remain intact. Coordinator
+verification of the complete timing-plugin file and all three owning files
+passed **64 checks in 1.66 seconds**. A scoped reference search found no remaining
+obsolete test identifiers. Review artifacts are under
+`/tmp/dryml/ce-code-review/test-consolidation-f5dc2154/`; the reviewers were local,
+without cross-provider independence. No new complete routine or fixed comparison
+was run for this small consolidation. R20 and R28 remain open.
+
 ## Implemented boundaries
 
 - Frozen, source-inert preparation retains operator topology, controls, specs,
