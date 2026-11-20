@@ -179,6 +179,17 @@ still precedes input checks. Raw-result validation still runs before publication
 and each call retains fresh signature normalization and caller-owned Repo/context
 delivery. These immutable predicates introduce no shared mutable validation cache.
 
+During `tf.function` tracing, the TensorFlow adapter inspects exact built-in
+dense, ragged and sparse TypeSpecs with ordinary shape/dtype metadata as Python,
+using a leaf-local AutoGraph exclusion. Optional TensorFlow imports still occur
+only at a visited leaf; importing `dryml.tf` or converting empty trees remains
+passive. Eager ragged inference still reads each row partition to prove uniform
+widths; traced inference uses static TypeSpec facts without host readback. No
+values or inference results are cached. Custom value conversion hooks and
+TypeSpec/metadata subclasses keep their ordinary conversion context. Method
+selection, input/raw-result checks, core signature delivery and user tensor
+control flow continue through their existing paths.
+
 ### Dynamic Dense Calls
 
 Known-spec preparation supports Dynamic sample dimensions and Dynamic batch sizes

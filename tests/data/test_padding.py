@@ -1,4 +1,4 @@
-"""Padding geometry, masks, spec inference and ordinary/prepared execution."""
+"""Padding geometry, masks, spec inference, execution and TF metadata staging."""
 
 import importlib.util
 import subprocess
@@ -257,6 +257,7 @@ def test_native_padding_and_masks_in_fresh_process(backend, module):
 
 
 def _check_native(backend):
+    """Check native geometry and gradients, plus TF tracing, in a fresh worker."""
     if backend == "tf":
         import tensorflow as tf
         make, host = tf.convert_to_tensor, lambda value: value.numpy()
@@ -315,9 +316,41 @@ def _check_native(backend):
         gradient = jax.grad(lambda value: method(value)["values"].sum())(make(array))
         np.testing.assert_array_equal(host(gradient), np.ones_like(array))
     else:
-        method = prepared(Padding(5, return_mask=True), spec)
-        compiled = tf.function(method, input_signature=[spec.tf()])
-        assert tuple(compiled(make(array))["values"].shape) == (2, 5, 5)
+        from collections import Counter
+        from tensorflow.python.autograph.impl import api
+
+        requests = Counter()
+        original = api._convert_actual
+
+        def counted(entity, program_ctx):
+            requests[(entity.__module__, entity.__qualname__)] += 1
+            return original(entity, program_ctx)
+
+        api._convert_actual = counted
+        try:
+            method = prepared(Padding(5, return_mask=True), spec)
+            compiled = tf.function(method, input_signature=[spec.tf()])
+            for current in (array, np.arange(5, dtype="float32").reshape(1, 1, 5)):
+                shape = current.shape
+                value = make(current)
+                with tf.GradientTape() as tape:
+                    tape.watch(value)
+                    result = compiled(value)
+                    loss = tf.reduce_sum(result["values"])
+                assert tuple(result["values"].shape) == (shape[0], 5, 5)
+                np.testing.assert_array_equal(host(result["values"][:, :shape[1]]), current)
+                np.testing.assert_array_equal(host(result["values"][:, shape[1]:]), 0)
+                np.testing.assert_array_equal(host(result["mask"]), np.tile(np.arange(5) < shape[1], (shape[0], 1)))
+                np.testing.assert_array_equal(host(tape.gradient(loss, value)), np.ones(shape))
+            assert compiled.experimental_get_tracing_count() == 1
+            assert compiled.input_signature == (spec.tf(),)
+            assert requests[("dryml.data.padding", "Padding._tf_batched")] > 0
+            static_requests = {name: count for (module, name), count in requests.items()
+                               if (module == "dryml.tf.tensor_spec" and name != "as_tensor_spec")
+                               or module == "dryml.tf.dtype"}
+            assert static_requests == {}
+        finally:
+            api._convert_actual = original
         source = GeneratorDataset(tf_examples, cardinality=3, spec=dense_spec(batch=None, backend="tf"))
         dataset = Map(Batch(source, 2, ragged=True), Padding(return_mask=True), preserves_examples=True)
         graph = dataset.method_graph()

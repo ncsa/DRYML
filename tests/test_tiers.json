@@ -1118,6 +1118,7 @@
     "tests/package/test_release_artifacts.py": "medium",
     "tests/ray/test_core_execute_ray.py": "heavy",
     "tests/runtime/test_execution_activation.py": "medium",
+    "tests/tf/test_metadata_staging.py": "medium",
     "tests/worlds/test_import_safety.py": "medium",
     "tests/worlds/test_requirement_combination.py": "medium",
     "tests/worlds/test_requirement_declarations.py": "medium"

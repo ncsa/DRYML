@@ -338,6 +338,84 @@ selected because the finding set was empty. Cross-model host attestation was
 unavailable, so the adversarial lens used a local fallback. This review approves
 only the bounded fixture changes, not the still-blocked feature qualification.
 
+### Owner-approved runtime hotspot investigation
+
+The owner then requested coherent commits followed by runtime-hotspot work and
+consideration of genuinely redundant tests. The fixture changes and review were
+committed before runtime investigation. The remaining gates are unchanged.
+
+The measured TensorFlow work is AutoGraph's Python AST conversion during
+`tf.function` tracing. Padding and its compiled checks were introduced by
+`09aaf19d` on November 13, before this plan. Against the pinned baseline, the
+unchanged seven-function Padding diagnostic and a current-code control using the
+old validation algorithm each reported **784 conversion requests, 728 cache
+hits, 56 AST attempts, 55 completed transformations and one fallback**. Each
+function traced once; all 27 array comparisons/signatures/gradients matched.
+Thus this evidence finds no conversion-count regression from the plan's shared
+NumPy-validation change. It is not a statistical timing comparison. The receipt
+is `/tmp/dryml/tf-autograph-attribution-be9b242f.md`.
+
+The managed/Store hotspot also predates the plan. Its many maintenance and
+projection calls serve distinct current-cut, retention, association and recovery
+boundaries; they are not interchangeable duplicate saves. A temporary exact-record
+encoding memo removed repeated pure work, but supported only about half a second
+per measured Fold case. A subsequent feasibility check found that safe weak
+identity, retained-context accounting, tightened bounds and stateful serializer
+overrides required disproportionate new machinery. **No managed-record cache was
+implemented.** Nine relevant feasibility/contract checks passed; two expected
+red checks characterize repeated encoding. Details remain in
+`/tmp/dryml/managed-store-attribution-be9b242f.md` and
+`/tmp/dryml/managed-control-encoding-feasibility-be9b242f.md`.
+
+### TensorFlow static metadata staging
+
+The TF adapter now separates resolved leaf metadata inspection from tree/value
+conversion. Only inside function tracing, exact built-in dense/ragged/sparse
+TypeSpecs with ordinary metadata and controls use the public leaf-local
+`tf.autograph.experimental.do_not_convert` boundary. Custom conversion hooks,
+TypeSpec/metadata subclasses, ordinary eager calls, input/raw-output checks,
+signature delivery and user Tensor-dependent control flow retain their paths.
+Imports remain leaf-lazy, empty/nested-empty trees remain passive, eager ragged
+inference keeps its partition reads, and traced inference adds no readback.
+There is no value/result cache or global AutoGraph rule change.
+
+Proof-first detected three conversion requests each for the static shape,
+batch-splitting and TF dtype helpers. A single post-change run of the original
+Padding diagnostic reduced **784 requests to 714** and **56 AST attempts to 52**,
+eliminating four metadata transformations and the failed dtype-conversion attempt.
+All seven signatures, one-trace counts and 27 original array comparisons matched.
+The 10.27-to-9.23-second diagnostic body observation is not a throughput claim.
+
+Coordinator verification passed **39 adapter/import/compiled Padding/ragged/
+dynamic-dense checks in 79.25 seconds**. One newly added standalone dense Padding
+proof duplicated existing fresh-worker setup, so its dynamic-shape, values/masks,
+compiled gradients, one-trace/signature and work-counter assertions were moved
+into that existing case. All original seven compiled geometry cases remain;
+none was proven redundant. Three new metadata/user-hook tests remain. Actual
+routine collection retains those three plus the existing TF Padding node, and
+the framework manifest already selects the complete `tests/tf` directory.
+
+After consolidation, **5 affected checks passed in 26.19 seconds**. Three
+simplification lenses requested no changes. Six local review lenses and an
+independent validator found one P2 work-coverage gap: ragged/sparse staging was
+checked semantically but lacked a discriminating conversion counter. The existing
+mixed-layout trace now supplies that counter without another compiled workload.
+Isolated diagnostic mutations removing ragged or sparse admission each fail the
+new assertion (10 and 8 metadata requests respectively), with earlier semantic
+assertions still passing. Final affected verification passed **4 checks in
+10.01 seconds**. An earlier attempt timed out after 120 seconds without output;
+no lingering test process was found, and the isolated test then passed in
+21.85 seconds. The cause of that timeout is not established and it supplies no
+passing evidence.
+
+Review artifacts: `/tmp/dryml/ce-code-review/tf-metadata-be9b242f/`. Finding #1 is
+applied; no runtime defect was identified in this scoped review. The original
+implementation receipt is `/tmp/dryml/tf-static-metadata-staging-be9b242f.md`;
+the later consolidation and mixed-layout correction supersede its four-new-test
+inventory. TensorFlow 2.19.0 is the qualified version; private test-only AutoGraph
+instrumentation remains version-sensitive. No new complete routine or fixed
+comparison has been run, and neither R20 nor R28 is claimed resolved.
+
 ## Implemented boundaries
 
 - Frozen, source-inert preparation retains operator topology, controls, specs,
