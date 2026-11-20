@@ -8,8 +8,9 @@ from pathlib import Path
 import subprocess
 import sys
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -77,10 +78,21 @@ def _requests(tmp_path, *, ray_address="127.0.0.1:6379"):
     ), manifest, manifest_path, tfds, roots
 
 
-def test_worker_matrix_enumerates_all_36_primary_cells_once_and_excludes_supplement(tmp_path):
-    """The U11 matrix is complete, stable, unique, and not multiplied by TFDS mode."""
+@pytest.mark.usefixtures("fixed_snapshot_environment")
+def test_worker_matrix_enumerates_all_36_primary_cells_once_and_excludes_supplement(tmp_path, monkeypatch):
+    """The complete, unique U11 matrix builds each declaration family only once."""
+
+    import tests.qualification.ml_workflow_workers as workers
+
+    cpu_declarations = Mock(wraps=workers.cpu_matrix)
+    accelerated_declarations = Mock(wraps=workers.accelerated_cases)
+    monkeypatch.setattr(workers, "cpu_matrix", cpu_declarations)
+    monkeypatch.setattr(workers, "accelerated_cases", accelerated_declarations)
 
     requests, manifest, *_ = _requests(tmp_path)
+    assert {"cpu": cpu_declarations.call_count, "accelerated": accelerated_declarations.call_count} == {
+        "cpu": 1, "accelerated": 1,
+    }
     assert len(requests) == len({request.case.case_id for request in requests}) == len({request.request_id for request in requests}) == 36
     assert {(request.case.workload, request.case.framework, request.case.execution) for request in requests} == {
         (workload, framework, execution)
@@ -91,6 +103,7 @@ def test_worker_matrix_enumerates_all_36_primary_cells_once_and_excludes_supplem
     assert supplemental_tfds_torch_case(manifest).case_id not in {request.case.case_id for request in requests}
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_fake_execute_routes_all_36_requests_without_live_transport_or_framework_import(tmp_path):
     """Routine routing covers every worker request while remaining framework-free."""
 
@@ -118,10 +131,10 @@ def test_fake_execute_routes_all_36_requests_without_live_transport_or_framework
             assert request.resource_mode == "worker-process-no-session-allocation"
 
 
-def test_worker_authority_and_ray_target_reject_before_submission(tmp_path):
-    """Missing fixture/control authority and Ray address cannot mutate a workload."""
+def test_worker_authority_and_ray_target_reject_before_submission(tmp_path, monkeypatch):
+    """Fresh CPU/GPU membership and selected Ray/Store authority guard submission."""
 
-    requests, _, _, _, roots = _requests(tmp_path)
+    requests, manifest, manifest_path, tfds, roots = _requests(tmp_path)
     executor = _FakeExecutor()
     missing_control = next(request for request in requests if request.case.execution == "local")
     Path(missing_control.control_store).rmdir()
@@ -136,16 +149,77 @@ def test_worker_authority_and_ray_target_reject_before_submission(tmp_path):
         )
     assert roots["output"].is_dir()
 
+    import tests.qualification.ml_workflow_workers as workers
 
-def test_missing_ray_address_classifies_only_nine_selected_ray_cells_as_unrun(tmp_path):
-    """Matrix enumeration remains complete while only selected Ray requests are unrun."""
+    cases = (missing_control.case, *workers.accelerated_cases(manifest))
+    cpu_declarations = Mock(wraps=workers.cpu_matrix)
+    accelerated_declarations = Mock(wraps=workers.accelerated_cases)
+    monkeypatch.setattr(workers, "cpu_matrix", cpu_declarations)
+    monkeypatch.setattr(workers, "accelerated_cases", accelerated_declarations)
+    arguments = dict(
+        manifest_path=manifest_path, tfds_data_dir=tfds, output_store=roots["output"],
+        work_dir=roots["work"], evidence_dir=roots["evidence"], control_store=roots["control"],
+    )
+    calls = 0
+    for case in cases:
+        device = "7" if case.accelerator == "gpu" else None
+        first = worker_request(manifest, case, gpu_device=device, **arguments)
+        second = worker_request(manifest, case, gpu_device=device, **arguments)
+        assert first == second and first is not second
+        assert QualificationWorkerRequest.from_data(inspect_worker_transport(first)) == first
+        if device is not None:
+            assert first.execution_backend == "core-subprocess"
+            assert first.resource_mode == "worker-process-one-gpu"
+            assert first.gate_id == f"gpu-{case.framework}-{case.workload.lower()}"
+        undeclared = replace(case, seed={**case.seed, "train": case.seed["train"] + 1})
+        with pytest.raises(FixtureManifestError, match="declared qualification case"):
+            worker_request(manifest, undeclared, gpu_device=device, **arguments)
+        calls += 3
+        assert cpu_declarations.call_count == accelerated_declarations.call_count == calls
+    with pytest.raises(FixtureManifestError, match="declared qualification case"):
+        worker_request(manifest, supplemental_tfds_torch_case(manifest), **arguments)
+    assert cpu_declarations.call_count == accelerated_declarations.call_count == calls + 1
 
+
+def test_missing_ray_address_classifies_only_nine_selected_ray_cells_as_unrun(tmp_path, monkeypatch):
+    """Fresh per-call manifests retain 27 non-Ray requests and nine selected unrun cells."""
+
+    import tests.qualification.ml_workflow_workers as workers
+
+    cpu_declarations = Mock(wraps=workers.cpu_matrix)
+    accelerated_declarations = Mock(wraps=workers.accelerated_cases)
+    monkeypatch.setattr(workers, "cpu_matrix", cpu_declarations)
+    monkeypatch.setattr(workers, "accelerated_cases", accelerated_declarations)
     _, manifest, manifest_path, tfds, roots = _requests(tmp_path)
+    assert cpu_declarations.call_count == accelerated_declarations.call_count == 1
     requests = worker_requests(
         manifest, manifest_path=manifest_path, tfds_data_dir=tfds, output_store=roots["output"],
         work_dir=roots["work"], evidence_dir=roots["evidence"], control_store=roots["control"],
     )
     assert len(requests) == 27
+    assert cpu_declarations.call_count == accelerated_declarations.call_count == 2
+    changed_manifest = replace(manifest, environment={key: "changed" for key in _TEST_ENVIRONMENT})
+    changed_requests = worker_requests(
+        changed_manifest, manifest_path=manifest_path, tfds_data_dir=tfds, output_store=roots["output"],
+        work_dir=roots["work"], evidence_dir=roots["evidence"], control_store=roots["control"],
+    )
+    assert cpu_declarations.call_count == accelerated_declarations.call_count == 3
+    for declarations in (cpu_declarations, accelerated_declarations):
+        assert declarations.call_args_list[0].args[0] is manifest
+        assert declarations.call_args_list[1].args[0] is manifest
+        assert declarations.call_args_list[2].args[0] is changed_manifest
+    assert len(changed_requests) == 27
+    assert {request.case.case_id for request in requests}.isdisjoint(request.case.case_id for request in changed_requests)
+    assert {request.request_id for request in requests}.isdisjoint(request.request_id for request in changed_requests)
+    assert all(request.case.manifest_digest == changed_manifest.digest for request in changed_requests)
+    assert all(request.case.environment == changed_manifest.environment for request in changed_requests)
+    for case in (requests[0].case, *workers.accelerated_cases(manifest)):
+        with pytest.raises(FixtureManifestError, match="declared qualification case"):
+            worker_request(
+                changed_manifest, case, manifest_path=manifest_path, tfds_data_dir=tfds,
+                output_store=roots["output"], work_dir=roots["work"], evidence_dir=roots["evidence"],
+                control_store=roots["control"], gpu_device="7" if case.accelerator == "gpu" else None,
+            )
     outcomes = []
     for case in cpu_matrix(manifest):
         try:

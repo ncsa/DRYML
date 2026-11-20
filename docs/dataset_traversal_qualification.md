@@ -270,6 +270,42 @@ the real derived index once. Its real fixture dimensions and query contracts
 remain intact. Further suite-wide setup optimization and noisy-comparison
 qualification remain open; another unchanged full run is not a correction.
 
+### Owner-approved suite-wide fixture optimization
+
+The owner subsequently approved expanding into suite-wide test-fixture setup,
+while preserving all workloads, assertions and process-isolation guarantees.
+The bounded attribution receipt is
+`/tmp/dryml/routine-fixture-cost-attribution-5e93626b.md`. Its 188.90 seconds of
+serial diagnostic/test subprocess work identified roughly 20-25 seconds of
+plausible savings, not the full 181.11-second gap. Query-prefix probes were
+explicitly non-qualification and did not replace the full fixture or index.
+Native worker isolation and AutoGraph coverage were retained; bytecode-write
+suppression was not a demonstrated material cost.
+
+The first integrated correction removes repeated qualification declarations:
+`worker_requests` constructs each CPU/accelerated family once per call instead
+of 37/36 times. A private constructor still validates every selected case;
+independent `worker_request` calls rebuild declarations and reject undeclared or
+foreign-manifest cases. No cross-call cache, request-identity change or route
+relaxation is introduced. Existing tests retain all 36 requests, closed JSON
+roundtrips, optional-import guards, 27 non-Ray requests and nine Ray-unrun cases.
+
+Only the two measured metadata-only routing tests opt into the existing fixed
+snapshot-evidence fixture. The measured JAX managed-local test similarly uses
+the existing managed snapshot fixture, retaining actual JAX training, lineage,
+requirements, persistence, independent owner state and receipt assertions.
+Explicit host observers and clocks remain intact.
+
+Proof-first work counts failed with 37 CPU/36 accelerated constructions before
+the change, then passed at one each. The original two-node runner measured
+**5.03 seconds**, versus the earlier **21.06-second** original diagnostic; this
+historical comparison is not a new A/B performance certificate. Coordinator
+verification passed **9 authority, routing, isolation, recovery and JAX checks
+in 48.21 seconds**. The evidence supports approximately 17-18 seconds of
+plausible routine savings including avoided incidental JAX inventory, not a
+passing full-suite estimate. Further corrections remain necessary before
+another routine measurement is justified.
+
 ## Implemented boundaries
 
 - Frozen, source-inert preparation retains operator topology, controls, specs,

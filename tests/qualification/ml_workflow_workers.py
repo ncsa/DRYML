@@ -342,13 +342,52 @@ def worker_request(manifest, case: QualificationCase, *, manifest_path, tfds_dat
                     ray_address: str | None = None,
                     recovery: RecoveryControl | None = None,
                     gpu_device: str | None = None) -> QualificationWorkerRequest:
-    """Build one selected primary or recovery request without probing other cells.
+    """Build one primary, accelerated, or recovery request from fresh declarations.
 
-    Missing Ray configuration therefore classifies only the selected Ray cell as
-    :class:`QualificationUnrun`; local and subprocess requests remain constructible.
+    Args:
+        manifest: FixtureManifest supplying the current case authority. CPU and
+            accelerated declarations are rebuilt for every independent call.
+        case: QualificationCase that must belong to those declarations.
+        manifest_path: str or PathLike naming the selected manifest JSON file.
+        tfds_data_dir: str or PathLike naming the prepared TFDS authority.
+        output_store: str or PathLike naming the output Store root.
+        work_dir: str or PathLike naming the worker scratch root.
+        evidence_dir: str or PathLike naming the evidence root.
+        control_store: str or PathLike naming the control Store root.
+        ray_address: Optional str target for the selected Ray cell only.
+        recovery: Optional RecoveryControl for the Torch W3 subprocess cell.
+        gpu_device: Optional str selecting one GPU for an accelerated cell.
+
+    Returns:
+        A closed QualificationWorkerRequest with the selected route and identity.
+
+    Raises:
+        FixtureManifestError: The case is undeclared or request fields conflict.
+        QualificationUnrun: The selected Ray/GPU case lacks its target/device.
+        TypeError: An authority path is not str or PathLike.
+
+    Only declaration metadata is constructed: no workers, payloads, filesystem
+    writes, or hardware probes are started. Missing Ray configuration classifies
+    only the selected Ray cell as unrun; other routes remain constructible.
     """
 
-    if case not in (*cpu_matrix(manifest), *accelerated_cases(manifest)):
+    return _validated_worker_request(
+        case, declarations=(*cpu_matrix(manifest), *accelerated_cases(manifest)),
+        manifest_path=manifest_path, tfds_data_dir=tfds_data_dir,
+        output_store=output_store, work_dir=work_dir, evidence_dir=evidence_dir,
+        control_store=control_store, ray_address=ray_address,
+        recovery=recovery, gpu_device=gpu_device,
+    )
+
+
+def _validated_worker_request(case: QualificationCase, *, declarations, manifest_path,
+                              tfds_data_dir, output_store, work_dir, evidence_dir,
+                              control_store, ray_address: str | None = None,
+                              recovery: RecoveryControl | None = None,
+                              gpu_device: str | None = None) -> QualificationWorkerRequest:
+    """Validate membership in caller-local declarations before constructing a route."""
+
+    if case not in declarations:
         raise FixtureManifestError("Qualification worker request must select a declared qualification case.")
     accelerated = case.accelerator == "gpu"
     return QualificationWorkerRequest(
@@ -364,19 +403,44 @@ def worker_request(manifest, case: QualificationCase, *, manifest_path, tfds_dat
 
 def worker_requests(manifest, *, manifest_path, tfds_data_dir, output_store, work_dir,
                     evidence_dir, control_store, ray_address: str | None = None) -> tuple[QualificationWorkerRequest, ...]:
-    """Return every constructible primary request without starting workers or loading data.
+    """Return primary requests using declarations shared only within this call.
+
+    Args:
+        manifest: FixtureManifest whose CPU/accelerated declarations are each
+            rebuilt once per call and used to validate every selected case.
+        manifest_path: str or PathLike naming the selected manifest JSON file.
+        tfds_data_dir: str or PathLike naming the prepared TFDS authority.
+        output_store: str or PathLike naming the output Store root.
+        work_dir: str or PathLike naming the worker scratch root.
+        evidence_dir: str or PathLike naming the evidence root.
+        control_store: str or PathLike naming the control Store root.
+        ray_address: Optional str target for the nine Ray cells.
+
+    Returns:
+        A tuple of 36 unique QualificationWorkerRequests, or all 27 non-Ray
+        requests when ray_address is None. Accelerated cases are not enumerated.
+
+    Raises:
+        FixtureManifestError: Declaration or selected request fields are invalid.
+        QualificationUnrun: A selected Ray cell has an empty/invalid target.
+        AssertionError: Case or request identities are duplicated.
+        TypeError: An authority path is not str or PathLike.
 
     Callers that omit a Ray address receive all 27 non-Ray requests. They can use
     :func:`worker_request` to truthfully classify each of the nine Ray cells.
+    No declarations survive this call; no workers, payloads, filesystem writes,
+    or hardware probes are started.
     """
 
+    primary = cpu_matrix(manifest)
+    declarations = (*primary, *accelerated_cases(manifest))
     requests = tuple(
-        worker_request(
-            manifest, case, manifest_path=manifest_path, tfds_data_dir=tfds_data_dir,
+        _validated_worker_request(
+            case, declarations=declarations, manifest_path=manifest_path, tfds_data_dir=tfds_data_dir,
             output_store=output_store, work_dir=work_dir, evidence_dir=evidence_dir,
             control_store=control_store, ray_address=ray_address,
         )
-        for case in cpu_matrix(manifest)
+        for case in primary
         if case.execution != "ray" or ray_address is not None
     )
     if len({request.case.case_id for request in requests}) != len(requests):

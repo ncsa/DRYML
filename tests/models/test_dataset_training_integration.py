@@ -1124,6 +1124,7 @@ def test_jax_qualification_model_runs_on_authored_dataset_batches(workload):
     )["observed_device"] == "cpu"
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_jax_managed_local_publishes_exact_history_and_independent_owner_state(tmp_path):
     """A local managed JAX run publishes exact terminal, history, and owner receipts."""
 
