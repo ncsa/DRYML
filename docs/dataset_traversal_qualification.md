@@ -5,17 +5,17 @@
 The traversal, continuation, Accumulate, accepted-training-state, and native
 consumer implementation is present on `fix/real-usage-followups`. The plan is
 **not complete**: comparative performance and updated-tree routine qualification
-remain blocking. The complete routine gate passed at `238a2cbd`, but the later
-`314c9057` run failed a stale collection inventory and exceeded 900 seconds.
-The inventory is corrected below; passing focused checks does not waive either
-completion gate.
+remain blocking. The routine run at `8549015a` now passes all **5,160 tests with
+25 skips**, but its **1081.11-second** complete wall time fails the strict
+under-900-second gate. The earlier `314c9057` collection-inventory failure is
+corrected; successful assertions do not waive the timing requirement.
 
 Latest corrections cover retained native call preparation, JAX argument
 commitment, and redundant explicit-TF scalar loss reduction. Earlier corrections
 include the linear Array/Map-to-Batch kernel, the
 [explicit TF/Keras recipe loss](#fresh-comparison-tfkeras-recipe-loss-correction),
 and confirmation instrumentation identity.
-Earlier exhausted reports remain **unverified**. The last successful complete
+Earlier exhausted reports remain **unverified**. The last under-budget complete
 routine runner passed **5,149 tests with 25 skips in 898.23 seconds**. Current
 evidence and the owner's continued-execution direction are recorded below.
 
@@ -230,6 +230,45 @@ verification of the entire affected `tests/tools/test_runner.py` passed
 not claim the full wall-time gate is repaired. The old untracked medium timing
 file describes a different, smaller selection and cannot attribute this run's
 elapsed time; it is preserved.
+
+### Complete routine at 8549015a: assertions pass, wall budget fails
+
+After the inventory correction and its entire affected runner subsystem passed,
+one complete run retained the same selection and assertions, adding only pytest's
+duration display to attribute a possible overrun:
+
+```sh
+export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} --durations=30"
+/usr/bin/time -o /tmp/dryml/dataset-routine-time-8549015a.txt -f 'exit=%x wall_seconds=%e' ./tests.sh good-enough --ignore tests/old --ignore tests/dev -x tests
+```
+
+The CPU/thread/bytecode settings match the preceding run. Output is retained in
+`/tmp/dryml/dataset-routine-8549015a.log`.
+
+| Phase | Passed | Skipped | Pytest elapsed |
+|---|---:|---:|---:|
+| Isolated phase | 265 | 0 | 50.53 s |
+| Remaining routine selection | 4,895 | 25 | 1021.90 s |
+| Entire runner | **5,160** | **25** | **1081.11 s full wall** |
+
+Exit zero resolves the assertion failure, but **R20 fails by 181.11 seconds**.
+The run is not relabeled as successful qualification. No test was disabled or
+assertion relaxed. The duration report identifies substantial existing costs:
+
+- Shared synthetic query Store construction: **84.19 seconds**, already once per
+  module, with its independent 90-second builder cap and fresh query workers.
+- TensorFlow image registration/results: **25.65 seconds**; native TF padding:
+  **16.91 seconds**; dynamic-dense TF contracts: **14.42 seconds**.
+- Test-tier inventory collection setup: **16.87 seconds**.
+- JAX managed-local history/ownership qualification: **14.33 seconds**.
+- Two framework-free 36-cell worker-routing tests: **10.11/10.10 seconds**.
+
+These measurements identify investigation targets, not established redundant
+work or permission to reduce workload dimensions, freshness, deadlines or
+coverage. The query builder already publishes with indexing disabled and builds
+the real derived index once. Its real fixture dimensions and query contracts
+remain intact. Further suite-wide setup optimization and noisy-comparison
+qualification remain open; another unchanged full run is not a correction.
 
 ## Implemented boundaries
 
@@ -684,9 +723,9 @@ different-model corroboration.
 
 1. **Final-tree routine verification:** `238a2cbd` passed in **898.23 seconds**;
    the subsequent `314c9057` run failed at **1019.93 seconds** with a stale test
-   inventory. The inventory correction passes its affected subsystem; a complete
-   successful run strictly below 900 seconds is still required. Historical
-   929.86 and 914.70-second failures remain recorded.
+   inventory. After correction, `8549015a` passes **5,160 tests with 25 skips** but
+   takes **1081.11 seconds**. A complete successful run strictly below 900 seconds
+   is still required. Historical 929.86 and 914.70-second failures remain recorded.
 2. **Comparative performance:** the historical fixed 1,200-second comparison
    budget was exhausted. Earlier indexed and Torch regression signals are preserved in
    [the Data measurement section](data.md#bounded-cpu-evidence-and-unresolved-gates).

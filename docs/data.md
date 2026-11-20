@@ -877,9 +877,10 @@ explicit-TF scalar-loss correction at `314c9057` measured TF steady ratios
 **0.894977/0.918846**, with no regression observed. Its single confirmation still
 has unresolved Torch/Keras noise; the whole comparison remains unverified. The
 routine run at that revision stopped on a subsequently corrected collection
-inventory after **1019.93 seconds**, so final-tree routine qualification also
-remains open. See the current evidence section of the qualification document;
-no historical report is relabeled.
+inventory after **1019.93 seconds**. At `8549015a` all **5,160 tests pass with
+25 skips**, but complete wall time is **1081.11 seconds**, still above the strict
+900-second limit. Final-tree routine qualification remains open. See the current
+evidence section of the qualification document; no historical report is relabeled.
 
 ## Source Datasets
 
