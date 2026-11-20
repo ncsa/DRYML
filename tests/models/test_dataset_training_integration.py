@@ -123,6 +123,97 @@ def _dataset_continuation_experiment(backend, *, repo=None, sectioned=True, epoc
                       artifacts={}, repo=repo)
 
 
+@pytest.mark.parametrize("model_kind", ("model", "sequential"))
+def test_tf_training_retains_raw_selection_signature_and_native_sgd(model_kind, monkeypatch):
+    """Exact built-ins select once per invocation and still deliver every batch."""
+    tf = pytest.importorskip("tensorflow")
+    from dryml.core import signatures
+    from dryml.core.backend import Backend
+    from dryml.methods.implementation import SelectedDescriptorAdapter
+    from dryml.models.tf import Model, Optimizer, Sequential, Training
+
+    model = (Model(tf.keras.layers.Dense, 1, kernel_initializer="ones")
+             if model_kind == "model" else
+             Sequential((F("Dense", 1, kernel_initializer="ones"),)))
+    x = np.arange(5, dtype=np.float32).reshape(-1, 1) / 10
+    y = x * 2
+    model.obj(tf.zeros((1, 1)))
+    native = tf.keras.layers.Dense(1)
+    native(tf.zeros((1, 1)))
+    native.set_weights(model.obj.get_weights())
+    native_optimizer = tf.keras.optimizers.SGD(learning_rate=.01)
+    loss_fn = tf.keras.losses.MeanSquaredError()
+    exp = Experiment(model, Training(optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=.01),
+                                    epochs=1, verbose=0),
+                     train_data=Batch(ArrayDataset((x, y)), 2))
+    graph = model.method_graph()
+    eager = model._select(Backend.tf, None)
+    canonical = model.find_implementation(backend="tf")
+    assert canonical.name == eager.name == "raw_call"
+    assert canonical.target is eager.target
+    assert canonical.conversion_edge is eager.conversion_edge is None
+    selections, catalogs, compiles, deliveries = [], [], [], []
+    original_select, original_catalog = Model.find_implementation, Model.implementations
+    original_compile = signatures.compile_signature
+    original_prepare, original_invoke = SelectedDescriptorAdapter.prepare, SelectedDescriptorAdapter.invoke_prepared
+
+    def select(owner, *args, **kwargs):
+        if owner is model:
+            selections.append(kwargs)
+        return original_select(owner, *args, **kwargs)
+
+    def catalog(owner):
+        if owner is model:
+            catalogs.append(owner)
+        return original_catalog(owner)
+
+    def compile(target):
+        if getattr(target, "__name__", None) == "raw_call":
+            compiles.append(target)
+        return original_compile(target)
+
+    def prepare(adapter, args, kwargs):
+        if adapter.name == "raw_call":
+            deliveries.append("args")
+        return original_prepare(adapter, args, kwargs)
+
+    def invoke(adapter, args, kwargs, **controls):
+        result = original_invoke(adapter, args, kwargs, **controls)
+        if adapter.name == "raw_call":
+            deliveries.append("return")
+        return result
+
+    monkeypatch.setattr(Model, "find_implementation", select)
+    monkeypatch.setattr(Model, "implementations", catalog)
+    monkeypatch.setattr(signatures, "compile_signature", compile)
+    monkeypatch.setattr(SelectedDescriptorAdapter, "prepare", prepare)
+    monkeypatch.setattr(SelectedDescriptorAdapter, "invoke_prepared", invoke)
+    observed = []
+    for invocation in range(2):
+        expected = []
+        for start in range(0, len(x), 2):
+            with tf.GradientTape() as tape:
+                loss = tf.reduce_mean(loss_fn(y[start:start + 2], native(x[start:start + 2])))
+            native_optimizer.apply_gradients(zip(tape.gradient(loss, native.trainable_variables),
+                                                native.trainable_variables))
+            expected.append(float(loss.numpy()))
+        actual = exp.train_fn(exp, callbacks=(lambda: observed.append(exp.state.step),))
+        assert actual == pytest.approx(expected)
+        for value, expected_value in zip(model.obj.get_weights(), native.get_weights()):
+            np.testing.assert_allclose(value, expected_value)
+        assert len(compiles) == invocation + 1
+        assert selections == [{"backend": "tf"}] * (invocation + 1)
+        # Canonical selection reads compatible candidates, then selects from the catalog.
+        assert len(catalogs) == 2 * (invocation + 1)
+        assert model.call_mode == "eager" and model.cached_signature is None
+        assert model.default_batched is None
+        assert model.method_graph().nodes == graph.nodes
+        assert model.method_graph().conversion_edges == ()
+    assert deliveries == ["args", "return"] * 6
+    assert observed == list(range(1, 7))
+    assert exp.state.examples_seen == 10 and exp.state.epoch == 2
+
+
 @pytest.mark.parametrize("backend", ("torch", "tf", "jax", "keras"))
 def test_dataset_continuation_native_sections_share_one_source(backend):
     """Two logical sections retain one factory, RNG, conversion plan and input owner."""

@@ -35,6 +35,8 @@
   },
   "default_tier": "medium",
   "node_tiers": {
+    "tests/models/test_dataset_training_integration.py::test_tf_training_retains_raw_selection_signature_and_native_sgd[model]": "medium",
+    "tests/models/test_dataset_training_integration.py::test_tf_training_retains_raw_selection_signature_and_native_sgd[sequential]": "medium",
     "tests/models/test_dataset_training_integration.py::test_dataset_continuation_native_sections_share_one_source[torch]": "medium",
     "tests/models/test_dataset_training_integration.py::test_dataset_continuation_native_sections_share_one_source[tf]": "medium",
     "tests/models/test_dataset_training_integration.py::test_dataset_continuation_native_sections_share_one_source[jax]": "medium",

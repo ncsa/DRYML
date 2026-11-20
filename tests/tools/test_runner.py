@@ -680,6 +680,8 @@ sys.exit(pytest.main([
             "test_jax_qualification_model_runs_on_authored_dataset_batches[W3]",
             "test_jax_managed_local_publishes_exact_history_and_independent_owner_state",
             "test_torch_update_failure_survives_source_cleanup_with_accepted_prefix",
+            "test_tf_training_retains_raw_selection_signature_and_native_sgd[model]",
+            "test_tf_training_retains_raw_selection_signature_and_native_sgd[sequential]",
             "test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
             "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
         )

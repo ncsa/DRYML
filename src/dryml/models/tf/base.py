@@ -1725,6 +1725,12 @@ class Training(BasicTraining):
         accepted input capture at saves/finalization. Stale exact retries require
         durable reload; transient optimizers retain positional recovery. Zero work
         performs metadata admission without preparing data or binding native state.
+        Exact built-in Model and Sequential instances in eager mode with
+        default_batched=None retain one raw selected signature adapter locally
+        across training batches. Arguments/returns and native placement/restoration
+        still run on every call under the native-owner lease. Each batch checks
+        mode/default changes and retires that adapter; custom/subclass models
+        retain ordinary dynamic dispatch.
         """
         callbacks = validate_training_callbacks(callbacks)
         require_supervised_dataset(exp.train_data, batched=True)
@@ -1741,6 +1747,7 @@ class Training(BasicTraining):
     def _train_with_input(self, exp, inputs, *, callbacks):
         """Execute explicit native work after input and state-owner admission."""
         import tensorflow as tf
+        from dryml.models.tf.keras.base import Sequential
 
         callbacks = validate_training_callbacks(callbacks)
         loss_fn = self._make_loss(tf, exp)
@@ -1778,6 +1785,7 @@ class Training(BasicTraining):
         target_epoch = exp.state.begin_invocation(self.epochs)
         total_steps = None if steps_per_epoch is None else steps_per_epoch * self.epochs
         progress = TrainingProgress(total=total_steps, verbose=self.verbose, desc="TF training")
+        selected_model = model_invoker = None
 
         try:
             exp.model.prep_train()
@@ -1806,7 +1814,16 @@ class Training(BasicTraining):
 
                         with inputs.update(input_candidate):
                             with tf.GradientTape() as tape:
-                                y_pred = exp.model(x)
+                                model = exp.model
+                                if type(model) in (Model, Sequential) and model.call_mode == "eager" and model.default_batched is None:
+                                    Backend.tf.module
+                                    if selected_model is not model:
+                                        model_invoker = model.find_implementation(backend="tf").prepared_invoker()
+                                        selected_model = model
+                                    y_pred = model_invoker(x)
+                                else:
+                                    selected_model = model_invoker = None
+                                    y_pred = model(x)
                                 loss_value = tf.reduce_mean(loss_fn(y, y_pred))
 
                             if trainable_variables is None:

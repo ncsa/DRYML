@@ -17,6 +17,19 @@ from dryml.models import AutoEncoder, Experiment, TrainState
 
 tf = pytest.importorskip("tensorflow")
 
+from dryml.models.tf import Model as TFModel
+
+
+class DynamicSelectionTFModel(TFModel):
+    """Expose per-value selection for the explicit training fallback regression."""
+
+    def _runtime_selection_facts(self, args, kwargs):
+        from dryml.core.backend import Backend
+        from dryml.core.tensor_spec import BatchMode
+
+        self.selection_shapes.append(tuple(args[0].shape))
+        return Backend.tf, BatchMode.batched if len(args[0]) == 2 else BatchMode.element
+
 
 class TinyKerasModel(tf.keras.Model):
     def __init__(self):
@@ -863,6 +876,117 @@ def _tf_accounting_experiment(*, repo=None, count=64, batch_size=1, trainer=None
         train_data=Batch(ArrayDataset((x, y), repo=repo), batch_size, repo=repo),
         repo=repo,
     )
+
+
+@pytest.mark.parametrize("change", ("learning", "prepared", "default"))
+@pytest.mark.parametrize("when", ("initial", "callback"))
+def test_tf_retained_call_retires_and_reselects_after_mode_changes(monkeypatch, change, when):
+    """Initial controls and callback transitions use ordinary dispatch, then reselect."""
+    from dryml.methods import Method
+    from dryml.models.tf import Model
+
+    exp = _tf_accounting_experiment(count=3)
+    modes, selections = [], []
+    original_gateway = Method._alternative_call
+    original_select = Model.find_implementation
+
+    def gateway(receiver, args, kwargs, **controls):
+        if receiver is exp.model:
+            modes.append((receiver.call_mode, receiver.default_batched))
+        return original_gateway(receiver, args, kwargs, **controls)
+
+    def select(owner, *args, **kwargs):
+        if owner is exp.model:
+            selections.append((owner.call_mode, owner.default_batched, kwargs))
+        return original_select(owner, *args, **kwargs)
+
+    monkeypatch.setattr(Method, "_alternative_call", staticmethod(gateway))
+    monkeypatch.setattr(Model, "find_implementation", select)
+
+    def change_mode():
+        if change == "learning":
+            exp.model.learn()
+        elif change == "prepared":
+            exp.model.learn(TensorSpec("float32", shape=(1,), batch=1, backend="tf"))
+        else:
+            exp.model.default_batched = True
+
+    def callback():
+        if when == "callback" and exp.state.step == 1:
+            change_mode()
+        elif exp.state.step == 2:
+            exp.model.eager()
+            exp.model.default_batched = None
+
+    if when == "initial":
+        change_mode()
+    exp.train_fn(exp, callbacks=(callback,))
+    calls = 2 if when == "initial" else 1
+    expected = ([("learning", None)] + [("cached", None)] * (calls - 1) if change == "learning" else
+                [("cached", None)] * calls if change == "prepared" else [("eager", True)] * calls)
+    assert modes == expected
+    expected_selections = [("eager", None, {"backend": "tf"})] * (1 if when == "initial" else 2)
+    if change == "prepared":
+        expected_selections.insert(0 if when == "initial" else 1, ("learning", None, {"output_spec": None}))
+    assert selections == expected_selections
+    assert exp.state.step == exp.state.examples_seen == 3
+    assert exp.model.call_mode == "eager" and exp.model.cached_signature is None
+
+
+def test_tf_retained_call_keeps_subclass_runtime_selection_dynamic(monkeypatch):
+    """Subclass hooks see every native batch, including the short final batch."""
+    from dryml.methods.implementation import SelectedDescriptorAdapter
+    from dryml.models.tf import Optimizer, Training
+
+    model = DynamicSelectionTFModel(tf.keras.layers.Dense, 1)
+    model.selection_shapes = []
+    data = Batch(ArrayDataset((np.zeros((3, 1), dtype=np.float32), np.zeros((3, 1), dtype=np.float32))), 2)
+    exp = Experiment(model, Training(optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=0.),
+                                     epochs=1, verbose=0), train_data=data)
+    names = []
+    original = SelectedDescriptorAdapter.invoke_prepared
+
+    def invoke(adapter, args, kwargs, **controls):
+        if adapter.receiver_ref() is model:
+            names.append(adapter.name)
+        return original(adapter, args, kwargs, **controls)
+
+    monkeypatch.setattr(SelectedDescriptorAdapter, "invoke_prepared", invoke)
+    exp.train_fn(exp)
+    assert model.selection_shapes == [(2, 1), (1, 1)]
+    assert names == ["batched_call", "element_call"]
+    assert exp.state.step == 2 and exp.state.examples_seen == 3
+
+
+def test_tf_retained_call_keeps_native_lease_and_invalidates_forward_failure(monkeypatch):
+    """A retained raw call keeps CPU placement, owner exclusion and failure retirement."""
+    from dryml.core.repo import RepoSaveError
+    from dryml.core.state import is_reserved
+
+    exp = _tf_accounting_experiment(count=3)
+    exp.model.obj(tf.zeros((1, 1)))
+    repo = Repo()
+    original = exp.model.obj.call
+    calls = []
+
+    def call(value):
+        assert "CPU" in value.device.upper()
+        assert is_reserved(exp.model) and is_reserved(exp.train_fn.optimizer)
+        with pytest.raises(RepoSaveError, match="reserved"):
+            repo.reserve_state_graph(exp)
+        calls.append(exp.state.step)
+        if len(calls) == 2:
+            raise RuntimeError("native forward failed")
+        return original(value)
+
+    monkeypatch.setattr(exp.model.obj, "call", call)
+    with pytest.raises(RuntimeError, match="native forward failed"):
+        exp.train_fn(exp)
+    assert calls == [0, 1]
+    assert exp.state.step == exp.state.input_sequence == exp.state.examples_seen == 1
+    for owner in (exp, exp.model, exp.train_fn.optimizer):
+        assert owner._restore_failed and not is_reserved(owner)
+    assert exp.state._input_provider is None
 
 
 def test_tf_interrupt_at_step_32_resumes_exact_remaining_epoch(tmp_path):

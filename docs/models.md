@@ -227,6 +227,15 @@ composite models retain ordinary dispatch. No shared Method mode, learned graph,
 or per-value validation result is cached by this optimization. These bounded
 work-count reductions do not establish a throughput improvement.
 
+TensorFlow's explicit `dryml.models.tf.Training` loop retains the same raw selected
+adapter for exact built-in `dryml.models.tf.Model` and `dryml.models.tf.Sequential`
+instances with those eager/default controls. Canonical
+`find_implementation(backend="tf")` preserves raw batching intent, argument/return
+delivery, native placement, and pending model restoration on every call under the
+existing update lease. Mode/default transitions retire the local adapter and
+re-entry selects afresh; subclasses and custom models keep dynamic dispatch.
+This does not change compiled Keras `BasicTraining` or native user batching.
+
 Unknown EOF/empty-section discovery is installed with `session.sync_boundary()`
 without inventing an optimizer step. Complete the retained epoch postlude before
 `session.handoff()` permits the next physical pass. Repeated synchronization does
