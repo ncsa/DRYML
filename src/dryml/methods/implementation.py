@@ -11,7 +11,7 @@ from typing import Callable
 from dryml.core.tensor_spec import SpecTree, TensorSpec
 
 from .errors import ImplementationDeclarationError, ImplementationSelectionError, MethodError
-from .signature import MethodCallNode, runtime_node_for_constraint, satisfies
+from .signature import MethodCallNode, _compile_numpy_constraint, runtime_node_for_constraint, satisfies
 from .traits import Traits
 
 
@@ -320,7 +320,10 @@ class PreparedMethodInvoker:
     The invoker is process-local and deliberately not a persistence carrier. It
     validates each call against declared dynamic/fixed facts before running the
     selected target, avoiding both candidate rediscovery and first-call cache
-    mutation on child Methods.
+    mutation on child Methods. Exact dense NumPy inputs use pure predicates
+    compiled at creation that reread dtype/shape metadata on every call. Other
+    values and complex constraints retain generic validation and adapter
+    activation. No runtime value, validation result, or caller context is cached.
     """
 
     name: str
@@ -330,6 +333,15 @@ class PreparedMethodInvoker:
     output_spec: MethodCallNode | None
     conversion_edge: object | None = None
     children: tuple["PreparedMethodInvoker", ...] = ()
+    _input_matchers: tuple[Callable[[object], bool | None] | None, ...] = field(
+        init=False, repr=False, compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        """Compile immutable per-input metadata predicates without inspecting values."""
+        object.__setattr__(self, "_input_matchers", tuple(
+            _compile_numpy_constraint(constraint) for constraint in self.input_specs
+        ))
 
     def __call__(self, *args: object, **kwargs: object) -> object:
         """Validate and invoke retained selection using logical call arguments."""
@@ -345,12 +357,31 @@ class PreparedMethodInvoker:
     ) -> object:
         """Validate one call, invoke its adapter, and validate its raw result.
 
+        Each call checks current input metadata with compiled exact-NumPy
+        predicates or the generic fallback, then borrows fresh signature controls.
+        Raw outputs are generically validated before any publication callback.
+
+        Args:
+            args: Logical positional inputs checked before signature delivery.
+            kwargs: Logical keyword inputs forwarded to the selected adapter.
+            on_raw_result: Optional callback receiving only a validated raw result.
+
+        Returns:
+            The selected target's freshly normalized return value.
+
         Raises:
-            ImplementationSelectionError: If input or output facts drift before
-                the selected target is allowed to run.
+            ImplementationSelectionError: If input facts drift before the target,
+                or raw output facts drift after the target but before publication.
+            MethodError: If the selected receiver is no longer live.
+            SignatureError: If fresh argument/return delivery or ambient authority
+                validation fails. Generic adapter/normalization failures propagate.
+
+        Side Effects:
+            Activates declared runtime adapters, invokes the selected target and
+            optional callback, and may materialize through the caller-owned Repo.
         """
 
-        _validate_input_specs(self.input_specs, args)
+        _validate_input_specs(self.input_specs, args, self._input_matchers)
         if self.output_spec is None:
             return self.adapter.invoke(args, kwargs, on_raw_result=on_raw_result)
 
@@ -483,6 +514,8 @@ class MethodImplementation:
             An immutable process-local invoker with weak Method receivers and
             finalized child invokers. No selected carrier or caller context is
             retained. Repeated builds are independent; there is no global cache.
+            Pure exact-NumPy predicates are compiled here; every call still reads
+            actual metadata and other values retain generic validation.
 
         Raises:
             ImplementationDeclarationError: If the selected declaration cannot
@@ -546,7 +579,10 @@ class MethodImplementation:
         return result
 
 
-def _validate_input_specs(input_specs: tuple[MethodCallNode, ...], args: tuple[object, ...]) -> None:
+def _validate_input_specs(
+    input_specs: tuple[MethodCallNode, ...], args: tuple[object, ...],
+    matchers: tuple[Callable[[object], bool | None] | None, ...] = (),
+) -> None:
     """Reject missing or incompatible retained positional input facts."""
 
     if len(args) < len(input_specs):
@@ -554,14 +590,15 @@ def _validate_input_specs(input_specs: tuple[MethodCallNode, ...], args: tuple[o
     for constraint, value in zip(input_specs, args):
         _activate_constraint(constraint, value)
     try:
-        valid = all(
-            satisfies(constraint, runtime_node_for_constraint(args[index], constraint))
-            for index, constraint in enumerate(input_specs)
-        )
+        for index, constraint in enumerate(input_specs):
+            matcher = matchers[index] if matchers else None
+            valid = None if matcher is None else matcher(args[index])
+            if valid is None:
+                valid = satisfies(constraint, runtime_node_for_constraint(args[index], constraint))
+            if not valid:
+                raise ImplementationSelectionError("conflict")
     except TypeError as error:
         raise ImplementationSelectionError("conflict") from error
-    if not valid:
-        raise ImplementationSelectionError("conflict")
 
 
 def _validate_raw_result(output_spec: MethodCallNode, result: object) -> None:

@@ -247,6 +247,32 @@ def _stop_after_checkpoint(_obj, _context):
     raise RuntimeError("stop after checkpoint")
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+def test_section_boundary_checkpoint_is_active_and_resume_requires_remaining_root(tmp_path, monkeypatch):
+    """A checkpoint at a section end cannot bypass the remaining observations."""
+    from dryml.artifacts import Fold
+    from dryml.data import ArrayDataset, Batch, Epoch
+
+    source = Batch(Epoch(ArrayDataset(np.arange(1, 5, dtype=np.float64)), len=2), 2)
+    fold = Fold(source, initial_state=ResumeInitial(), accumulator=ResumeSum(), finalize=ResumeFinish())
+    repo = Repo(DirStore(tmp_path / "state"))
+    monkeypatch.setattr(ResumeFinish, "calls", 0)
+    with pytest.raises(RuntimeError, match="stop after checkpoint"):
+        fold.compute(checkpoint_every=1, managed=ManagedConfig(
+            state_repo=repo, callbacks=[_stop_after_checkpoint]))
+    status = fold.compute.status(state_repo=repo)
+    saved = repo.load_state_ref(status.checkpoint, reuse_live="never")
+    assert saved._fold_progress_version == 3
+    assert saved._fold_progress["state"] == "active"
+    assert "eof" not in saved._fold_progress
+    assert saved.processed_count == 1
+    assert ResumeFinish.calls == 0
+    fold.compute(checkpoint_every=1, managed=ManagedConfig(state_repo=repo))
+    assert fold.value() == 10
+    assert fold.processed_count == 2
+    assert ResumeFinish.calls == 1
+
+
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "fold_progress"
 
 

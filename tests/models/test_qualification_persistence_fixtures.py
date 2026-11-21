@@ -48,7 +48,7 @@ class FixtureValue(Value):
         raise AssertionError("fixture reader must not compute")
 
 
-def test_experiment_data_v1_fixture_is_rejected_without_partial_install(tmp_path):
+def _assert_experiment_data_v1_fixture_is_rejected_without_partial_install(tmp_path):
     """Old history/reference authority is rejected intact; current rows survive."""
 
     verify_qualification_fixture_manifest(FIXTURE_ROOT)
@@ -141,9 +141,9 @@ def test_train_state_old_named_and_tuple_vectors_are_rejected_atomically():
 
 
 def test_qualification_frozen_inputs_remain_immutable_after_reader_refusal(tmp_path):
-    """Frozen incompatible inputs remain byte-identical across repeat refusal."""
+    """Frozen incompatible inputs remain byte-identical after reader refusal."""
     committed = _generated_fixture_bytes(FIXTURE_ROOT)
 
-    test_experiment_data_v1_fixture_is_rejected_without_partial_install(tmp_path)
+    _assert_experiment_data_v1_fixture_is_rejected_without_partial_install(tmp_path)
     verify_qualification_fixture_manifest(FIXTURE_ROOT)
     assert _generated_fixture_bytes(FIXTURE_ROOT) == committed

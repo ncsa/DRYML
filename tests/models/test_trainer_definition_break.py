@@ -121,3 +121,23 @@ def test_torch_dataset_owned_batches_weight_short_final_update():
     trainer(exp)
 
     assert (exp.state.step, exp.state.examples_seen, exp.state.loss_denominator) == (2, 3, 3)
+
+
+def test_continuation_adds_no_experiment_constructor_parameter_or_graph_node(tmp_path):
+    """Live, definition-built, and exact-loaded graphs retain the original topology."""
+    from dryml.models import Experiment
+    from .test_training_transaction import experiment
+
+    repo, exp = experiment(tmp_path)
+    assert "dataset_state" not in inspect.signature(Experiment).parameters
+    initial = repo._state_graph_evidence(exp)[0]
+    built = repo.build(exp.definition, cache="none")
+    assert set(built._runtime_projection) == set(exp._runtime_projection)
+    exp.train_fn(exp)
+    after = repo._state_graph_evidence(exp)[0]
+    assert initial.object_ids == after.object_ids
+    assert tuple(type(node) for node in initial.nodes) == tuple(type(node) for node in after.nodes)
+    assert "dataset_state" not in exp.definition.parameters
+    loaded = repo.load(repo.save_object(exp), cache="none")
+    assert set(loaded._runtime_projection) == set(exp._runtime_projection)
+    assert loaded.state.dataset_state.position == exp.state.input_position

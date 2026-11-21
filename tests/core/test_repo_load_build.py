@@ -6,6 +6,7 @@ from dryml.core.repo import Repo
 from dryml.core import save_object, load_object
 
 
+@pytest.mark.usefixtures("fixed_snapshot_environment")
 def test_partial_node_build_and_apply_have_distinct_unspecified_state_semantics(tmp_path):
     from dryml.core import ObjectId
     from dryml.core.store.dir import DirStore

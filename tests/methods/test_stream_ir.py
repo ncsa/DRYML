@@ -60,3 +60,48 @@ def test_custom_stream_node_requires_explicit_iterator_ports():
             max_buffered_items=0,
             implementation=lambda source: source,
         )
+
+
+def test_prepared_occurrences_detach_specs_and_preserve_reused_source_identity():
+    """Occurrence paths distinguish opens while immutable evidence retains sharing."""
+    from dataclasses import FrozenInstanceError
+    from dryml.methods.stream import StreamPlan
+
+    class Binding:
+        def open(self, epoch):
+            return iter(({"x": 1},))
+
+    class Source:
+        _stream_operator = "source"
+        spec = {"x": TensorSpec("int64", shape=(), backend="numpy")}
+
+        def yield_cardinality(self):
+            return Cardinality.finite(1)
+
+        def _prepare_stream_source(self, spec):
+            return Binding()
+
+    class Zip:
+        _stream_operator = "zip"
+
+        def __init__(self, source):
+            self.sources = [source, source]
+            self.spec = [source.spec, source.spec]
+
+        def yield_cardinality(self):
+            return Cardinality.finite(1)
+
+    source = Source()
+    plan = StreamPlan(Zip(source))
+    plan.learn()
+    root = plan._prepared.root
+    assert [child.occurrence for child in root.inputs] == [(0,), (1,)]
+    assert root.inputs[0].dataset is root.inputs[1].dataset is source
+    source.spec["new"] = source.spec.pop("x")
+    assert tuple(root.inputs[0].spec) == ("x",)
+    decoded = root.spec
+    decoded[0].clear()
+    assert tuple(root.spec[0]) == ("x",)
+    with pytest.raises(FrozenInstanceError):
+        root.controls = (1,)
+    assert list(plan.iterator()) == [[{"x": 1}, {"x": 1}]]

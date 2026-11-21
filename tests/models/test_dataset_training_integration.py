@@ -14,7 +14,7 @@ from dryml.core.node import require_saved
 from dryml.core.repo import default_repo
 from dryml.core.store.dir import DirStore
 from dryml.core.utils.graph.path import GraphPath, Parameter
-from dryml.data import ArrayDataset, Batch, Select, as_supervised
+from dryml.data import ArrayDataset, Batch, RecoverableGenerator, Select, as_supervised
 from dryml.managed import ManagedConfig
 from dryml.models import Experiment, ExperimentData, Model, TrainFunction
 
@@ -40,6 +40,713 @@ class FailingClosePairs:
         """Record one close attempt and raise the secondary cleanup failure."""
         self.closes.append(True)
         raise RuntimeError("source close failed")
+
+
+_dataset_continuation_events = []
+_dataset_continuation_direct_captures = []
+
+
+class DatasetContinuationDirectPairs(RecoverableGenerator):
+    """Tiny infinite direct producer; state extraction is independently counted."""
+
+    def __init__(self):
+        self.index = 0
+
+    def __next__(self):
+        self.index += 1
+        value = np.asarray([self.index], dtype=np.float32)
+        return value, value * 2
+
+    def capture_state(self):
+        _dataset_continuation_direct_captures.append(self.index)
+        return self.index
+
+    def restore_state(self, state):
+        self.index = state
+
+
+def _dataset_continuation_pairs(*, seed):
+    """Record a tiny reproducible source's acquisitions and delivered identifiers."""
+    _dataset_continuation_events.append("open")
+    rng = np.random.default_rng(seed)
+    for identifier in rng.permutation(4):
+        value = np.asarray([identifier + 1], dtype=np.float32)
+        _dataset_continuation_events.append(int(value[0]))
+        yield value, value * 2
+
+
+def _dataset_continuation_short_pairs(actual):
+    """Yield a configurable tiny physical input with no captured environment."""
+    for _ in range(actual):
+        value = np.ones((1,), dtype=np.float32)
+        yield value, value
+
+
+def _dataset_continuation_experiment(backend, *, repo=None, sectioned=True, epochs=2, validation=False):
+    """Build independently persisted native owners and four tiny paired inputs."""
+    from dryml.data import Epoch, GeneratorDataset
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    data = Batch(GeneratorDataset(_dataset_continuation_pairs, seed=7, seed_aware=True,
+                                 spec=(spec, spec), repo=repo), 1, repo=repo)
+    if sectioned:
+        data = Epoch(data, len=2, repo=repo)
+    if backend == "torch":
+        torch = pytest.importorskip("torch")
+        from dryml.models.torch import Model, Optimizer, Training
+        model = Model(torch.nn.Linear, 1, 1, repo=repo)
+        with torch.no_grad():
+            model.obj.weight.zero_()
+            model.obj.bias.zero_()
+        trainer = Training(optimizer=Optimizer(torch.optim.SGD, target=model, lr=.001,
+                                               momentum=.5, repo=repo),
+                           loss_cls=torch.nn.MSELoss, epochs=epochs, verbose=0, repo=repo)
+    elif backend in ("tf", "keras"):
+        tf = pytest.importorskip("tensorflow")
+        from dryml.models.tf import Model, Optimizer, Training
+        if backend == "keras":
+            from dryml.models.tf import BasicTraining as Training
+        from tests.models.test_tf_training import ZeroKerasModel
+        model = Model(ZeroKerasModel, repo=repo)
+        model.obj(tf.zeros((1, 1)))
+        trainer = Training(optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=.001,
+                                               momentum=.5, repo=repo),
+                           epochs=epochs, verbose=0, repo=repo)
+    else:
+        pytest.importorskip("jax")
+        pytest.importorskip("optax", reason="real Optax is required for native JAX qualification")
+        from dryml.models.jax import Model, Optimizer, Training
+        model = Model(F(_linear_init_factory), F(_linear_apply_factory),
+                      output_spec=TensorSpec("float32", shape=(1,), backend="jax"), repo=repo)
+        trainer = Training(optimizer=Optimizer(F(_adam_factory), repo=repo), loss=_mse,
+                           epochs=epochs, verbose=0, repo=repo)
+    return Experiment(model, trainer, train_data=data, val_data=data if validation else None,
+                      artifacts={}, repo=repo)
+
+
+@pytest.fixture
+def tf_cpu():
+    """Keep native setup and execution on CPU for opt-in specialization proofs."""
+    tf = pytest.importorskip("tensorflow")
+    with tf.device("/CPU:0"):
+        yield tf
+
+
+@pytest.mark.parametrize("model_kind", ("model", "sequential"))
+def test_tf_training_retains_raw_selection_signature_and_native_sgd(model_kind, monkeypatch, tf_cpu):
+    """Retained calls keep native SGD parity without scalar reduction work."""
+    tf = tf_cpu
+    from tensorflow.python.framework import op_callbacks
+    from dryml.core import signatures
+    from dryml.core.backend import Backend
+    from dryml.methods.implementation import SelectedDescriptorAdapter
+    from dryml.models.tf import Model, Optimizer, Sequential, Training
+
+    model = (Model(tf.keras.layers.Dense, 1, kernel_initializer="ones")
+             if model_kind == "model" else
+             Sequential((F("Dense", 1, kernel_initializer="ones"),)))
+    x = np.arange(5, dtype=np.float32).reshape(-1, 1) / 10
+    y = x * 2
+    model.obj(tf.zeros((1, 1)))
+    native = tf.keras.layers.Dense(1)
+    native(tf.zeros((1, 1)))
+    native.set_weights(model.obj.get_weights())
+    native_optimizer = tf.keras.optimizers.SGD(learning_rate=.01)
+    loss_fn = tf.keras.losses.MeanSquaredError()
+    exp = Experiment(model, Training(optimizer=Optimizer(tf.keras.optimizers.SGD, learning_rate=.01),
+                                    epochs=1, verbose=0),
+                     train_data=Batch(ArrayDataset((x, y)), 2))
+    native_gradients, actual_gradients = [], []
+
+    def record_gradients(optimizer, sink):
+        original = optimizer.apply_gradients
+
+        def apply(pairs):
+            pairs = list(pairs)
+            for gradient, variable in pairs:
+                assert "/device:CPU:0" in gradient.device
+                assert "/device:CPU:0" in variable.handle.device
+            sink.append([gradient.numpy().copy() for gradient, _ in pairs])
+            return original(pairs)
+
+        monkeypatch.setattr(optimizer, "apply_gradients", apply)
+
+    record_gradients(native_optimizer, native_gradients)
+    record_gradients(exp.train_fn.optimizer.obj, actual_gradients)
+    graph = model.method_graph()
+    eager = model._select(Backend.tf, None)
+    canonical = model.find_implementation(backend="tf")
+    assert canonical.name == eager.name == "raw_call"
+    assert canonical.target is eager.target
+    assert canonical.conversion_edge is eager.conversion_edge is None
+    selections, catalogs, compiles, deliveries = [], [], [], []
+    original_select, original_catalog = Model.find_implementation, Model.implementations
+    original_compile = signatures.compile_signature
+    original_prepare, original_invoke = SelectedDescriptorAdapter.prepare, SelectedDescriptorAdapter.invoke_prepared
+
+    def select(owner, *args, **kwargs):
+        if owner is model:
+            selections.append(kwargs)
+        return original_select(owner, *args, **kwargs)
+
+    def catalog(owner):
+        if owner is model:
+            catalogs.append(owner)
+        return original_catalog(owner)
+
+    def compile(target):
+        if getattr(target, "__name__", None) == "raw_call":
+            compiles.append(target)
+        return original_compile(target)
+
+    def prepare(adapter, args, kwargs):
+        if adapter.name == "raw_call":
+            deliveries.append("args")
+        return original_prepare(adapter, args, kwargs)
+
+    def invoke(adapter, args, kwargs, **controls):
+        result = original_invoke(adapter, args, kwargs, **controls)
+        if adapter.name == "raw_call":
+            deliveries.append("return")
+        return result
+
+    monkeypatch.setattr(Model, "find_implementation", select)
+    monkeypatch.setattr(Model, "implementations", catalog)
+    monkeypatch.setattr(signatures, "compile_signature", compile)
+    monkeypatch.setattr(SelectedDescriptorAdapter, "prepare", prepare)
+    monkeypatch.setattr(SelectedDescriptorAdapter, "invoke_prepared", invoke)
+    observed = []
+    scalar_means = []
+    expected_numerator = 0.
+
+    def observe_op(op_type, inputs, attrs, outputs, op_name=None, graph=None):
+        if op_type == "Mean" and inputs[0].shape.rank == 0:
+            scalar_means.append(op_type)
+
+    for invocation in range(2):
+        native_loss = loss_fn
+        mixed_ranks = []
+        if invocation:
+            def changing_loss(ranks):
+                def loss(target, prediction):
+                    value = loss_fn(target, prediction)
+                    if len(ranks) % 3 == 1:
+                        value = tf.stack([value, value * 3])
+                    ranks.append(value.shape.rank)
+                    return value
+                loss.reduction = "sum_over_batch_size"
+                return loss
+
+            native_loss = changing_loss([])
+            mixed_loss = changing_loss(mixed_ranks)
+            monkeypatch.setattr(exp.train_fn, "_make_loss", lambda *args: mixed_loss)
+        expected = []
+        for start in range(0, len(x), 2):
+            with tf.GradientTape() as tape:
+                loss = tf.reduce_mean(native_loss(y[start:start + 2], native(x[start:start + 2])))
+            native_optimizer.apply_gradients(zip(tape.gradient(loss, native.trainable_variables),
+                                                native.trainable_variables))
+            expected.append(float(loss.numpy()))
+        op_callbacks.add_op_callback(observe_op)
+        try:
+            actual = exp.train_fn(exp, callbacks=(lambda: observed.append(exp.state.step),))
+        finally:
+            op_callbacks.remove_op_callback(observe_op)
+        assert actual == pytest.approx(expected)
+        for value, expected_value in zip(model.obj.get_weights(), native.get_weights()):
+            np.testing.assert_allclose(value, expected_value)
+        assert len(actual_gradients) == len(native_gradients) == 3 * (invocation + 1)
+        for actual_step, expected_step in zip(actual_gradients, native_gradients):
+            for actual_gradient, expected_gradient in zip(actual_step, expected_step):
+                np.testing.assert_allclose(actual_gradient, expected_gradient)
+        assert len(compiles) == invocation + 1
+        assert selections == [{"backend": "tf"}] * (invocation + 1)
+        # Canonical selection reads compatible candidates, then selects from the catalog.
+        assert len(catalogs) == 2 * (invocation + 1)
+        assert model.call_mode == "eager" and model.cached_signature is None
+        assert model.default_batched is None
+        assert model.method_graph().nodes == graph.nodes
+        assert model.method_graph().conversion_edges == ()
+        assert scalar_means == [], "already-scalar native losses must not execute Mean"
+        if invocation:
+            assert mixed_ranks == [0, 1, 0]
+        expected_numerator += sum(a * n for a, n in zip(expected, (2, 2, 1)))
+        assert exp.state.loss_denominator == 5 * (invocation + 1)
+        assert exp.state.loss_numerator == pytest.approx(expected_numerator)
+    assert deliveries == ["args", "return"] * 6
+    assert observed == list(range(1, 7))
+    assert exp.state.examples_seen == 10 and exp.state.epoch == 2
+
+
+def test_tf_dataset_continuation_scalar_loss_values_gradients_and_fallback(monkeypatch, tf_cpu):
+    """Scalar specialization matches native values/gradients and keeps fallback dispatch."""
+    tf = tf_cpu
+    from tensorflow.python.framework import op_callbacks
+    from dryml.models.tf.base import _mean_tf_loss
+
+    def differentiate(reduce, value):
+        ops = []
+
+        def observe(op_type, inputs, attrs, outputs, op_name=None, graph=None):
+            ops.append(op_type)
+
+        op_callbacks.add_op_callback(observe)
+        try:
+            with tf.GradientTape() as tape:
+                tape.watch(value)
+                result = reduce(value)
+            gradient = tape.gradient(result, value)
+        finally:
+            op_callbacks.remove_op_callback(observe)
+        return result, gradient, ops
+
+    for dtype in (tf.float32, tf.float64):
+        info = np.finfo(dtype.as_numpy_dtype)
+        values = (0., -0., 1.25, -2.5, info.max, info.tiny, info.smallest_subnormal,
+                  -info.smallest_subnormal, float("inf"), -float("inf"), float("nan"))
+        for value in values:
+            tensor = tf.convert_to_tensor(np.array(value, dtype=dtype.as_numpy_dtype))
+            assert "/device:CPU:0" in tensor.device
+            expected, expected_grad, before = differentiate(tf.reduce_mean, tensor)
+            actual, actual_grad, after = differentiate(lambda v: _mean_tf_loss(tf, v), tensor)
+            assert actual.numpy().tobytes() == expected.numpy().tobytes()
+            np.testing.assert_array_equal(actual_grad.numpy(), expected_grad.numpy())
+            assert actual.dtype == expected.dtype == dtype
+            assert actual.device == expected.device == tensor.device
+            assert actual_grad.device == expected_grad.device == tensor.device
+            assert before.count("Mean") == 1 and after.count("Mean") == 0
+            assert before.count("RealDiv") == 1 and after.count("RealDiv") == 0
+            assert len(after) < len(before)
+
+    original_mean = tf.reduce_mean
+    fallbacks = []
+
+    def mean(value):
+        fallbacks.append(value)
+        return original_mean(value)
+
+    monkeypatch.setattr(tf, "reduce_mean", mean)
+
+    class ScalarLike:
+        def __tf_tensor__(self, dtype=None, name=None):
+            return tf.constant(2., dtype=dtype, name=name)
+
+    values = (
+        tf.constant([1., 3.]), tf.constant([[1., 3.]]), tf.constant([], dtype=tf.float32),
+        tf.constant(3, dtype=tf.int32), tf.constant(1., dtype=tf.float16),
+        tf.constant(1., dtype=tf.bfloat16), tf.constant(1 + 2j, dtype=tf.complex64),
+        tf.Variable(2.), np.float32(2.), np.array(2., dtype=np.float64), [1., 3.],
+        tf.ragged.constant([[1.], [2., 3.]]), ScalarLike(),
+    )
+    for value in values:
+        expected = original_mean(value)
+        actual = _mean_tf_loss(tf, value)
+        assert fallbacks[-1] is value
+        np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+        assert actual.dtype == expected.dtype and actual.device == expected.device
+
+    for value in (tf.constant(True), tf.constant("invalid"), object()):
+        with pytest.raises((TypeError, ValueError, tf.errors.InvalidArgumentError)) as expected:
+            original_mean(value)
+        with pytest.raises(type(expected.value)):
+            _mean_tf_loss(tf, value)
+        assert fallbacks[-1] is value
+
+    value = tf.constant(2.)
+    with monkeypatch.context() as patch:
+        patch.delattr(tf.__internal__, "EagerTensor")
+        assert _mean_tf_loss(tf, value).numpy() == original_mean(value).numpy()
+        assert fallbacks[-1] is value
+
+    @tf.function(input_signature=[tf.TensorSpec(shape=(), dtype=tf.float32)], autograph=False)
+    def symbolic_scalar(value):
+        return _mean_tf_loss(tf, value)
+
+    assert symbolic_scalar(value).numpy() == original_mean(value).numpy()
+    assert any(op.type == "Mean" for op in symbolic_scalar.get_concrete_function().graph.get_operations())
+
+    @tf.function(input_signature=[tf.TensorSpec(shape=None, dtype=tf.float32)], autograph=False)
+    def unknown_rank(value):
+        assert value.shape.rank is None
+        return _mean_tf_loss(tf, value)
+
+    for value in (tf.constant(-0.), tf.constant([1., 3.])):
+        np.testing.assert_array_equal(unknown_rank(value).numpy(), original_mean(value).numpy())
+    assert unknown_rank.experimental_get_tracing_count() == 1
+    assert any(op.type == "Mean" for op in unknown_rank.get_concrete_function().graph.get_operations())
+
+
+@pytest.mark.exhaustive_only
+@pytest.mark.parametrize("input_device", ("/GPU:0", "/CPU:0"),
+                         ids=("gpu-input", "cpu-input-gpu-ops"))
+def test_tf_scalar_loss_gpu_fallback_and_native_operation_placement(monkeypatch, input_device):
+    """Opt-in GPU proof of fallback identity and native cross-device value/gradient parity.
+
+    Skip without a visible TensorFlow GPU; CPU input under a GPU operation scope
+    also checks that specialization preserves native operation placement.
+    """
+    tf = pytest.importorskip("tensorflow")
+    from dryml.models.tf.base import _mean_tf_loss
+
+    if not tf.config.list_logical_devices("GPU"):
+        pytest.skip("requires a visible TensorFlow GPU; GPU behavior not exercised")
+
+    original_mean = tf.reduce_mean
+    forwarded = []
+
+    def mean(value):
+        forwarded.append(value)
+        return original_mean(value)
+
+    monkeypatch.setattr(tf, "reduce_mean", mean)
+
+    def differentiate(reduce, value):
+        with tf.GradientTape() as tape:
+            tape.watch(value)
+            result = reduce(value)
+        return result, tape.gradient(result, value)
+
+    for dtype in (tf.float32, tf.float64):
+        info = np.finfo(dtype.as_numpy_dtype)
+        values = (0., -0., 1.25, -2.5, info.max, info.tiny, info.smallest_subnormal,
+                  -info.smallest_subnormal, float("inf"), -float("inf"), float("nan"))
+        for value in values:
+            with tf.device(input_device):
+                tensor = tf.convert_to_tensor(np.array(value, dtype=dtype.as_numpy_dtype))
+            assert type(tensor) is tf.__internal__.EagerTensor
+            assert tensor.shape.rank == 0 and tensor.dtype == dtype
+            assert f"/device:{input_device[1:]}" in tensor.device
+            forwarded.clear()
+            with tf.device("/GPU:0"):
+                expected, expected_grad = differentiate(original_mean, tensor)
+                actual, actual_grad = differentiate(lambda v: _mean_tf_loss(tf, v), tensor)
+            if input_device == "/GPU:0":
+                assert len(forwarded) == 1 and forwarded[0] is tensor
+            else:
+                assert forwarded == []
+            assert actual.numpy().tobytes() == expected.numpy().tobytes()
+            np.testing.assert_array_equal(actual_grad.numpy(), expected_grad.numpy())
+            np.testing.assert_array_equal(actual_grad.numpy(), np.array(1., dtype=dtype.as_numpy_dtype))
+            assert actual.dtype == expected.dtype == dtype
+            assert actual_grad.dtype == expected_grad.dtype == dtype
+            assert actual.device == expected.device
+            assert actual_grad.device == expected_grad.device
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf", "jax", "keras"))
+def test_dataset_continuation_native_sections_share_one_source(backend):
+    """Two logical sections retain one factory, RNG, conversion plan and input owner."""
+    exp = _dataset_continuation_experiment(backend)
+    _dataset_continuation_events.clear()
+    exp.train_fn(exp)
+    assert _dataset_continuation_events.count("open") == 1
+    assert len(_dataset_continuation_events) == 5
+    assert (exp.state.step, exp.state.epoch, exp.state.examples_seen) == (4, 2, 4)
+    assert exp.state.input_recovery == "exact"
+    assert exp.state.dataset_state.position == exp.state.input_position
+    assert exp.state._input_provider is None
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf", "jax"))
+def test_dataset_continuation_native_checkpoint_suffix(backend, tmp_path, monkeypatch):
+    """An actual saved Experiment resumes its accepted input cut and native slots."""
+    repo = Repo(DirStore(tmp_path / "native"))
+    exp = _dataset_continuation_experiment(backend, repo=repo)
+    _dataset_continuation_events.clear()
+    saved = []
+    def checkpoint():
+        if exp.state.step == 1:
+            saved.append(repo.save(exp, deep_capture=True))
+        if exp.state.step == 2:
+            raise RuntimeError("unsaved update")
+    with pytest.raises(RuntimeError, match="unsaved update"):
+        exp.train_fn(exp, callbacks=(checkpoint,))
+    loaded = repo.load_state_ref(saved[0], reuse_live="never")
+    assert loaded.state.step == 1
+    from dryml.models.utils import TrainingPreparation
+    received = []
+    original_prepare = TrainingPreparation.prepare
+    def prepare(owner, x, y):
+        received.append(int(x.item()))
+        return original_prepare(owner, x, y)
+    monkeypatch.setattr(TrainingPreparation, "prepare", prepare)
+    _dataset_continuation_events.clear()
+    loaded.train_fn(loaded)
+    assert _dataset_continuation_events.count("open") == 1
+    assert len(_dataset_continuation_events) == 5  # one replayed prefix, three new yields
+    suffix = list(received)
+    received.clear()
+    recovered = loaded.model
+    baseline = _dataset_continuation_experiment(backend)
+    baseline.train_fn(baseline)
+    assert suffix == received[1:]
+    assert loaded.state.step == baseline.state.step == 4
+    if backend == "torch":
+        import torch
+        torch.testing.assert_close(recovered.obj.state_dict(), baseline.model.obj.state_dict())
+        torch.testing.assert_close(loaded.train_fn.optimizer.obj.state_dict(),
+                                   baseline.train_fn.optimizer.obj.state_dict())
+    elif backend == "tf":
+        for actual, expected in zip(recovered.obj.weights, baseline.model.obj.weights):
+            np.testing.assert_allclose(actual.numpy(), expected.numpy())
+        for actual, expected in zip(loaded.train_fn.optimizer.obj.variables,
+                                    baseline.train_fn.optimizer.obj.variables):
+            np.testing.assert_allclose(actual.numpy(), expected.numpy())
+    else:
+        np.testing.assert_allclose(recovered.parameters["weight"], baseline.model.parameters["weight"])
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf", "jax", "keras"))
+def test_dataset_continuation_native_implicit_passes(backend):
+    """Finite physical passes reopen exactly once per logical epoch."""
+    exp = _dataset_continuation_experiment(backend, sectioned=False)
+    _dataset_continuation_events.clear()
+    exp.train_fn(exp)
+    assert _dataset_continuation_events.count("open") == 2
+    assert len(_dataset_continuation_events) == 10
+    assert (exp.state.step, exp.state.epoch, exp.state.input_sequence) == (8, 2, 10)
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+@pytest.mark.parametrize("actual", (0, 2))
+def test_dataset_continuation_native_declared_shortfall_rejects_completion(backend, actual):
+    """Actual explicit trainers cannot finish declared-three, short physical input."""
+    from dryml.data import DatasetExhaustedError, GeneratorDataset
+    exp = _dataset_continuation_experiment(backend, sectioned=False, epochs=1)
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    exp.train_data = Batch(GeneratorDataset(_dataset_continuation_short_pairs, actual,
+                                          cardinality=3, spec=(spec, spec)), 1)
+    with pytest.raises(DatasetExhaustedError) as caught:
+        exp.train_fn(exp)
+    assert (caught.value.requested, caught.value.yielded) == (3, actual)
+    assert (exp.state.step, exp.state.examples_seen, exp.state.epoch) == (actual, actual, 0)
+    assert exp.state._input_provider is None
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_dataset_continuation_native_finite_final_callback_sees_normalized_epoch(backend):
+    """A finite generator's last callback sees the accepted next-epoch frontier."""
+    from dryml.data import GeneratorDataset
+    exp = _dataset_continuation_experiment(backend, sectioned=False, epochs=1)
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    exp.train_data = Batch(GeneratorDataset(_dataset_continuation_pairs, seed=7, seed_aware=True,
+                                          cardinality=4, spec=(spec, spec)), 1)
+    _dataset_continuation_events.clear()
+    seen = []
+    exp.train_fn(exp, callbacks=(lambda: seen.append((exp.state.epoch, exp.state.next_batch)),))
+    assert seen == [(0, 1), (0, 2), (0, 3), (1, 0)]
+    assert _dataset_continuation_events.count("open") == 1
+    assert len(_dataset_continuation_events) == 5
+    assert exp.state.step == exp.state.input_sequence == 4
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_dataset_continuation_native_unknown_eof_postlude_reload(backend, tmp_path, monkeypatch):
+    """Saved last-value EOF normalizes once; validation precedes next-pass demand."""
+    import importlib
+    module = importlib.import_module(f"dryml.models.{backend}.base")
+    repo = Repo(DirStore(tmp_path / "eof"))
+    exp = _dataset_continuation_experiment(backend, repo=repo, sectioned=False, validation=True)
+    saved = []
+    def checkpoint():
+        if exp.state.step == 4:
+            saved.append(repo.save(exp, deep_capture=True))
+            raise RuntimeError("saved last value")
+    with pytest.raises(RuntimeError, match="saved last value"):
+        exp.train_fn(exp, callbacks=(checkpoint,))
+    loaded = repo.load_state_ref(saved[0], reuse_live="never")
+    assert (loaded.state.epoch, loaded.state.next_batch, loaded.state.input_sequence) == (0, 4, 4)
+    evaluations = []
+    monkeypatch.setattr(type(loaded.train_fn), "_evaluate",
+                        lambda *a, **k: evaluations.append("validation") or {"loss": 3.})
+    postludes = []
+    class Progress:
+        def __init__(self, **kwargs):
+            pass
+        def update(self, *a, **k):
+            pass
+        def close(self):
+            pass
+        def epoch_end(self, epoch, **kwargs):
+            postludes.append(epoch)
+            if len(postludes) == 1:
+                assert _dataset_continuation_events.count("open") == 1  # saved prefix replay only
+                assert loaded.state.input_sequence == 5
+                assert loaded.state.pending_epoch_postlude_phase == "progress"
+                assert loaded.state.pending_epoch_metrics["loss"] > 0
+                saved.append(repo.save(loaded, deep_capture=True))
+                raise RuntimeError("boundary postlude")
+    monkeypatch.setattr(module, "TrainingProgress", Progress)
+    _dataset_continuation_events.clear()
+    with pytest.raises(RuntimeError, match="boundary postlude"):
+        loaded.train_fn(loaded)
+    resumed = repo.load_state_ref(saved[1], reuse_live="never")
+    assert resumed.state.input_sequence == 5
+    _dataset_continuation_events.clear()
+    resumed.train_fn(resumed)
+    assert evaluations == ["validation", "validation"]  # once per completed epoch
+    assert postludes == [1, 1, 2]
+    assert _dataset_continuation_events.count("open") == 1
+    assert (resumed.state.step, resumed.state.epoch, resumed.state.input_sequence) == (8, 2, 10)
+    assert resumed.state.dataset_state.position == resumed.state.input_position
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_dataset_continuation_native_stale_retry_precedes_setup(backend, monkeypatch):
+    """A callback alone leaves owners valid but cannot authorize uncaptured retry."""
+    exp = _dataset_continuation_experiment(backend)
+    def pause():
+        raise RuntimeError("uncaptured callback")
+    with pytest.raises(RuntimeError, match="uncaptured callback"):
+        exp.train_fn(exp, callbacks=(pause,))
+    assert exp.state.step == exp.state.input_sequence == 1
+    assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
+    monkeypatch.setattr(type(exp.train_data), "prepare", lambda _: pytest.fail("stale input prepared"))
+    monkeypatch.setattr(exp.train_fn, "_make_loss", lambda *a: pytest.fail("stale retry built loss"))
+    with pytest.raises(ValueError, match="current matching record.*durable reload"):
+        exp.train_fn(exp)
+    assert exp.state._input_provider is None
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+@pytest.mark.parametrize("failure_step", (1, 2))
+def test_dataset_continuation_native_mutation_failure_invalidates_owners(backend, failure_step, tmp_path, monkeypatch):
+    """Model and independently saved momentum slots require durable reload after failure."""
+    from dryml.core.repo import RepoSaveError
+    repo = Repo(DirStore(tmp_path / "mutation"))
+    exp = _dataset_continuation_experiment(backend, repo=repo)
+    checkpoint = []
+    def capture():
+        if exp.state.step == 1:
+            checkpoint.append(repo.save(exp, deep_capture=True))
+    optimizer = exp.train_fn.optimizer.obj
+    name = "step" if backend == "torch" else "apply_gradients"
+    original = getattr(type(optimizer), name)
+    calls = []
+    def fail(owner, *args, **kwargs):
+        result = original(owner, *args, **kwargs)
+        calls.append(True)
+        if len(calls) == failure_step:
+            raise RuntimeError("mutated model and slots")
+        return result
+    monkeypatch.setattr(type(optimizer), name, fail)
+    with pytest.raises(RuntimeError, match="mutated model and slots"):
+        exp.train_fn(exp, callbacks=(capture,))
+    assert exp.state.step == exp.state.input_sequence == failure_step - 1
+    for owner in (exp, exp.model, exp.train_fn.optimizer):
+        assert owner._restore_failed
+        with pytest.raises(RepoSaveError, match="invalidated"):
+            repo.save(owner, deep_capture=True)
+    with pytest.raises(RepoSaveError, match="invalidated"):
+        exp.train_fn(exp)
+    if failure_step == 1:
+        assert checkpoint == []  # no usable durable recovery cut was fabricated
+        return
+    monkeypatch.setattr(type(optimizer), name, original)
+    loaded = repo.load_state_ref(checkpoint[0], reuse_live="never")
+    assert loaded.state.step == loaded.state.input_sequence == 1
+    loaded.train_fn(loaded)
+    assert loaded.state.step == 4
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_dataset_continuation_native_direct_hooks_only_at_final_capture(backend, monkeypatch):
+    """Infinite directly recoverable input is bounded by sections without per-step hooks."""
+    from dryml.core.cardinality import Cardinality
+    from dryml.data import Epoch, GeneratorDataset
+    exp = _dataset_continuation_experiment(backend)
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    exp.train_data = Epoch(Batch(GeneratorDataset(DatasetContinuationDirectPairs,
+        cardinality=Cardinality.INFINITE, spec=(spec, spec)), 1), len=2)
+    _dataset_continuation_direct_captures.clear()
+    exp.train_fn(exp, callbacks=(lambda: _dataset_continuation_direct_captures == []
+                                or pytest.fail("direct source snapshot per update"),))
+    assert _dataset_continuation_direct_captures == [4]
+    assert exp.state.input_replay_policy == "disabled"
+    assert exp.state.step == exp.state.input_sequence == 4
+    record = exp.state.dataset_state
+    exp.train_fn.epochs = 0
+    monkeypatch.setattr(type(exp.train_data), "prepare", lambda _: pytest.fail("started zero call prepared"))
+    exp.train_fn(exp)
+    assert exp.state.dataset_state is record and exp.state.input_recovery == "exact"
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf"))
+def test_dataset_continuation_native_conversion_failure_preserves_primary(backend, monkeypatch):
+    """Conversion precedes mutation; a failing source close is only secondary evidence."""
+    from dryml.data import GeneratorDataset
+    from dryml.models.utils import TrainingPreparation
+    exp = _dataset_continuation_experiment(backend)
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    exp.train_data = Batch(GeneratorDataset(FailingClosePairs, spec=(spec, spec)), 1)
+    FailingClosePairs.closes.clear()
+    def fail(*args):
+        raise ValueError("conversion before mutation")
+    monkeypatch.setattr(TrainingPreparation, "prepare", fail)
+    with pytest.raises(ValueError, match="conversion before mutation") as caught:
+        exp.train_fn(exp)
+    assert FailingClosePairs.closes == [True]
+    assert exp.state.step == exp.state.input_sequence == exp.state.examples_seen == 0
+    assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
+    assert exp.state._input_provider is None
+    assert any("source close failed" in note for note in caught.value.__notes__)
+
+
+@pytest.mark.parametrize("backend,kind", (("torch", "native"), ("tf", "native"),
+                                         ("torch", "cache"), ("torch", "transient"),
+                                         ("tf", "transient")))
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
+def test_dataset_continuation_positional_compatibility(backend, kind, tmp_path, monkeypatch):
+    """Unsupported sources/transient owners keep explicitly positional same-live retry."""
+    from dryml.data import UnsupportedContinuationError
+    exp = _dataset_continuation_experiment(backend, sectioned=False)
+    values = np.arange(3, dtype=np.float32).reshape(-1, 1)
+    spec = TensorSpec("float32", shape=(1,), backend="numpy")
+    if kind == "native":
+        if backend == "torch":
+            import torch
+            from dryml.data import TorchDatasetAdapter
+            from tests.models.test_torch_training import DatasetContinuationTorchPairs
+            native = DatasetContinuationTorchPairs(values)
+            native_spec = TensorSpec("float32", shape=(1,), backend="torch")
+            source = TorchDatasetAdapter(native, spec=(native_spec, native_spec))
+        else:
+            import types
+            import tensorflow as tf
+            from dryml.data import TFDSAdapter
+            options = tf.data.Options()
+            options.threading.private_threadpool_size = 1
+            native = tf.data.Dataset.from_tensor_slices((values, values)).with_options(options)
+            monkeypatch.setitem(sys.modules, "tensorflow_datasets", types.SimpleNamespace(load=lambda *a, **k: native))
+            source = TFDSAdapter("local-test", spec=(spec, spec), as_numpy=True, download=False)
+        exp.train_data = Batch(source, 1)
+    elif kind == "cache":
+        from dryml.artifacts import CachedDataset
+        repo = Repo(DirStore(tmp_path / "cache"))
+        source = CachedDataset(ArrayDataset((values, values)))
+        source.compute(codec="numpy", managed=ManagedConfig(state_repo=repo))
+        assert source.ready
+        exp.train_data = Batch(source, 1)
+    else:
+        if backend == "torch":
+            from dryml.models.torch import Training
+        else:
+            from dryml.models.tf import Training
+        exp.train_fn = Training(epochs=2, verbose=0)
+        exp.train_data = Batch(ArrayDataset((values, values)), 1)
+    with ArrayDataset(values).open() as traversal:
+        record = traversal.capture_state()
+    if kind != "transient":
+        with pytest.raises(UnsupportedContinuationError):
+            exp.train_data.open(state=record)
+    def pause():
+        raise RuntimeError("positional callback")
+    with pytest.raises(RuntimeError, match="positional callback"):
+        exp.train_fn(exp, callbacks=(pause,))
+    assert exp.state.input_recovery == "positional" and exp.state.dataset_state is None
+    assert not exp.model._restore_failed
+    exp.train_fn(exp)
+    assert exp.state.step == exp.state.examples_seen == 6
+    assert exp.state.epoch == 2 and exp.state.dataset_state is None
 
 
 class CountingModel(Model):
@@ -359,6 +1066,20 @@ def test_jax_trainer_consumes_authored_dataset_batches():
     assert exp.train_fn.training_preparation.consumer_specs[0].backend.value == "jax"
 
 
+def test_jax_candidate_accounting_does_not_use_train_state_persistence(monkeypatch):
+    """The U5 v3 codec cannot introduce per-update continuation serialization."""
+    pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    from dryml.models import TrainState
+    exp = _jax_experiment()
+    monkeypatch.setattr(TrainState, "__getstate__", lambda _: pytest.fail("candidate persistence encoding"))
+    with default_repo(Repo()):
+        exp.train_fn(exp)
+    assert (exp.state.step, exp.state.examples_seen, exp.state.epoch) == (3, 5, 1)
+    assert exp.state.input_started is True
+    assert exp.state.dataset_state.position == exp.state.input_position
+
+
 @pytest.mark.parametrize("workload", ("W1", "W3"))
 def test_jax_qualification_model_runs_on_authored_dataset_batches(workload):
     """Qualification JAX factories execute authored batches and supported labels."""
@@ -403,6 +1124,7 @@ def test_jax_qualification_model_runs_on_authored_dataset_batches(workload):
     )["observed_device"] == "cpu"
 
 
+@pytest.mark.usefixtures("fixed_managed_snapshot_environment")
 def test_jax_managed_local_publishes_exact_history_and_independent_owner_state(tmp_path):
     """A local managed JAX run publishes exact terminal, history, and owner receipts."""
 

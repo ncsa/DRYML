@@ -19,9 +19,10 @@ Important expectations:
 - `yield_cardinality()` returns the declared number of yielded values as a
   finite, unknown, or infinite `Cardinality`. It normalizes legacy integer and
   `Cardinality` `__len__` declarations without opening a cursor.
-- `example_cardinality()` returns an example total only when declared TensorSpec
-  batch metadata proves it. Unbatched values have one example per yield; fixed
-  uniform batches multiply yield cardinality; dynamic batches remain unknown.
+- `example_cardinality()` returns an example total when declared TensorSpec
+  batch metadata or an explicit source total proves it. Unbatched values have
+  one example per yield; fixed uniform batches multiply yield cardinality;
+  dynamic batches remain unknown unless an explicit total is available.
   A zero-yield dataset has zero examples regardless of batch metadata.
 - `examples_in(value)` validates one runtime TensorSpec tree and returns its
   exact positive example count. Batched leaves must expose non-rank-zero,
@@ -89,6 +90,362 @@ one epoch. Opaque generator factories receive no new replay or seed requirement.
 A completed `CachedDataset` instead persists one selected realization: repeating
 that cache replays its stored values and does not advance the source's epoch seed.
 
+### Detached traversal continuation
+
+`Dataset.open(*, epoch=None, start=None, state=None, acceptance="delivery")`
+and `PreparedDataset.open(...)` can resume an explicitly captured `DatasetState`.
+The record is an immutable ordinary value, **outside the Object graph**: it has no
+ObjectId, Dataset property, LocalState, Repo, producer, frame, invoker or acceptance
+token. `state.cdef` describes the frozen prepared recipe; `state.state_ref` is
+optional selected-state metadata, not a restoration command or retention grant.
+`state.position`, `state.replay_recovery_policy` and
+`state.replay_recovery_enabled` inspect saved facts without source access.
+
+```python
+from dryml.data import ArrayDataset, DatasetState, Shuffle
+import numpy as np
+
+dataset = Shuffle(ArrayDataset(np.arange(100)), buffer_size=8, seed=17)
+with dataset.open() as traversal:
+    view = traversal.next_epoch()
+    first = next(view)
+    state = traversal.capture_state()  # explicit detachment, not a per-yield cost
+    state.save("input-cut")           # destination must be a new directory
+
+loaded = DatasetState.load("input-cut")
+loaded.validate(dataset)              # metadata compatibility only
+with dataset.open(state=loaded) as resumed:
+    remaining = list(resumed.next_epoch())
+```
+
+The supplied target may be independently materialized but must match the complete
+configuration, occurrence/sharing partition, source selections and required state,
+normalized specs, operator controls, and protocols. Preparation freezes those
+facts; later changes to mutable Dataset controls do not change the prepared record
+binding. A newly prepared edited target is incompatible. Each open revalidates;
+past validation is not authorization. With a record, omitted epoch/start use its
+saved position; explicitly supplied values must equal it. Two opens create
+independent live state and cannot mutate the record or each other.
+
+`load(path)` reads only that directory's metadata and owned bytes. `validate(target)`
+may prepare source-inert selections and inspect supplied array contents, but neither
+API instantiates a Dataset, calls a producer/factory/state hook, restores a referenced
+Object, opens referenced Stores, or imports optional tensor backends to rebuild
+values. Native buffers decode to inert host evidence and reconstruct lazily at
+explicit reattachment. `open(state=...)` selects indexed/direct/replay restoration
+per occurrence; producers remain lazy until ordinary demand.
+
+#### Recovery strategies and replay policy
+
+* **ArrayDataset:** indexed restoration fetches no discarded rows. Prepare/open do
+  not copy the full source. Capture owns its required source bytes, so later
+  producer/consumer mutation cannot alter a saved record. Keep borrowed array
+  contents stable during capture and traversal; concurrent unversioned mutation is
+  unsupported. Readonly views alone do not establish stable ownership. There is no
+  per-yield hash or mutation monitor.
+* **Ordinary GeneratorDataset:** call `traversal.enable_replay_recovery()` or
+  `enable_replay_recovery_if_needed()` to trust deterministic replay. Restoration
+  recreates original initialization with the actual effective seed and physical
+  pass, consumes exactly the saved fetched-source prefix once, and restores
+  downstream buffers/phases independently. A factory may return an inner generator
+  function through the ordinary acquisition path. No suspended frame is serialized.
+* **Direct producer:** subclass the public `RecoverableGenerator` abstract iterator
+  and implement `__next__`, `capture_state() -> ContinuationValue`, and
+  `restore_state(state: ContinuationValue) -> None`. The inherited `__iter__` returns
+  self. State must include the complete next-yield cursor/RNG/buffer state. Capture
+  invokes hooks only on request; restore generates zero historical yields. Hook
+  exceptions propagate. Optional `close()` is called once through cursor ownership.
+* **Other sources/operators:** ordinary live iteration remains available; unsupported
+  exact capture fails explicitly. NPY-file, custom/native-source and dynamically
+  selected Map execution are not certified by this continuation format.
+
+The default traversal-local policy is `"disabled"`. Manual enable selects
+`"enabled"` and is not weakened by the conditional helper. Manual disable selects
+`"disabled"` and cancels future conditional fallback; direct/indexed capability
+and already captured records remain valid. Re-enable uses all retained source
+positions, including work done while disabled. Toggling never consumes/replays or
+reseeds a source, changes the Dataset/preparation, or modifies another traversal.
+Small configuration is frozen once; large unversioned mutable factory arguments
+are identified by bounded structural/byte preflight (256 small entries and at most
+2 KiB per eligible NumPy configuration leaf, with aggregate array bytes charged to
+the structural budget). They
+are borrowed for live iteration and cannot retroactively gain original replay
+evidence. Saved constructor-declared source dependencies can instead carry exact
+SavedNode selections and use the caller's normally materialized target values.
+The record neither embeds live Objects nor implicitly captures their state.
+Stateful Method dependencies likewise need an exact saved target or Method state
+selection; a constructor recipe alone is insufficient. Keep those selected live
+source values unchanged during the traversal. Data does not infer current mutable
+payload contents from an old save receipt or serialize a live Model implicitly.
+
+The conditional helper is source-inert/idempotent: generator-free or declared
+direct-only trees are no-ops; arbitrary factory products are classified only at
+normal acquisition, including future Chain/Repeat/pass occurrences. Direct
+capability requires the **actual consumed iterator** to satisfy the ABC, iterator
+identity, and callable state methods; duck typing or hooks on an unrelated iterable
+wrapper do not qualify. A failed direct restore never falls back to replay.
+`replay_recovery_enabled` is true for explicit enablement or an active conditional
+replay occurrence; an unresolved conditional decision alone is false. An initial
+conditional record can be captured/saved/closed without calling any factory.
+Disabling after opening a record does not cancel its already selected one-time
+source reconstruction.
+
+For mixed Zip trees, indexed, replay and direct branches keep separate fetched
+counts and strategy records, including over-pulls, Shuffle buffers and unequal
+section tails. Shared Dataset slots are independent execution occurrences. Zip
+output offsets are never used to replay the whole tree or duplicate downstream
+transitions. Unknown implicit EOF retains prior physical-pass nonempty evidence;
+observing an empty resumed suffix normalizes its boundary once, with the existing
+handoff holding next-pass acquisition until released.
+
+Notebook functions/classes need retrievable source and supported stable imports.
+A notebook-defined RecoverableGenerator class can be captured from retained cell
+source using its own method filenames/line anchors, reconstructed without the live
+binding in a clean process, and restored directly. Missing/conflicting/ambiguous
+source rejects; a changed captured body is incompatible even under the same name.
+There is no name-only/pickle fallback, IPython requirement, hot reload, or live-class
+migration contract. Target reconstruction is caller-controlled, separate from inert
+DatasetState reading.
+
+#### Capture cuts, values, and publication
+
+Capture and policy mutation require a live owner-thread quiescent cut. An outstanding
+public candidate or in-flight pull raises `TraversalOwnershipError`. Staged but
+unexposed lookahead is represented without accepting it. Raw/converted candidate
+aliases still share one single-use authority. After closure/rejection, capture can
+return only an exactly matching prior record (position, policy and boundary facts);
+otherwise it fails without reopening a source. Dynamic unsupported buffers fail
+capture without rolling back accepted progress or damaging earlier records.
+
+`ContinuationValue` admits Python None/bool/bounded int/float/complex/string/bytes,
+list/tuple/string-keyed dict trees, supported fixed-storage nonobject unstructured
+NumPy arrays/scalars and registered dense native tensor buffers (Torch, TensorFlow,
+JAX). Repeated object aliases within the supported tree are preserved; arbitrary
+overlapping strided-view storage aliases are not a portable contract. PCG64's
+128-bit state is lossless. Live Objects, frames, generators, callables, resources,
+object/structured/metadata-bearing dtypes and opaque values are rejected in buffers.
+Import-bearing enum/type or extension-dtype constructor metadata is not qualified
+for inert continuation IO either; ordinary live execution remains available.
+Writable values retained by buffering operators are owned at their algorithmic
+lifetime boundary; immutable/native-functional buffers avoid indiscriminate copies.
+For NumPy leaves, readonly flags alone are insufficient: buffering operators and
+the Keras pending window follow ndarray bases and readonly memoryview owners.
+They share only chains ending in immutable `bytes` or readonly NumPy-owned storage;
+callers must not re-enable writes to those NumPy owners while values are retained.
+Writable backing arrays, bytearrays (even behind readonly memoryviews), and unknown
+foreign owners are copied at retention. This does not copy full source arrays at
+prepare/open or convert/synchronize immutable native tensor leaves. Keras retains
+its `Variable.read_value()` snapshot behavior for mutable TensorFlow variables.
+
+`DatasetState.save(path) -> Path` publishes a new v1 directory, with no overwrite
+mode. A stable sibling name advisory lock covers the authoritative final absence
+check and same-filesystem staged rename. Concurrent cooperating thread/process
+writers produce one complete winner and one `FileExistsError`; readers see no
+destination or a complete inventoried record. Permission, short-write, inventory,
+interruption and cleanup failures preserve prior destinations and primary errors.
+An interruption around rename may leave a complete committed record; inspect that
+destination before retrying. Supported local locking/atomic-rename semantics are
+required, not distributed/network-filesystem coordination.
+
+`ContinuationFormatError` rejects malformed/incomplete/corrupt/unsupported records;
+`ContinuationMismatchError` rejects a different supplied target;
+`UnsupportedContinuationError` rejects unqualified capture. Filesystem, source,
+factory, hook and cleanup failures retain their causal exceptions where possible.
+Standalone saving never publishes a DRYML Object, managed checkpoint, or retention
+root. Keep required external source states under an existing saved owner or explicit
+Repo retention. Reclaimed state must be rematerialized through normal Core rules
+and fails when unavailable; metadata in this directory cannot resurrect it.
+
+Cost boundaries are distinct: ordinary delivery maintains counters/local buffers;
+capture detaches/validates required source and pending bytes (possibly synchronizing
+native leaves); save encodes/publishes files; restore loads chosen snapshots,
+seeks indexed positions, installs direct state, or replays only recorded ordinary
+source prefixes. No capture tree, direct state hook, encoding, source-sized clone,
+or recovery-only device barrier runs on normal yields, with recovery enabled or
+disabled. Consumer/trainer checkpoint association is a separate integration layer.
+
+### Dynamic Dense Elements
+
+Dense Dataset values may vary in sample dimensions as well as batch size. For
+example, `TensorSpec("float32", shape=(Dynamic, 5), batch=Dynamic, backend="numpy")`
+admits consecutive tensors shaped `(2, 3, 5)`, `(1, 7, 5)` and `(3, 2, 5)`.
+Map, composed Methods, explicit-output Models and prepared stream graph ports
+retain that contract. Counts still use only the leading batch length, so changing
+a sample length does not change the number of examples represented by a batch.
+
+Batch can stack equally shaped samples in one group while later groups have
+different shapes. It cannot stack unequal sample shapes within the same dense
+batch: ordinary and prepared execution propagate the collation failure. Unbatch
+preserves the declared Dynamic sample dimensions and splits actual batch lengths.
+Zero-sized sample axes are distinct from empty batches; Dataset runtime example
+counting still rejects a zero-example batch.
+
+GeneratorDataset can infer varying dimensions from a SpecHint while retaining an
+explicit example_count. Sampling closes its cursor on success or failure; observed
+example totals are checked on subsequent normal traversals once the spec exists.
+
+### Ragged Elements
+
+`Batch(source, size, ragged=True)` packs variable dense sample axes using NumPy
+row partitions or native TensorFlow ragged tensors. Fixed-shape labels remain
+dense and opaque leaves retain list batching. Existing ragged samples gain an
+outer partition with ordinary Batch as well. Unbatch removes one partition,
+preserving empty rows and returning dense samples when the ragged rank reaches
+zero. Ordinary and prepared graphs share the same collation and split contracts.
+
+Cast, scalar Scale, composition, and authored Models can preserve ragged values or
+produce dense outputs. Example counts use the outer population, independently of
+row lengths. See [Ragged Tensors](ragged.md) for complete examples and contracts.
+
+### Padding And Masks
+
+`Padding(length, return_mask=True)` returns `{"values": dense_tensor,
+"mask": bool_tensor}` from one geometry decision. Sample axes exclude batch;
+mask axes stop before unchanged trailing features. Fixed targets or per-input
+maxima, left/right placement and explicit truncation work in ordinary/prepared
+pipelines. Real values equal to the fill value remain valid. NumPy/TensorFlow
+accept ragged input; all four tensor backends provide dense padding. See
+[Padding And Validity Masks](padding.md) for full contracts and examples.
+
+### Opaque Python Elements
+
+For a fixed numerical array such as sampled probe coordinates, the
+[`NumpyArray` Serializable container](numpy.md) keeps the bytes in saved state
+instead of constructor metadata, with small searchable `shape`/`dtype` arguments
+and zero initialization. It is a payload container, not a Dataset; retain its
+SavedNode as a dependency of the Dataset that evaluates or traverses it.
+
+`GeneratorDataset` can declare raw Python values without describing their class
+or content:
+
+```python
+from dryml.core import TensorSpec
+from dryml.data import GeneratorDataset, Batch
+
+objects = GeneratorDataset(make_meshes, spec=TensorSpec("object", layout="python"))
+batches = Batch(objects, 32)
+```
+
+Here `make_meshes` is the user's factory. No factory runs during declaration or
+planning. Each opaque source yield counts as one example, even when the yielded
+object itself is a list or dict. `Batch` keeps the original references in an
+outer Python list, and `Unbatch` splits only that declared outer batch. A source
+already yielding list/tuple batches declares `batch=Dynamic` or a fixed batch
+size on the same object spec. Mixed object/tensor spec trees preserve their
+declared structure and collate/split each leaf by its own spec.
+
+Use `Map(objects, conversion_method)` to produce fixed-shape numerical tensors;
+the user-owned Method interprets each object's content and declares its numerical
+output spec. Known-spec Method validation and ordinary/prepared Dataset cursors
+do not inspect opaque values' classes, attributes, or array representations.
+Object declarations do not choose a serialization codec for raw object content.
+
+Object values can remain opaque across multiple Map stages and only become
+tensors when a user Method produces them. Tensor-to-object outputs and mixed
+object/tensor intermediate trees use the same specs in ordinary and prepared
+graphs; Project and Select preserve the declared boundaries.
+
+Alternatively, `spec=SpecHint(samples=2)` asks `GeneratorDataset` to sample two
+values during construction and infer unknown Python leaves as opaque specs.
+`SpecHint(batch_mode="batched", samples=2)` infers nonempty list/tuple batches of
+opaque leaves and merges different lengths to `Dynamic`. Hints are normalized
+to ordinary definition metadata. Use an explicit spec for object-valued
+containers, empty batches, or construction without factory execution.
+
+### Local Traversals And Epochs
+
+`Dataset.open(*, epoch=None, start=None, state=None, acceptance="delivery")` prepares once
+and returns a lazy `DatasetTraversal`. `PreparedDataset.open(...)` reuses its
+frozen controls, topology, source bindings and selected invokers. Each traversal
+owns independent live cursors, RNGs and buffers; multiple traversals may interleave.
+Reading an unread traversal's `position` or closing it opens no producer.
+
+```python
+from dryml.data import Epoch, Batch
+
+prepared = Epoch(Batch(source, 32), len=100).prepare()
+with prepared.open() as traversal:
+    for epoch, elements in traversal.epochs(stop=3):
+        for batch in elements:
+            consume(batch)
+```
+
+`Epoch(src, *, len)` requires a positive **exact int** and sections incoming
+yields without reopening or reseeding upstream. It retains a nonempty short final
+section; an empty source creates no section. Adjacent views share one execution.
+Without Epoch, each finite physical pass is one implicit epoch; the data layer
+reopens it for the next pass. A genuinely empty pass terminates traversal. A
+provably infinite boundary-free root rejects epoch-oriented opening before
+acquisition; UNKNOWN is supported without a scan and does not promise termination.
+Existing `iterator()`/`__iter__()` remain independent flattened physical-pass APIs.
+
+`traversal.next_epoch()` returns a borrowed finite `EpochView`, or raises
+`StopIteration` at terminal completion. `traversal.epochs(*, stop=None)` yields
+`(ordinal, view)` pairs; stop is an exclusive logical epoch. One unfinished view
+or active enumeration may borrow an individual traversal. Finish each view before
+requesting another. The traversal, view and one-level cursor are context managers.
+Closing an unfinished view aborts its owner; exhausted views remain exhausted and
+closing them is a no-op. Closing never drains discarded tails. Source, operator,
+consumer and cleanup failures follow the cursor primary-exception policy above.
+Pulls and mutations are owner-thread-only; recursive advancement and competing
+consumers raise `TraversalOwnershipError` (a `TraversalError`/`RuntimeError`).
+
+`epoch` and `start` default to zero; start counts final outputs in the selected
+epoch. Explicit positional seeking may consume earlier sections. An exact-end
+start is valid: epoch enumeration normalizes past that completed section, while
+`Dataset.iterate(*, epoch=None, start=None)` and `PreparedDataset.iterate(...)`
+return an empty one-level cursor for it. Larger offsets raise
+`DatasetExhaustedError(requested, yielded)`. `iterate()` owns a private traversal,
+returns authored elements (including `(x, y)` pairs) unchanged, and its EOF proves
+only selected-epoch completion. New epoch/start/stop/len counts reject bool, NumPy
+integers, integer subclasses and floats with `TypeError`; negative values and
+stop before the effective epoch raise `ValueError`. Stop equal to that epoch
+acquires nothing; reaching stop leaves the traversal usable.
+
+`TraversalPosition` reports accepted `epoch`, `start`, `sequence`,
+`section_complete` and `root_complete`. A fixed final boundary normalizes on its
+last delivery without another producer pull. Unknown natural EOF is observed
+later; exact EOF never fabricates another explicit view. Implicit physical EOF
+retains a boundary handoff before another pass is acquired; it is not terminal
+traversal EOF. Nonempty-pass evidence includes values discarded during positional
+seeking, independently of whether its selected suffix was empty.
+
+For explicit acceptance use `open(acceptance="explicit")`, then `view.reserve()`
+and `traversal.accept(candidate)` or `traversal.reject(candidate)`. At most one
+`PendingElement` is outstanding. It carries a borrowed value, proposed position
+and known-section-completion fact with an opaque single-use token, not a detached
+continuation record. Acceptance performs no capture/serialization. A converted
+value carrier may alias the same token; accepting/rejecting an alias consumes all
+aliases. Stale/foreign tokens fail without progress. Rejection aborts speculative
+execution while retaining the accepted position; tokens cannot be pickled.
+
+Only one explicit section axis is supported. Nested Epoch, mixed boundary modes
+in Chain/Zip, and unsupported custom section compositions reject during planning
+before acquisition. Boundary-free custom operators retain ordinary eager fallback.
+
+| Operator above Epoch | Section behavior |
+|---|---|
+| Map | One output per input; forwards boundaries |
+| Batch | Flushes/drops short groups per section; never combines sections |
+| Unbatch | Finishes the current input's splits before its boundary |
+| Shuffle | Drains its section-local buffer; one continuing RNG stream |
+| Take / Skip | Count a global prefix; Skip preserves crossed empty sections; Take remains strict and can terminate midsection |
+| Repeat | Reopens only at child root completion; forwards and renumbers sections |
+| Chain | Concatenates and renumbers sectioned children; skips empty child roots |
+| Zip | Ends at the shortest aligned section, then discards unmatched tails before the next section |
+
+Empty transformed sections remain visible. For example,
+`Batch(Epoch(source, len=3), 4, drop_remainder=True)` has empty sections, rather
+than false root EOF. `Epoch(Batch(source, 2), len=3)` groups six source elements
+per full section; `Batch(Epoch(source, len=3), 2)` yields batches of two and one
+within each three-input section.
+
+`yield_cardinality()` accounts for per-section Batch remainders and Zip tail
+discards. It returns UNKNOWN when declarations cannot prove exact membership.
+`EpochView.cardinality` is exact from its opening offset or UNKNOWN;
+`max_elements` is a separate optional upper bound. An upper bound is never used
+as an exact-count shortfall check. These queries neither scan nor acquire sources.
+
 ### Prepared Stream Graphs
 
 `dataset.method_graph()` returns an inert `MethodGraph` view for a Dataset
@@ -101,13 +458,68 @@ source specs, and `output_spec` is an assertion of its declared result spec.
 Mismatched assertions, unsupported strategies, unqualified operators, and
 Method-selection failures raise before source execution.
 
-The initial prepared subset is `Map`, `Batch`, `Unbatch`, `Zip`, and `Chain`.
+The prepared subset is `Map`, `Batch`, `Unbatch`, `Take`, `Skip`, `Repeat`,
+`Shuffle`, `Epoch`, `Zip`, and `Chain`.
 It preserves their ordinary order and cardinality rules: Map emits one result
 per input, Batch retains short final batches unless `drop_remainder=True`,
 Unbatch emits split items in order, Zip stops at the shortest source with its
 existing left-to-right positional over-pull, and Chain opens/advances sources in
-declaration order. Other Dataset operators keep their eager behavior but reject
+declaration order. Take preserves its strict count and logical seed coordinates.
+Other Dataset operators keep their eager behavior but reject
 graph planning explicitly.
+
+Preparation publishes a complete frozen occurrence tree only after source
+binding, inference, assertions, and selection succeed. It retains Batch size,
+remainder/ragged policy, Take count/epoch/fixed-prefix controls, Skip/Repeat counts,
+Shuffle buffer/seed, Epoch length, Map preservation
+policy and Method selection, normalized specs/cardinalities, and the ordered
+Zip/Chain shape (including nested dict/list/tuple containers). Editing the
+original recipe later does not change existing prepared execution or its output
+metadata. Fresh preparation observes recipe edits. Failed `graph.learn()`
+replacement preserves the previous tree, selections, and existing cursors.
+
+Concrete Array, Generator, NPY-file, TFDS and Torch sources supply Data-owned
+acquisition adapters. Array tree structure, file ordering/loading policy,
+generator factory/seed/cardinality declarations and small factory argument
+containers are retained at preparation. Small plain dict/list/tuple argument
+trees (up to 256 visited values per argument) are detached and reconstructed for
+each cursor, preserving shared-container aliases. Container cycles in this
+configuration raise `ValueError` before acquisition. Larger argument trees,
+arrays, native objects and opaque values remain payload bindings by reference;
+preparation never clones their full contents. Their existing external mutation,
+ownership and availability requirements still apply. Freezing configuration is
+not a snapshot of externally mutable payload bytes or of arbitrary Python code.
+Custom source implementations retain their trusted compatibility opener and do
+not gain a frozen-configuration or recovery guarantee.
+
+#### Array source fast path
+
+The local traversal kernel can group an unsectioned `Batch(ArrayDataset(...))`
+when the source is the exact built-in ArrayDataset, its frozen plain dict/list/tuple
+tree contains only exact fixed-storage NumPy arrays with known NumPy or immutable
+bytes owners, and the acquired indexed cursor still uses its admitted reader.
+It copies each mutable leaf's bounded leading-axis slice once per batch, builds
+retained rows from those slices, and invokes the existing selected collator once.
+Readonly stable storage follows the ordinary sharing rules above. Retention is
+complete before collation; collators returning views of retained rows do not
+borrow mutable source bytes.
+
+Preparation/open do not snapshot source bytes. Later batches observe mutations
+to the bound backing arrays between deliveries; changing the original recipe's
+containers or replacing its arrays does not replace an already frozen binding.
+Noncontiguous and nonnative-endian arrays and whole native-batched source items
+retain ordinary values, shapes, dtypes and batch boundaries. Physical source
+positions advance by exactly the consumed row count, including dropped short
+groups, with the same raw last-source value, finality and capture/restore format.
+Separate source occurrences still own separate cursor positions.
+
+Maps remain per authored row, without vectorization or grouped source ownership
+across a Method call. Unknown/custom sources or cursors, subclasses, object or
+other unsupported dtypes, sparse/native-framework values, foreign storage owners,
+changed reader behavior and changed array metadata keep scalar acquisition.
+Acquisition, retention and collator failures abort input and close acquired
+resources once, preserving the primary error and accepted-record freshness.
+This bounded dispatch/copy reduction makes no unmeasured wall-time speed claim.
 
 One graph cursor owns all source and selected output iterator resources it
 acquires. It closes them once in reverse acquisition order on exhaustion,
@@ -123,7 +535,8 @@ adapter is applied while advancing the Dataset cursor, before native model
 forward/loss/backward/tape or compiled work begins. Dataset preprocessing is
 therefore data-only: it is not an end-to-end autodiff, tracing, or `tf.function`
 contract. Batch and Unbatch select the existing declared-backend stack/split
-operation once when available; their generic Python fallback remains equivalent
+operation once per prepared occurrence when available, reusing it across
+independent cursors; their generic Python fallback remains equivalent
 for order, short batches, cardinality, and cursor cleanup. Zip and Chain retain
 the Python fallback unless compatible source-native composition is explicitly
 provided by all inputs.
@@ -136,6 +549,12 @@ without opening a source. Its `execution_level` is `"stream"` when that qualifie
 plan runs and `"eager"` when an unqualified operator retains ordinary eager
 Dataset iteration. Selection failures in qualified operators still fail during
 preparation; eager fallback is only for unqualified Dataset operators.
+The qualified plan's output `spec` is returned with detached container structure;
+native cursor finite-count checks use the same preparation's captured cardinality,
+not later Dataset edits. Existing independent flattened iteration remains lazy
+and does not extract producer state, build continuation records, serialize values,
+or scalarize a selected native/batched Method. The same preparation also supplies
+`open(state=...)` and selected-epoch `iterate()`; each open owns its live session.
 
 `PreparedDataset.iterator()` opens an independent closeable cursor each time.
 `training_batches(preparation)` applies one already selected x/y handoff per
@@ -168,6 +587,301 @@ heavy framework nor the unsupported historical `dryml.data.tf` and
 `dryml.data.torch` wrappers. Framework imports occur only when a native adapter
 is requested or a retained handoff executes.
 
+### Public types and measurement controls
+
+`dryml.data` exports `AcceptanceMode` (`"delivery" | "explicit"`),
+`ReplayRecoveryPolicy` (`"disabled" | "enabled" | "if_needed"`), `StatePath`
+(`str | os.PathLike[str]`), `ContinuationValue`, `TraversalPosition`,
+`PendingElement`, `EpochView`, `DatasetTraversal`, `DatasetState`,
+`RecoverableGenerator`, `Epoch`, `Accumulate`, and the continuation errors above.
+`BatchPreparation`, also available from `dryml.data.native`, is a dependency-light
+Protocol: `prepare(x: object, y: object) -> tuple[object, object]` validates/converts
+one pair using retained specifications. Conversion may allocate native values;
+validation/backend errors propagate before input acceptance. No root-package
+aliases or generator-recovery wrapper are added.
+
+The opt-in benchmark is `python -m tests.tools.benchmark_dataset_traversal`.
+`--describe` emits its fixed JSON profile without importing a tensor framework.
+To run locally, archive `pre-dataset-improvement` at
+`9a681eabfe53b66f9d6d1459960ba10b95c1ff1d` into a new directory under
+`/tmp/dryml`, then supply `--baseline-source DIRECTORY --output NEW_JSON_PATH`.
+Repeat `--workload` or `--mode` to select an explicit subset; partial evidence
+never certifies the full comparison. Before launching any worker, an invocation
+reserves its new output name with a nonblocking stable sibling FileLock
+(`.NAME.benchmark.lock`) and checks absence under that lock. Existing outputs and
+competing owners fail before work. The lock remains held through final publication;
+it is never unlinked. Progress and final JSON use unique same-parent staging,
+checked writes, flush/fsync and atomic replace (plus parent-directory fsync on
+POSIX). Failed writes preserve the previous complete JSON; errors around replace
+can leave a complete new snapshot and propagate with that uncertainty noted.
+Cleanup owns only the invocation's stage and preserves primary failures.
+
+Controls remain seed 1729, two warmups, five repetitions, CPU/one producer/one
+native thread, 120 seconds per cell including instrumentation/startup, and 1,200
+seconds overall including failed cells. Keras uses window capacity eight and
+prefetch two. Indexed work is 4,096x8 float32, batch 32, eight passes (1,024
+batches), separately 64 sections of 16. Ordinary/direct/mixed work is 512x8 with
+sections of 16. Training is 4,096x16 to one target, batch 32, 128 updates in four
+sections, with no intermediate checkpoint and cadence 32. Buffered Shuffle uses
+capacity 32 and capture after output 129, then validates the entire resumed suffix.
+
+JSON uses measurement protocol `dryml-dataset-traversal-cost-domains-v2` and
+benchmark schema v2. It distinguishes complete warmups, preparation/first-result,
+steady windows, full training invocations, end-to-end, capture/save/load/restore,
+and a separate instrumentation pass. Every window and aggregate carries a typed
+timing domain (`name`, `unit`, exact timed `count`, logical `sections`), rather
+than assuming total performed work is the throughput numerator. Unmeasured copy,
+compile, synchronization, device-memory and pending-window metrics are `null`,
+not inferred zeros. Median/MAD and three times the larger comparison MAD are a
+triage envelope; noisy, timeout, unavailable or mismatched work is not a pass.
+Native runs use native pipelines without DRYML wrappers. Optimized modes preserve
+vectorized work/compilation/prefetch; grouped native Keras changes callback
+granularity and is labeled separately. Full invocation and end-to-end costs are
+compared independently of the steady-state R28 gate; a different cost domain
+cannot establish or excuse a new same-domain steady regression.
+
+The report carries `dryml-dataset-traversal-applicability-v1`, a closed required
+workload/mode/cadence/instrumentation schema independent of observed results or
+installed dependencies. New modes are required for every workload; old modes
+are required for indexed implicit and all training workloads; native modes are
+required for both indexed workloads and all training workloads. Only old explicit
+sections/recovery and native ordinary/direct/mixed/buffered continuation cells
+are known unsupported: they stay labeled, launch no worker and yield no ratio.
+All applicable cells require exact useful work, two complete warmups, five
+validated windows with matching end-to-end observations, and separate validated
+instrumentation. Missing, duplicate, unavailable, unsupported-required, failed,
+timed-out or incomplete evidence blocks closeout. New/pre-change regressions and
+unresolved noise block; matched/optimized native gaps remain informational ratios
+with named follow-ups, not required parity. Partial selections cannot pass.
+Native Keras cadence and saved step metadata use cumulative optimizer iterations,
+so the four section checkpoints bind weights to updates 32, 64, 96 and 128 in
+both matched and grouped modes.
+
+The JAX driver implements all four required modes with the same zero-initialized,
+bias-free 16-to-1 float32 dense model, mean squared error, and constant-rate
+momentum-free Optax SGD (`.001`). Old/new use functional DRYML Model, Optimizer
+and Training owners with importable `F(...)` factories. The pinned baseline uses
+four equivalent manual input slices; new uses one continuous four-section Epoch.
+Matched-native uses native array slice batching and one JIT update/scalar report
+per batch. Optimized-native uses a JIT `lax.scan` over each 32-update section;
+host reporting and synchronization are grouped at section boundaries. Neither
+native mode uses DRYML wrappers or its input bridge.
+
+JAX windows validate all 128 ordered delivery IDs, cumulative exposures, four
+completed sections, finite losses, and weights against deterministic NumPy SGD
+(`rtol=5e-5`, `atol=1e-6`) before returning successful evidence. Weight checksums
+report both actual and NumPy-expected sums. Requested checkpoints associate the
+accepted update count and weights with a current input record: DatasetState for
+new, source arrays and a next-row/batch cursor for native and old manual sections.
+The latter is not a claim of baseline exact Dataset continuation. Constant-rate
+SGD has no Optax slot leaves; the saved count is accepted updates, not an Optax
+slot. Checkpoint snapshots also validate against their corresponding NumPy
+prefixes. Source snapshots are taken only at requested checkpoints/finalization.
+
+### Measurement domains and exact timed populations
+
+All training modes still perform **128 accepted updates in four sections** per
+window. Owners/functions are freshly constructed for each of the two complete
+warmups and five timed windows. The warmups do not pretend to make each subsequent
+fresh owner's setup or compilation disappear.
+
+| Metric | Clock boundaries and timed work | Decision role |
+|---|---|---|
+| `steady_seconds`, `accepted-report-within-section-v1` | Sum of accepted report 1→32, 33→64, 65→96, 97→128; **31 updates per section, 124 updates total** | Comparable old/new and matched-native observed steady work; R28 old/new gate |
+| `invocation_seconds`, `full-training-invocation-v1` | Immediately before training/manual section loop until return; **all 128 updates**, configured cadence IO, normal final input capture and postludes | Informational full-invocation cost comparison |
+| `end_to_end_seconds`, `complete-training-window-v1` | Entire window call: input generation/reference calculation, imports/setup, invocation, numerical validation, final save, and temporary-file finalization; **all 128 updates** | Informational complete-cost comparison |
+
+Steady intervals start/end at the first/last **already required accepted-update
+report** within each section, after the backend's ordinary reporting synchronization.
+They exclude each section's first completed update and retain **all** intervening
+input acquisition/conversion, acceptance, fencing, queuing, reporting, and trainer
+work, including any later compilation. They are observed post-first-update intervals,
+not pure kernel time or a promise that a backend never recompiles. Throughput is
+**124 / steady seconds**, never 128 divided by a 124- or 127-update interval.
+Only eight boundary timestamps are collected; no per-yield source/state-hook,
+capture, callable tracing, or extra device fence is added to the timed path.
+
+`report_intervals` lists exact endpoints, seconds and 31-update counts.
+`report_offsets` and `boundary_costs` expose initial setup through first report,
+three last-report→next-section-first-report gaps, and the final report→return tail.
+Those gaps/tail include section setup, first updates, checkpoint callbacks, and
+postludes/final capture where executed; their combined `outside_steady_seconds`
+plus steady time must reconcile to full invocation time. They are **mixed costs**,
+not invented independent compile or capture measurements. `prepare_seconds`
+includes imports/native setup; isolated `cold_import_seconds`, `open_seconds`,
+`compile_seconds`, and training `final_capture_seconds` remain `null` where not
+independently observable. Final capture is retained in the measured invocation
+tail and complete total. `checkpoint_steps`/`checkpoint_seconds` list exactly
+zero or four intermediate saves at 32/64/96/128. `final_save_seconds`/bytes are
+separate from that list and outside invocation time, inside end-to-end time.
+`end_to_end_other_seconds` exposes the complete-window remainder after subtracting
+preparation, invocation and final save, including reference checks and cleanup.
+
+Optimized-native JAX retains JIT `lax.scan` of 32 updates and Keras retains
+`steps_per_execution=32`. These paths expose only four section-end reports.
+Their first **group** latency is `first_group_result_seconds`; first-update
+latency, 124-update steady time/domain, and steady throughput are `null`, with an
+explicit `steady_blocker`. A comparable within-section interval cannot be isolated
+without changing their optimized execution/reporting contract. The tool refuses
+that steady ratio and reports the 128-update invocation/end-to-end ratios instead.
+It does not insert Python batch callbacks, unroll the scan, or remove grouping.
+This limitation cannot waive or mask a measured old/new steady regression.
+
+Dataset windows likewise retain all performed outputs, with post-first-section
+delivery timing (including ordinary cursor EOF/drain overhead) counted exactly:
+1,016/1,024 batches for implicit indexed passes, 960/1,024 for explicit sections,
+480/512 outputs for ordinary/direct/mixed sections, and 511/512 for buffered work.
+Buffered capture remains after output 129; the steady interval is split around
+the capture/restore probe, whose costs remain separate and in end-to-end totals.
+First results, preparation/open, final capture and complete costs remain visible.
+For new-mode Dataset windows, each `section_first_result_seconds` interval starts
+before advancing the epoch enumerator and ends after its first delivery, including
+source acquisition, staging, transformation or buffered fill. The first interval
+also includes enumerator construction; `first_result_seconds` is that first
+observation. `prepare_seconds` and `open_seconds` remain separate, non-overlapping
+costs. `costs.section_first_result_seconds` repeats the same observations for
+compatibility and must not be added a second time. Empty-view and terminal
+enumeration attempts that deliver nothing are measured separately in
+`costs.epoch_enumeration_without_result_seconds`, not charged to a nonexistent
+first result or the post-first numerator. Ordinary view EOF/drain remains inside
+its tail interval. Final capture is measured once outside those intervals; the
+complete-window clock still includes all setup, capture/probe, validation and
+cleanup, including overhead not independently isolated by the component clocks.
+Optimized NumPy still transforms the whole source once before materializing batches;
+it reports full vectorized delivery and end-to-end costs, with no fabricated
+comparable post-first steady interval. Native pipelines gain no DRYML wrappers or
+per-batch Python instrumentation to manufacture timing parity.
+
+The gate checks domain identities/counts in every warmup and timed window,
+report endpoints/counts, full invocation reconciliation, exact cadence work,
+and end-to-end consistency before accepting ratios. Incompatible or missing
+domains return no ratio. Full-invocation/end-to-end regressions remain visible
+informational cost signals; a same-domain old/new steady regression or unresolved
+noise still blocks. Overall status is explicitly scoped by
+`decision_domain="old-new-steady"`; it does not certify absence of total-cost
+regressions. Grouped/vectorized native steady gaps stay explicitly
+unverified named follow-ups, while their full-work costs remain required.
+Historical v1 evidence cannot be confirmed or reused under v2 and is never
+rewritten into v2 performance qualification. The fixed seed, useful work,
+warmup/repetition counts, cadences and deadlines are unchanged. Tiny real builder
+probes qualify numerical correctness only; synthetic clock/backend fixtures do
+not produce comparative evidence or consume the authorized fresh comparison.
+The six real JAX builder, script-import and native-mode matrix cases are marked
+`exhaustive_only` for the routine profile. They remain available through explicit
+focused file/node selections and exhaustive coverage. The routine tool checks
+exercise the backend-free protocol; real JAX training remains represented by the
+named native integration selections. This keeps the new expanded driver matrix
+out of routine qualification without dropping its separately executed evidence.
+
+Throughput parity is not certified by deterministic work counts or the Keras
+barrier test. Capture may copy a full source plus buffered values; replay costs
+the fetched ordinary prefix, and native pending windows add converted value
+storage and a capture handshake. The fixed comparison and real Optax/JAX
+qualification must be resolved independently of the routine correctness gate.
+
+#### Bounded CPU evidence and unresolved gates
+
+The U8 run at base revision `f569da67` used an isolated archive of the pinned
+baseline and the fixed profile above. Initial driver failures consumed 708.19 s;
+one confirmation exhausted the cumulative budget at 1,200.21 s including
+termination/report overhead. It is **unverified**, not a performance pass.
+Five-window confirmation measurements (seconds, median ± MAD) were:
+
+| Work | Pre-change | New | New/pre-change |
+|---|---:|---:|---:|
+| Indexed implicit, 1,024 batches | 3.9448 ± 0.0418 | 4.3464 ± 0.0854 | 1.102 |
+| Torch invocation, 128 updates, no intermediate save | 0.1708 ± 0.0015 | 3.0924 ± 0.0390 | 18.111 |
+| Torch invocation, cadence 32 | 0.1815 ± 0.0035 | 3.4000 ± 0.0720 | 18.728 |
+
+The indexed difference (0.4016 s) exceeds its initial three-max-MAD envelope
+(0.2563 s). Torch compares a labeled equivalent old **manual** four-section loop
+with the new exact session, and includes preparation/final capture in invocation
+time; kernel-only steady training has not been isolated. Its difference also
+exceeds measured noise. These are unresolved regression signals, not accepted
+recovery overhead. A subsequent correction to
+`core.repo_plan.validate_retained_save_plan` reuses the identical admitted immutable
+identity Node while retaining replacement-handle comparison, live-binding checks,
+invalidation and reservation exclusion. A deterministic two-update regression now
+observes zero graph comparisons or `NodePreparation` constructions, replacing six
+comparisons and twelve preparations before the correction. The historical Torch
+ratio is neither a current measurement nor evidence that the complete regression
+is resolved; later cost-domain-v2 evidence is recorded below. Indexed per-row
+Map validation/collation and section delivery also need investigation without
+weakening membership or ownership.
+
+The NumPy matched/vectorized native indexed windows were 0.001410/0.000151 s;
+the new implicit path was approximately 3,082/28,822 times slower. Native Torch
+matched/compiled windows were 0.06345/0.05659 s, giving new invocation gaps of
+48.74/54.65. These large gaps remain visible; no framework-native pipeline was
+routed through DRYML to close them. NumPy vectorization changes transform grouping,
+and optimized Keras changes callback grouping, so those are separately labeled.
+
+For the buffered Shuffle representative, a full suffix after output 129 validated.
+One confirmation window measured capture 0.01488 s, save 0.02105 s, load 0.01073 s,
+reattachment 0.01174 s, full resumed suffix 0.00468 s, and 50,776 serialized bytes;
+final capture was 0.01298 s. These are individual cost observations, not medians
+or throughput-parity evidence. Ordinary/direct/mixed suffixes also validated.
+
+TF/Keras DRYML driver construction failed before useful training; its corrected
+Sequential recipe has only inert declaration qualification in this run. Budget
+exhaustion prevented another real comparison. Initial native TF/Keras measurements
+cannot establish their missing DRYML ratios. At that historical run, Optax was
+absent and the fixed-profile JAX driver was unimplemented. Subsequent
+owner-authorized setup installed Optax 0.2.4 and Chex 0.1.89 alongside unchanged
+JAX/JAXlib 0.5.3 and NumPy 2.1.3. The driver is now implemented and has tiny real
+CPU unit qualification, including the actual pinned baseline in an isolated
+source-archive process. The owner-authorized fresh cost-domain-v2 comparison at
+`fde25998` consumed 894.4321190109476 seconds, observed indexed/Torch/TF/JAX steady
+regressions, and failed old Keras because the shared recipe omitted compile loss.
+The subsequent finite Array/Map-to-Batch kernel reduces child signaling and
+publishes equivalent metadata once per batch, with per-row source advancement,
+retention and validation preserved. The corrected benchmark supplies explicit MSE
+to old/new TF and Keras. Confirmation instrumentation now requires matching
+cell-owned runtime and driver identity; historical evidence is never retrofitted.
+
+The single confirmation at `e393202d` used the same fixed work, warmups and five
+timed windows. It exhausted the cumulative budget at **1,201.22 seconds**, including
+termination/report overhead, and remains **unverified**. Completed steady ratios
+were **1.070 indexed**, **1.278/1.255 Torch** at cadences 0/32, and **1.198 JAX** at
+cadence 0; each slowdown exceeds the initial three-max-MAD envelope. The deadline
+interrupted old JAX cadence 32 and left later Keras/TF/explicit-indexed/source cells
+incomplete. No old throughput or stale instrumentation was substituted to qualify
+them. The recipe's real tiny functional checks do not replace its missing fixed
+comparison. Both authorized comparison attempts are spent; no further measurement
+budget or second confirmation is implied.
+Pending-window/compile/copy
+metrics missing from successful instrumentation remain explicitly unknown. The earlier barrier-based Keras
+overlap/capture correctness evidence is independent and is not replaced by these
+timings. The historical complete routine runner passed 4,978 tests with 30 skips
+in **914.70 seconds**. After the material corrections, the full runner at
+`e393202d` passed **5,102 tests with 25 skips** in **929.86 seconds**. Both fail the
+strict under-900-second gate. See
+[implementation qualification](dataset_traversal_qualification.md) for
+the exact command, review corrections, and unresolved gates. Completion still
+requires regression diagnosis, resolved fixed comparison evidence, real
+available-backend qualification, and a successful strictly-under-900-second run.
+
+Subsequent owner-directed optimization shared immutable test setup, compiled
+exact-NumPy input predicates, grouped pure Array batch ownership, and retained
+eligible native model-call setup. The complete routine runner at `238a2cbd`
+passed **5,149 tests with 25 skips in 898.23 seconds**. The complete comparison at
+`3d1df5e7` measured indexed steady time at **0.824319 times baseline**; its
+post-correction training confirmation at `238a2cbd` measured Torch at
+**0.900239/0.899465** for cadences 0/32. That round still exhausted its total
+budget and retained TF/JAX regressions and unresolved Keras noise. After TF
+selection and JAX placement-only compilation corrections, the full `3153003b`
+matrix measured JAX at **0.828590/0.856285** times baseline with no steady
+regression observed. Its single confirmation cleared Torch and Keras steady
+comparisons but retained TF cadence-32 regression at **1.226797**. A subsequent
+explicit-TF scalar-loss correction at `314c9057` measured TF steady ratios
+**0.894977/0.918846**, with no regression observed. Its single confirmation still
+has unresolved Torch/Keras noise; the whole comparison remains unverified. The
+routine run at that revision stopped on a subsequently corrected collection
+inventory after **1019.93 seconds**. At `8549015a` all **5,160 tests pass with
+25 skips**, but complete wall time is **1081.11 seconds**, still above the strict
+900-second limit. Final-tree routine qualification remains open. See the current
+evidence section of the qualification document; no historical report is relabeled.
+
 ## Source Datasets
 
 Common source dataset classes:
@@ -191,7 +905,16 @@ import, split, local filesystem, and download failures; NumPy delivery avoids
 importing DRYML's TensorFlow spec backend.
 
 `GeneratorDataset` accepts an optional explicit `example_count` for opaque
-or dynamically batched sources. It also supports a declared `seed_aware=True`
+or dynamically batched sources. A preserving `Map` retains this total without
+opening the generator: for three yields with batch sizes `[2, 2, 1]`, a declared
+`example_count=5` remains five examples after `Map(..., preserves_examples=True)`.
+Ranges covering the whole source (including `Take(source, 3)` when the declared
+yield cardinality is three, and `Skip(source, 0)`) retain the total as well.
+Proper dynamic-batch subsets remain unknown because the total alone does not
+locate examples within batches. Conflicting provable declarations still raise,
+and iteration still validates observed source totals and preserving Map outputs.
+
+It also supports a declared `seed_aware=True`
 factory protocol: a base `seed` and versioned epoch derivation supply a deterministic
 `seed` keyword to `iterator_for_epoch(epoch)`, allowing direct epoch reopening
 without traversing earlier epochs.
@@ -315,16 +1038,91 @@ recovery Fold applies its saved processed-yield count to a new closeable cursor;
 it never persists or transfers the prior iterator. Exact skipping detects a source
 that now ends before the saved position. Positional continuation assumes a
 re-iterable source but does not claim that a stochastic suffix equals the suffix
-from the interrupted traversal. Trusted version-2 root-output EOF progress needs
+from the interrupted traversal. Trusted version-3 root-output EOF progress needs
 no new source cursor. Cursor closure is not EOF: failed acquisition/read/Map,
 consumer validation, interruption, and strict replay shortfall cannot authorize
-exhausted Fold progress, even when cleanup also fails. Compatible version-1 active
-progress still replays position; ambiguous version-1 exhausted progress requires
-an explicit fresh managed rerun before carry/role/source effects. Legacy snapshots
-are not rewritten or silently relabeled as trustworthy EOF.
+exhausted Fold progress, even when cleanup also fails. Explicit section boundaries
+and early epoch-view closure likewise cannot authorize finalization: Fold uses
+the flattened physical-pass iterator. Version-1/version-2 progress is incompatible
+and rejected before carry/role/source effects; legacy snapshots are not rewritten
+or silently relabeled as trustworthy EOF.
 CachedDataset applies the same positional meaning to retained cache progress: the
 completed prefix remains exact, while a resumed stochastic source may provide a
 fresh suffix after the saved yield count.
+
+## Streaming Accumulation
+
+`Accumulate(src: Dataset[T], *, initial_state: Method,
+accumulator: Accumulator[T, StateT]) -> Accumulate[StateT]` emits one
+post-transition carry for each observation. The initializer receives the first
+real observation, returning fresh carry; the observation-first Accumulator then
+processes that same observation once. There is no extra initial output and no
+finalizer. Empty input and empty sections invoke neither Method.
+
+```python
+import numpy as np
+from dryml.core.tensor_spec import TensorSpec
+from dryml.data import Accumulate, ArrayDataset
+from dryml.methods import Accumulator, Method, traits
+
+class Zero(Method):
+    @traits(backend="numpy")
+    def numpy(self, observation):
+        return np.int64(0)
+
+    def infer_output_spec(self, observation_spec):
+        return TensorSpec("int64", shape=(), backend="numpy")
+
+class Add(Accumulator):
+    @traits(backend="numpy")
+    def numpy(self, observation, state):
+        return state + observation
+
+    def infer_output_spec(self, observation_spec, state_spec):
+        return state_spec
+
+totals = Accumulate(ArrayDataset(np.array([1, 2, 3], dtype=np.int64)),
+                    initial_state=Zero(), accumulator=Add())
+assert list(totals) == [1, 3, 6]
+```
+
+An initializer returning the first observation instead yields `[2, 4, 7]` with
+this additive transition. Declaration infers carry metadata without executing a
+body. Source-inert preparation selects both roles, infers carry spec `S` from
+the selected initializer, and constrains the transition `(observation, S) -> S`.
+Incompatible roles raise `ImplementationSelectionError` before acquisition;
+invalid role types raise `TypeError`. Unqualified custom operator compositions
+raise `NotImplementedError`. Source, inference, Method and cleanup failures
+propagate through the existing cursor lifetime rules.
+
+Output spec is the carry spec, which can be scalar or structured even for
+batched/vector observations. Yield cardinality equals the source's; example
+cardinality follows the **output** carry's batch metadata. Each prepared plan
+retains initializer/transition invokers; each execution occurrence owns independent
+initialization and carry. Explicit sections preserve carry. Reopening an implicit
+full pass resets it. For source `[1, 2]` initialized from zero:
+
+| Composition | Outputs |
+|---|---|
+| `Repeat(Accumulate(source, ...), 2)` | `[1, 3, 1, 3]` |
+| `Accumulate(Repeat(source, 2), ...)` | `[1, 3, 4, 6]` |
+
+Supported mutable array/container emissions are detached from live carry, so
+later in-place transitions or consumer mutations cannot change earlier results.
+Immutable/native-functional leaves share without a recovery-only clone or host
+conversion. `capture_state()` validates and detaches actual carry and pending
+outputs only on request. DatasetState v1 includes an `accumulate` occurrence tag,
+ordered initializer/transition recipe and selection evidence, and the occurrence's
+carry/initialization flag. Restoration installs that carry and buffered outputs
+without replaying accepted transitions, even when source-prefix replay is needed.
+Separate opens of one record have independent mutable carry. Unsupported dynamic
+carry fails capture with `UnsupportedContinuationError`; live accepted progress
+and previously captured records remain truthful and usable.
+
+Accumulate publishes no terminal Value or managed checkpoint. Use
+[`Fold`](artifacts.md) for a terminal reduction; its v3 positive root-output EOF
+contract remains unchanged. Streaming accumulation is optional for all source
+recovery strategies.
 
 ## Structural Operations
 

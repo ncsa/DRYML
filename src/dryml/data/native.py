@@ -1,11 +1,374 @@
-"""Dependency-light prepared Dataset cursors for native training integrations."""
+"""Frozen source acquisition adapters and prepared native-training Dataset cursors.
+
+Preparation detaches small controls and topology without acquiring sources or
+cloning payload bytes. Each cursor owns independent live progress and resources;
+ordinary pulls neither extract continuation state nor encode it for persistence.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any
+from dataclasses import dataclass, replace
+from functools import partial
+from typing import Any, Protocol, TYPE_CHECKING
+
+from dryml.core.tensor_spec import SpecTree
 
 from dryml.methods.stream import DatasetExhaustedError, _CursorLifecycle
+
+if TYPE_CHECKING:
+    from .dataset import Dataset, DatasetCursor
+    from dryml.methods.stream import StreamGraphCursor
+    from .traversal import AcceptanceMode, DatasetTraversal, EpochView, PendingElement
+    from .state import DatasetState
+
+
+class BatchPreparation(Protocol):
+    """Dependency-light retained conversion interface for native training batches."""
+
+    def prepare(self, x: object, y: object) -> tuple[object, object]:
+        """Validate/convert a paired input without accepting traversal progress.
+
+        Args:
+            x: Authored feature value matching captured producer specifications.
+            y: Authored target value matching captured producer specifications.
+        Returns:
+            Converted features/targets matching retained consumer specifications.
+        Raises:
+            TypeError, ValueError: Invalid values; backend conversion errors propagate.
+        Side Effects:
+            May allocate native values using previously selected conversion edges.
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class _ConfigTree:
+    """Detached container topology, with payload leaves retained by reference."""
+
+    kind: type
+    items: tuple
+
+    def unpack(self, memo=None):
+        memo = {} if memo is None else memo
+        if id(self) in memo:
+            return memo[id(self)]
+        if self.kind is dict:
+            result = {key: _unpack_config(value, memo) for key, value in self.items}
+        else:
+            result = self.kind(_unpack_config(value, memo) for value in self.items)
+        memo[id(self)] = result
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class _SavedSourceArgument:
+    """Borrow a live source argument with its original immutable saved selection."""
+
+    value: object
+    selection: object
+
+
+@dataclass(frozen=True, slots=True)
+class _SmallArrayConfig:
+    """Bounded immutable initialization bytes, not a source-sized payload clone."""
+
+    dtype: str
+    shape: tuple
+    data: bytes
+
+    def unpack(self, memo=None):
+        import numpy as np
+        memo = {} if memo is None else memo
+        if id(self) not in memo:
+            memo[id(self)] = np.frombuffer(self.data, dtype=self.dtype).reshape(self.shape).copy()
+        return memo[id(self)]
+
+
+def _unpack_config(value, memo=None):
+    if isinstance(value, _SavedSourceArgument):
+        return value.value
+    return value.unpack(memo) if isinstance(value, (_ConfigTree, _SmallArrayConfig)) else value
+
+
+def _freeze_config(value, *, small=False, active=None, memo=None):
+    """Freeze small configuration, borrowing source-sized payload leaves.
+
+    Large factory argument containers are payload bindings, not small controls.
+    The bounded preflight avoids traversing or cloning a source-sized list just
+    to discover that distinction. At most 2 KiB per small factory array leaf is
+    owned once; ordinary ArrayDataset bindings never take this configuration path.
+    """
+    from dryml.core.object import Object
+    import numpy as np
+    memo = {} if memo is None else memo
+    if id(value) in memo:
+        return memo[id(value)]
+    if (small and type(value) is np.ndarray and value.nbytes <= 2048 and not value.dtype.hasobject
+            and value.dtype.fields is None and not value.dtype.metadata
+            and value.dtype.kind in "biufcSUmM" and value.dtype.itemsize > 0):
+        result = _SmallArrayConfig(value.dtype.str, value.shape, value.tobytes())
+        memo[id(value)] = result
+        return result
+    if isinstance(value, Object):
+        return _SavedSourceArgument(value, value.last_state_ref)
+    if type(value) not in (dict, list, tuple):
+        return value
+    if small and not _small_config(value, [256], set()):
+        return value
+    active = set() if active is None else active
+    if id(value) in active:
+        raise ValueError("Prepared source configuration contains a container cycle.")
+    active.add(id(value))
+    try:
+        items = (tuple((key, _freeze_config(child, small=small, active=active, memo=memo)) for key, child in value.items())
+                 if type(value) is dict else tuple(_freeze_config(child, small=small, active=active, memo=memo) for child in value))
+        frozen = _ConfigTree(type(value), items)
+        memo[id(value)] = frozen
+        return frozen
+    finally:
+        active.remove(id(value))
+
+
+def _small_config(value, budget, active):
+    import numpy as np
+    budget[0] -= 1
+    if budget[0] < 0:
+        return False
+    if type(value) is np.ndarray:
+        budget[0] -= (value.nbytes + 7) // 8
+        return budget[0] >= 0
+    if type(value) not in (dict, list, tuple):
+        return True
+    if id(value) in active:
+        raise ValueError("Prepared source configuration contains a container cycle.")
+    if len(value) > budget[0]:
+        return False
+    active.add(id(value))
+    try:
+        return all(_small_config(child, budget, active) for child in
+                   (value.values() if type(value) is dict else value))
+    finally:
+        active.remove(id(value))
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceBinding:
+    """One inert source declaration and its frozen acquisition callable.
+
+    The optional private retained_batch adapter may decline an actual cursor
+    without consuming it. Otherwise it owns a bounded row list and publishes the
+    raw consumed frontier through the kernel callback, including on copy failure.
+    """
+
+    kind: str
+    binding: object
+    open: object
+    retained_batch: object = None
+
+
+def _numpy_array_storage(value):
+    """Return storage stability for exact arrays, or None for unqualified owners."""
+    import numpy as np
+
+    if (type(value) is not np.ndarray or value.ndim == 0 or value.dtype.hasobject
+            or value.dtype.fields is not None or value.dtype.metadata
+            or value.dtype.kind not in "biufcSUmM" or value.dtype.itemsize == 0):
+        return None
+    owner = value
+    stable = True
+    while type(owner) is np.ndarray:
+        stable = stable and not owner.flags.writeable
+        if owner.base is None:
+            return stable if owner.flags.owndata else None
+        owner = owner.base
+    return stable if type(owner) is bytes else None
+
+
+def _array_row(layout, leaves, index):
+    """Build one row using detached plain topology and already selected leaves."""
+    if type(layout) is int:
+        return leaves[layout][index]
+    if layout.kind is dict:
+        return {key: _array_row(child, leaves, index) for key, child in layout.items}
+    return layout.kind(_array_row(child, leaves, index) for child in layout.items)
+
+
+@dataclass(frozen=True, slots=True)
+class _ArrayBatchReader:
+    """Bounded NumPy slice ownership for an unchanged exact indexed reader.
+
+    No callbacks run between leaf reads. Publish the consumed source frontier
+    before returning owned rows or propagating a copy failure. A failed grouped
+    retention consumes only the first row, as failure retaining that row would in
+    the scalar kernel; no later rows have been delivered to an operator.
+    """
+
+    item_at: object
+    layout: object
+    leaves: tuple
+    metadata: tuple
+    length: int
+
+    @classmethod
+    def prepare(cls, tree, length, item_at):
+        leaves = []
+
+        def layout(value):
+            if isinstance(value, _ConfigTree):
+                if value.kind is dict:
+                    if any(type(key) not in (str, int) for key, _ in value.items):
+                        raise TypeError
+                    return _ConfigTree(dict, tuple((key, layout(child)) for key, child in value.items))
+                return _ConfigTree(value.kind, tuple(layout(child) for child in value.items))
+            if _numpy_array_storage(value) is None or len(value) != length:
+                raise TypeError
+            leaves.append(value)
+            return len(leaves) - 1
+
+        try:
+            shape = layout(tree)
+        except TypeError:
+            return None
+        return cls(item_at, shape, tuple(leaves), tuple((v.shape, v.dtype) for v in leaves), length)
+
+    def __call__(self, cursor, size, publish):
+        from .source import _IndexedDatasetCursor
+        import numpy as np
+
+        if (type(cursor) is not _IndexedDatasetCursor
+                or not cursor._matches_native_reader(self.item_at)
+                or cursor._length != self.length
+                or any((v.shape, v.dtype) != metadata
+                       for v, metadata in zip(self.leaves, self.metadata))):
+            return None
+        stable = tuple(_numpy_array_storage(value) for value in self.leaves)
+        if any(value is None for value in stable):
+            return None
+        start, stop = cursor.position, min(cursor.position + size, self.length)
+        if start == stop:
+            return None
+        # Retain the raw first value before allocation, so failed retention has
+        # the same consumed-row frontier as the generic read-then-retain path.
+        first = _array_row(self.layout, self.leaves, start)
+        try:
+            owned = tuple(value[start:stop] if share else np.copy(value[start:stop], order="K")
+                          for value, share in zip(self.leaves, stable))
+            rows = [_array_row(self.layout, owned, index) for index in range(stop - start)]
+            last = first if stop == start + 1 else _array_row(self.layout, self.leaves, stop - 1)
+        except BaseException:
+            cursor._position = start + 1
+            publish(first, 1)
+            raise
+        cursor._position = stop
+        publish(last, stop - start)
+        return rows
+
+
+@dataclass(frozen=True, slots=True)
+class _GeneratorBinding:
+    """Frozen factory controls consumed by the existing owned generator cursor."""
+
+    gen_factory: object
+    args: tuple
+    kwargs: tuple
+    cardinality: object
+    _declared_example_count: object
+    _spec: object
+    examples_in: object
+    seed: int | None
+    seed_aware: bool
+    epoch_seed_version: int
+
+    @property
+    def factory_args(self):
+        return tuple(_unpack_config(value) for value in self.args)
+
+    @property
+    def factory_kwargs(self):
+        return {key: _unpack_config(value) for key, value in self.kwargs}
+
+    def open(self, epoch):
+        from .source import _GeneratorCursor
+
+        memo = {}
+        invocation = replace(self,
+            args=tuple(_unpack_config(value, memo) for value in self.args),
+            kwargs=tuple((key, _unpack_config(value, memo)) for key, value in self.kwargs),
+        )
+        cursor = _GeneratorCursor(invocation, epoch)
+        cursor._initial_binding = self
+        return cursor
+
+
+def _required_saved_state(value):
+    """Ignore incidental stateless save receipts when binding continuation evidence."""
+    from dryml.core.node import _owned_nodes
+    selected = getattr(value, "last_state_ref", None)
+    if selected is not None and any(node.state is not None for _, node in _owned_nodes(selected)):
+        return selected
+    return None
+
+
+def _prepare_source(dataset, spec):
+    """Bind concrete built-in source controls without acquisition or payload copies.
+
+    Unknown/custom source implementations retain their trusted compatibility
+    opener; this binding does not certify their configuration or recovery.
+    """
+    from .dataset import Dataset, DatasetCursor
+    from .source import (ArrayDataset, GeneratorDataset, NpyFileDataset,
+                         TFDSAdapter, TorchDatasetAdapter, _IndexedDatasetCursor,
+                         _tree_index, _NATIVE_TREE_INDEX)
+    from dryml.methods.signature import spec_node
+
+    if type(dataset) is GeneratorDataset:
+        memo = {}
+        binding = _GeneratorBinding(
+            dataset.gen_factory,
+            tuple(_freeze_config(value, small=True, memo=memo) for value in dataset.factory_args),
+            tuple((key, _freeze_config(value, small=True, memo=memo)) for key, value in dataset.factory_kwargs.items()),
+            dataset.cardinality, dataset._declared_example_count, spec_node(spec),
+            partial(Dataset._examples_in_spec, spec),
+            dataset.seed, dataset.seed_aware, dataset.epoch_seed_version,
+        )
+        return _SourceBinding("generator", binding, binding.open)
+    if type(dataset) is ArrayDataset:
+        tree, length = _freeze_config(dataset.arrays), dataset._length
+        item_at = partial(_tree_index, _unpack_config(tree))
+        retained = (_ArrayBatchReader.prepare(tree, length, item_at)
+                    if _tree_index is _NATIVE_TREE_INDEX else None)
+
+        def open_array(epoch):
+            return _IndexedDatasetCursor(length, item_at if retained is not None
+                                         else partial(_tree_index, _unpack_config(tree)))
+
+        return _SourceBinding("array", (tree, length), open_array, retained)
+    if type(dataset) is NpyFileDataset:
+        import numpy as np
+
+        files, allow_pickle = tuple(dataset.files), dataset.allow_pickle
+        return _SourceBinding("npy", (files, allow_pickle), lambda epoch: _IndexedDatasetCursor(
+            len(files), lambda index: np.load(files[index], allow_pickle=allow_pickle)))
+    if type(dataset) is TFDSAdapter:
+        native, as_numpy = dataset.dataset, dataset.as_numpy
+        return _SourceBinding("tfds", (native, as_numpy), lambda epoch: DatasetCursor(
+            native.as_numpy_iterator() if as_numpy else iter(native)))
+    if type(dataset) is TorchDatasetAdapter:
+        native = dataset.dataset
+
+        def open_torch(epoch):
+            import torch.utils.data as tud
+
+            return DatasetCursor(iter(native) if isinstance(native, tud.IterableDataset)
+                                 else (native[index] for index in range(len(native))))
+
+        return _SourceBinding("torch", native, open_torch)
+    opener = getattr(dataset, "iterator_for_epoch", None)
+    if not callable(opener):
+        iterator = dataset.iterator
+        opener = lambda epoch: iterator()
+    return _SourceBinding("custom", dataset, opener)
 
 
 class PreparedDataset:
@@ -15,23 +378,40 @@ class PreparedDataset:
         dataset: Dataset pipeline whose declared stream graph is prepared once.
 
     Attributes:
-        dataset: The unchanged source Dataset pipeline.
+        dataset: Inspection reference to the source Dataset recipe; qualified
+            execution does not reread its controls.
         spec: Captured output SpecTree from the prepared plan (or eager fallback
             declaration), independent of later shared Dataset metadata changes.
         execution_level: ``"stream"`` when the qualified stream graph was
             prepared, or ``"eager"`` when an unqualified operator retains its
             documented ordinary Dataset iteration fallback.
 
-    A prepared graph is constructed without opening a source. Each
+    A prepared graph freezes operator controls, source acquisition declarations,
+    small factory configuration containers, topology, specs and selections
+    without opening a source. Payload bindings are retained, not cloned. Each
     :meth:`iterator` call returns an independent closeable cursor, so a consumer
     can stop, resume from a separately opened cursor, or traverse concurrently
     without sharing source position. This carrier owns no traversal and does not
     update training progress, checkpoint state, or exposure.
     Preparation and fallback never publish or reset child Method state; failed
     planning cannot leave partial child selections requiring cleanup.
+    Accumulate retains initializer/transition selections here; mutable carry and
+    initialization belong to each execution occurrence, not this shared plan.
+
+    Raises:
+        ImplementationSelectionError: If a qualified declared Method cannot be
+            selected. Other inference/compilation and backend errors propagate.
+        TypeError, ValueError: For invalid specs or unsupported source controls,
+            including cycles in small factory configuration containers.
+
+    Custom/unqualified execution retains its established eager semantics and
+    does not gain a frozen-configuration or continuation guarantee.
     """
 
-    def __init__(self, dataset) -> None:
+    def __init__(self, dataset: Dataset[Any]) -> None:
+        from dryml.methods.stream import _dataset_sections
+
+        sectioned, _, _ = _dataset_sections(dataset)
         self.dataset = dataset
         self.graph = dataset.method_graph()
         try:
@@ -39,17 +419,67 @@ class PreparedDataset:
         except NotImplementedError as error:
             if not str(error).startswith("Dataset graph planning does not support"):
                 raise
+            if sectioned:
+                raise NotImplementedError("Unsupported custom operator in section composition.") from error
             self.execution_level = "eager"
         else:
             self.execution_level = "stream"
+        from dryml.methods.signature import spec_from_node
+
         if self.execution_level == "stream":
-            from dryml.methods.signature import spec_from_node
-
-            self.spec = spec_from_node(self.graph.nodes[-1].outputs[0].spec)
+            root = self.graph._stream_plan._prepared.root
+            self._signature = root.signature
+            self._cardinality = root.cardinality
+            count_spec = spec_from_node(self._signature)
         else:
-            self.spec = dataset.spec
+            self._eager_spec = dataset.spec
+            self._cardinality = None
+            count_spec = self._eager_spec
+        self._count_examples = partial(dataset._examples_in_spec, count_spec)
+        self._continuation_nodes = {}
+        self._continuation_target_state = _required_saved_state(dataset)
+        self._continuation_missing_states = set()
+        if self.execution_level == "stream":
+            def retain(op):
+                from dryml.core.cdef_graph import has_stateful_materialization
+                recipe = getattr(op.dataset, "definition", None)
+                method = getattr(op.dataset, "method", None) if op.kind == "map" else None
+                method_definition = getattr(method, "definition", None)
+                method_state = _required_saved_state(method)
+                if (method_definition is not None and has_stateful_materialization(method_definition)
+                        and self._continuation_target_state is None and method_state is None):
+                    self._continuation_missing_states.add(op.occurrence)
+                self._continuation_nodes[op.occurrence] = (
+                    recipe, method_definition, method_state if self._continuation_target_state is None else None)
+                if op.kind == "accumulate":
+                    roles = (op.dataset.initial_state, op.dataset.accumulator)
+                    definitions = tuple(role.definition for role in roles)
+                    states = tuple(_required_saved_state(role) for role in roles)
+                    if self._continuation_target_state is None and any(
+                            has_stateful_materialization(definition) and state is None
+                            for definition, state in zip(definitions, states)):
+                        self._continuation_missing_states.add(op.occurrence)
+                    self._continuation_nodes[op.occurrence] = (
+                        recipe, definitions, states if self._continuation_target_state is None else (None, None))
+                for child in op.inputs:
+                    retain(child)
+            retain(root)
 
-    def examples_in(self, value) -> int:
+    @property
+    def spec(self) -> SpecTree:
+        """Return captured output metadata, detached for qualified stream plans.
+
+        Qualified mutable list/dict structure is detached on each read; immutable
+        TensorSpec leaves are shared. Eager fallback retains its original declared
+        spec. Reading performs no selection or source acquisition.
+        """
+        from dryml.methods.signature import spec_from_node
+
+        if self.execution_level == "eager":
+            return self._eager_spec
+        return spec_from_node(self._signature)
+
+    def examples_in(self, value: Any) -> int:
         """Validate/count one value against captured output metadata.
 
         Args:
@@ -64,7 +494,27 @@ class PreparedDataset:
         Side Effects:
             Reads captured specs only; no selection, inference, or source access.
         """
-        return self.dataset._examples_in_spec(self.spec, value)
+        return self._count_examples(value)
+
+    def _require_continuation_capability(self) -> None:
+        """Admit frozen exact source/operator declarations without capture or IO.
+
+        Unknown generator products retain conditional acquisition-time checks.
+        This checks capability, not dynamic value saveability, and never clones
+        array bindings or constructs a continuation record.
+        """
+        from .errors import UnsupportedContinuationError
+        from .recovery import _ops, _initial_available
+        if self.execution_level != "stream" or self._continuation_missing_states:
+            raise UnsupportedContinuationError("Input lacks qualified exact continuation evidence.")
+        for op in _ops(self.graph._stream_plan._prepared.root):
+            if op.kind == "custom" or op.kind == "map" and op.selected is None:
+                raise UnsupportedContinuationError("Unqualified continuation operator.")
+            if op.kind == "source":
+                if op.source.kind not in ("array", "generator"):
+                    raise UnsupportedContinuationError(f"Unsupported source continuation: {op.source.kind}.")
+                if op.source.kind == "generator" and not _initial_available(op.source.binding):
+                    raise UnsupportedContinuationError("Factory configuration lacks retained original evidence.")
 
     def _require_declared_selection(self) -> None:
         """Reject Maps needing cursor-local discovery, including eager wrappers."""
@@ -97,7 +547,7 @@ class PreparedDataset:
 
             admit(self.dataset)
 
-    def iterator(self, *, epoch: int = 0):
+    def iterator(self, *, epoch: int = 0) -> DatasetCursor[Any] | StreamGraphCursor:
         """Open one independent closeable traversal at the prepared execution level.
 
         Args:
@@ -109,12 +559,15 @@ class PreparedDataset:
             cursor for the documented eager fallback.
 
         Raises:
+            ValueError: If ``epoch`` is not a nonnegative exact integer.
             Source-specific acquisition or iteration errors from the underlying
             Dataset pipeline.
 
         Side Effects:
-            May acquire resources for this one traversal. The prepared plan itself
-            remains reusable and holds neither cursor position nor source handles.
+            Qualified cursor creation acquires nothing; its first advancement may
+            acquire source resources. Eager fallback may acquire on creation.
+            The reusable plan holds source bindings but no live cursor position
+            or acquired traversal resources.
         """
 
         if type(epoch) is not int or epoch < 0:
@@ -126,7 +579,7 @@ class PreparedDataset:
             return opener(epoch)
         return self.dataset.iterator()
 
-    def training_batches(self, preparation, *, epoch: int = 0) -> "NativeTrainingCursor":
+    def training_batches(self, preparation: BatchPreparation, *, epoch: int = 0) -> NativeTrainingCursor:
         """Open one closeable native-training batch cursor.
 
         Args:
@@ -151,12 +604,57 @@ class PreparedDataset:
             raise TypeError("Native training data requires a prepared x/y handoff.")
         return NativeTrainingCursor(self, preparation, epoch=epoch)
 
+    def open(self, *, epoch: int | None = None, start: int | None = None,
+             state: DatasetState[Any] | None = None,
+             acceptance: AcceptanceMode = "delivery") -> DatasetTraversal[Any]:
+        """Lend finite epoch views from an independent lazy local traversal.
+
+        Args:
+            epoch: Exact nonnegative logical epoch, default zero.
+            start: Exact nonnegative final-output offset within it, default zero.
+            state: Detached DatasetState, or None for a new positional traversal.
+                Omitted positions use the record; explicit positions must match.
+            acceptance: ``"delivery"`` or single-candidate ``"explicit"`` acceptance.
+
+        Returns:
+            DatasetTraversal retaining this preparation's frozen descriptors and
+            invokers; sibling traversals share no live execution state.
+
+        Raises:
+            TypeError, ValueError: Malformed controls or an infinite unsectioned
+                root. Unsupported section combinations fail before acquisition.
+                Positional shortfalls and source/operator failures occur lazily.
+            ContinuationMismatchError: Saved frozen recipe/source/spec evidence
+                differs. Validation is repeated on every open, without acquisition.
+
+        Side Effects:
+            Creation and unread close acquire no producer. A custom eager fallback
+            retains ordinary behavior without a frozen-configuration guarantee.
+        """
+        from .traversal import DatasetTraversal
+
+        return DatasetTraversal(self, epoch=epoch, start=start, state=state, acceptance=acceptance)
+
+    def iterate(self, *, epoch: int | None = None, start: int | None = None) -> DatasetCursor[Any]:
+        """Return a lazy DatasetCursor owning one selected epoch and its traversal.
+
+        Exact nonnegative ``epoch``/``start`` default to zero. An exact-end start
+        produces an empty cursor; a larger start raises DatasetExhaustedError.
+        TypeError/ValueError reject malformed controls; source and cleanup errors
+        propagate. The cursor reuses frozen selections and closes its private
+        traversal on EOF, failure, or explicit close, without opening on creation.
+        """
+        from .traversal import _SelectedEpochCursor
+
+        return _SelectedEpochCursor(self.open(epoch=epoch, start=start))
+
 
 class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
     """Closeable prepared x/y batch cursor whose reads have no progress side effects.
 
     Args:
-        dataset: Prepared Dataset that opens this cursor's independent traversal.
+        dataset: PreparedDataset for an independent pass, or EpochView borrowing
+            an invocation traversal. Borrowed explicit views use reserve/accept.
         preparation: Retained x/y handoff carrier applied exactly once per yield.
         epoch: Exact nonnegative logical epoch forwarded to the Dataset traversal.
 
@@ -169,18 +667,32 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
     over cleanup errors; non-pull StopIteration is a causal RuntimeError.
     Unresolved Map selections raise TypeError during cursor construction,
     before source acquisition, even when output declarations name a native backend.
+    Borrowed views validate their exact opening-suffix cardinality, counting only
+    successfully converted deliveries/reservations; UNKNOWN membership and separate
+    upper bounds do not impose a strict count.
+    Delivery converts under the owner's advancement guard before accepting progress,
+    without allocating a public reservation. Explicit reservations retain their
+    single-use token and conversion-before-acceptance behavior.
     """
 
-    def __init__(self, dataset: PreparedDataset, preparation, *, epoch: int = 0) -> None:
+    def __init__(self, dataset: PreparedDataset | EpochView, preparation: BatchPreparation, *, epoch: int = 0) -> None:
         super().__init__()
-        dataset._require_declared_selection()
-        self._dataset = dataset
+        from .traversal import EpochView
+        self._view = dataset if isinstance(dataset, EpochView) else None
+        if self._view is not None and epoch != 0:
+            raise ValueError("A borrowed view already selects its epoch; epoch must be zero.")
+        self._dataset = dataset._owner._prepared if self._view is not None else dataset
+        self._dataset._require_declared_selection()
         self._preparation = preparation
         if type(epoch) is not int or epoch < 0:
             raise ValueError("epoch must be a nonnegative exact int.")
         self._epoch = epoch
         self._cursor = None
-        cardinality = self._call(dataset.dataset.yield_cardinality)
+        if self._view is not None:
+            self._own(self._view)
+        cardinality = self._view.cardinality if self._view is not None else dataset._cardinality
+        if cardinality is None:
+            cardinality = self._call(dataset.dataset.yield_cardinality)
         self._expected = cardinality.require_finite() if cardinality.is_finite else None
         self._yielded = 0
 
@@ -190,22 +702,69 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
         return self
 
     def _read(self) -> tuple[Any, Any]:
+        if self._view is not None:
+            from .errors import TraversalOwnershipError
+            owner = self._view._owner
+            if owner._acceptance != "delivery":
+                raise TraversalOwnershipError("Explicit acceptance requires reserve(), not next().")
+            try:
+                value = owner._deliver_view(self._view, prepare=self._prepare)
+            except StopIteration:
+                self._validate_count()
+                raise
+            self._yielded += 1
+            return value
         if self._cursor is None:
             self._cursor = self._own(self._call(self._dataset.iterator, epoch=self._epoch))
         try:
             value = self._pull(self._cursor)
-        except StopIteration as error:
-            if self._expected is not None and self._yielded != self._expected:
-                raise DatasetExhaustedError(self._expected, self._yielded) from error
+        except StopIteration:
+            self._validate_count()
             raise
         result = self._call(self._prepare, value)
         self._yielded += 1
         return result
 
+    def _validate_count(self):
+        if self._expected is not None and self._yielded != self._expected:
+            raise DatasetExhaustedError(self._expected, self._yielded)
+
     def _prepare(self, value):
         x, y = value
         self._dataset.examples_in((x, y))
         return self._preparation.prepare(x, y)
+
+    def reserve(self) -> PendingElement[tuple[Any, Any]]:
+        """Convert one borrowed explicit candidate without accepting its token.
+
+        Returns PendingElement[tuple[object, object]] sharing the raw candidate's
+        single-use authority. EOF closes only the exhausted view. Conversion or
+        validation failure aborts input without accepted progress; secondary close
+        errors retain the primary failure. Independent-pass cursors reject this
+        operation with TypeError. Exact opening-suffix shortfalls raise
+        DatasetExhaustedError before observed_eof is certified; UNKNOWN counts and
+        max_elements-only bounds remain non-strict.
+        """
+        if self._view is None:
+            raise TypeError("Reservations require a borrowed EpochView.")
+        if self._closed:
+            raise StopIteration
+        try:
+            try:
+                candidate = self._view.reserve()
+            except StopIteration:
+                self._validate_count()
+                self._observed_eof = True
+                self.close()
+                raise
+            result = replace(candidate, value=self._call(self._prepare, candidate.value))
+            self._yielded += 1
+            return result
+        except StopIteration:
+            raise
+        except BaseException as error:
+            self._close_after_failure(error)
+            raise
 
     def skip(self, n: int) -> None:
         """Skip raw authored batches without executing their conversion edges.
@@ -214,7 +773,7 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
             n: Exact nonnegative number of completed batches to discard.
 
         Raises:
-            TypeError: If ``n`` is not an exact integer.
+            TypeError: If ``n`` is not an exact integer or this cursor borrows a view.
             ValueError: If ``n`` is negative.
             DatasetExhaustedError: If fewer than ``n`` batches remain.
 
@@ -224,6 +783,8 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
         """
 
         self._validate_skip_count(n)
+        if self._view is not None:
+            raise TypeError("Borrowed views cannot skip accepted input.")
         if n == 0:
             return
         if self._closed:
@@ -240,4 +801,4 @@ class NativeTrainingCursor(_CursorLifecycle, Iterator[tuple[Any, Any]]):
         self._yielded += n
 
 
-__all__ = ["NativeTrainingCursor", "PreparedDataset"]
+__all__ = ["BatchPreparation", "NativeTrainingCursor", "PreparedDataset"]

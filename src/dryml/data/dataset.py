@@ -5,18 +5,31 @@ from __future__ import annotations
 from abc import abstractmethod
 from collections.abc import Iterator
 from numbers import Integral
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, TYPE_CHECKING
 
 from dryml.core import Object
-from dryml.core.backend import discover_backends
 from dryml.core.cardinality import Cardinality
-from dryml.core.tensor_spec import Dynamic, SpecTree, TensorSpec
+from dryml.core.tensor_spec import Dynamic, SpecTree, TensorSpec, _python_object_batch_size
+from dryml.methods.signature import _runtime_backends_for_spec
 from dryml.methods import ImplementationSelectionError
 from dryml.methods.stream import DatasetExhaustedError, _CursorLifecycle
+
+if TYPE_CHECKING:
+    from .state import DatasetState
+    from .traversal import AcceptanceMode, DatasetTraversal
 
 
 T = TypeVar("T")
 _PENDING = object()
+
+
+def _section_iterator(dataset, *, epoch=0):
+    """Route sectioned built-ins through the retained shared boundary kernel."""
+    from dryml.methods.stream import _dataset_sections
+
+    if _dataset_sections(dataset)[0]:
+        return dataset.prepare().iterator(epoch=epoch)
+    return None
 
 
 def _normalize_cardinality(value: int | Cardinality) -> Cardinality:
@@ -89,8 +102,9 @@ class DatasetCursor(_CursorLifecycle, Iterator[T], Generic[T]):
     ``position`` advances after each source value is consumed, including values
     discarded by :meth:`skip`. Closing is idempotent and forwards to an owned
     iterator's ``close`` method when it has one. A closed cursor stops yielding,
-    but only ``observed_eof`` proves successful root-output termination. Use a
-    context manager to preserve consumer failures when cleanup also fails.
+    but only ``observed_eof`` proves successful owned-output termination (one
+    selected epoch for :meth:`Dataset.iterate`, one physical pass for iterator).
+    Use a context manager to preserve consumer failures when cleanup also fails.
     Read failures close the source; cleanup failures propagate without erasing
     genuine EOF. Non-pull StopIteration becomes RuntimeError with its cause.
     """
@@ -131,6 +145,8 @@ class Dataset(Object, Generic[T]):
     Subclasses must implement :meth:`__iter__`; cardinality remains optional.
     ``spec`` describes one yielded element when known, and ``peek`` obtains one
     value from a fresh iterator without changing persistent dataset state.
+    Object/Python-layout leaves declare opaque values without class or content
+    inspection; only explicit outer list/tuple batch lengths are countable.
     """
 
     def __init__(self, spec: SpecTree | None = None):
@@ -196,8 +212,20 @@ class Dataset(Object, Generic[T]):
 
         return MethodGraph(self, stream_plan=StreamPlan(self))
 
+    def _prepare_stream_source(self, spec):
+        """Supply a Data-owned inert source binding to the lower-layer kernel."""
+        from dryml.data.native import _prepare_source
+
+        return _prepare_source(self, spec)
+
+    def _prepare_stream_selection(self, kind, input_spec):
+        """Select Data-owned collation/splitting once during graph preparation."""
+        if kind == "batch":
+            return self._resolve_collate((), input_spec=input_spec)
+        return self._resolve_split(input_spec=input_spec)
+
     def prepare(self):
-        """Plan this Dataset once for native training-data delivery.
+        """Plan this Dataset once for local sessions and native data delivery.
 
         Returns:
             A dependency-light :class:`dryml.data.native.PreparedDataset` that
@@ -216,6 +244,46 @@ class Dataset(Object, Generic[T]):
         from dryml.data.native import PreparedDataset
 
         return PreparedDataset(self)
+
+    def open(self, *, epoch: int | None = None, start: int | None = None,
+             state: DatasetState[T] | None = None,
+             acceptance: AcceptanceMode = "delivery") -> DatasetTraversal[T]:
+        """Prepare and return a lazy, independent local DatasetTraversal.
+
+        Args:
+            epoch: Exact nonnegative logical epoch, default zero. Explicit sections
+                seek by consuming earlier sections; implicit finite passes open the
+                selected physical pass directly.
+            start: Exact nonnegative final-output offset in that epoch, default zero.
+            state: Optional immutable DatasetState requesting exact resumption.
+                Omitted positions use its saved position; supplied ones must match.
+            acceptance: ``"delivery"`` accepts on next; ``"explicit"`` requires
+                reserving and accepting one lightweight candidate at a time.
+
+        Returns:
+            A context-managed owner lending finite EpochViews. Preparation freezes
+            qualified controls/selections without acquiring a producer.
+
+        Raises:
+            TypeError, ValueError: Invalid controls, unsupported boundary algebra,
+                or a provably infinite boundary-free root. Seek shortfalls raise
+                DatasetExhaustedError lazily. Source/selection failures propagate.
+            ContinuationMismatchError: Record differs from supplied target. This
+                validates metadata without acquiring or restoring a producer.
+        """
+        return self.prepare().open(epoch=epoch, start=start, state=state, acceptance=acceptance)
+
+    def iterate(self, *, epoch: int | None = None, start: int | None = None) -> DatasetCursor[T]:
+        """Return an owned one-level cursor over one selected finite epoch.
+
+        ``epoch`` and ``start`` are exact nonnegative integers, defaulting to zero.
+        The lazy cursor owns a private traversal and closes it on completion,
+        failure or explicit close. Exact-end offsets are empty; larger offsets
+        raise DatasetExhaustedError. Invalid controls raise TypeError/ValueError;
+        acquisition, execution and cleanup failures retain their identities.
+        Unlike iterator(), EOF here proves only the selected epoch's completion.
+        """
+        return self.prepare().iterate(epoch=epoch, start=start)
 
     def peek(self) -> T:
         """Return one fresh element, releasing its traversal before returning.
@@ -395,7 +463,8 @@ class Dataset(Object, Generic[T]):
             if isinstance(spec, TensorSpec):
                 if not spec.batched:
                     return [None]
-                observed = _batch_length(runtime, path)
+                observed = (_python_object_batch_size(runtime) if spec.is_python_object
+                            else _batch_length(runtime, path))
                 if observed == 0:
                     raise ValueError(f"Batched value at {path} has zero examples.")
                 if spec.batch is not Dynamic and observed != spec.batch:
@@ -473,7 +542,7 @@ class _MapCursor(DatasetCursor):
             except StopIteration:
                 self._resolved = True
                 return
-            backends = self._call(discover_backends, first, activate_native=True)
+            backends = self._call(_runtime_backends_for_spec, first, self._dataset.src.spec)
             if len(backends) != 1:
                 if len(backends) > 1:
                     raise ImplementationSelectionError("conflict")
@@ -614,7 +683,8 @@ class Map(Dataset):
             independence after selection resolves.
         """
 
-        return _MapCursor(self)
+        sectioned = _section_iterator(self)
+        return sectioned if sectioned is not None else _MapCursor(self)
 
     def __len__(self) -> Cardinality:
         return self.src.yield_cardinality()

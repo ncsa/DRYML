@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import os
 import subprocess
 import sys
+import textwrap
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import numpy as np
 import pytest
@@ -21,6 +26,12 @@ from dryml.models.utils import TrainingPreparation
 
 
 UNKNOWN_SOURCE_OPENS = []
+_NATIVE_DEFAULT_DEVICE_PAIR = None
+
+
+def _native_default_device_pairs():
+    """Yield the unchanged native buffers installed only by the two-CPU child."""
+    yield _NATIVE_DEFAULT_DEVICE_PAIR
 
 
 def _unknown_source():
@@ -254,6 +265,323 @@ def _experiment(*, repo=None, epochs=1):
     )
 
 
+def test_jax_dataset_continuation_native_compiled_sections(monkeypatch):
+    """Real Optax/JAX qualification keeps one JIT across adjacent borrowed sections."""
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("optax", reason="real Optax is required for native JAX qualification")
+    from tests.models.test_dataset_training_integration import _dataset_continuation_experiment
+    from dryml.data import DatasetTraversal
+    exp = _dataset_continuation_experiment("jax")
+    captures, jit_calls = [], []
+    original_capture = DatasetTraversal.capture_state
+    monkeypatch.setattr(DatasetTraversal, "capture_state", lambda owner:
+                        captures.append(owner.position.sequence) or original_capture(owner))
+    original_jit = jax.jit
+    monkeypatch.setattr(jax, "jit", lambda *a, **k: jit_calls.append(True) or original_jit(*a, **k))
+    exp.train_fn(exp, callbacks=(lambda: captures == [] or pytest.fail("per-update capture"),))
+    assert jit_calls == [True] and captures == [4]
+    assert exp.state.input_sequence == exp.state.step == 4
+
+
+def test_jax_native_transition_reuses_equal_batch_signature(monkeypatch, caplog):
+    """Tiny real SGD keeps one cache entry, full validation and both barriers."""
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    import dryml.models.jax.base as jax_base
+    from dryml.core.state import is_reserved
+    from tests.tools.benchmark_dataset_traversal import _JaxDriver
+    x = np.arange(96 * 16, dtype=np.float32).reshape(96, 16) / 10000
+    y = x.sum(axis=1, keepdims=True) / 8
+    exp = _JaxDriver("new", x, y, sections=1).exp
+    traces, signatures, cache_sizes = [], [], []
+    barriers, validations, puts, update_puts = [], [], [], []
+    compiled_updates = []
+    original_jit = jax.jit
+    original_put = jax.device_put
+    original_sync = jax_base._synchronize_tree
+    original_validate = exp.model._validate_candidate_state
+    original_apply = exp.model._training_apply
+    original_update = exp.train_fn._native_update
+    prior_rng = np.asarray(jax.random.key_data(exp.model.rng)).copy()
+
+    def device_put(value, device=None, *args, **kwargs):
+        puts.append(value)
+        return original_put(value, device, *args, **kwargs)
+
+    def synchronize(*args):
+        assert is_reserved(exp.model)
+        barriers.append(True)
+        return original_sync(*args)
+
+    def validate(*args):
+        validations.append(True)
+        return original_validate(*args)
+
+    def jit(*args, **kwargs):
+        compiled = original_jit(*args, **kwargs)
+        compiled_updates.append(compiled)
+        return compiled
+
+    def apply(*args):
+        traces.append(True)
+        return original_apply(*args)
+
+    def native_update(*args):
+        update = original_update(*args)
+
+        def call(*values):
+            assert is_reserved(exp.model)
+            signatures.append([
+                (leaf.shape, str(leaf.dtype), getattr(leaf, "weak_type", False), str(leaf.sharding),
+                 str(getattr(leaf, "layout", None)), leaf.committed)
+                for leaf in jax.tree_util.tree_leaves(values)
+            ])
+            before = len(puts)
+            candidate = update(*values)
+            update_puts.append(len(puts) - before)
+            cache_sizes.append(compiled_updates[0]._cache_size())
+            return candidate
+
+        return call
+
+    monkeypatch.setattr(exp.model, "_training_apply", apply)
+    monkeypatch.setattr(exp.model, "_validate_candidate_state", validate)
+    monkeypatch.setattr(jax_base, "_synchronize_tree", synchronize)
+    monkeypatch.setattr(jax, "device_put", device_put)
+    monkeypatch.setattr(jax, "jit", jit)
+    monkeypatch.setattr(exp.train_fn, "_native_update", native_update)
+    with jax.log_compiles(True):
+        exp.train_fn(exp)
+    assert len(traces) == 1, signatures
+    assert len(compiled_updates) == 1
+    compiles = [record.getMessage() for record in caplog.records
+                if record.getMessage().startswith("Compiling transition ")]
+    assert len(compiles) == 1, compiles
+    assert cache_sizes == [1, 1, 1], signatures
+    assert update_puts == [2, 0, 0]
+    assert len(barriers) == len(validations) == 6
+    assert exp.state.step == 3 and exp.state.examples_seen == 96
+    expected = np.zeros((16, 1), dtype=np.float32)
+    for start in range(0, 96, 32):
+        a, b = x[start:start + 32], y[start:start + 32]
+        expected -= np.float32(.001) * (2 * a.T @ (a @ expected - b) / 32)
+    np.testing.assert_allclose(exp.model.parameters["kernel"], expected, rtol=1e-6)
+    np.testing.assert_array_equal(jax.random.key_data(exp.model.rng), prior_rng)
+
+
+@pytest.mark.exhaustive_only
+def test_jax_native_uncommitted_training_respects_default_device():
+    """Fresh two-CPU training preserves the original pure JIT's device inference."""
+    pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    script = textwrap.dedent('''
+        import json
+        from unittest.mock import patch
+        from dryml import F
+        from dryml.core import TensorSpec
+        from dryml.data import GeneratorDataset
+        from dryml.models.jax import Optimizer, Training
+        from tests.models import test_jax_training as fixtures
+        import jax
+        import numpy as np
+
+        a, b = jax.devices()
+        assert a.platform == b.platform == "cpu" and a != b
+
+        with jax.default_device(a):
+            exp = fixtures._experiment()
+            exp.train_fn.optimizer = Optimizer(F("optax.sgd", 0.1))
+            transformation = exp.train_fn.optimizer.bind(exp.model)
+            assert jax.tree_util.tree_leaves(transformation.init(exp.model.parameters)) == []
+            x = jax.numpy.ones((2, 1), dtype=jax.numpy.float32)
+            y = x * 2
+            fixtures._NATIVE_DEFAULT_DEVICE_PAIR = (x, y)
+            spec = TensorSpec("float32", shape=(1,), batch=2, backend="jax")
+            exp.train_data = GeneratorDataset(
+                fixtures._native_default_device_pairs, cardinality=1, spec=(spec, spec),
+            )
+
+        original_jit = jax.jit
+        original_update = Training._native_update
+        candidates = []
+
+        def native_update(*args):
+            compiled = []
+
+            def jit(transition):
+                pure = original_jit(transition)
+                compiled.append(pure)
+                return pure
+
+            with patch.object(jax, "jit", jit):
+                update = original_update(*args)
+            assert len(compiled) == 1
+
+            def checked(*values):
+                leaves = jax.tree_util.tree_leaves(values)
+                assert leaves and all(not leaf.committed and leaf.device == a for leaf in leaves)
+                assert values[4] is x and values[5] is y
+                expected = compiled[0](*values)
+                actual = update(*values)
+                expected_leaves = jax.tree_util.tree_leaves(expected)
+                actual_leaves = jax.tree_util.tree_leaves(actual)
+                proof = {
+                    "initial_device": str(a), "default_device": str(b),
+                    "initial_all_uncommitted": True,
+                    "pure_jit_devices": [str(leaf.device) for leaf in expected_leaves],
+                    "actual_devices": [str(leaf.device) for leaf in actual_leaves],
+                }
+                print(json.dumps(proof), flush=True)
+                assert all(leaf.device == b for leaf in expected_leaves)
+                assert all(leaf.device == b for leaf in actual_leaves), proof
+                for actual_leaf, expected_leaf in zip(actual_leaves, expected_leaves):
+                    if jax.dtypes.issubdtype(actual_leaf.dtype, jax.dtypes.prng_key):
+                        assert jax.random.key_impl(actual_leaf) == jax.random.key_impl(expected_leaf)
+                        actual_leaf = jax.random.key_data(actual_leaf)
+                        expected_leaf = jax.random.key_data(expected_leaf)
+                    np.testing.assert_array_equal(actual_leaf, expected_leaf)
+                candidates.append(actual)
+                return actual
+
+            return checked
+
+        with patch.object(Training, "_native_update", staticmethod(native_update)):
+            with jax.default_device(b):
+                exp.train_fn(exp)
+        assert len(candidates) == exp.state.step == exp.state.input_sequence == 1
+        assert exp.state.examples_seen == 2
+        assert exp.model.parameters["weight"].device == exp.model.rng.device == b
+        assert not x.committed and x.device == a and not y.committed and y.device == a
+    ''')
+    environment = os.environ.copy()
+    environment.update({
+        "JAX_PLATFORMS": "cpu", "JAX_ENABLE_X64": "false",
+        "XLA_FLAGS": "--xla_force_host_platform_device_count=2 --xla_cpu_multi_thread_eigen=false",
+        "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+        "TF_NUM_INTRAOP_THREADS": "1", "TF_NUM_INTEROP_THREADS": "1",
+    })
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=environment, capture_output=True,
+        text=True, check=False, timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    print(result.stdout, end="")
+
+
+def test_jax_native_placement_failure_preserves_owners_and_frontier(monkeypatch):
+    """A reserved placement failure cannot install owners or accept source input."""
+    jax = pytest.importorskip("jax")
+    pytest.importorskip("optax")
+    from dryml.core.state import is_reserved
+
+    exp = _experiment()
+    prior = exp.model.parameters, exp.model.mutable_state, exp.model.rng
+    exp.train_fn.optimizer.bind(exp.model)
+    prior_slots = exp.train_fn.optimizer.state
+    original_put = jax.device_put
+    failed = []
+
+    def device_put(value, *args, **kwargs):
+        if value is prior[0]["weight"]:
+            assert is_reserved(exp.model)
+            failed.append(True)
+            raise RuntimeError("native placement failed")
+        return original_put(value, *args, **kwargs)
+
+    monkeypatch.setattr(jax, "device_put", device_put)
+    with exp.train_fn.input_session(exp) as inputs:
+        record = inputs.capture()
+    with pytest.raises(RuntimeError, match="native placement failed"):
+        exp.train_fn(exp)
+    assert failed == [True] and not is_reserved(exp.model)
+    assert exp.model.parameters is prior[0] and exp.model.mutable_state is prior[1]
+    assert exp.model.rng is prior[2] and exp.train_fn.optimizer.state is prior_slots
+    assert exp.state.step == exp.state.input_sequence == 0
+    assert exp.state.dataset_state is record
+    assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
+    with exp.train_fn.input_session(exp) as inputs:
+        assert inputs.capture() is record
+
+
+@pytest.mark.parametrize("implementation", ("threefry2x32", "rbg"))
+def test_jax_native_placement_retains_host_backed_keys_and_weak_types(monkeypatch, implementation):
+    """Native admission preserves restored key bits/implementation and weak scalars."""
+    jax = pytest.importorskip("jax")
+    from dryml.models.jax import Training
+
+    key = jax.random.key(17, impl=implementation)
+    host_bits = np.asarray(jax.random.key_data(key)).copy()
+    host_key = jax.random.wrap_key_data(host_bits, impl=implementation)
+    scalar = jax.numpy.asarray(1.)
+    ready = jax.device_put(jax.numpy.ones((1,)), jax.devices()[0])
+    monkeypatch.setattr(jax, "jit", lambda transition: lambda *args: args)
+    update = Training._native_update(jax, None, None, None, None)
+    result = update({"weight": scalar}, {}, host_key, (), ready, ready)
+    placed_scalar, placed_key = result[0]["weight"], result[2]
+    assert placed_scalar.committed and placed_key.committed
+    assert placed_scalar.weak_type == scalar.weak_type
+    assert placed_scalar.shape == scalar.shape and placed_scalar.dtype == scalar.dtype
+    assert placed_scalar.sharding == scalar.sharding
+    assert placed_key.shape == host_key.shape and placed_key.dtype == host_key.dtype
+    assert jax.random.key_impl(placed_key) == jax.random.key_impl(host_key)
+    np.testing.assert_array_equal(jax.random.key_data(placed_key), host_bits)
+    assert jax.random.key_data(host_key) is host_bits
+    assert result[4] is result[5] is ready
+
+
+@pytest.mark.parametrize("failure", (
+    "parameter_dtype", "parameter_topology", "parameter_nonfinite",
+    "mutable_nonfinite", "slot_dtype", "slot_topology", "slot_nonfinite", "rng",
+))
+def test_jax_direct_commit_retains_complete_candidate_checks(failure):
+    """Direct commits reject invalid complete candidates before changing any owner."""
+    jax = pytest.importorskip("jax")
+    exp = _experiment()
+    exp.model.mutable_state = {"value": jax.numpy.asarray(0., dtype=jax.numpy.float32)}
+    exp.train_fn.optimizer.state = {"slot": jax.numpy.asarray(0., dtype=jax.numpy.float32)}
+    prior = exp.model.parameters, exp.model.mutable_state, exp.model.rng
+    prior_slots = exp.train_fn.optimizer.state
+    parameters, mutable, rng, slots = *prior, prior_slots
+    if failure == "parameter_dtype":
+        parameters = {"weight": jax.numpy.zeros((1, 1), dtype=jax.numpy.int32)}
+    elif failure == "parameter_topology":
+        parameters = [parameters["weight"]]
+    elif failure == "parameter_nonfinite":
+        parameters = {"weight": jax.numpy.full((1, 1), float("nan"))}
+    elif failure == "mutable_nonfinite":
+        mutable = {"value": jax.numpy.asarray(float("inf"), dtype=jax.numpy.float32)}
+    elif failure == "slot_dtype":
+        slots = {"slot": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
+    elif failure == "slot_topology":
+        slots = ()
+    elif failure == "slot_nonfinite":
+        slots = {"slot": jax.numpy.asarray(float("nan"), dtype=jax.numpy.float32)}
+    else:
+        rng = jax.random.key_data(rng)
+    with pytest.raises((TypeError, ValueError), match="candidate"):
+        exp.train_fn._commit_update(
+            exp, parameters, mutable, rng, slots,
+            examples=2, loss=1., complete_epoch=False,
+        )
+    assert exp.model.parameters is prior[0] and exp.model.mutable_state is prior[1]
+    assert exp.model.rng is prior[2] and exp.train_fn.optimizer.state is prior_slots
+    assert exp.state.step == exp.state.examples_seen == 0
+
+
+def test_jax_candidate_validation_keeps_shared_leaf_topology():
+    """Shared identity is checked in addition to otherwise identical leaf metadata."""
+    jax = pytest.importorskip("jax")
+    from dryml.models.jax.base import _validate_tree_like
+
+    shared = jax.numpy.zeros((1, 1), dtype=jax.numpy.float32)
+    template = {"left": shared, "right": shared}
+    _validate_tree_like(template, template, "parameters", jax)
+    with pytest.raises(TypeError, match="topology"):
+        _validate_tree_like(
+            {"left": shared, "right": shared + 0}, template, "parameters", jax,
+        )
+
+
 def test_jax_native_iterator_yields_prepared_authored_batches():
     """The JAX bridge yields native batches and closes an exhausted traversal."""
     jax = pytest.importorskip("jax")
@@ -463,7 +791,7 @@ def test_jax_training_rejects_empty_and_infinite_validation_before_binding():
 
 
 def test_jax_training_admission_matrix_preserves_preacquisition_boundaries():
-    """Declared empty, infinite, unknown-callback, and noncanonical inputs fail early."""
+    """Empty/infinite/noncanonical fail; unknown exact input admits without demand."""
     pytest.importorskip("jax")
 
     spec = TensorSpec("float32", shape=(1,), batch=1, backend="numpy")
@@ -477,14 +805,15 @@ def test_jax_training_admission_matrix_preserves_preacquisition_boundaries():
     assert infinite.train_fn.optimizer.obj is infinite.train_fn.optimizer.state is None
 
     UNKNOWN_SOURCE_OPENS.clear()
-    callback_blocked = _experiment()
-    callback_blocked.train_data = GeneratorDataset(
+    unknown = _experiment()
+    unknown.train_data = GeneratorDataset(
         _unknown_source, cardinality=Cardinality.UNKNOWN, spec=(spec, spec),
     )
-    with pytest.raises(ValueError, match="finite deterministic"):
-        callback_blocked.train_fn(callback_blocked, callbacks=(lambda: None,))
+    with unknown.train_fn.input_session(unknown) as inputs:
+        assert unknown.state.input_recovery == "exact"
+        assert inputs.traversal.position.sequence == 0
     assert UNKNOWN_SOURCE_OPENS == []
-    assert callback_blocked.train_fn.optimizer.obj is callback_blocked.train_fn.optimizer.state is None
+    assert unknown.train_fn.optimizer.obj is unknown.train_fn.optimizer.state is None
 
     known_empty = _experiment()
     zeros = np.zeros((0, 1), dtype=np.float32)
@@ -533,6 +862,7 @@ def test_jax_training_callback_interruption_resumes_without_duplicate_update(tmp
 
     def pause():
         seen.append((interrupted.state.step, interrupted.state.epoch, interrupted.state.next_batch))
+        interrupted.state._input_provider.capture()
         raise RuntimeError("pause after accepted JAX update")
 
     with pytest.raises(RuntimeError, match="accepted JAX update"):
@@ -592,6 +922,7 @@ def test_jax_final_update_retry_runs_postlude_once_then_next_invocation_adds_epo
 
     def pause_on_final_update():
         if exp.state.step == 3:
+            exp.state._input_provider.capture()
             raise RuntimeError("final update accepted")
 
     with pytest.raises(RuntimeError, match="final update accepted"):
@@ -619,6 +950,7 @@ def test_jax_validation_retry_discards_candidate_mutable_and_rng_state(monkeypat
     def fail_once(*args):
         calls.append(True)
         if len(calls) == 1:
+            exp.state._input_provider.capture()
             raise RuntimeError("validation failed")
         return original(*args)
 
@@ -650,15 +982,232 @@ def test_jax_experiments_do_not_share_native_runtime_owners():
     assert (second.state.step, second.state.examples_seen, second.state.epoch) == (0, 0, 0)
 
 
-@pytest.mark.parametrize("stage", ("before_model", "after_model", "after_optimizer", "after_accounting"))
-def test_jax_candidate_commit_interruptions_repair_all_owners(monkeypatch, stage):
-    """Any interruption before accounting restores model slots and TrainState together."""
-    jax = pytest.importorskip("jax")
-    pytest.importorskip("optax")
+def _candidate_transaction():
+    """Execute the real loop transaction without importing unavailable Optax.
+
+    This focused proof extracts the candidate-to-callback statements verbatim;
+    it qualifies reservation/installation only, not native Optax training or the
+    surrounding training loop. Native integration tests retain their real prerequisite.
+    """
     import dryml.models.jax.base as jax_base
 
+    function = ast.parse(textwrap.dedent(inspect.getsource(jax_base.Training._train_with_input))).body[0]
+    loop = next(node for node in ast.walk(function) if isinstance(node, ast.While))
+    body = loop.body[1:]
+    callback_end = next(index for index, node in enumerate(body)
+                        if isinstance(node, ast.For) and isinstance(node.target, ast.Name)
+                        and node.target.id == "callback")
+    wrapper = ast.parse(
+        "def transaction(self, exp, inputs, input_candidate, update, jax, callbacks=()):\n"
+        "    prepared_train = inputs.prepared\n"
+        "    epoch_loss = epoch_steps = resume_batch = 0\n"
+    ).body[0]
+    wrapper.body.extend(body[:callback_end + 1])
+    namespace = dict(vars(jax_base))
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])),
+                 inspect.getsourcefile(jax_base.Training), "exec"), namespace)
+    return namespace["transaction"]
+
+
+def _pure_candidate(jax, parameters, mutable, rng, slots, x, y):
+    """Return distinct installed JAX arrays using a local non-Optax transition."""
+    del x, y
+    return (jax.numpy.asarray(1.), {"weight": parameters["weight"] + 1}, mutable,
+            jax.random.split(rng)[0], {"count": slots["count"] + 1})
+
+
+def test_jax_candidate_reservation_precedes_shared_model_read():
+    """Real-array transaction overlap rejects contention before a second pure read.
+
+    Separate TrainStates/slot owners share one Model. Events hold the first pure
+    computation open after both sessions admit; no native Optax qualification is claimed.
+    """
+    jax = pytest.importorskip("jax")
+    from dryml.core.repo import RepoSaveError
+
+    transaction = _candidate_transaction()
+    first, second = _experiment(), _experiment()
+    second = Experiment(first.model, second.train_fn, train_data=second.train_data)
+    assert second.model is first.model
+    assert first.state is not second.state
+    for exp in (first, second):
+        exp.train_fn.optimizer.state = {"count": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
+    admitted, start, computing, release = (Event() for _ in range(4))
+    reads, callbacks = [], []
+
+    def held_update(*args):
+        reads.append("first")
+        computing.set()
+        assert release.wait(10), "contender did not release the pure computation"
+        return _pure_candidate(jax, *args)
+
+    def contender_update(*args):
+        reads.append("second")
+        return _pure_candidate(jax, *args)
+
+    def run_first():
+        with first.train_fn.input_session(first) as inputs:
+            candidate = inputs.traversal.next_epoch().reserve()
+            admitted.set()
+            assert start.wait(10), "second input session did not admit"
+
+            def accepted_callback():
+                assert inputs._guard is None and inputs._accepted
+                with inputs._repo.reserve_state_graph(first):
+                    callbacks.append(first.state.step)
+
+            transaction(first.train_fn, first, inputs, candidate, held_update, jax,
+                        (accepted_callback,))
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(run_first)
+        try:
+            assert admitted.wait(10), "first input session did not admit"
+            with pytest.raises(RepoSaveError, match="reserved|overlap|in progress"):
+                with second.train_fn.input_session(second) as inputs:
+                    candidate = inputs.traversal.next_epoch().reserve()
+                    start.set()
+                    assert computing.wait(10), "first candidate did not start"
+                    transaction(second.train_fn, second, inputs, candidate, contender_update, jax)
+        finally:
+            start.set()
+            release.set()
+            future.result(timeout=10)
+
+    assert reads == ["first"]
+    assert callbacks == [1]
+    np.testing.assert_array_equal(first.model.parameters["weight"], [[1.]])
+    assert first.state.step == 1 and second.state.step == 0
+    assert int(first.train_fn.optimizer.state["count"]) == 1
+    assert int(second.train_fn.optimizer.state["count"]) == 0
+    assert not first.model._restore_failed
+
+
+@pytest.mark.parametrize("failure", ("compute", "sync", "loss", "model", "slots"))
+def test_jax_pure_transaction_failures_preserve_valid_owners(monkeypatch, failure):
+    """Real-array pre-installation failures release the lease without invalidation.
+
+    The extracted transaction uses a local pure fixture, not Optax training.
+    Prior input records and native references must survive without encoding.
+    """
+    jax = pytest.importorskip("jax")
+    import dryml.models.jax.base as jax_base
+    from dryml.core.state import is_reserved
+    from dryml.models import TrainState
+
     exp = _experiment()
+    exp.train_fn.optimizer.state = {"count": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
+    prior_parameters, prior_mutable, prior_rng = exp.model.parameters, exp.model.mutable_state, exp.model.rng
+    prior_slots, prior_continuation = exp.train_fn.optimizer.state, exp.train_fn.continuation
+
+    def update(*args):
+        assert is_reserved(exp.model)
+        if failure == "compute":
+            raise RuntimeError("pure compute failed")
+        loss, parameters, mutable, rng, slots = _pure_candidate(jax, *args)
+        if failure == "loss":
+            loss = jax.numpy.asarray(float("nan"))
+        if failure == "model":
+            mutable = {"wrong": jax.numpy.asarray(1)}
+        if failure == "slots":
+            slots = ()
+        return loss, parameters, mutable, rng, slots
+
+    def fail_sync(*args):
+        assert is_reserved(exp.model)
+        raise RuntimeError("pure sync failed")
+
+    if failure == "sync":
+        monkeypatch.setattr(jax_base, "_synchronize_tree", fail_sync)
+    transaction = _candidate_transaction()
+    with pytest.raises((RuntimeError, TypeError, ValueError), match="pure|finite|candidate"):
+        with exp.train_fn.input_session(exp) as inputs:
+            prior = inputs.capture()
+            monkeypatch.setattr(TrainState, "__getstate__", lambda _: pytest.fail("candidate encoded continuation"))
+            candidate = inputs.traversal.next_epoch().reserve()
+            transaction(exp.train_fn, exp, inputs, candidate, update, jax)
+
+    assert inputs._guard is None and not is_reserved(exp.model)
+    assert exp.model.parameters is prior_parameters
+    assert exp.model.mutable_state is prior_mutable and exp.model.rng is prior_rng
+    assert exp.train_fn.optimizer.state is prior_slots
+    assert exp.train_fn.continuation is prior_continuation
+    assert int(prior_slots["count"]) == 0
+    assert (exp.state.step, exp.state.examples_seen, exp.state.next_batch, exp.state.input_sequence) == (0, 0, 0, 0)
+    assert exp.state.dataset_state is prior and inputs.traversal.position == prior.position
+    assert exp.state._input_provider is None
+    assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
+    with exp.train_fn.input_session(exp) as retry:
+        assert retry.capture() is prior
+
+
+@pytest.mark.parametrize("capture", (False, True))
+def test_jax_callback_capture_controls_save_after_provider_retirement(tmp_path, monkeypatch, capture):
+    """Only a live accepted callback capture authorizes later exact save/retry.
+
+    This transaction proof uses local slots; native Optax recovery comparisons
+    remain in the separately prerequisite-gated integration tests below.
+    """
+    jax = pytest.importorskip("jax")
+    from dryml.core.repo import RepoSaveError
+    repo = Repo(DirStore(tmp_path / "store"))
+    exp = _experiment(repo=repo)
+    exp.train_fn.optimizer.state = {"count": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
+    transaction = _candidate_transaction()
+
+    def pause():
+        provider = exp.state._input_provider
+        assert provider._guard is None and provider._accepted
+        assert exp.state.step == exp.state.input_sequence == 1
+        if capture:
+            provider.capture()
+        raise RuntimeError("uncaptured callback" if not capture else "captured callback")
+
+    with pytest.raises(RuntimeError, match="callback"):
+        with exp.train_fn.input_session(exp) as inputs:
+            candidate = inputs.traversal.next_epoch().reserve()
+            transaction(exp.train_fn, exp, inputs, candidate,
+                        lambda *args: _pure_candidate(jax, *args), jax, (pause,))
+
+    assert exp.state._input_provider is None
+    assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
+    assert exp.state.step == exp.state.input_sequence == 1
+    if capture:
+        assert exp.state.dataset_state.position == exp.state.input_position
+        assert repo.save_object(exp, deep_capture=True) is not None
+    else:
+        assert exp.state.dataset_state is None
+        with pytest.raises(RepoSaveError, match="snapshot-local state preparation failed") as error:
+            repo.save_object(exp, deep_capture=True)
+        assert isinstance(error.value.__cause__, ValueError)
+        assert "current matching record; durable reload" in str(error.value.__cause__)
+        monkeypatch.setattr(type(exp.train_data), "prepare", lambda _: pytest.fail("stale input prepared"))
+        with pytest.raises(ValueError, match="current matching record.*durable reload"):
+            exp.train_fn(exp)
+
+
+@pytest.mark.parametrize("stage", ("before_model", "after_model", "after_optimizer", "after_accounting", "after_frontier"))
+def test_jax_candidate_commit_interruptions_repair_all_owners(monkeypatch, stage):
+    """Deterministic installation-seam proof; no Optax/native-training qualification."""
+    jax = pytest.importorskip("jax")
+    import dryml.models.jax.base as jax_base
+    from dryml.models.jax import Model
+
+    exp = _experiment()
+    exp = Experiment(
+        Model(F(_stateful_init_factory), F(_stateful_apply_factory), output_spec=_spec()),
+        exp.train_fn, train_data=exp.train_data,
+    )
+    exp.train_fn.optimizer.state = {"count": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
+    from dryml.models import TrainState
+    monkeypatch.setattr(TrainState, "__getstate__", lambda _: pytest.fail("candidate encoded continuation"))
     before = np.asarray(exp.model.parameters["weight"]).copy()
+    prior_parameters, prior_mutable, prior_rng = exp.model.parameters, exp.model.mutable_state, exp.model.rng
+    prior_rng_data = np.asarray(jax.random.key_data(prior_rng)).copy()
+    prior_slots = exp.train_fn.optimizer.state
+    candidate_mutable = {"updates": prior_mutable["updates"] + 1}
+    candidate_rng = jax.random.split(prior_rng)[0]
+    assert not np.array_equal(jax.random.key_data(candidate_rng), prior_rng_data)
     exp.train_fn.continuation = {"marker": jax.numpy.asarray(7, dtype=jax.numpy.int32)}
 
     def interrupt(observed):
@@ -667,12 +1216,64 @@ def test_jax_candidate_commit_interruptions_repair_all_owners(monkeypatch, stage
 
     monkeypatch.setattr(jax_base, "_training_commit_boundary", interrupt)
     with pytest.raises(RuntimeError, match=stage):
-        exp.train_fn(exp)
+        with exp.train_fn.input_session(exp) as inputs:
+            prior = inputs.capture()
+            candidate = inputs.traversal.next_epoch().reserve()
+            with inputs.update(candidate, repairable=True):
+                exp.train_fn._commit_update(
+                    exp, {"weight": exp.model.parameters["weight"] + 1}, candidate_mutable,
+                    candidate_rng, {"count": jax.numpy.asarray(1, dtype=jax.numpy.int32)},
+                    examples=2, loss=1., complete_epoch=False, input_candidate=candidate,
+                )
 
     np.testing.assert_array_equal(exp.model.parameters["weight"], before)
+    assert exp.model.parameters is prior_parameters
+    assert exp.model.mutable_state is prior_mutable
+    assert exp.model.rng is prior_rng
+    np.testing.assert_array_equal(exp.model.mutable_state["updates"], np.asarray(0, dtype=np.int32))
+    np.testing.assert_array_equal(jax.random.key_data(exp.model.rng), prior_rng_data)
     np.testing.assert_array_equal(exp.train_fn.continuation["marker"], np.asarray(7, dtype=np.int32))
-    assert exp.train_fn.optimizer.state is not None
+    assert exp.train_fn.optimizer.state is prior_slots
+    np.testing.assert_array_equal(exp.train_fn.optimizer.state["count"], np.asarray(0, dtype=np.int32))
     assert (exp.state.step, exp.state.examples_seen, exp.state.next_batch) == (0, 0, 0)
+    assert exp.state.input_sequence == 0 and exp.state.dataset_state is prior
+    assert inputs.traversal.position == prior.position
+    assert exp.state._input_provider is None
+    assert not exp.model._restore_failed and not exp.train_fn.optimizer._restore_failed
+    with exp.train_fn.input_session(exp) as inputs:
+        assert inputs.capture() is prior
+
+
+def test_jax_candidate_failed_installation_repair_invalidates_owners(monkeypatch):
+    """A local installation/repair failure retires owners instead of claiming rollback."""
+    jax = pytest.importorskip("jax")
+    from dryml.core.repo import RepoSaveError
+
+    exp = _experiment()
+    exp.train_fn.optimizer.state = {"count": jax.numpy.asarray(0, dtype=jax.numpy.int32)}
+    install = exp.model._install_candidate_state
+    calls = []
+
+    def fail_install(*args):
+        calls.append(True)
+        if len(calls) == 1:
+            install(*args)
+            raise RuntimeError("installation failed")
+        raise RuntimeError("repair failed")
+
+    monkeypatch.setattr(exp.model, "_install_candidate_state", fail_install)
+    with pytest.raises(RuntimeError, match="installation failed") as error:
+        with exp.train_fn.input_session(exp) as inputs:
+            inputs.capture()
+            candidate = inputs.traversal.next_epoch().reserve()
+            _candidate_transaction()(exp.train_fn, exp, inputs, candidate,
+                                     lambda *args: _pure_candidate(jax, *args), jax)
+    assert calls == [True, True]
+    assert any("repair failed" in note for note in error.value.__notes__)
+    assert exp.model._restore_failed and exp.train_fn.optimizer._restore_failed
+    assert exp.state._input_provider is None and inputs._guard is None
+    with pytest.raises(RepoSaveError, match="invalidated"):
+        exp.train_fn(exp)
 
 
 def test_jax_training_apply_contract_fails_before_owner_installation():
@@ -823,6 +1424,7 @@ def test_jax_seeded_take_resume_reopens_the_saved_epoch_before_skip(tmp_path):
 
     def pause_in_epoch_one():
         if (interrupted.state.epoch, interrupted.state.next_batch) == (1, 1):
+            interrupted.state._input_provider.capture()
             raise RuntimeError("pause in generated epoch")
 
     with pytest.raises(RuntimeError, match="generated epoch"):
@@ -877,6 +1479,7 @@ def test_jax_rng_and_mutable_state_resume_match_uninterrupted_adam(tmp_path):
     interrupted = make_experiment(repo=repo)
 
     def pause():
+        interrupted.state._input_provider.capture()
         raise RuntimeError("stochastic pause")
 
     with pytest.raises(RuntimeError, match="stochastic pause"):
@@ -944,6 +1547,7 @@ if sys.argv[1] == 'save':
     repo = Repo(DirStore(sys.argv[2]))
     interrupted = experiment(repo)
     def pause():
+        interrupted.state._input_provider.capture()
         raise RuntimeError('pause after accepted update')
     try:
         interrupted.train_fn(interrupted, callbacks=(pause,))

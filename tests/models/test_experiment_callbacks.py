@@ -48,18 +48,20 @@ def test_caller_observer_runs_after_completed_experiment_history_without_mutatio
     seen = []
 
     def first(obj, context):
-        history = ExperimentData.find(context.checkpoint_state_ref.object_projection(), repo=context.state_repo)
+        history = ExperimentData.find(context.latest_checkpoint.object_view(), repo=context.state_repo)
         seen.append(("first", history.data.iloc[0].evaluation_status))
 
     def second(obj, context):
-        seen.append(("second", context.checkpoint_state_ref))
+        seen.append(("second", context.latest_checkpoint))
 
     callbacks = [first, second]
     config = ManagedConfig(state_repo=repo, callbacks=callbacks)
     final = exp.train(managed=config)
 
     assert callbacks == [first, second]
-    assert seen == [("first", "completed"), ("second", final)]
+    assert seen[0] == ("first", "completed")
+    assert len(seen) == 2 and seen[1][0] == "second"
+    assert seen[1][1].graph_equal(final.final_state_ref)
 
 
 def test_caller_interrupt_is_decided_only_after_experiment_observer(tmp_path):
@@ -71,7 +73,7 @@ def test_caller_interrupt_is_decided_only_after_experiment_observer(tmp_path):
     observed = []
 
     def request(obj, context):
-        history = ExperimentData.find(context.checkpoint_state_ref.object_projection(), repo=context.state_repo)
+        history = ExperimentData.find(context.latest_checkpoint.object_view(), repo=context.state_repo)
         observed.append(history.data.iloc[0].evaluation_status)
         assert obj.train.request_interrupt(state_repo=context.state_repo).outcome == "requested"
 
@@ -90,7 +92,7 @@ def test_caller_failure_after_terminal_observer_preserves_completed_history(tmp_
     callbacks = []
 
     def fail(obj, context):
-        history = ExperimentData.find(context.checkpoint_state_ref.object_projection(), repo=context.state_repo)
+        history = ExperimentData.find(context.latest_checkpoint.object_view(), repo=context.state_repo)
         callbacks.append(("fail", history.data.iloc[0].evaluation_status))
         raise RuntimeError("caller failed")
 
@@ -98,8 +100,8 @@ def test_caller_failure_after_terminal_observer_preserves_completed_history(tmp_
     with pytest.raises(RuntimeError, match="caller failed"):
         exp.train(managed=config)
 
-    checkpoint = exp.train.status(state_repo=repo).checkpoint_state_ref
-    history = ExperimentData.find(checkpoint.object_projection(), repo=repo)
+    checkpoint = exp.train.status(state_repo=repo).checkpoint
+    history = ExperimentData.find(checkpoint.object_view(), repo=repo)
     assert callbacks == [("fail", "completed")]
     assert config.callbacks == [fail]
     assert history.data.iloc[0].evaluation_status == "completed"
@@ -133,7 +135,7 @@ def test_best_effort_telemetry_warns_once_closes_and_allows_completion(tmp_path)
         ("close", None),
     ]
     assert exp.state.is_trained
-    assert exp.train.status(state_repo=repo).final_state_ref == final
+    assert exp.train.status(state_repo=repo).final.graph_equal(final.final_state_ref)
 
 
 def test_strict_telemetry_fails_after_retained_update_without_false_completion(tmp_path):
@@ -163,8 +165,8 @@ def test_strict_telemetry_fails_after_retained_update_without_false_completion(t
     status = exp.train.status(state_repo=repo)
     assert (exp.model.value, exp.state.step, closed) == (1, 1, ["closed"])
     assert status.state == "failed"
-    assert status.checkpoint_state_ref is not None
-    assert status.final_state_ref is None
+    assert status.checkpoint is not None
+    assert status.final is None
 
 
 def test_telemetry_cleanup_does_not_mask_an_escaping_failure(tmp_path):
@@ -283,3 +285,36 @@ def test_telemetry_rejects_a_trainer_without_observer_support_before_mutation(tm
         )
 
     assert (exp.model.value, exp.state.step, exp.state.phase) == (0, 0, None)
+
+
+def test_exact_capture_failure_does_not_associate_a_new_managed_checkpoint(tmp_path, monkeypatch):
+    """Accepted update two survives failed capture; checkpoint one remains usable."""
+    import numpy as np
+    from dryml.data import ArrayDataset, DatasetTraversal
+    from dryml.core.repo import RepoSaveError
+    from .test_training_transaction import Counter, Procedure
+
+    repo = Repo(DirStore(tmp_path / "state", query_index="none"))
+    exp = Experiment(Counter(), Procedure(), ArrayDataset(np.asarray([1, 2, 3])),
+                     checkpoint_every_steps=1, repo=repo)
+    checkpoints = []
+    original = DatasetTraversal.capture_state
+    def capture(owner):
+        if owner.position.sequence == 2:
+            raise ValueError("dynamic state no longer saveable")
+        return original(owner)
+    monkeypatch.setattr(DatasetTraversal, "capture_state", capture)
+    def associated(obj, ctx):
+        checkpoints.append(ctx.latest_checkpoint)
+    with pytest.raises(RepoSaveError, match="snapshot-local") as failure:
+        exp.train(managed=ManagedConfig(state_repo=repo, callbacks=[associated]))
+    assert isinstance(failure.value.__cause__, ValueError)
+    assert str(failure.value.__cause__) == "dynamic state no longer saveable"
+    status = exp.train.status(state_repo=repo)
+    assert status.state == "failed" and status.final is None
+    assert len(checkpoints) == 1 and status.checkpoint.graph_equal(checkpoints[0])
+    assert exp.last_state_ref.graph_equal(checkpoints[0])
+    assert (exp.state.step, exp.state.input_sequence, exp.model.value) == (2, 2, 3)
+    assert not exp.model._restore_failed and exp.state._input_provider is None
+    restored = repo.load(checkpoints[0], cache="none")
+    assert (restored.state.step, restored.state.input_sequence, restored.model.value) == (1, 1, 1)

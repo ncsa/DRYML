@@ -115,16 +115,16 @@ import sys
 import dryml.methods
 from dryml.methods.stream import DatasetExhaustedError, StreamGraphCursor, _StreamOp, _TakeIterator
 class Source:
-    def iterator(self):
+    def open(self, epoch):
         return iter((1,))
-cursor = StreamGraphCursor(_StreamOp('source', dataset=Source()))
+cursor = StreamGraphCursor(_StreamOp('source', source=Source()))
 try:
     cursor.skip(2)
 except DatasetExhaustedError as error:
     assert (error.requested, error.yielded) == (2, 1)
 else:
     raise AssertionError('skip did not report shortfall')
-cursor = StreamGraphCursor(_StreamOp('source', dataset=Source()))
+cursor = StreamGraphCursor(_StreamOp('source', source=Source()))
 try:
     next(_TakeIterator(cursor, iter(()), 2))
 except DatasetExhaustedError as error:

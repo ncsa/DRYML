@@ -1,5 +1,62 @@
 # Release Notes
 
+## Unreleased
+
+- Add independent DatasetTraversal owners, continuous explicit `Epoch` sections,
+  implicit finite passes, selected-epoch `iterate()`, and explicit single-use input
+  acceptance. Export typed session/recovery contracts, including BatchPreparation.
+- Add detached DatasetState v1 no-clobber directory IO, indexed restoration,
+  traversal-local ordinary-generator replay, explicit RecoverableGenerator direct
+  restoration, mixed Zip frontiers, and stable source-backed notebook producers.
+  Source availability and retention remain explicit; no generator frame is saved.
+- Add streaming Accumulate with observation-first Accumulator transitions. Fold
+  remains terminal with its unchanged v3 root-output-EOF authority.
+- Associate accepted input with TrainState/Experiment v3 through existing payload
+  hooks, with capture on save/final exact completion. Historical consumer v2 is
+  rejected without migration. Preserve token-qualified Keras prefetch/overlap and
+  fail-and-restore native-owner boundaries. Standalone input IO is not a managed
+  checkpoint. See [Data](data.md) and [Models](models.md).
+- Add an opt-in fixed CPU JSON comparison and offline installed-package suffix
+  probes. Native parity, accelerator performance and real Optax/JAX training are
+  not certified by work-count or overlap correctness tests; capture copies,
+  positional replay, fit setup and unresolved comparison evidence remain visible.
+
+- Share repeated exact Node value blocks in large managed-control records so
+  checkpoint/final-association preparation can fit the existing 1 MiB wire limit.
+  Preserve exact nested snapshot CAS bytes, legacy plain records, graph identities
+  and metadata-only recovery/replay; bound expanded metadata separately to 8 MiB.
+- Add Padding with optional bool validity masks, fixed or per-input maximum
+  targets, sample-axis selection, left/right placement and explicit truncation.
+  Support dense NumPy/TensorFlow/Torch/JAX execution and NumPy/TensorFlow ragged
+  inputs, with pure structured spec inference, prepared pipelines, empty rows,
+  gradient preservation and dense model handoffs.
+- Add owned NumPy RaggedTensor values and native TensorFlow ragged pipelines,
+  including explicit ragged collation, nested Batch/Unbatch partition inference,
+  empty rows, mixed trees, selected/prepared Method IR, and partition-preserving
+  Cast/Scale. Validate rank/offset metadata and reject unsupported ragged shape
+  transforms or implicit dense/backend conversions explicitly.
+- Qualify dynamic dense sample dimensions together with variable batches across
+  known-spec Methods, composition, Models, and ordinary/prepared Dataset paths.
+  Interpret declared axis names on native values, preserve names through ArgMax
+  and Flatten inference, retain provable zero flattened widths, and reshape empty
+  batches without an ambiguous inferred dimension. Reject merged specs that mix
+  batched and unbatched interpretations.
+- Allow GeneratorDataset spec hints alongside explicit example totals and close
+  sampling resources deterministically on successful or failed inference.
+- Preserve GeneratorDataset's explicit example total through example-preserving
+  Map and whole-source yield ranges, including finite dynamic batches with a
+  short final batch. Partial dynamic-batch ranges remain unknown without a proof.
+- Add `dryml.numpy.NumpyArray`, a zero-initialized Serializable container with
+  searchable shape/dtype arguments, read-only owned content and non-pickle NPY
+  state payloads. Values remain replaceable within the declared shape/dtype;
+  saved references retain exact arrays without embedding values in definitions.
+- Support class-agnostic Python object values and list/tuple batches through
+  object/Python-layout TensorSpecs, shared spec inference, Method learning, and
+  ordinary or prepared Dataset pipelines. Preserve opaque inputs, outputs, and
+  intermediate IR values across compositions while validating surrounding
+  structure and batch length; preserve dense NumPy object arrays. GeneratorDataset
+  accepts SpecHint objects as normalized inference metadata.
+
 ## 0.3.0b4 (unreleased)
 
 - Improve shared-Store training, checkpoint publication, history queries, and

@@ -188,9 +188,11 @@ def _confirm_final(control, current):
         raise ManagedRecoveryError("unconfirmed_final", "final grants require confirmation")
     _confirm_root(ledger, root.selection, resources=root.resources)
     control.control_store.retention.adopt(ledger.token, _stores(control))
-    for store in _stores(control):
-        if store.authority_cut().pending:
-            raise ManagedRecoveryError("pending_finalization", "finalization prerequisites require exact acknowledgement")
+    # Result/capture receipts and the grant handshake above confirm their exact
+    # mutations. An independent operation may publish after those confirmations;
+    # only this operation's control/preparation debt fences its completion.
+    if control._pending_mutations(current.operation_id):
+        raise ManagedRecoveryError("pending_finalization", "finalization prerequisites require exact acknowledgement")
     return root.selection
 
 

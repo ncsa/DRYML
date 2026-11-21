@@ -165,6 +165,111 @@ invoker; retained Map, Fold, and group execution uses it throughout the invocati
 Calling a selected carrier directly remains supported and prepares a fresh
 invocation, without a second global or carrier compilation cache.
 
+Prepared invokers compile pure metadata predicates for simple dense numerical
+NumPy constraints. Every exact `numpy.ndarray` input still has its current dtype,
+physical shape, fixed/Dynamic dimensions and logical leading batch checked on
+every call, including empty arrays and changed metadata on a reused array. Native
+sample-axis labels inherit the declaration as in generic validation. Byte order
+uses the same canonical semantic dtype interpretation as `TensorSpec`; it is not
+an additional constraint. No input values or validation results are cached.
+Structured/subarray/metadata-bearing or unsupported dtypes, ndarray subclasses,
+non-NumPy values, opaque leaves, nested structures, and complex layout constraints
+retain generic runtime normalization and its errors. Declared backend activation
+still precedes input checks. Raw-result validation still runs before publication,
+and each call retains fresh signature normalization and caller-owned Repo/context
+delivery. These immutable predicates introduce no shared mutable validation cache.
+
+During `tf.function` tracing, the TensorFlow adapter inspects exact built-in
+dense, ragged and sparse TypeSpecs with ordinary shape/dtype metadata as Python,
+using a leaf-local AutoGraph exclusion. Optional TensorFlow imports still occur
+only at a visited leaf; importing `dryml.tf` or converting empty trees remains
+passive. Eager ragged inference still reads each row partition to prove uniform
+widths; traced inference uses static TypeSpec facts without host readback. No
+values or inference results are cached. Custom value conversion hooks and
+TypeSpec/metadata subclasses keep their ordinary conversion context. Method
+selection, input/raw-result checks, core signature delivery and user tensor
+control flow continue through their existing paths.
+
+### Dynamic Dense Calls
+
+Known-spec preparation supports Dynamic sample dimensions and Dynamic batch sizes
+at the same time, including `shape=(10, Dynamic)`, `shape=(Dynamic, 5)` and
+`shape=(Dynamic, Dynamic)` with `batch=Dynamic`. Repeated calls and graph edges
+retain the declared contracts rather than specializing to the first concrete size.
+Different sizes reuse finalized invokers without selection or signature compilation.
+Fixed axes, rank, dtype, layout and backend remain checked. Named sample axes on
+native values are interpreted from retained declarations; explicit TensorSpec
+arguments must carry compatible metadata themselves.
+
+Pure `infer_output_spec()` rules describe how each authored operation changes
+shape. Pipe threads those rules and Project/Select preserve their structured
+results. Dynamic does not prove equality between operands: an operation such as
+Diff still checks actual equal shapes rather than silently broadcasting. Models
+with explicit dynamic output specs retain them and inherit input batch metadata;
+the native model must itself support the concrete dimensions supplied.
+
+First-call numerical `learn()` remains exact. Supply a known dynamic spec to admit
+variation deliberately, and `output_spec=` to validate the raw output. This is
+local Method/IR reuse, not a guarantee about native JIT retracing or compilation.
+
+### Ragged Calls
+
+NumPy RaggedTensor and native TensorFlow ragged values are logical tensor leaves.
+Known-spec preparation validates layout, partition rank/dtype, fixed uniform axes,
+numeric dtype and batch metadata while admitting declared Dynamic dimensions.
+Cast and scalar Scale preserve partitions; Pipe, Project, Select and authored
+Models retain ragged graph ports and may return dense tensors. Unsupported ragged
+Flatten/ArgMax inference and automatic cross-backend conversions fail explicitly.
+See [Ragged Tensors](ragged.md) for partition semantics and Dataset integration.
+
+### Padding Outputs
+
+Padding is a tensor Method with native NumPy/TensorFlow/Torch/JAX alternatives.
+Its optional mask is part of the inferred output SpecTree, not hidden runtime
+state. Fixed targets resolve output dimensions before values exist; per-input
+maxima retain Dynamic dimensions. Named bool masks describe the sample prefix
+through the final padded axis and preserve the input batch contract. Pipe,
+Project, Select and authored Models can consume or forward the values/mask dict.
+See [Padding And Validity Masks](padding.md) for geometry and failure semantics.
+
+## Opaque Object Inputs And Outputs
+
+`TensorSpec("object", layout="python")` describes one arbitrary Python value,
+without class registration or content inspection. Use `.with_batch(Dynamic)` or
+a fixed batch size for a list/tuple of opaque values. Known-spec preparation
+(`method.learn(object_spec)`) and selected input/raw-result validation preserve
+the values by reference. An opaque container is one leaf; its dict/list contents
+are not recursively normalized, hashed, coerced to arrays, or retained in a cache.
+Only the explicit outer batch length and declared surrounding tree structure are
+validated. Dynamic batches accept different lengths, including a short final
+batch; Dataset example-count contracts still reject empty batches.
+
+An object-only input has no tensor backend, rather than an unknown one: selection
+admits generic implementations and rejects tensor-specific-only catalogs without
+opening a source to discover a backend. In mixed object/tensor trees, only tensor
+fields contribute backend facts. Completing or discovering those fields never
+assigns a backend to an opaque field or inspects its content. First-call learning
+also infers unknown Python leaves as object/Python-layout specs. Standard
+containers remain structural trees; with batched intent, a nonempty list/tuple
+of opaque leaves becomes an object batch. Use an explicit spec for ambiguous
+containers or variable batch lengths. Once retained, an opaque leaf accepts any
+Python value, including a tensor or container, without reclassifying its contents.
+
+A mesh-to-tensor Method can therefore accept an opaque input and infer, for
+example, `TensorSpec("float32", shape=(256, 8), backend="numpy")`. Its Python body
+owns the conversion algorithm. Implementation backend traits describe input
+requirements; returning a NumPy tensor does not require a NumPy input trait.
+Dense NumPy object-array inputs continue to use their normal NumPy backend and
+dense tensor shape metadata.
+
+These are ordinary IR values in either direction: object-to-object,
+tensor-to-object, and object-to-tensor Methods compose through Pipe, Project,
+Select, accumulator carry, and Dataset Map graphs. Selected graph ports retain
+the inferred output specs. No mesh-specific adapter is needed; each authored
+Method remains responsible for interpreting its input and declaring its output.
+Native adapter/dtype failures still raise rather than silently changing a tensor
+into an opaque value.
+
 ## Accumulators
 
 `Accumulator[ObservationT, StateT]` is an abstract two-input Method for one
@@ -216,8 +321,9 @@ imports when called with no arguments. The next supported call normalizes
 complete positional and keyword layout, selects under eager rules, and publishes an immutable
 `cached_signature` plus target before invocation. Selection/normalization
 failure stays learning without a partial cache; a selected target that fails
-still leaves the cache available. Unsupported opaque learning values raise
-`MethodError`; ordinary eager generic calls remain available.
+still leaves the cache available. Unknown Python leaves normalize to opaque
+specs without retaining their classes or values. Invalid native tensor metadata
+or unsupported structural keys still fail before caching or invocation.
 
 `learn(input_spec, *additional_input_specs, strategy="local",
 output_spec=None)` instead prepares a retained local invoker from known
@@ -238,7 +344,7 @@ mutating that child's first-call cache. Element-only Method graphs reject
 `iterator()`. A Dataset supplies the iterator-port form through
 `dataset.method_graph()`: it is inert until `learn(strategy="local")` records
 its qualified stream plan, then `iterator()` returns an independent pull cursor.
-The qualified stream subset is Map, Batch, Unbatch, Zip, and Chain. Ports carry
+The qualified stream subset is Map, Batch, Unbatch, Take, Zip, and Chain. Ports carry
 element specs separately from iterator consumption/emission, so a list returned
 from an element Method is still one output element. `IteratorPort` and
 `StreamNode` provide the bounded deterministic custom authoring seam; their
@@ -252,8 +358,9 @@ direct CPU host-copy handoff to a uniquely most-specific target backend. Each
 `ConversionEdge` exposes producer/consumer specs, adapter name, exact
 dtype/shape/batch preservation, and CPU device policy. Ties remain selection
 errors; there is no framework preference, route search, cost ranking, or
-multi-edge conversion. Planning imports neither optional framework and invokes
-no adapter.
+multi-edge conversion. Map/handoff planning imports neither optional framework
+and invokes no conversion adapter. Declared Batch/Unbatch selection may load its
+configured backend's native stack/split operation during preparation.
 
 Dataset graph cursors own source and selected-output resources, close acquired
 resources once in reverse acquisition order, and preserve a primary acquisition
@@ -277,6 +384,37 @@ the previous plan and independently running cursors usable. Dataset graph
 `eager()` discards only that plan's selections; already captured cursors continue
 using their invokers. Direct `Method.learn()` retains its distinct clearing
 contract: a failed reprepare leaves learning mode with no old or partial plan.
+
+Each prepared occurrence also retains immutable controls, a deterministic child
+path, normalized spec/cardinality evidence, source bindings, and Zip/Chain
+topology. Qualified pulls consume these descriptors rather than Dataset recipe
+attributes. Batch collators and Unbatch splitters are retained at preparation
+lifetime, alongside fully declared Map invokers; backend-unknown Map discovery
+remains cursor-local. Data supplies inert source-opening adapters through a
+one-way hook; Methods imports neither Data nor Models. Bound custom-source
+compatibility openers do not certify frozen custom configuration or recovery.
+
+`dryml.methods.stream_state` exposes dependency-light structural protocols:
+`SourceBinding.open(epoch)` supplies independent acquisition;
+`StreamExecution.pull()` reports `PullKind.DELIVERY`, `SECTION_END`, or
+`ROOT_END`, with a borrowed `value` only for delivery. `BoundaryHandoff` is the
+separate optional transition out of a pending section, and `StateExport` /
+`StateRestore` describe explicit, domain-validated state transfer. These names
+are submodule exports, not additions to the Methods-root manifest. They define
+local execution capabilities, not a persisted schema or Dataset traversal API.
+Data owns the public `RecoverableGenerator` ABC and detached DatasetState schema;
+Methods does not import those consumers. State hooks are capture-time operations,
+not part of delivery. Fully declared Map, initializer, Accumulator, collator and
+splitter selections are retained across adjacent sections and independent sessions.
+
+`StreamGraphCursor.pull()` is an optional one-pass adapter over the existing
+flattened iterator: it reports delivery/root completion, never section end.
+Calling it after explicit close without observed EOF raises `RuntimeError`;
+source/operator/cleanup errors propagate. Ordinary `next()` keeps returning the
+authored value directly, including native batches, without per-edge event boxes,
+state extraction, serialization, or source-payload clones. Capturing state is an
+explicit optional operation, not part of a pull. Root EOF remains distinct from
+a logical section boundary; the protocols alone introduce no section policy.
 
 The protected lifecycle in `methods.stream` is shared with ordinary Dataset and
 native-training cursors. Use a cursor context manager around consumer work to
@@ -331,6 +469,10 @@ inference, or default lookup. A mismatch raises
 `PreparedCallMismatchError(expected, observed)` before user code and preserves
 the cache. `MethodCallNode` and `MethodCallSignature` are immutable diagnostic
 carriers that preserve tensor, tuple, list, mapping, and mapping-order facts.
+Opaque leaves compare only their logical spec, not class or content; learned
+object batches retain the observed fixed outer length. Surrounding structure and
+numerical fields remain exact. For variable batches, use known-spec preparation
+with `batch=Dynamic`.
 
 `eager()` returns `None`, clears learning/cached state, and preserves an explicit
 `default_batched`. `learn()` from cached state similarly clears the old cache and

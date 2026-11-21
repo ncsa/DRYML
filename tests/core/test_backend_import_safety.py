@@ -42,10 +42,15 @@ import sys
 
 assert "tensorflow" not in sys.modules
 import dryml.tf
+from dryml.tf.tensor_spec import as_tensor_spec
 from dryml.core.tensor_spec import TensorSpec
 
 spec = TensorSpec("float32", shape=(32,))
 assert hasattr(spec, "tf")
+from collections import namedtuple
+Empty = namedtuple("Empty", "")
+for tree in ({}, [], (), {"x": [(), {}, Empty()]}):
+    assert as_tensor_spec(tree, batched=True) == tree
 assert "tensorflow" not in sys.modules
         """
     )

@@ -118,6 +118,42 @@ def _fold(source: FileDataset, *, repo: Repo | None = None) -> Fold:
     return Fold(source, initial_state=Zero(), accumulator=Sum(), repo=repo)
 
 
+def test_early_sectioned_cursor_close_cannot_authorize_fold_finalization(tmp_path, monkeypatch):
+    """Closing after one section leaves active v3 progress and reports missing root EOF."""
+    from dryml.data import ArrayDataset, Batch, Epoch
+
+    source = Batch(Epoch(ArrayDataset(np.arange(1, 5, dtype=np.float64)), len=2), 2)
+    with source.open() as traversal:
+        view = traversal.next_epoch()
+        next(view)
+        view.close()
+        assert not traversal.position.root_complete
+    cursor = source.prepare().iterator()
+    fold = Fold(source, initial_state=Zero(), accumulator=Sum())
+    monkeypatch.setattr(Fold, "_load_source", lambda self, managed: source)
+    monkeypatch.setattr(source, "iterator", lambda: cursor)
+    original = Fold._select_followups
+
+    def select(self, *specs):
+        transition, finalizer = original(self, *specs)
+
+        def close_after_first(observation, state):
+            result = transition(observation, state)
+            cursor.close()
+            return result
+
+        return close_after_first, finalizer
+
+    monkeypatch.setattr(Fold, "_select_followups", select)
+    with pytest.raises(ValueError, match="without observed root-output EOF"):
+        fold.compute(checkpoint_every=1, managed=ManagedConfig(state_repo=DirStore(tmp_path / "state")))
+    assert not cursor.observed_eof
+    assert not fold.ready
+    assert fold._fold_progress_version == 3
+    assert fold._fold_progress["state"] == "active"
+    assert "eof" not in fold._fold_progress
+
+
 def _run_managed(artifact, *, placement: str, repo: Repo, control_store: DirStore, spool: Path):
     """Compute one Artifact directly or through one real core subprocess.
 

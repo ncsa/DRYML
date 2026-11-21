@@ -10,7 +10,7 @@ from threading import RLock
 from dryml.annotations import AnnotatedMember, annotations_for_members
 from dryml.core.backend import Backend
 from dryml.core.object import Object, _register_class_transformer
-from dryml.core.tensor_spec import BatchMode, SpecTree, TensorSpec
+from dryml.core.tensor_spec import BatchMode, SpecTree, TensorSpec, iter_specs
 from dryml.core.utils.recurse import iter_leaves
 
 from .errors import ImplementationDeclarationError, ImplementationSelectionError, MethodError, PreparedCallMismatchError
@@ -34,6 +34,7 @@ from .signature import (
     spec_from_runtime_node,
     spec_node,
     spec_nodes,
+    _python_object_inputs,
 )
 from .traits import METHOD_TRAITS_KEY, Traits
 
@@ -362,7 +363,10 @@ class Method(Object):
 
         Args:
             input_spec: Optional known first input specification. Omitting it
-                preserves the original first-supported-call learning behavior.
+                learns numerical metadata and class-agnostic opaque Python leaf
+                boundaries from the first call. Standard containers remain trees;
+                batched intent admits nonempty lists/tuples of opaque leaves as
+                object batches. Explicit specs resolve ambiguous containers.
             *additional_input_specs: Known later positional input specifications.
             strategy: Preparation strategy. U4 supports only ``"local"``.
             output_spec: Optional raw-result contract for known-spec preparation.
@@ -636,8 +640,8 @@ class Method(Object):
         input_nodes, required_backend, required_batch = self._selection_constraints(
             input_spec, additional_input_specs, backend, batch_mode
         )
-        del input_nodes
-        return self._compatible(required_backend, required_batch)
+        return self._compatible(required_backend, required_batch,
+                                python_objects=_python_object_inputs(input_nodes))
 
     def find_implementation(
         self,
@@ -659,6 +663,11 @@ class Method(Object):
             output_spec: Optional normalized raw-result constraint retained by the
                 returned callable. It validates after target execution but before
                 a raw-result callback or successful return.
+
+        Object/Python-layout leaves are content-agnostic. Object-only input trees
+        select generic implementations without backend discovery; numeric fields
+        in mixed trees retain their own backend requirements. Selected validation
+        checks opaque batch lengths but never inspects the elements' contents.
 
         Returns:
             One callable carrier retaining its raw authored target and traits.
@@ -705,15 +714,18 @@ class Method(Object):
             output_node = None if output_spec is None else spec_node(output_spec)
         except TypeError as error:
             raise ImplementationSelectionError("conflict") from error
-        direct_candidates = self._compatible(required_backend, required_batch)
+        python_objects = _python_object_inputs(input_nodes)
+        direct_candidates = self._compatible(required_backend, required_batch, python_objects=python_objects)
         input_nodes = tuple(complete_backend_constraint(node, required_backend) for node in input_nodes)
         if input_nodes:
             from .signature import spec_from_node
 
             input_spec = spec_from_node(input_nodes[0])
         if direct_candidates:
-            implementation = self._select(required_backend, required_batch)
+            implementation = self._select(required_backend, required_batch, python_objects=python_objects)
         else:
+            if python_objects:
+                raise ImplementationSelectionError("no_candidate")
             implementation = self._select_converted(
                 input_spec,
                 additional_input_specs,
@@ -807,6 +819,8 @@ class Method(Object):
             raise ImplementationSelectionError("conflict") from error
         if required_backend is not None and spec_backend is not None and required_backend != spec_backend:
             raise ImplementationSelectionError("conflict")
+        if required_backend is not None and _python_object_inputs(input_nodes):
+            raise ImplementationSelectionError("conflict")
         if required_batch is not None and spec_batch is not None and required_batch != spec_batch:
             raise ImplementationSelectionError("conflict")
         selected_backend = required_backend or spec_backend
@@ -827,6 +841,7 @@ class Method(Object):
         self,
         backend: Backend | None,
         batch_mode: BatchMode | None,
+        *, python_objects: bool = False,
     ) -> tuple[MethodImplementation, ...]:
         """Return ordered catalog alternatives whose supplied traits do not conflict."""
 
@@ -834,13 +849,14 @@ class Method(Object):
             candidate
             for candidate in self.implementations()
             if (candidate.traits.backend is None or backend is None or candidate.traits.backend == backend)
+            and (not python_objects or candidate.traits.backend is None)
             and (candidate.traits.batch_mode is None or batch_mode is None or candidate.traits.batch_mode == batch_mode)
         )
 
-    def _select(self, backend: Backend | None, batch_mode: BatchMode | None) -> MethodImplementation:
+    def _select(self, backend: Backend | None, batch_mode: BatchMode | None, *, python_objects=False) -> MethodImplementation:
         """Choose one direct-safe candidate or raise a typed bounded diagnostic."""
 
-        candidates = self._compatible(backend, batch_mode)
+        candidates = self._compatible(backend, batch_mode, python_objects=python_objects)
         if not candidates:
             raise ImplementationSelectionError("no_candidate")
         unknown = tuple(
@@ -902,7 +918,7 @@ class Method(Object):
             if expected is None or cached is None:
                 raise MethodError("Method cached state is incomplete.")
             try:
-                observed = call_signature(args, kwargs)
+                observed = call_signature(args, kwargs, expected=expected)
             except (TypeError, ValueError) as error:
                 raise PreparedCallMismatchError(expected, expected) from error
             if observed.batch_mode is None:
@@ -923,7 +939,7 @@ class Method(Object):
             try:
                 signature = call_signature(args, kwargs)
             except TypeError as error:
-                raise MethodError("Method learning requires supported tensor-like call values.") from error
+                raise MethodError("Method learning requires representable logical call values.") from error
             backend = signature.backend
             effective_batch = signature.batch_mode
             if effective_batch is None and default_batched is not None:
@@ -934,9 +950,13 @@ class Method(Object):
                     if not signature.args
                     else spec_from_runtime_node(signature.args[0], effective_batch)
                 )
+                python_objects = input_spec is not None and _python_object_inputs((spec_node(input_spec),))
+                if input_spec is not None and any(spec.is_python_object for spec in iter_specs(input_spec)):
+                    schema = replace(signature, args=(spec_node(input_spec), *signature.args[1:]))
+                    signature = call_signature(args, kwargs, expected=schema)
                 implementation = receiver._prepare_implementation(
                     input_spec,
-                    backend=backend,
+                    backend=None if python_objects else backend,
                     batch_mode=effective_batch,
                 )
             except TypeError as error:

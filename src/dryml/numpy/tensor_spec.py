@@ -82,19 +82,38 @@ def as_tensor_spec(
     batched: bool = False,
     batch_axis_name: str | None = "batch",
 ) -> SpecTree:
-    from dryml.core.tensor_spec import Layout
-    """
-    Convert a NumPy ndarray or NumPy scalar value to a DRYML TensorSpec.
+    """Infer dense or packed-ragged NumPy metadata without retaining values.
 
-    Parameters
-    ----------
-    batched:
-        NumPy arrays do not intrinsically identify a "batch axis".
-        If True, interpret the leading axis as batch.
+    Args:
+        x: NumPy arrays/scalars, RaggedTensors, Python scalars or a plain tree.
+        batched: Interpret the leading physical axis as batch. This changes
+            interpretation, not the ragged partition rank.
+        batch_axis_name: Optional logical name for that batch axis.
+
+    Returns:
+        A corresponding SpecTree with NumPy backend. Ragged metadata includes
+        partition rank/dtype and uniform axis sizes proved by row splits.
+
+    Raises:
+        TypeError: For unsupported native values/dtypes.
+        ValueError: For scalar batching or invalid metadata.
+
+    Side Effects:
+        Reads ragged partition offsets to infer uniform widths. No padding,
+        optional framework import, native payload retention or I/O occurs.
     """
+    from dryml.core.tensor_spec import Layout
     def leaf_to_spec(x: Any) -> TensorSpec:
         from dryml.core.tensor_spec import TensorSpec
         from dryml.core.dtype import dtype
+        from .ragged import RaggedTensor
+        if isinstance(x, RaggedTensor):
+            shape = tuple(Dynamic if dim is None else dim for dim in x.shape)
+            sample_shape, batch = _split_batch(shape, batched=batched)
+            return TensorSpec(dtype=dtype(x.dtype), shape=sample_shape, batch=batch,
+                              layout=Layout.RAGGED, backend="numpy", ragged_rank=x.ragged_rank,
+                              row_splits_dtype=dtype(x.row_splits_dtype),
+                              batch_axis_name=batch_axis_name if batch is not None else None)
         if isinstance(x, np.ndarray):
             shape = _np_shape_to_dryml(x.shape)
             sample_shape, batch = _split_batch(shape, batched=batched)

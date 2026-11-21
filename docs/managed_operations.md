@@ -31,6 +31,19 @@ proofs and optional-backend limits are recorded in
 Acquiring low-level admission or constructing metadata alone does not retain
 private state. U15's selected saved-start handshake does acquire physical grants.
 
+### Dataset continuation association
+
+Standalone `DatasetState.save(path)` writes a detached Data-owned v1 directory;
+it does not publish an Object, establish a managed checkpoint, or retain external
+source states. TrainFunction owns one invocation-local input capture provider.
+Experiment's existing payload hook requests its coherent accepted cut and writes
+TrainState/Experiment v3 with one continuation bundle. Logging-only safe points
+request no capture. Core publication and Managed checkpoint association still
+decide which complete consumer state is recoverable; a detached input directory
+alone cannot restore optimizer/model progress. Capture or publication failure must
+preserve prior associated checkpoints. See [input recovery](models.md#invocation-owned-input-recovery)
+for exact versus positional retries and native-owner invalidation.
+
 ### Invocation-local performance and evidence
 
 Snapshot environment evidence is observed lazily before the first capture's state
@@ -536,6 +549,13 @@ including reads/captures/restores affected by that mutation. Core's exclusive
 state-IO reservations still protect actual overlapping capture/restore/reuse;
 they are not an operation-lifetime lock.
 
+Finalization freshly confirms its exact result/capture publication receipts,
+adopted retention grants and operation-scoped control/preparation acknowledgements.
+It does not require the shared Store to have no unrelated pending mutations:
+another operation may publish between those confirmations and completion. Such
+work retains its own journal and index invalidation; it cannot substitute for
+this operation's prerequisites or completion's separately acknowledged CAS.
+
 An ownership token belongs to its creating process, thread and asyncio task.
 Inherited, foreign and retired tokens cannot mutate authority or release another
 token's lock. Active invocation ID and generation are mandatory owner fences for
@@ -600,13 +620,14 @@ The selected control DirStore owns:
   managed Execute adapter version 2 validates nested result references before
   reconstruction or resource opening. Current record version 4 and history version 2
   retain these explicitly versioned nested references.
-- Version-1 start/root-association preparation sidecars under
+- Version-2 start/root-association preparation wire records under
   `managed/operations/v2/starts/v1/<shard>/<operation>/current.json`, containing exact
   previous/proposed current metadata, the physical retention token, disposition
   and reconciliation acknowledgement. These are intents, not current authority
   or serialized process-local restoration capabilities. The same bounded sidecar
   now also journals checkpoint/initial/final root replacements, with no second
-  operation-current state machine.
+  operation-current state machine. The namespace and logical projection remain
+  v1; readers also accept existing inline-snapshot v1 preparations.
 - Nested `dryml-node-graph/v1` / identity-3 graph, reference and StateKey codecs.
 
 Area format 2 does **not** admit old current-record versions 2 or 3. Every owning reader
@@ -625,6 +646,16 @@ snapshots preserve their original packet evidence. Logical snapshot, history and
 root-selection equality uses exact Node graph comparison (including facets,
 aliases, roles and quotations), never packet placement or digest equality alone.
 Logically equal graphs need not have identical storage bytes.
+New large records may pool repeated exact Node value blocks in the optional
+`dryml-managed-control-blocks` v1 wire envelope. Stored control bytes still have a
+1 MiB limit; expanded metadata is bounded to 8 MiB and the existing closed JSON
+grammar. Node tables, root views, identity and state selections remain distinct.
+Start wire v2 embeds the actual previous/proposed plain or shared snapshot packet,
+plus original UTF-8 source text when its spelling is noncanonical. Its reader
+validates that text against the packet before using it as exact CAS evidence.
+Existing plain current-v4 and start-v1 records remain readable without rewriting
+them. See [Managed Control Formats](formats.md#managed-control-formats) for the
+closed envelope, reference scopes and bounds.
 Advancing preparation from prepared to ready validates unchanged non-intent fields
 logically when root intents change; it never manufactures a source-byte witness by
 re-encoding a replacement. The sidecar and previous-current CAS still compare

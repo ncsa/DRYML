@@ -958,14 +958,23 @@ def build_save_plan(
 def validate_retained_save_plan(plan: SavePlan, value: Object) -> None:
     """Verify admitted save evidence still names the same usable live graph.
 
-    This is intentionally a read-through validation of the already captured
-    paths. It neither traverses a new graph nor selects routes, so a reservation
-    cannot become authorization for changed or invalidated bindings.
+    The identical immutable identity Node reuses admission's qualification;
+    replacement handles require exact semantic comparison. Retained paths and
+    invalidation flags are always read through, so a reservation cannot become
+    authorization for changed or invalidated bindings. Returns None on success;
+    raises RepoSaveError on stale evidence, without selecting routes or mutating
+    the plan or live graph.
+
+    Args:
+        plan: SavePlan retaining the admitted identity Node and live bindings.
+        value: Object root that must still match the plan's retained evidence.
     """
 
     from .repo import RepoSaveError
 
-    if plan.binding.roots[0].obj is not value or not value._identity_node.graph_equal(plan.object_ref):
+    if plan.binding.roots[0].obj is not value or (
+            value._identity_node is not plan.object_ref
+            and not value._identity_node.graph_equal(plan.object_ref)):
         raise RepoSaveError("State graph reservation does not cover this exact live graph.")
     if any(getattr(node, "_restore_failed", False) for node in plan.nodes):
         raise RepoSaveError("State graph contains an invalidated restore target.")

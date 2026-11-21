@@ -1,3 +1,5 @@
+"""Immutable tensor and opaque-value specs, batch metadata and spec-tree helpers."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -8,8 +10,9 @@ from typing import Any, TypeAlias
 import numpy as np
 
 from .dtype import DType, normalize_dtype
-from .backend import discover_backend, Backend
+from .backend import Backend, _native_backend, _try_discover_backend
 from .utils.recurse import map_leaf_groups, map_leaves, iter_leaves
+from .utils.types import is_namedtuple
 
 
 class Dim(Enum):
@@ -94,7 +97,9 @@ class TensorSpec:
         Canonical semantic dtype.
 
     shape:
-        Sample shape, excluding batch. None means unknown rank.
+        Sample shape, excluding batch. Nonnegative integers fix dimension sizes;
+        Dynamic accepts different concrete sizes across calls. None means
+        unknown rank, not a dynamic dimension inside a shape tuple.
 
     batch:
         Batch axis contract:
@@ -113,6 +118,26 @@ class TensorSpec:
 
     backend:
         Optional name for the backend used for this tensor
+
+    ragged_rank:
+        Positive number of row-partition levels in the full physical tensor,
+        including any batch axis in rank accounting; None leaves it unspecified.
+        Partitioned axes start after the outermost physical axis. Fixed uniform
+        axes before deeper variable axes are represented by partitions as well.
+
+    row_splits_dtype:
+        Ragged partition offsets use int32 or int64. None is unconstrained;
+        newly ragged-batched dense values use int64 by default.
+
+    ``dtype="object", layout="python"`` describes an opaque Python value,
+    without a Python class or content constraint. Its sample shape is ``()`` or
+    unknown and it has no tensor backend or sparse/ragged metadata. An explicit
+    batch contains opaque values in a list or tuple. Dense NumPy object arrays
+    retain their ordinary tensor shape/backend semantics.
+
+    Dense Dynamic dimensions describe rectangular tensors of varying size, not
+    unequal row lengths within one value. Each Dynamic is an independent unknown;
+    repeated occurrences do not assert equality between axes or separate leaves.
     """
     dtype: DType | str | Any
     shape: tuple[DimLike, ...] | list[DimLike] | None = ()
@@ -149,9 +174,37 @@ class TensorSpec:
         if self.row_splits_dtype is not None:
             object.__setattr__(self, "row_splits_dtype", normalize_dtype(self.row_splits_dtype))
 
+        if self.layout is Layout.RAGGED:
+            if self.full_rank is not None and self.full_rank < 2:
+                raise ValueError("Ragged tensors require at least two physical axes.")
+            if self.ragged_rank is not None:
+                if type(self.ragged_rank) is not int or self.ragged_rank < 1:
+                    raise ValueError("ragged_rank must be a positive integer or None.")
+                if self.full_rank is not None and self.ragged_rank >= self.full_rank:
+                    raise ValueError("ragged_rank must be smaller than the physical tensor rank.")
+            if self.row_splits_dtype is not None and self.row_splits_dtype.name not in {"int32", "int64"}:
+                raise ValueError("Ragged row_splits_dtype must be int32 or int64.")
+
         if self.backend is not None:
             if not isinstance(self.backend, Backend):
                 object.__setattr__(self, "backend", Backend(self.backend))
+        if self.is_python_object:
+            if self.shape not in ((), None):
+                raise ValueError("Opaque Python object specs do not declare sample axes.")
+            if self.backend is not None:
+                raise ValueError("Opaque Python object specs do not declare a tensor backend.")
+            if any(value is not None for value in (self.ragged_rank, self.row_splits_dtype, self.sparse_format)):
+                raise ValueError("Opaque Python object specs cannot have sparse or ragged metadata.")
+
+    @property
+    def is_python_object(self) -> bool:
+        """Return whether this spec denotes opaque, class-agnostic Python values.
+
+        Only canonical object dtype with Python layout qualifies; dense object
+        arrays remain tensor leaves. This metadata check inspects no runtime
+        value and has no side effects.
+        """
+        return self.dtype.kind == "object" and self.layout is Layout.PYTHON
 
     @property
     def rank(self) -> int | None:
@@ -180,10 +233,45 @@ class TensorSpec:
         return self.shape
 
     def with_batch(self, batch: int | Dim = Dynamic, axis_name: str | None = "batch") -> TensorSpec:
-        return replace(self, batch=batch, batch_axis_name=axis_name)
+        """Add or update a leading batch axis, adding a partition for ragged samples.
+
+        Args:
+            batch: Fixed or Dynamic leading size; no runtime values are inspected.
+            axis_name: Optional logical batch label.
+
+        Returns:
+            A new spec. Adding a batch to an unbatched ragged tensor increments
+            its physical ragged_rank; changing an existing batch does not.
+
+        Raises:
+            ValueError: If a ragged sample has no known partition rank.
+        """
+        rank = self.ragged_rank
+        if self.layout is Layout.RAGGED and not self.batched:
+            if type(rank) is not int or rank < 1:
+                raise ValueError("Batching ragged values requires a positive ragged_rank.")
+            rank += 1
+        return replace(self, batch=batch, batch_axis_name=axis_name, ragged_rank=rank)
 
     def without_batch(self) -> TensorSpec:
-        return replace(self, batch=None, batch_axis_name=None)
+        """Remove a batch axis and its outer ragged partition, without reading values.
+
+        Returns:
+            An unbatched spec. Ragged rank one becomes dense; higher ranks lose
+            one partition. Already unbatched specs retain their layout metadata.
+
+        Raises:
+            ValueError: If a batched ragged spec has no known positive rank.
+        """
+        changes = {}
+        if self.layout is Layout.RAGGED and self.batched:
+            if type(self.ragged_rank) is not int or self.ragged_rank < 1:
+                raise ValueError("Unbatching ragged values requires a positive ragged_rank.")
+            if self.ragged_rank == 1:
+                changes.update(layout=Layout.DENSE, ragged_rank=None, row_splits_dtype=None)
+            else:
+                changes["ragged_rank"] = self.ragged_rank - 1
+        return replace(self, batch=None, batch_axis_name=None, **changes)
 
     def with_dtype(self, dtype: DType | str | Any) -> TensorSpec:
         return replace(self, dtype=dtype)
@@ -279,6 +367,19 @@ SpecTree: TypeAlias = (
 )
 
 
+def _python_object_batch_size(value: Any) -> int:
+    """Read only the outer list/tuple length of an explicitly declared object batch."""
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("Opaque Python object batches must be lists or tuples.")
+    return len(value)
+
+
+def _python_object_spec(*, batch=None, batch_axis_name="batch") -> TensorSpec:
+    """Describe an opaque value domain without accepting an instance or class."""
+    return TensorSpec("object", layout=Layout.PYTHON, batch=batch,
+                      batch_axis_name=batch_axis_name if batch is not None else None)
+
+
 def is_spec_tree(x: Any) -> bool:
     if isinstance(x, TensorSpec):
         return True
@@ -324,11 +425,59 @@ def assert_same_spec_structure(*specs: SpecTree) -> None:
             raise ValueError("Spec trees do not have the same structure.")
 
 
-def batch_spec_tree(spec: SpecTree, batch=Dynamic, axis_name: str | None = "batch") -> SpecTree:
-    return map_spec_tree(spec, lambda s: s.with_batch(batch=batch, axis_name=axis_name))
+def batch_spec_tree(spec: SpecTree, batch=Dynamic, axis_name: str | None = "batch", *, ragged: bool = False) -> SpecTree:
+    """Add batch metadata, optionally partitioning dense sample axes for ragged collation.
+
+    Args:
+        spec: Unbatched input spec tree. Existing ragged samples gain a partition.
+        batch: Fixed or Dynamic output population.
+        axis_name: Optional batch label.
+        ragged: Explicitly pack variable-shaped dense samples using row partitions
+            through their last Dynamic sample axis. Fixed-shape leaves (including
+            scalar labels) remain dense; opaque leaves retain list batching.
+
+    Returns:
+        A new spec tree. Ragged outputs retain numeric dtype and dense tail axes.
+
+    Raises:
+        TypeError, ValueError: If explicit ragged collation has unknown
+            sample rank, batched inputs, unsupported layout/backend, or bad rank.
+    """
+    if type(ragged) is not bool:
+        raise TypeError("ragged must be an exact bool.")
+    def leaf(s):
+        if s.layout is Layout.RAGGED and s.batched:
+            raise ValueError("Batch requires unbatched ragged samples.")
+        if not ragged or s.is_python_object or s.layout is Layout.RAGGED:
+            return s.with_batch(batch=batch, axis_name=axis_name)
+        if s.batched or s.layout is not Layout.DENSE or s.shape is None:
+            raise ValueError("Ragged Batch requires unbatched dense samples of known rank.")
+        if Dynamic not in s.shape:
+            return s.with_batch(batch=batch, axis_name=axis_name)
+        if s.backend is not Backend.numpy and s.backend is not Backend.tf:
+            raise TypeError("Ragged Batch requires a declared NumPy or TensorFlow backend.")
+        rank = max((i + 1 for i, dim in enumerate(s.shape) if dim is Dynamic), default=1)
+        return replace(s, batch=batch, batch_axis_name=axis_name, layout=Layout.RAGGED,
+                       ragged_rank=rank, row_splits_dtype="int64")
+    return map_spec_tree(spec, leaf)
 
 
 def unbatch_spec_tree(spec: SpecTree) -> SpecTree:
+    """Remove each leaf's batch axis and the corresponding outer ragged partition.
+
+    Args:
+        spec: TensorSpec tree with logical batch metadata.
+
+    Returns:
+        A new tree. Rank-one ragged batches produce dense samples; higher ragged
+        ranks decrease by one. Already unbatched leaves keep their layout.
+
+    Raises:
+        ValueError: If a batched ragged leaf has no known positive partition rank.
+
+    Side Effects:
+        None. This is pure metadata inference, without splitting runtime values.
+    """
     return map_spec_tree(spec, lambda s: s.without_batch())
 
 
@@ -345,7 +494,29 @@ def batch_from_spec_tree(spec_tree: SpecTree):
 
 
 def fake_from_spec_tree(spec_tree: SpecTree):
+    """Construct a NumPy placeholder tree for supported tensor declarations.
+
+    Args:
+        spec_tree: TensorSpec tree whose ranks and NumPy dtypes are available.
+
+    Returns:
+        The same container structure with zero-filled arrays. Dynamic dimensions
+        become one; unbatched leaves keep the existing leading singleton sample
+        convention.
+
+    Raises:
+        ValueError: If a rank is unknown, opaque content would need invention,
+            or ragged partitions would have to be synthesized.
+        TypeError: If a declared dtype has no NumPy representation.
+
+    Side Effects:
+        Allocates NumPy arrays; never instantiates arbitrary Python object types.
+    """
     def leaf_sample(spec: TensorSpec):
+        if spec.is_python_object:
+            raise ValueError("Cannot synthesize sample content for an opaque Python object spec.")
+        if spec.layout is Layout.RAGGED:
+            raise ValueError("Cannot synthesize ragged row partitions from a TensorSpec.")
         if spec.shape is None:
             raise ValueError("Cannot create a fake sample from an unknown-rank TensorSpec.")
         sample_shape = tuple(1 if dim is Dynamic else int(dim) for dim in spec.shape)
@@ -371,10 +542,28 @@ def match_input_batch(spec: TensorSpec, input_spec: SpecTree) -> TensorSpec:
 
 
 def merge_tensor_specs(specs: Sequence[TensorSpec]) -> TensorSpec:
-    """Merge same-position TensorSpecs, marking varying dimensions dynamic."""
+    """Merge same-position tensor metadata without changing batch interpretation.
+
+    Args:
+        specs: Nonempty sequence of equally ranked, uniformly batched or
+            unbatched TensorSpecs with compatible non-shape metadata.
+
+    Returns:
+        A TensorSpec with differing sample dimensions or batch sizes marked
+        Dynamic. Fixed dimensions and common layout/dtype/axis facts remain.
+
+    Raises:
+        ValueError: If the sequence is empty, ranks or batch interpretations
+            differ, or non-shape metadata conflicts.
+
+    Side Effects:
+        None. Merging reads metadata without inspecting or allocating tensors.
+    """
     specs = list(specs)
     if not specs:
         raise ValueError("At least one TensorSpec is required.")
+    if len({spec.batched for spec in specs}) != 1:
+        raise ValueError("TensorSpecs must be uniformly batched or unbatched to merge.")
 
     ranks = [spec.rank for spec in specs]
     if len(set(ranks)) > 1:
@@ -423,17 +612,82 @@ def merge_spec_trees(specs: Sequence[SpecTree]) -> SpecTree:
 
 
 def as_tensor_spec(x: Any, *args, require_consistent_backend=True, **kwargs):
-    # Tensor Specs should have a consistent backend.
-    all_backends = set(map(discover_backend, iter_leaves(x)))
-    if len(all_backends) == 0:
-        raise ValueError("No values with a backend?")
+    """Infer a logical SpecTree from tensors, Python scalars and opaque objects.
 
-    if require_consistent_backend and len(all_backends) > 1:
-        raise ValueError(f"Found values from multiple backends: {all_backends}")
+    Args:
+        x: One value or a dict/list/tuple/namedtuple value tree. Unknown Python
+            leaves become object/Python-layout specs without recording their
+            classes or inspecting content. Existing TensorSpecs pass through.
+        *args: Positional options forwarded to native backend adapters.
+        require_consistent_backend: Require one consistent native tensor backend;
+            opaque leaves contribute no backend, rather than a conflicting one.
+        **kwargs: Adapter options, including batched and batch_axis_name. With
+            batched=True, a nonempty list/tuple of opaque leaves is one opaque
+            batch. Other containers retain ordinary tree structure. Ambiguous
+            object-valued containers can always use an explicit object spec.
 
-    backend = all_backends.pop()
+    Returns:
+        A normalized SpecTree with numerical or opaque leaves. Variable opaque
+        batch lengths can be merged by detect_spec_tree into Dynamic metadata.
 
-    return backend.as_tensor_spec(x, *args, **kwargs)
+    Raises:
+        TypeError: For unsupported native adapters/dtypes, detector failures,
+            invalid Python-object options, or unsupported mapping keys.
+        ValueError: For conflicting native backends, incompatible batching, or
+            an empty tree with no inferable leaves.
+
+    Side Effects:
+        Invokes registered native spec adapters when recognized; optional native
+        families need their existing adapters rather than being relabeled opaque.
+        No opaque content, equality, hash, shape or array protocol is inspected.
+        Input objects are not retained in the returned metadata.
+    """
+    batched = kwargs.get("batched", False)
+    batch_axis_name = kwargs.get("batch_axis_name", "batch")
+
+    def leaf(value, *, as_batch):
+        if isinstance(value, TensorSpec):
+            return value
+        backend = _try_discover_backend(value)
+        if backend is not None:
+            options = dict(kwargs, batched=as_batch)
+            return backend.as_tensor_spec(value, *args, **options)
+        if _native_backend(value) is not None:
+            raise TypeError("Native tensor spec inference requires its registered backend adapter.")
+        if args or set(kwargs) - {"batched", "batch_axis_name"}:
+            raise TypeError("Python value spec inference supports only batched and batch_axis_name options.")
+        if np.isscalar(value):
+            if as_batch:
+                raise ValueError("A Python scalar has no physical batch axis.")
+            array = np.asarray(value)
+            return TensorSpec(array.dtype, shape=array.shape)
+        if as_batch:
+            raise ValueError("Opaque object batches require an outer list or tuple.")
+        return _python_object_spec()
+
+    def infer(value):
+        if isinstance(value, dict):
+            if not all(isinstance(key, (str, int)) for key in value):
+                raise TypeError("SpecTree mapping keys must be str or int.")
+            return {key: infer(child) for key, child in value.items()}
+        if isinstance(value, (tuple, list)):
+            if batched and value and not is_namedtuple(value) and all(
+                    not isinstance(child, (dict, tuple, list)) for child in value):
+                candidates = tuple(leaf(child, as_batch=False) for child in value)
+                if all(spec.is_python_object for spec in candidates):
+                    return _python_object_spec(batch=len(value), batch_axis_name=batch_axis_name)
+            items = tuple(infer(child) for child in value)
+            return type(value)(*items) if is_namedtuple(value) else list(items) if isinstance(value, list) else items
+        return leaf(value, as_batch=batched)
+
+    result = infer(x)
+    leaves = tuple(iter_specs(result))
+    if not leaves:
+        raise ValueError("No values with an inferable specification.")
+    backends = {spec.backend for spec in leaves if spec.backend is not None}
+    if require_consistent_backend and len(backends) > 1:
+        raise ValueError(f"Found values from multiple backends: {backends}")
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,7 +718,27 @@ def detect_spec_tree(
     samples: Iterable[Any],
     hint: SpecHint | dict[str, str | int] | str | int | None = None,
 ) -> SpecTree:
-    """Infer one SpecTree from several sample values."""
+    """Infer and merge logical metadata from a bounded number of sample values.
+
+    Args:
+        samples: Iterable of numerical, opaque Python, or structured values.
+        hint: SpecHint or its dict/string/count shorthand. Defaults to two
+            element samples; batched mode treats nonempty lists/tuples of opaque
+            leaves as object batches and merges differing lengths to Dynamic.
+
+    Returns:
+        A SpecTree retaining structure and common dtype/layout/backend facts,
+        with varying dimensions merged to Dynamic and no opaque values/classes.
+
+    Raises:
+        TypeError: For invalid hints, structural keys, or native adapter/dtypes.
+        ValueError: For insufficient samples or incompatible spec metadata.
+        Exception: Propagates sample iterator and registered adapter failures.
+
+    Side Effects:
+        Advances the iterable by hint.samples values and invokes recognized
+        native adapters. Explicit specs avoid this sampling step entirely.
+    """
     hint = SpecHint.build(hint)
     batched = hint.batch_mode is BatchMode.batched
     it = iter(samples)

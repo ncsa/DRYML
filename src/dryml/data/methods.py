@@ -1,9 +1,12 @@
+"""Composable data Methods with pure spec inference and selected native execution."""
+
 from __future__ import annotations
 
 from dataclasses import replace
+from math import prod
 
 from dryml.core.dtype import normalize_dtype
-from dryml.core.tensor_spec import Dynamic, SpecTree, map_spec_tree
+from dryml.core.tensor_spec import Dynamic, Layout, SpecTree, map_spec_tree
 from dryml.methods import ImplementationSelectionError, Method, traits
 
 
@@ -385,6 +388,19 @@ class Pipe(Method):
 
 
 class Cast(Method):
+    """Convert one native dense or ragged tensor to a declared semantic dtype.
+
+    Args:
+        dtype: Canonical DRYML or supported native dtype spelling.
+
+    Returns:
+        A native value preserving shape, layout, batch and ragged partitions.
+        NumPy ragged outputs own their buffers; native backend cast semantics
+        otherwise apply. Pure inference maps the same dtype change over a tree.
+
+    Raises:
+        TypeError, ValueError: For unsupported dtypes, values or native casts.
+    """
     @property
     def iteration_independent(self) -> bool:
         """Return whether discarded Cast calls can be omitted safely."""
@@ -414,6 +430,8 @@ class Cast(Method):
 def _flat_shape(shape):
     if shape is None:
         return None
+    if 0 in shape:
+        return (0,)
     size = 1
     for dim in shape:
         if dim is Dynamic:
@@ -436,6 +454,20 @@ def _argmax_shape(shape, axis):
 
 
 class ArgMax(Method):
+    """Select maximum indices along one sample axis, preserving the batch axis.
+
+    Args:
+        axis: Positive or negative sample-axis index, excluding the batch axis.
+
+    Returns:
+        A native int64 result with the selected sample axis removed. Pure output
+        inference preserves remaining Dynamic dimensions and their axis names.
+
+    Raises:
+        TypeError: If axis is not an integer.
+        ValueError: For a known scalar spec, an out-of-range axis, or a runtime
+            reduction over an empty axis.
+    """
     @property
     def iteration_independent(self) -> bool:
         """Return whether discarded ArgMax calls can be omitted safely."""
@@ -451,10 +483,26 @@ class ArgMax(Method):
         return self.axis + 1 if batched and self.axis >= 0 else self.axis
 
     def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
-        return map_spec_tree(
-            input_spec,
-            lambda spec: spec.with_dtype("int64").with_shape(_argmax_shape(spec.shape, self.axis)),
-        )
+        """Remove the selected sample axis and its name without executing values.
+
+        Args:
+            input_spec: TensorSpec tree with known or unknown sample rank.
+
+        Returns:
+            The same tree with int64 leaves, the reduced shapes/names, and
+            unchanged batch/backend metadata. Unknown ranks stay unknown.
+
+        Raises:
+            ValueError: If a known rank cannot admit the selected axis.
+            TypeError: For ragged input, whose reduction contract is not defined.
+        """
+        def infer(spec):
+            if spec.layout is Layout.RAGGED:
+                raise TypeError("ArgMax does not yet define a ragged-axis reduction contract.")
+            names = None if spec.axis_names is None else _argmax_shape(spec.axis_names, self.axis)
+            return replace(spec, dtype="int64", shape=_argmax_shape(spec.shape, self.axis), axis_names=names)
+
+        return map_spec_tree(input_spec, infer)
 
     @traits(backend="numpy", batch_mode="element")
     def numpy_call(self, x):
@@ -494,6 +542,17 @@ class ArgMax(Method):
 
 
 class Flatten(Method):
+    """Flatten sample axes into one axis while retaining an explicit batch axis.
+
+    Returns:
+        A native vector per sample. A known zero sample dimension proves a
+        zero-width output; otherwise any Dynamic sample dimension makes the
+        flattened width Dynamic. A collapsed multi-axis name becomes unnamed.
+
+    Runtime reshaping allocates or views storage according to the native backend.
+    Empty sample dimensions and empty batches are supported. Incompatible values
+    fail through normal selected Method validation or native reshape errors.
+    """
     @property
     def iteration_independent(self) -> bool:
         """Return whether discarded Flatten calls can be omitted safely."""
@@ -501,7 +560,30 @@ class Flatten(Method):
         return True
 
     def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
-        return map_spec_tree(input_spec, lambda spec: spec.with_shape(_flat_shape(spec.shape)))
+        """Infer flattened widths and axis names from a TensorSpec tree.
+
+        Args:
+            input_spec: Input spec tree. Unknown sample rank stays unknown.
+
+        Returns:
+            A new tree preserving dtype, batch and backend. Single-axis names
+            survive; collapsed or newly introduced axes have no name.
+
+        Side Effects:
+            None. No values, sources or native frameworks are evaluated.
+
+        Raises:
+            TypeError: For ragged input, whose sample-flattening contract is not defined.
+        """
+        def infer(spec):
+            if spec.layout is Layout.RAGGED:
+                raise TypeError("Flatten does not yet define a ragged sample-flattening contract.")
+            names = spec.axis_names
+            if names is not None and spec.rank != 1:
+                names = (None,)
+            return replace(spec, shape=_flat_shape(spec.shape), axis_names=names)
+
+        return map_spec_tree(input_spec, infer)
 
     @traits(backend="numpy", batch_mode="element")
     def numpy_call(self, x):
@@ -509,7 +591,17 @@ class Flatten(Method):
 
     @traits(backend="numpy", batch_mode="batched")
     def numpy_batched(self, x):
-        return x.reshape((x.shape[0], -1))
+        """Reshape a NumPy batch to (batch, sample product), including zero sizes.
+
+        Args:
+            x: NumPy array with a leading batch axis.
+
+        Returns:
+            A NumPy array preserving batch length and dtype, normally as a view.
+            Invalid native shapes raise ValueError without changing x.
+        """
+        # A concrete sample product avoids ambiguous reshape(0, -1) for empty batches.
+        return x.reshape((x.shape[0], prod(x.shape[1:])))
 
     @traits(backend="tf", batch_mode="element")
     def tf_call(self, x):
@@ -519,9 +611,19 @@ class Flatten(Method):
 
     @traits(backend="tf", batch_mode="batched")
     def tf_batched(self, x):
+        """Flatten TensorFlow sample axes using concrete or graph shape arithmetic.
+
+        Args:
+            x: TensorFlow dense tensor with a leading batch axis.
+
+        Returns:
+            A same-dtype tensor of shape (batch, sample product), including zero
+            sizes. TensorFlow reports invalid reshapes through native errors.
+        """
         import tensorflow as tf
 
-        return tf.reshape(x, [tf.shape(x)[0], -1])
+        shape = tf.shape(x)
+        return tf.reshape(x, [shape[0], tf.reduce_prod(shape[1:])])
 
     @traits(backend="torch", batch_mode="element")
     def torch_call(self, x):
@@ -529,10 +631,34 @@ class Flatten(Method):
 
     @traits(backend="torch", batch_mode="batched")
     def torch_batched(self, x):
-        return x.reshape((x.shape[0], -1))
+        """Flatten Torch sample axes without inferring an ambiguous zero product.
+
+        Args:
+            x: Dense Torch tensor with a leading batch axis.
+
+        Returns:
+            A same-dtype tensor shaped (batch, sample product), allocating or
+            viewing according to Torch reshape semantics. Native errors propagate.
+        """
+        return x.reshape((x.shape[0], prod(x.shape[1:])))
 
 
 class Scale(Method):
+    """Apply scalar centering/scaling to a dense or ragged native tensor.
+
+    Args:
+        mean: Scalar center subtracted after dtype conversion.
+        std: Nonzero scalar divisor.
+        dtype: Semantic output dtype, default float32.
+
+    Returns:
+        A native value with unchanged shape/layout and preserved row partitions.
+        NumPy ragged output owns new buffers. Inference performs only dtype changes.
+
+    Raises:
+        ValueError: If std is zero or native arithmetic/broadcasting is invalid.
+        TypeError: For unsupported dtypes or values. No input buffers are mutated.
+    """
     @property
     def iteration_independent(self) -> bool:
         """Return whether discarded Scale calls can be omitted safely."""
@@ -557,6 +683,19 @@ class Scale(Method):
 
     @traits(backend="numpy")
     def numpy_call(self, x):
+        """Return dtype-converted, centered and scaled NumPy values.
+
+        Args:
+            x: Dense ndarray or packed RaggedTensor.
+
+        Returns:
+            A new value of the same layout; ragged row partitions are preserved.
+            Unsupported casts or arithmetic propagate NumPy TypeError/ValueError.
+        """
+        from dryml.numpy.ragged import RaggedTensor
+        if isinstance(x, RaggedTensor):
+            values = (x.flat_values.astype(self.dtype.np()) - self.mean) / self.std
+            return x.with_flat_values(values)
         return (x.astype(self.dtype.np()) - self.mean) / self.std
 
     @traits(backend="tf")

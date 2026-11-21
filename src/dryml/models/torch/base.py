@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import weakref
+from contextlib import nullcontext
 from dataclasses import replace
 
 from dryml.core.factory import FactorySpec
@@ -25,7 +26,6 @@ from dryml.models.train_spec import (
 from dryml.models.utils import (
     finite_dataset_len,
     record_train_update,
-    require_bounded_safe_points,
     require_supervised_dataset,
     TrainingPreparation,
     validate_training_callbacks,
@@ -545,7 +545,33 @@ class Training(TrainFunction):
             acquisition; captured output facts drive batch validation before the
             native forward/backward body. Graph traversal uses a temporary
             explicit Repo only for trainable-parameter collection.
+
+        Qualified persisted optimizers use one continuous invocation input session.
+        Safe-point saves capture matching accepted continuation; stale exact retries
+        require durable reload. Transient optimizers retain positional recovery.
+        Zero work performs metadata admission without loss/optimizer/input setup.
+        Exact built-in Model instances in eager mode with default_batched=None
+        retain one raw selected signature adapter locally across training batches.
+        Every call still delivers arguments/returns, converts and places tensors,
+        and runs inside the native-owner lease. Mode/default changes are checked
+        each batch and retire that adapter; custom models use ordinary dispatch.
         """
+        callbacks = validate_training_callbacks(callbacks)
+        if observer_session is not None:
+            observer_session.require_callables("Torch")
+        require_supervised_dataset(exp.train_data, batched=True)
+        target = exp.state.target_epoch
+        positive = (target if target is not None else exp.state.epoch + self.epochs) > exp.state.epoch
+        positive = positive or exp.state.pending_epoch_postlude is not None
+        with self.input_session(exp, positive=positive,
+                                exact=isinstance(self._optimizer(exp), Optimizer)) as inputs:
+            if not positive:
+                exp.state.finish_invocation(exp.state.begin_invocation(self.epochs))
+                return []
+            return self._train_with_input(exp, inputs, callbacks=callbacks, observer_session=observer_session)
+
+    def _train_with_input(self, exp, inputs, *, callbacks, observer_session):
+        """Execute native work after input/owner admission and retain conversions."""
         import torch
 
         callbacks = validate_training_callbacks(callbacks)
@@ -556,9 +582,7 @@ class Training(TrainFunction):
         self._begin_training_preparation_generation()
         train_data = exp.train_data
         require_supervised_dataset(train_data, batched=True)
-        require_bounded_safe_points(train_data, callbacks)
-        train_xy = train_data
-        prepared_train = train_xy.prepare()
+        prepared_train = inputs.prepared
         self.training_preparation = TrainingPreparation.from_dataset(
             self, prepared_train, "torch"
         )
@@ -596,14 +620,13 @@ class Training(TrainFunction):
             return []
         total_steps = None if steps_per_epoch is None else int(steps_per_epoch) * self.epochs
         progress = TrainingProgress(total=total_steps, verbose=self.verbose, desc="Torch training")
+        selected_model = model_invoker = None
 
         try:
             stopped = self._finish_pending_epoch(
                 torch, exp, prepared_val, loss_fn, metrics, device, progress, target_epoch
             )
-            for epoch in range(start_epoch, target_epoch):
-                if stopped:
-                    break
+            for epoch, view in (() if stopped else inputs.epoch_views(stop=target_epoch)):
                 for metric in metrics:
                     _reset_metric(metric)
                 metric_totals = {}
@@ -613,59 +636,67 @@ class Training(TrainFunction):
 
                 from dryml.torch.training_data import iter_training_batches
 
-                cursor = iter_training_batches(prepared_train, self.training_preparation)
-                resume_batch = exp.state.next_batch if epoch == start_epoch else 0
-                with cursor:
-                    if resume_batch:
-                        cursor.skip(resume_batch)
-                    for x, y in cursor:
+                cursor = iter_training_batches(view, self.training_preparation) if view is not None else None
+                resume_batch = view.position if view is not None else 1
+                with cursor if cursor is not None else nullcontext():
+                    while cursor is not None:
+                        try:
+                            input_candidate = cursor.reserve()
+                        except StopIteration:
+                            inputs.sync_boundary()
+                            break
+                        x, y = input_candidate.value
                         batch_index = exp.state.next_batch
                         examples = prepared_train.examples_in((x, y))
                         x = _tree_to_torch(x, torch, device=device)
                         y = _tree_to_torch(y, torch, device=device)
 
-                        optimizer.zero_grad()
-                        y_pred = exp.model(x)
-                        loss_value = loss_fn(y_pred, y)
-                        loss_value.backward()
-                        optimizer.step()
+                        with inputs.update(input_candidate):
+                            optimizer.zero_grad()
+                            model = exp.model
+                            if type(model) is Model and model.call_mode == "eager" and model.default_batched is None:
+                                Backend.torch.module
+                                if selected_model is not model:
+                                    model_invoker = model.find_implementation(backend="torch").prepared_invoker()
+                                    selected_model = model
+                                y_pred = model_invoker(x)
+                            else:
+                                selected_model = model_invoker = None
+                                y_pred = model(x)
+                            loss_value = loss_fn(y_pred, y)
+                            loss_value.backward()
+                            optimizer.step()
 
-                        batch_metrics = self._update_metrics(metrics, y_pred, y)
-                        for name, value in batch_metrics.items():
-                            metric_totals[name] = metric_totals.get(name, 0.0) + value
-                            metric_counts[name] = metric_counts.get(name, 0) + 1
+                            batch_metrics = self._update_metrics(metrics, y_pred, y)
+                            for name, value in batch_metrics.items():
+                                metric_totals[name] = metric_totals.get(name, 0.0) + value
+                                metric_counts[name] = metric_counts.get(name, 0) + 1
 
-                        loss_float = float(metric_value(loss_value))
-                        complete_epoch = (
-                            steps_per_epoch is not None
-                            and exp.state.next_batch + 1 == steps_per_epoch
-                        )
-                        completed_metrics = None
-                        if complete_epoch:
-                            completed_metrics = {
-                                "loss": (epoch_loss + loss_float) / (epoch_steps + 1)
-                            }
-                            completed_metrics.update(_metric_results(metrics))
-                            for name, total in metric_totals.items():
-                                completed_metrics.setdefault(name, total / metric_counts[name])
-                        record_train_update(
-                            exp,
-                            x,
-                            loss_float,
-                            batched=True,
-                            examples=examples,
-                            complete_epoch=complete_epoch,
-                            epoch_metrics=completed_metrics,
-                            callbacks=callbacks,
-                        )
+                            loss_float = float(metric_value(loss_value))
+                            step_metrics = {"loss": loss_float}
+                            step_metrics.update(batch_metrics)
+                            step_metrics.update(_metric_results(metrics))
+                            complete_epoch = input_candidate.section_complete
+                            completed_metrics = None
+                            if complete_epoch:
+                                completed_metrics = {
+                                    "loss": (epoch_loss + loss_float) / (epoch_steps + 1)
+                                } if not resume_batch else {}
+                                completed_metrics.update({name: value for name, value in step_metrics.items() if name != "loss"})
+                                for name, total in metric_totals.items():
+                                    completed_metrics.setdefault(name, total / metric_counts[name])
+                            record_train_update(
+                                exp, x, loss_float, batched=True, examples=examples,
+                                complete_epoch=complete_epoch, epoch_metrics=completed_metrics,
+                                input_candidate=input_candidate,
+                            )
+                        for callback in callbacks:
+                            callback()
                         losses.append(loss_float)
                         epoch_loss += loss_float
                         epoch_steps += 1
                         steps += 1
 
-                        step_metrics = {"loss": loss_float}
-                        step_metrics.update(batch_metrics)
-                        step_metrics.update(_metric_results(metrics))
                         progress.update(1, step_metrics)
                         _notify_host_observers(observer_session, {
                             "event": "train_batch_end",
@@ -676,7 +707,7 @@ class Training(TrainFunction):
                             **step_metrics,
                         })
 
-                if epoch_steps == 0 and resume_batch == 0:
+                if epoch_steps == 0 and resume_batch == 0 and exp.state.pending_epoch_postlude is None:
                     continue
 
                 # A resumed suffix cannot truthfully represent a full epoch mean.
@@ -706,6 +737,8 @@ class Training(TrainFunction):
                     "stopped": stopped,
                     **epoch_metrics,
                 })
+                if stopped:
+                    break
         except BaseException:
             if fresh_target:
                 try:
@@ -846,6 +879,7 @@ class Training(TrainFunction):
             exp.state.finish_epoch(postlude_pending=True)
         if exp.state.pending_epoch_postlude == epoch:
             if exp.state.pending_epoch_postlude_phase == "start":
+                epoch_metrics.update(exp.state.pending_epoch_metrics or {})
                 if val_data is not None:
                     val_metrics = self._evaluate(torch, exp.model, val_data, loss_fn, metrics, device=device)
                     epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})

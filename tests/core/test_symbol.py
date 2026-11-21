@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 import types
+import linecache
 
 from dryml.core.symbol import ImportRef, SourceSpec, symbol_ref
 from dryml.core.definition import Definition, ConcreteDefinition
@@ -12,6 +13,47 @@ from dryml.core.store.dir import DirStore
 from dryml.core.freeze import FrozenTuple
 from dryml.core.utils.general import pickler, unpickler
 import numpy as np
+
+
+def test_notebook_class_source_uses_retained_method_anchors():
+    source = "class CellProducer:\n    def value(self):\n        return np.int64(7)\n"
+    filename = "<ipython-input-37-u3>"
+    linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
+    namespace = {"__name__": "__main__", "np": np}
+    exec(compile(source, filename, "exec"), namespace)
+    original = namespace.pop("CellProducer")
+    spec = SourceSpec.from_class(original)
+    rebuilt = spec.resolve()
+    assert rebuilt is not original
+    assert rebuilt().value() == 7
+    assert spec.imports == {"np": ImportRef("numpy")}
+
+
+@pytest.mark.parametrize("failure", ["missing", "conflict", "same_name", "no_anchors"])
+def test_notebook_class_source_rejects_absent_or_conflicting_anchors(failure):
+    source = "class CellProducer:\n    def first(self):\n        return 1\n    def second(self):\n        return 2\n"
+    filename = f"<ipython-input-u3-{failure}>"
+    linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
+    namespace = {"__name__": "__main__"}
+    exec(compile(source, filename, "exec"), namespace)
+    producer = namespace["CellProducer"]
+    if failure == "missing":
+        del linecache.cache[filename]
+    elif failure == "conflict":
+        other = "def second(self):\n    return 9\n"
+        other_filename = "<ipython-input-other-u3>"
+        linecache.cache[other_filename] = (len(other), None, other.splitlines(True), other_filename)
+        exec(compile(other, other_filename, "exec"), namespace)
+        producer.second = namespace["second"]
+    elif failure == "same_name":
+        changed = source + source
+        linecache.cache[filename] = (len(changed), None, changed.splitlines(True), filename)
+        exec(compile(changed, filename, "exec"), namespace)
+        producer.second = namespace["CellProducer"].second
+    else:
+        producer = type("CellProducer", (), {"__module__": "__main__"})
+    with pytest.raises(ValueError, match="source|anchors"):
+        SourceSpec.from_class(producer)
 
 
 def top_level_add1(x):

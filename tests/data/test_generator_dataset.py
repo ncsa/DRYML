@@ -92,6 +92,28 @@ def test_generator_dataset_infers_spec_from_hint():
     assert ds.spec == TensorSpec("float32", shape=(Dynamic,), backend="numpy")
 
 
+def test_generator_hint_closes_samples_and_checks_example_total_only_on_normal_traversal():
+    _resources.clear()
+    dataset = GeneratorDataset(closeable_factory, cardinality=3, example_count=3, spec=2)
+    assert dataset.spec == TensorSpec("int64", shape=(), backend="numpy")
+    assert [resource.closes for resource in _resources] == [1]
+    assert list(dataset) == [0, 1, 2]
+    assert [resource.closes for resource in _resources] == [1, 1]
+
+    invalid = GeneratorDataset(closeable_factory, cardinality=3, example_count=4, spec=2)
+    assert _resources[-1].closes == 1
+    with pytest.raises(ValueError, match="observed example count"):
+        list(invalid)
+    assert all(resource.closes == 1 for resource in _resources)
+
+
+def test_failed_generator_hint_closes_sampling_resource():
+    _resources.clear()
+    with pytest.raises(ValueError, match="fewer than 4 samples"):
+        GeneratorDataset(closeable_factory, cardinality=3, example_count=3, spec=4)
+    assert [resource.closes for resource in _resources] == [1]
+
+
 def test_dataset_requires_iteration_without_affecting_supported_generators():
     """Dataset subclasses must provide iteration while current sources stay concrete."""
 

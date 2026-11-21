@@ -6,6 +6,107 @@
         "package": "Artifact builds and installed-package checks remain available through ./tests.sh package and exhaustive modes."
       },
       "representative_functions": {
+        "tests/data/test_dataset_traversal.py": {
+          "rationale": "Retain continuous/implicit ownership, exact controls, token authority and deterministic cost canaries; expanded owner/failure products remain opt-in.",
+          "functions": [
+            "test_ae1_adjacent_sections_keep_one_producer_without_boundary_overpull",
+            "test_ae2_implicit_passes_reopen_once_each_and_unread_close_is_inert",
+            "test_unfinished_view_rejects_competition_but_independent_sessions_interleave",
+            "test_new_controls_require_exact_ints",
+            "test_twenty_sections_have_exact_work_and_no_capture_or_payload_copy",
+            "test_steady_map_validation_uses_retained_specs_without_decoding_control_graph",
+            "test_candidate_aliases_foreign_tokens_and_rejection_preserve_accepted_cut"
+          ]
+        },
+        "tests/data/test_traversal_preparation.py": {
+          "rationale": "Pin frozen preparation, independent sessions and no eager snapshots; full source/backend/control combinations remain opt-in.",
+          "functions": [
+            "test_declared_selections_are_retained_across_independent_cursors",
+            "test_array_payload_is_not_copied_while_container_bindings_are_frozen",
+            "test_large_factory_payload_binding_is_not_cloned",
+            "test_ordinary_pulls_never_extract_or_encode_state",
+            "test_prepared_native_batched_invoker_is_not_scalarized"
+          ]
+        },
+        "tests/data/test_epoch_boundaries.py": {
+          "rationale": "Keep section algebra and bounded retention, without native backend products.",
+          "functions": [
+            "test_batch_drops_partial_groups_without_losing_empty_sections",
+            "test_zip_discards_shortest_section_tails_then_realigns",
+            "test_thousand_repeated_section_occurrences_keep_live_ownership_bounded",
+            "test_session_map_keeps_vectorized_batch_calls"
+          ]
+        },
+        "tests/data/test_dataset_state.py": {
+          "rationale": "Keep detached buffered suffix, independent records and capture authority; repeated format/ownership combinations remain explicit.",
+          "functions": [
+            "test_ae4_ae5_buffered_suffix_survives_destroyed_traversal",
+            "test_immutable_record_has_no_graph_identity_and_two_opens_are_independent",
+            "test_pending_candidate_blocks_capture_but_staged_lookahead_round_trips",
+            "test_closed_and_rejected_return_only_matching_prior_capture"
+          ]
+        },
+        "tests/data/test_dataset_state_io.py": {
+          "rationale": "Keep inert IO and no-clobber integrity; process publication and filesystem fault-window matrices remain explicit opt-in.",
+          "functions": [
+            "test_load_validate_are_source_inert",
+            "test_no_clobber_and_corrupt_inventory_does_not_touch_prior_record",
+            "test_missing_directory_keeps_filesystem_failure_and_incomplete_directory_is_format_error"
+          ]
+        },
+        "tests/data/test_dataset_state_validation.py": {
+          "rationale": "Keep target topology/source compatibility and source-inert revalidation; full malformed envelope products remain explicit.",
+          "functions": [
+            "test_equivalent_materialized_target_allowed_but_configuration_sharing_and_source_state_reject",
+            "test_frozen_target_binding_survives_control_mutation_and_open_revalidates",
+            "test_each_open_decodes_once_and_revalidates_before_position_checks"
+          ]
+        },
+        "tests/data/test_generator_recovery.py": {
+          "rationale": "Retain direct/replay distinction, lazy policy and capture costs plus one clean-process notebook representative; expanded producer/configuration products remain explicit.",
+          "functions": [
+            "test_ae6_ae7_exact_prefix_once_or_zero_and_lazy_actual_iterator",
+            "test_initial_pending_conditional_record_and_unread_close_are_inert",
+            "test_declared_direct_and_indexed_helper_noop_and_disable_preserves_direct_capture",
+            "test_late_conditional_missing_large_initial_evidence_is_atomic",
+            "test_many_yields_no_capture_tree_codec_hooks_until_requested",
+            "test_notebook_direct_class_clean_process_epoch_one_offset_three"
+          ]
+        },
+        "tests/data/test_mixed_source_recovery.py": {
+          "rationale": "One indexed/replay Zip work-count proof; full direct/replay/Zip topology, buffering and shortest-tail products remain explicit.",
+          "functions": ["test_indexed_replay_zip_suffix_has_only_source_prefix_work"]
+        },
+        "tests/data/test_continuation_codec.py": {
+          "rationale": "Keep the closed host grammar and inert decoding; native tensor and malformed-value matrices remain opt-in.",
+          "functions": [
+            "test_closed_value_grammar_aliases_and_pcg64_128_bit_state",
+            "test_host_only_decode_blocks_optional_imports_and_rejects_tags"
+          ]
+        },
+        "tests/data/test_accumulate.py": {
+          "rationale": "Keep post-transition carry, detached restore, retained roles and capture-only costs; native and buffer/corruption matrices remain opt-in.",
+          "functions": [
+            "test_capture_restores_carry_without_repeating_accepted_transitions",
+            "test_ae13_one_post_transition_output_per_input_and_empty_never_initializes",
+            "test_two_sessions_share_prepared_selections_and_implicit_passes_reset",
+            "test_immutable_carry_live_path_does_not_snapshot_encode_or_clone",
+            "test_unsupported_dynamic_carry_fails_only_capture_without_falsifying_progress"
+          ]
+        },
+        "tests/models/test_training_transaction.py": {
+          "rationale": "Small backend-free accepted-cut, input-unstarted, stale-retry, provider-lifetime and native-boundary validation representatives; persisted fault-window products remain opt-in.",
+          "functions": [
+            "test_positive_completion_captures_once_without_per_update_capture",
+            "test_fresh_zero_work_is_source_inert_and_value_encoding_is_v3",
+            "test_exception_without_current_capture_rejects_retry_before_prepare",
+            "test_provider_retirement_survives_replaced_train_state_binding",
+            "test_positional_lane_keeps_weaker_retry_and_has_no_record",
+            "test_update_validates_retained_plan_only_before_native_and_at_acceptance",
+            "test_acceptance_rechecks_owner_binding_after_native_work",
+            "test_boundary_hook_requires_fresh_validation_before_reservation"
+          ]
+        },
         "tests/metrics/test_reduction_metrics.py": {
           "rationale": "Keep metric authoring, inference, numerical transitions, validation, and symbolic contracts; repeated managed Fold evaluations and native backend products are exhaustive.",
           "functions": [
@@ -26,6 +127,7 @@
           "functions": [
             "test_fold_declaration_is_inert_and_persists_without_source_or_method_calls",
             "test_fold_consumes_one_iterator_once_and_reuses_selected_dynamic_batch_carriers",
+            "test_sectioned_fold_finalizes_only_after_flattened_root_eof",
             "test_fold_rejects_non_lightweight_or_nonfinite_restored_results",
             "test_fold_validates_first_observation_against_declared_source_spec",
             "test_fold_freezes_dynamic_coordinate_shape_from_first_observation"
@@ -97,12 +199,16 @@
           "rationale": "Retain tiny lazy native delivery, causal source cleanup, selected calls and managed-local JAX representatives; full Experiment/artifact and managed-subprocess products are deferred.",
             "functions": [
               "test_generic_trainer_and_empty_artifacts_use_final_dataset_cardinality",
-              "test_native_trainers_consume_authored_dataset_batches",
+               "test_native_trainers_consume_authored_dataset_batches",
+               "test_dataset_continuation_native_sections_share_one_source",
+               "test_dataset_continuation_native_direct_hooks_only_at_final_capture",
               "test_jax_trainer_consumes_authored_dataset_batches",
             "test_jax_qualification_model_runs_on_authored_dataset_batches",
             "test_jax_managed_local_publishes_exact_history_and_independent_owner_state",
             "test_jax_managed_subprocess_restores_exact_graph",
             "test_torch_update_failure_survives_source_cleanup_with_accepted_prefix",
+            "test_tf_training_retains_raw_selection_signature_and_native_sgd",
+            "test_tf_dataset_continuation_scalar_loss_values_gradients_and_fallback",
             "test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
             "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache"
           ]
@@ -115,15 +221,15 @@
           ]
         },
         "tests/models/test_jax_training.py": {
-          "rationale": "Retain one first-class Flax NNX training representative in the routine qualified stack.",
+          "rationale": "Retain first-class Flax NNX training and one tiny real SGD placement/cache regression in the routine qualified stack.",
           "functions": [
-            "test_jax_training_updates_first_class_flax_nnx_model"
+            "test_jax_training_updates_first_class_flax_nnx_model",
+            "test_jax_native_transition_reuses_equal_batch_signature"
           ]
         },
         "tests/models/test_qualification_persistence_fixtures.py": {
            "rationale": "Retain intact incompatible history/progress refusal, current observation fidelity and unchanged Value receipt compatibility.",
             "functions": [
-                 "test_experiment_data_v1_fixture_is_rejected_without_partial_install",
                  "test_value_receipt_fixture_round_trips_actual_value_reader_input",
                  "test_current_history_preserves_original_fixture_facts_and_missing_columns",
                  "test_train_state_old_named_and_tuple_vectors_are_rejected_atomically",
@@ -158,11 +264,16 @@
           ]
         },
         "tests/methods/test_preparation.py": {
-          "rationale": "Retain known-spec validation and direct reprepare clearing semantics without optional backends.",
+          "rationale": "Retain known-spec/reprepare semantics plus bounded NumPy generic-oracle, mutable-metadata/concurrency, work-count/failure, activation-order/fallback and Dataset integration proofs without optional backends.",
           "functions": [
             "test_known_spec_learning_selects_without_a_body_and_validates_dynamic_batches",
             "test_failed_direct_reprepare_clears_old_plan_without_partial_publication",
-            "test_learning_conversion_failure_keeps_published_signature"
+            "test_learning_conversion_failure_keeps_published_signature",
+            "test_compiled_numpy_validation_matches_generic_oracle",
+            "test_prepared_numpy_rereads_mutated_metadata_and_keeps_no_values_or_receiver",
+            "test_prepared_numpy_validation_work_counts_and_failure_boundaries",
+            "test_compiled_numpy_preserves_activation_order_and_fallback_errors",
+            "test_prepared_map_batch_eliminates_per_row_input_reconstruction"
           ]
         },
         "tests/methods/test_stream_ir.py": {
@@ -252,7 +363,8 @@
           "functions": [
             "test_value_execution_publishes_a_result_only_state_for_a_fresh_reader",
             "test_fold_execution_publishes_a_result_only_state_for_a_fresh_reader",
-            "test_fold_worker_failed_read_repairs_and_returns_exact_completion_receipt"
+            "test_fold_worker_failed_read_repairs_and_returns_exact_completion_receipt",
+            "test_early_sectioned_cursor_close_cannot_authorize_fold_finalization"
           ]
         },
         "tests/artifacts/test_fold_resume.py": {
@@ -261,7 +373,8 @@
              "test_fold_resumes_saved_carry_and_position_without_rerunning_initializer",
              "test_fold_rejects_non_positive_or_non_exact_checkpoint_intervals",
               "test_fold_frozen_progress_rejected_intact_before_carry_use",
-             "test_fold_malformed_progress_does_not_partially_install"
+              "test_fold_malformed_progress_does_not_partially_install",
+              "test_section_boundary_checkpoint_is_active_and_resume_requires_remaining_root"
           ]
         },
         "tests/artifacts/test_cached_dataset.py": {

@@ -55,6 +55,60 @@ _EXPECTED_CODE_EXPORTS = [
     "trace",
 ]
 
+
+def test_installed_dataset_continuation_exports_signatures_and_offline_suffix(installed_python):
+    """Exercise installed public records without any optional backend import."""
+    result = _installed_probe(installed_python, '''
+import inspect
+import json
+import sys
+import tempfile
+from pathlib import Path
+import numpy as np
+class RejectNative:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'tensorflow', 'torch', 'jax', 'jaxlib'}:
+            raise AssertionError('unexpected native import: ' + fullname)
+sys.meta_path.insert(0, RejectNative())
+import dryml.data as data
+names = {'DatasetTraversal', 'DatasetState', 'EpochView', 'PendingElement',
+         'TraversalPosition', 'RecoverableGenerator', 'AcceptanceMode',
+         'ReplayRecoveryPolicy', 'ContinuationValue', 'StatePath', 'Epoch',
+         'Accumulate', 'TraversalError', 'TraversalOwnershipError',
+         'UnsupportedContinuationError', 'ContinuationMismatchError',
+         'ContinuationFormatError', 'BatchPreparation'}
+assert names <= set(data.__all__)
+assert all(getattr(data, name) is not None for name in data.__all__)
+assert len(data.__all__) == len(set(data.__all__))
+for cls in (data.Dataset, data.PreparedDataset):
+    signature = inspect.signature(cls.open)
+    assert list(signature.parameters) == ['self', 'epoch', 'start', 'state', 'acceptance']
+    assert [signature.parameters[n].default for n in ('epoch', 'start', 'state', 'acceptance')] == [None, None, None, 'delivery']
+    assert all(p.kind == inspect.Parameter.KEYWORD_ONLY for n, p in signature.parameters.items() if n != 'self')
+dataset = data.Epoch(data.ArrayDataset(np.arange(9)), len=4)
+for value in (True, np.int64(1), 1.0):
+    try:
+        dataset.open(start=value)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError('nonexact count accepted')
+with tempfile.TemporaryDirectory() as directory:
+    with dataset.open() as traversal:
+        view = traversal.next_epoch()
+        assert [next(view), next(view)] == [0, 1]
+        state = traversal.capture_state()
+        state.save(Path(directory) / 'cut')
+    loaded = data.DatasetState.load(Path(directory) / 'cut')
+    loaded.validate(dataset)
+    with dataset.open(state=loaded) as resumed:
+        suffix = [(epoch, [int(value) for value in view]) for epoch, view in resumed.epochs()]
+    assert suffix == [(0, [2, 3]), (1, [4, 5, 6, 7]), (2, [8])]
+    assert not hasattr(loaded, 'object_id')
+print(json.dumps({'suffix': suffix, 'native': [n for n in ('tensorflow', 'torch', 'jax', 'jaxlib') if n in sys.modules]}))
+''')
+    assert json.loads(result.stdout) == {"suffix": [[0, [2, 3]], [1, [4, 5, 6, 7]], [2, [8]]], "native": []}
+
 _EXPECTED_CODE_MODULE_EXPORTS = {
     "dryml.code.algorithms": [
         "LexicalDependencies",
@@ -652,6 +706,99 @@ print(json.dumps({
     assert "site-packages" in data["module"].replace("\\", "/")
 
 
+def test_installed_large_control_preparation_preserves_snapshot_bytes(installed_python: Path) -> None:
+    """Installed control readers share recipe blocks and preserve nested CAS bytes."""
+    result = _installed_probe(installed_python, """
+import json
+from dataclasses import replace
+from uuid import uuid4
+import numpy as np
+from dryml.core import Definition
+from dryml.data import ArrayDataset
+from dryml.managed.control import ControlSnapshot, StartPreparation
+
+node = Definition(ArrayDataset, np.arange(30000, dtype='float32').reshape(10000, 3)).concretize()
+previous = ControlSnapshot(node, 'run', 'a' * 64, uuid4().hex, uuid4().hex, 1, 'running', checkpoint=node)
+preparation = StartPreparation(uuid4().hex, previous, replace(previous, generation=2))
+payload = preparation.to_bytes()
+decoded = StartPreparation.from_bytes(payload, operation_id=previous.operation_id)
+assert decoded.previous.to_bytes() == previous.to_bytes()
+assert decoded.proposed.to_bytes() == preparation.proposed.to_bytes()
+print(json.dumps({'shared': json.loads(payload)['schema'] == 'dryml-managed-control-blocks',
+                  'size': len(payload)}))
+""")
+    data = json.loads(result.stdout)
+    assert data["shared"]
+    assert data["size"] < 1024 * 1024
+
+
+def test_installed_numpy_array_export_owns_readonly_content(installed_python: Path) -> None:
+    """The installed wheel exposes the payload class, not a checkout-only export."""
+    result = _installed_probe(installed_python, """
+import sys
+import json
+import numpy as np
+import dryml.numpy as backend
+assert 'dryml.numpy.array' not in sys.modules
+from dryml.numpy import NumpyArray
+holder = NumpyArray(shape=(2, 3), dtype='float32')
+holder.array = np.arange(6, dtype='float32').reshape(2, 3)
+print(json.dumps({
+    'exports': sorted(backend.__all__),
+    'module': NumpyArray.__module__,
+    'values': holder.array.tolist(),
+    'writeable': holder.array.flags.writeable,
+    'parameters': dict(holder.definition.parameters),
+}))
+""")
+    data = json.loads(result.stdout)
+    assert data["exports"] == ["NumpyArray", "RaggedTensor", "as_tensor_spec", "dtype"]
+    assert data["module"] == "dryml.numpy.array"
+    assert data["values"] == [[0, 1, 2], [3, 4, 5]]
+    assert data["writeable"] is False
+    assert data["parameters"] == {"shape": [2, 3], "dtype": "float32"}
+
+
+def test_installed_ragged_tensor_export_and_spec(installed_python: Path) -> None:
+    """Packed ragged values and their adapter are usable from the installed wheel."""
+    result = _installed_probe(installed_python, """
+import json
+import numpy as np
+from dryml.numpy import RaggedTensor, as_tensor_spec
+value = RaggedTensor.stack([np.ones((2, 5), dtype='float32'), np.zeros((0, 5), dtype='float32')])
+spec = as_tensor_spec(value, batched=True)
+print(json.dumps({'module': RaggedTensor.__module__, 'shape': value.shape,
+                  'rank': spec.ragged_rank, 'layout': spec.layout.value,
+                  'splits': spec.row_splits_dtype.name, 'writeable': value.flat_values.flags.writeable}))
+""")
+    assert json.loads(result.stdout) == {
+        "module": "dryml.numpy.ragged", "shape": [2, None, 5], "rank": 1,
+        "layout": "ragged", "splits": "int64", "writeable": False,
+    }
+
+
+def test_installed_padding_values_and_mask(installed_python: Path) -> None:
+    """Padding is public and executes against installed ragged values and specs."""
+    result = _installed_probe(installed_python, """
+import json
+import numpy as np
+from dryml.core.tensor_spec import Dynamic, TensorSpec
+from dryml.data import Padding
+from dryml.numpy import RaggedTensor
+spec = TensorSpec('float32', shape=(Dynamic, 5), batch=Dynamic, backend='numpy',
+                  layout='ragged', ragged_rank=1, row_splits_dtype='int64')
+method = Padding(3, return_mask=True)
+method.learn(spec, output_spec=method.infer_output_spec(spec))
+output = method(RaggedTensor.stack([np.zeros((1, 5), dtype='float32'), np.zeros((0, 5), dtype='float32')]))
+print(json.dumps({'module': Padding.__module__, 'shape': output['values'].shape,
+                  'mask': output['mask'].tolist(), 'dtype': str(output['mask'].dtype)}))
+""")
+    assert json.loads(result.stdout) == {
+        "module": "dryml.data.padding", "shape": [2, 3, 5],
+        "mask": [[True, False, False], [False, False, False]], "dtype": "bool",
+    }
+
+
 def test_installed_declaration_imports_are_passive(
     installed_python: Path,
 ) -> None:
@@ -670,6 +817,8 @@ class RejectNative:
             raise AssertionError('unexpected native import: ' + fullname)
 sys.meta_path.insert(0, RejectNative())
 import dryml
+from dryml.data import Padding
+Padding(5, return_mask=True)
 import dryml.annotations
 import dryml.environments
 import dryml.formats

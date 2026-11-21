@@ -78,8 +78,8 @@ example counts, and never reselects to correct metadata per batch.
 output facts only after Method inputs are fully declared. Native cursor
 construction enforces the same admission, even if an unresolved Map declares
 known native outputs. Zero-edge inputs still validate their producer constraints
-without copying, changing identity, or breaking gradients. Experimental
-JAX zero-work admission still precedes Dataset preparation and loss/runtime
+without copying, changing identity, or breaking gradients. Explicit TensorFlow,
+Torch, and experimental JAX zero-work admission precedes Dataset preparation and loss/runtime
 setup. Runtime adapter activation remains lazy and does not require a training
 context merely to recognize or convert a concrete CPU JAX value.
 
@@ -155,21 +155,136 @@ batches. A restored unfinished invocation completes its retained target rather
 than adding the configured epoch count again; a later call after completion is a
 fresh invocation.
 
-Its closed version-2 persistence state rejects incompatible versions and missing
+Its closed version-3 persistence state rejects incompatible versions and missing
 or unknown fields, and validates finite loss
 facts, exact nonnegative counters, lifecycle enums, pending-postlude coherence,
 and pending-observation type before installing restored progress. Historical
 three-slot `(epoch, step, phase)` and attempt-based payloads are rejected intact;
 there is no automatic conversion or default-filling reader.
 
+### Invocation-owned input recovery
+
+`TrainFunction.input_session(exp, *, positive=True, exact=True, repo=None)` creates
+an invocation-local context manager. The reusable trainer owns no cursor. Enter
+this boundary before loss factories, optimizer binding, or native preparation.
+For fresh zero work, pass `positive=False`: no Dataset preparation/opening or
+continuation capture occurs. Data-free custom training also needs no dummy input
+or record. `TrainState.input_started` is an exact bool independent of optimizer
+step/epoch accounting; later zero-work calls preserve an already started lane.
+
+A positive session opens the existing Dataset with explicit acceptance, or
+restores its last captured `DatasetState` after validating target/source evidence.
+It calls `traversal.enable_replay_recovery_if_needed()` without source-type
+dispatch. Indexed and declared-direct-only inputs do not enable replay; mixed
+inputs select recovery per occurrence. Fresh statically unqualified preparation
+retains positional compatibility. A backend with transient native owners or
+unsupported execution options must select `exact=False` during fresh admission.
+An established exact lane never falls back after restore/acquisition failure.
+Torch `Training`, explicit TensorFlow `Training`, and experimental JAX `Training`
+use this boundary. They retain one preparation and one traversal across adjacent
+explicit epochs; finite boundary-free inputs reopen once per implicit pass.
+Data admits frozen source/operator capability without acquiring factories,
+capturing state, or copying array payloads. Existing native-source adapters,
+completed caches, custom sources, and transient TF/Torch optimizers retain the
+positional lane with no continuation. A persisted backend Optimizer is necessary
+for exact optimizer recovery. Keras `BasicTraining` uses the same provider and
+accepted-owner fencing with the private token bridge described below; transient
+optimizers retain the positional lane.
+
+Backend `iter_training_batches(data, preparation, *, epoch=0)` accepts either a
+`PreparedDataset` (independent pass) or an `EpochView` (borrowed section, requiring
+`epoch=0`). `view.training_batches(preparation).reserve()` converts a lightweight
+candidate once without accepting it. Converted and raw candidates share one
+single-use token; exhausted cursor closure leaves adjacent sections alive.
+Conversion failure aborts input before exposure/native mutation and preserves its
+primary error if source cleanup also fails.
+`dryml.data.BatchPreparation` (also `dryml.data.native.BatchPreparation`) is the dependency-light structural protocol
+for that retained `prepare(x, y) -> (x, y)` handoff.
+
+Inside the session, reserve from an epoch view and perform each native update
+inside `session.update(candidate)`. Call `record_train_update(...,
+input_candidate=candidate)` before leaving that guard. This endpoint records
+accounting and accepts the input token, normalizes known final boundaries, and
+releases Core's reservation before invoking safe-point callbacks. Candidate
+validation and owner checks precede mutation. Core owner evidence is prepared
+once and read-through freshness/exclusion checks remain active per update; no
+per-update graph reconstruction, SQL, full continuation construction, model
+rollback copy, or extra native completion barrier is introduced.
+The immediate reservation reuses its preceding local check only where no user or
+native effect intervenes. Acceptance still revalidates after native work; boundary
+synchronization retains both checks around its possible hook. Owner-thread,
+binding, invalidation, and Core exclusion checks remain active across updates.
+
+Torch training retains an invocation-local raw selected adapter only for exact
+built-in `dryml.models.torch.Model` instances in eager mode with
+`default_batched=None`. It uses canonical `find_implementation(backend="torch")`
+without forcing batched intent. Each value still crosses argument and return
+signature delivery and the existing tensor-conversion/device-placement body under
+the native-owner lease. Each training batch checks the current mode/default;
+learning, cached, or explicit batch defaults retire the local adapter and use
+ordinary dispatch. A subsequent eligible batch selects afresh. Custom/subclass and
+composite models retain ordinary dispatch. No shared Method mode, learned graph,
+or per-value validation result is cached by this optimization. These bounded
+work-count reductions do not establish a throughput improvement.
+
+TensorFlow's explicit `dryml.models.tf.Training` loop retains the same raw selected
+adapter for exact built-in `dryml.models.tf.Model` and `dryml.models.tf.Sequential`
+instances with those eager/default controls. Canonical
+`find_implementation(backend="tf")` preserves raw batching intent, argument/return
+delivery, native placement, and pending model restoration on every call under the
+existing update lease. Mode/default transitions retire the local adapter and
+re-entry selects afresh; subclasses and custom models keep dynamic dispatch.
+This does not change compiled Keras `BasicTraining` or native user batching.
+
+Unknown EOF/empty-section discovery is installed with `session.sync_boundary()`
+without inventing an optimizer step. Complete the retained epoch postlude before
+`session.handoff()` permits the next physical pass. Repeated synchronization does
+not recount a boundary. Native mutation/accounting/frontier interruptions retire
+all affected owners through Core's existing invalidation/cache eviction boundary;
+recover through fresh durable loading. A backend that positively identifies a
+delayed native mutation failure calls `session.invalidate_native()` even after
+local acceptance. Capture/value failures and callback failures alone do not
+invalidate native owners or fabricate rollback.
+
+`TrainState.dataset_state` is the **last captured record**, separate from cheap
+live input sequence, epoch/offset, completion flags, and replay policy. It may be
+stale while a session is active. Logging-only callbacks do not capture. An actual
+Experiment save requests a matching record through a transient provider; normal
+positive exact completion captures before closure only when the record is absent
+or stale, including initial/no-new-update and boundary-only completion. All exits
+retire the provider. Same-live retry/save after exceptional exact closure requires
+a current matching record **and valid native owners**; otherwise it rejects before
+preparation and requires durable reload. Accepted callback work remains accepted.
+Conflicting-thread saves fail explicitly; they never pull the source on another
+thread or wait for its owner while holding save locks.
+
+Experiment's constructor and graph topology are unchanged. Its existing payload
+hooks write metadata-only TrainState v3 plus one optional `dataset-state/`
+inventory, bound by manifest digest and accepted sequence. Standalone TrainState
+pickle values embed at most one detached record. Providers, locks, live tokens,
+cursors and invokers are excluded from both encodings. `TrainState.validate()`
+validates live accounting independently of persistence and permits stale captured
+references without encoding/copying them; JAX candidate validation uses this path.
+Missing, corrupt, incompatible or mismatched pairs reject before TrainState
+assignment. Version-2 TrainState/Experiment payloads are rejected intact, without
+migration. Core's enclosing inventory and managed checkpoint association remain
+the sole publication authority; a failed capture/save preserves prior checkpoints.
+The bounded comparison tool in [Data](data.md#public-types-and-measurement-controls)
+reports input capture separately from normal training. Its direct input/model-SGD
+checkpoint probes are not managed publication qualification. Native grouped Keras
+may report once per 32 updates; that different callback guarantee is an optimized
+native comparison, not evidence of exact per-update DRYML parity. Real JAX training
+qualification requires Optax; pure JAX availability alone is insufficient.
+
 TensorFlow `fit`, explicit TensorFlow loops, and Torch loops validate all DRYML
 callbacks before training work and invoke them only after this retained state is
 truthful. Keras uses DRYML-owned train-step facts for the actual completed-update
-mean loss and example count, before native user callbacks. Explicit TF and Torch
-accept only mean-reduced supplied losses; sum, unreduced, and indeterminate loss
-contracts fail before model or optimizer mutation. Restoration reopens
-deterministic prepared data and skips `next_batch` without reapplying completed
-updates. An update completing an epoch is normalized to the next epoch/batch-zero
+mean loss, example count and consumed input token, before native user callbacks.
+Explicit TF and Torch accept only mean-reduced supplied losses; sum, unreduced, and indeterminate loss
+contracts fail before model or optimizer mutation. Exact restoration delivers
+saved pending input before continuing the saved producer frontier. Positional
+compatibility can replay to `next_batch` without reapplying completed updates.
+An update completing an epoch is normalized to the next epoch/batch-zero
 position before its callbacks. Explicit TensorFlow and Torch retain validation
 results before progress, so a progress failure does not repeat validation. Keras
 safe-point recovery is deliberately narrow: arbitrary native callbacks cannot be
@@ -241,14 +356,92 @@ cross-backend generator conversion, or Dataset execution inside a tape/backward
 body is supported.
 
 TensorFlow `BasicTraining` supplies Keras a native `tf.data.Dataset` built from
-that once-prepared Dataset plan. It never applies another batch or shuffle and
-only repeats when Keras requires a known finite `steps_per_epoch`; exact source
-exhaustion remains visible rather than being masked by repetition. Explicit
+that once-prepared Dataset plan. It never applies another batch, shuffle, repeat,
+or native positional skip. A logical epoch is one finite fit segment; only the
+view's exact remaining cardinality supplies native steps. Unknown/short final
+sections use observed EOF, without inventing updates. Explicit
 TensorFlow and Torch loops consume closeable native prepared-batch cursors, and
 Torch exposes an `IterableDataset`/single-process DataLoader bridge for native
 wrappers that require one. In all cases adapter reads, including native
 read-ahead, do not advance retained progress: post-update trainer hooks own that
 state.
+
+The explicit TensorFlow `Training` loop inspects each actual loss result rather
+than caching its shape from the loss configuration. Native eager CPU float32/64
+scalars use a native identity for training and validation, preserving their values,
+dtype and native placement while avoiding a redundant `Mean` and its gradient work.
+Training differentiates that scalar target with the native default unit seed. Vectors,
+symbolic tensors (including unknown rank), custom/non-tensor results, other
+dtypes and devices retain `tf.reduce_mean`, including its failure behavior.
+Mean-loss admission and example-weighted accounting are unchanged. This scoped
+work reduction does not establish throughput or native-performance qualification.
+
+#### Keras consumed-input window
+
+One invocation owns a dedicated source thread and a private window (default eight
+unacknowledged batches, 64 MiB retained-value limit, native prefetch two). Source
+pull, retained conversion, capture and cleanup execute on that thread outside
+condition locks. Mutable host buffers are detached when retained; immutable native
+tensors can be shared. The window includes envelopes already fetched into native
+queues: delivery never frees capacity. Production can overlap an optimizer update.
+
+Native generator factory calls borrow exclusive segment-consumer leases from this
+owner. Sequential reinvocation continues delivery without resetting the source or
+ordinals; competing and stale leases reject. Each envelope is a private dictionary
+`{x, y, token}`; nested user dictionaries remain inside their respective branches.
+The scalar int64 token binds the invocation and exact next ordinal. Its bounded
+allocation remains exactly representable through Keras's existing scalar-report
+conversion and raises on exhaustion rather than wrapping.
+
+Graph assertions dominate stateful forward calls as well as optimizer/metric
+effects in both compiled and eager execution. Completion publication depends on
+the actual native effects. Token/loss/example facts piggyback Keras's existing
+report synchronization and are removed before native callbacks, telemetry,
+progress and History; no recovery-only Python graph callback or token readback is
+added. Uncertain native failures invalidate every affected owner. A callback error
+after completed acceptance alone does not invalidate them.
+
+Requested saves and exact finalization ask the source owner to park, then capture
+its producer frontier and **every** unaccepted converted value in one Data-owned
+DatasetState. Restoring allocates fresh runtime authority and delivers that saved
+window without rerunning authored transformation/conversion. The private
+`training_window=1` codec protocol is checked with the other v1 protocols; ordinary
+Dataset.open rejects a training-window record, which requires this adapter.
+Experiment's existing payload/managed save remains the only checkpoint authority.
+Unknown implicit EOF parks next-pass acquisition until the previous postlude is
+complete. Logging-only callbacks invoke no capture hooks.
+
+Capture and cancellation wake capacity-blocked and parked owners. The private
+acknowledgment deadline defaults to 30 seconds. An uncooperative Python pull cannot
+be forcibly interrupted: timeout retires the bridge/provider, raises a causal
+TimeoutError with `cleanup_pending=True`, and prevents partial or late publication.
+When the pull returns, its owner discards the result and closes once. No caller
+thread closes a running producer. Dynamic capture failure preserves prior durable
+checkpoints and either permits safe live continuation or propagates the failure.
+
+Qualification uses TensorFlow 2.19.0 / Keras 3.13.2 on CPU. Deterministic tests prove
+three retained batches (24 bytes for the tiny paired float32 fixture), native-queued
+B/C during blocked A, durable exact suffix/slot/loss agreement, and one accounting
+model, one compile, and unchanged trace counts `[1, 1, 1]` across three short fit
+segments. That short-section fixture retained two batches / 16 bytes, with capacity
+eight and native prefetch two. Native fit setup still occurs per logical section;
+compilation/preparation is reused.
+Native callbacks and invocation telemetry retain one lifecycle across these fit
+segments: model/parameter setup and `on_train_begin` run once at the first actual
+segment, with `params["epochs"]` equal to the retained invocation target.
+Batch, epoch and validation events keep their native ordering after the relevant
+DRYML accounting. Callback state (including native plateau/early-stop patience)
+survives section boundaries. `on_train_end` runs once after normal completion or
+a native stop, with the final segment's public logs and the same combined
+`model.history` returned by the trainer. As in native Keras, an escaping
+source/native/callback exception does not synthesize `on_train_end`; an admitted
+retry starts a new callback lifecycle. Zero-work calls emit no begin/end or
+callback setup. This does not add persistence/replay for arbitrary native
+callbacks or relax the safe-point restrictions above; saved early-stopping
+behavior remains owned by `BasicEarlyStoppingTraining`.
+`steps_per_execution=1` remains a named pre-existing native parity gap. Comparative
+throughput and optimized native grouped execution belong to U8; these work-count
+proofs do not establish throughput parity.
 
 Experimental JAX training follows the same retained preparation and cardinality
 authority. It consumes the authored batches through a closeable JAX iterator;
@@ -802,10 +995,25 @@ epoch to an enclosed seed-aware `Take(...)` boundary; `Take` retains strict
 exhaustion, fixed-prefix, and zero-acquisition behavior. Ordinary non-epoch-aware
 Dataset pipelines retain their normal fresh traversal per epoch.
 
-Training computes a pure JITted parameter-only gradient/Optax candidate, waits
-for its arrays, validates model parameters, mutable state, RNG, and optimizer
-slots, then eagerly installs all owner state and TrainState accounting together.
-Callbacks and managed checkpoints run only after that accepted transition, so a
+Training acquires the input update reservation before reading Model parameters,
+mutable state, RNG, or Optimizer slots. Inside that reservation, native arguments
+with a committed anchor whose existing shardings agree on one device receive
+explicit placement before the JIT call; already committed arrays pass through
+unchanged. Entirely uncommitted arguments and missing, mixed or multi-device
+placement retain ordinary JAX inference, including `jax.default_device` policy.
+This prevents a placement-only second specialization when committed prepared
+batches make the first candidate committed. Placement retains dtype, weak type,
+typed-key implementation, and device/sharding choice; repeated leaf references share one
+placement result within that call. Host-backed restored typed keys use the same
+single-device placement, preserving their bits and implementation.
+No placement evidence or candidate arrays are cached across updates or callbacks.
+It holds that reservation while computing the pure JITted parameter-only
+gradient/Optax candidate, waiting for its arrays,
+validating state, and eagerly installing all owner state and TrainState accounting
+together. Concurrent updates sharing a Model fail explicitly on contention before
+computing a stale candidate. Pure pre-installation failures leave unchanged owners
+valid; failed installation repair invalidates affected owners. Callbacks and managed
+checkpoints run only after that accepted transition and reservation release, so a
 callback/publication failure retains the truthful update. An interruption during
 the bounded transition repairs the prior Model, Optimizer, TrainFunction, and
 progress state before it propagates. Resume reopens the same logical Dataset epoch

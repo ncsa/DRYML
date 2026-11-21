@@ -14,6 +14,110 @@ evidence alongside keys in the same bounded LRU; repeated equality avoids
 relabeling without treating a matching digest as proof. These are implementation
 optimizations, with no persistent-format or identity-version change.
 
+## DatasetState continuation directory v1
+
+The Data-owned `DatasetState` format is separate from Object/Store publication.
+It is an immutable detached record with no ObjectId, graph node, retention root,
+Repo descriptor or executable prepared plan. See [Data continuation](data.md#detached-traversal-continuation)
+for the public API, qualified sources and ownership rules. There is no historical
+reader, migration or overwrite mode.
+
+A directory contains exactly `manifest.json`, `record.json`, and the ordered
+payload files `000000.bin`, `000001.bin`, … . The manifest has the closed keys
+`format="dryml-dataset-state"`, exact integer `version=1`, and `files`. Each
+inventory entry has exactly `name`, nonnegative exact integer `size`, and the
+SHA-256 hex digest `sha256`. The first entry is `record.json`; remaining entries
+are contiguous payload ordinals. Missing/extra entries, directories in place of
+files, noncanonical names, integrity mismatches, duplicate JSON keys, and unknown
+schema/protocols are rejected. Metadata is bounded to 16 MiB, total inventory to
+1 GiB, value depth to 48, integers to 4096 bits, and value nodes to 100,000.
+
+`record.json` contains a closed tagged value grammar, with immutable out-of-line
+byte payloads and backward alias references. Scalar tags are `none`, `bool`,
+`int`, `float` (hex spelling), `complex` (two hex components), and `str`.
+Container tags `list`, `tuple`, and `dict` carry alias ordinals; dict keys are
+unique strings. `bytes`, `array`, `scalar` and `native` name owned payload ordinals.
+Array/scalar records retain dtype and shape and require fixed-storage nonobject,
+unstructured, metadata-free representations. Native records retain registered
+backend (`torch`, `tensorflow`, `jax`), dtype, shape, contiguous logical layout
+and required placement plus host bytes. Native decode produces inert host
+records; only explicit reattachment may import the backend and reconstruct a
+tensor. No pickle, arbitrary callable/class instance, frame or Object-buffer tag
+exists. Integer state, including PCG64 128-bit fields, is never narrowed.
+
+TensorFlow reattachment checks the reconstructed tensor's effective placement
+against every specified saved `DeviceSpec` component, including job, replica and
+task for fully qualified captured devices. Equivalent device spellings are
+accepted; soft-placement fallback to a different required placement raises
+`ValueError`. Reconstruction does not change TensorFlow's process-global
+soft-placement policy.
+
+The decoded domain envelope has exactly `format`, `version`, `protocol`,
+`target`, `state_ref`, `snapshots`, `position`, `policy`, `active_replay`, `explicit`,
+`pass_nonempty`, `initialized`, `staged`, `staged_boundary`, `boundary_pending`,
+`execution`, and `adapter`. Protocol evidence pins the Python major/minor, NumPy version,
+and replay/codec/kernel/training_window integer versions (all currently 1). `position` contains
+the accepted epoch/offset/sequence and completion flags. Target occurrence rows
+include frozen controls, normalized specs, sharing, source evidence and retained
+implementation-selection facts; no invoker or selected function is encoded.
+
+Target CDef/SavedNode metadata uses Core's authenticated canonical Node packets.
+Embedded binary literals are transported as continuation-owned raw byte payloads
+rather than source-sized base64 strings in `record.json`. The original Node binary
+spelling is reinstated before Core validates/authenticates the packet. Node codecs
+that import enum/type or NumPy extension-dtype targets are excluded from this inert
+format; symbol ImportRef/SourceSpec metadata remains unresolved. The directory is
+not a request to materialize its target or restore referenced state.
+
+`adapter` is normally None. A private Keras `tf-training-v1` window contains
+`kind`, `producer_position`, and `pending`. Each pending entry has `value`,
+`position`, and `stage="converted"`. The outer position is accepted training
+progress; producer position and the complete unacknowledged window can be ahead.
+Native dequeuing is not acceptance. These records require their owning training
+adapter; ordinary `Dataset.open` rejects them instead of silently discarding or
+double-converting pending inputs. They add no public prefetch API.
+
+`policy` is disabled,
+enabled or if_needed. Pending public tokens are never serialized; staged values
+and source/operator buffers represent unexposed work at an accepted cut.
+
+Target occurrence records carry deterministic paths, tags, alias partition,
+frozen controls, normalized full specs/cardinality/boundary evidence, Zip tree
+structure, canonical immutable Node-graph recipe/method/required-state metadata,
+and source declarations. Source initialization has its own closed tree grammar:
+value/list/tuple/dict and saved-node metadata. Saved-node records describe exact
+external constructor dependencies and grant no retention or automatic restoration.
+At acquisition they bind only to the caller's compatible target values. Buffered
+values do not admit live Objects or Node handles. Array `snapshots` own contents;
+indexed positions require zero historical row fetches.
+
+Each execution occurrence has independent epoch/counters, boundary/terminal flags,
+buffer/split state, RNG, phase, child states and optional source state. Source
+strategies are indexed/replay/direct; unresolved declarations remain unacquired.
+Replay state records initial values, actual derived seed, physical pass and total
+fetched count. Direct state additionally names the producer definition and complete
+next-yield hook value. A saved direct failure never falls back to replay. Parent
+Zip phases and branch frontiers are restored independently rather than rerunning
+accepted root transitions. Unknown implicit EOF retains prior-pass nonempty truth
+and its pending handoff, preventing double boundary increments or early reopen.
+
+Capture is explicit; prepare/open and ordinary yields perform no source-sized
+snapshot, full continuation encoding, or direct hook call. Loading and target
+validation are inert metadata/owned-byte operations: no Dataset construction,
+producer/factory call, referenced Store access or Object restoration occurs.
+Independent target equivalence compares complete normalized evidence, not only a
+digest, current Python class name, receiver identity or stale validation result.
+
+The writer privately stages on the destination filesystem, writes/fsyncs files,
+validates its full inventory, and acquires the stable sibling lock
+`.<destination>.dataset-state.lock`. It checks destination absence **inside that
+lock** and holds it through atomic directory rename. The lock is never unlinked
+between cooperating writers. There is no replacement or unlocked fallback.
+Failures clean up only this writer's staging and preserve primary errors; an
+interruption around rename may have committed a complete directory, which a retry
+must not replace. These guarantees require supported local advisory-lock and
+same-filesystem atomic-rename semantics, not hostile-path or distributed races.
+
 ## Object And Store Authority
 
 ### Shared Node Graph V1 / CDef Identity 3
@@ -545,9 +649,37 @@ reader requirement.
 Completed `Value` Artifacts retain their result through the
 `dryml.artifacts.value` v1 envelope. A `TrainState` is ordinary Object state, not
 a separate Store format: its closed pickle state is
-`{"version": 2, "fields": <complete-current-field-map>}`. Missing/unknown fields,
+`{"version": 3, "fields": <complete-current-field-map>}`. Missing/unknown fields,
 prior named/three-slot states, and inconsistent progress are rejected before
-installation. Experiment state wraps this as `{"version": 2, "state": TrainState}`.
+installation. The semantic fields include exact-bool `input_started`, recovery
+lane (`exact` or `positional`), input-frontier sequence, section/root completion
+flags and replay policy. Input-unstarted state has zero input sequence, no input
+boundary, and no continuation, independently of data-free training accounting.
+Started positional state has no continuation. Started exact persistence requires
+the captured record's sequence, epoch/offset, completion flags, and replay policy
+to match the accepted TrainState cut; pending postludes must be compatible.
+
+The standalone TrainState **value** encoding has one optional `dataset_state`
+field, either `None` or the closed mapping `{"version": 1, "metadata": bytes,
+"payloads": tuple[bytes, ...]}`. Decode validates the detached DatasetState v1
+record and the pair before installing fields. In-memory validation/candidate
+copying borrows immutable record references and never uses this persistence path.
+The transient input provider is excluded from the field map.
+
+Experiment's `experiment_state.pkl` is instead the closed envelope
+`{"version": 3, "state": {"version": 3, "fields": <metadata-only-field-map>},
+"continuation": <binding-or-None>}`. The metadata map excludes `dataset_state`
+and the provider. A present binding has exactly `path="dataset-state"`,
+`manifest_sha256=<SHA-256 of dataset-state/manifest.json>`, and
+`sequence=<accepted-input-sequence>`. That fixed directory contains the single
+DatasetState inventory; the pickle never duplicates its buffers. An absent
+binding requires an absent directory. Restore rejects extra fields, illegal
+presence, bad versions, corrupt/truncated inventory, stale digest or mismatched
+sequence/position before assigning the restored TrainState. The existing outer
+Core inventory protects the whole payload, and managed checkpoint association
+remains unchanged. Neither encoding contains live cursors, tokens, guards, locks,
+queues or selected invokers. Version-2 Experiment and TrainState are rejected
+intact without migration; the constructor/Node/Store identity formats do not change.
 Pending observations carry `pending_observation_run_id`, with occurrence keys
 `v2:<run_id>:<sequence>`; resumed invocations reuse those facts. Experiment
 artifact mappings persist individual Template-role Definitions as quotation data
@@ -638,6 +770,26 @@ See [Repos and Stores](repos.md) for reconstruction ownership and
 [Session](session.md) for cache lifetime; [Generic Execute](execute.md) accepts
 only the narrower direct-DirStore worker transport.
 
+## NumPy Array Payload V1
+
+`dryml.numpy.NumpyArray` uses the opaque state codec `npy1`, with one codec-private
+`array.npy` file. The token versions this container contract, not NumPy's NPY
+header version. Constructor metadata contains normalized shape/dtype fields but
+no array values. The standard NumPy header must agree with those declarations;
+shape or dtype mismatches fail before payload installation.
+
+Readers/writers disable pickle and admit only nonobject, unstructured dtypes with
+no dtype metadata that NPY can preserve exactly. A dtype such as a custom bfloat
+representation that NPY reduces to void is rejected rather than relabeled.
+Missing, malformed, truncated, unsupported or trailing bytes fail before the hook
+replaces its installed array. Restored arrays are eager, owned and read-only;
+there is no retained mmap or external-file authority.
+
+Core's normal inventory/hash checks, immutable StateKey publication, selected
+source validation, graph invalidation and receipt installation remain in force.
+The class adds no Store-format or Node-identity revision. See
+[NumPy Array Storage](numpy.md) for ownership, default Repo selection and usage.
+
 ## Artifact Value V1
 
 `Value` local state contains one trusted dill protocol-5 `value.pkl` envelope:
@@ -720,6 +872,35 @@ Node records use version 1; `dryml-managed-history` v2 and
 reference and StateKey versions are validated independently. No Object payload,
 Repo handle, portable Repo definition or Python continuation is stored.
 
+Control wire bytes remain bounded to 1 MiB. Large records can use the closed
+`dryml-managed-control-blocks` v1 envelope with exactly `schema`, `version`,
+`record`, and `blocks`. The pool maps existing 64-hex Node value-block keys to
+their exact JSON blocks. A reference replaces only a graph `values` entry (or a
+nested envelope's `blocks` entry), and must equal that entry's key. Nested
+envelopes retain independent reference scopes. Missing/unused blocks, invalid
+references, conflicting same-key content, duplicate JSON keys and unsupported
+versions fail closed. Sharing does not merge Node tables, views, occurrences,
+ObjectIds, state bindings or retained construction evidence; authenticated graph
+v1 / identity-3 validation still runs after expansion.
+
+Writers retain plain canonical JSON through 256 KiB and select pooling of repeated
+blocks of at least 256 bytes only when it reduces stored bytes. Expanded metadata
+is separately bounded to 8 MiB, depth 96, 65,536 nodes, 16,384 entries per container,
+1 MiB strings and 64-bit integers. These limits apply before graph reconstruction;
+a compact reference expansion cannot bypass them. Plain current-v4 records remain
+readable and retain their original bytes.
+
+New `dryml-managed-start` wire v2 preparations retain the logical v1 projection
+shape but embed previous/proposed snapshots as closed
+`dryml-managed-snapshot-packet` v1 descriptors, with `packet` and `source` fields.
+`packet` contains the actual plain/shared snapshot JSON. `source` is null for
+canonical bytes, otherwise the original UTF-8 JSON spelling, validated against
+that packet. Readers also accept existing inline-snapshot start v1 preparations.
+Unchanged decoded snapshots/preparations return their exact source bytes; changing
+a preparation preserves each nested snapshot's original CAS witness. This is
+explicit wire-format readability, not conversion of incompatible Store, current,
+result or graph authority.
+
 Durable ordinary values use `dryml-managed-result` version 2, independent of the
 current-control record version. Its closed envelope contains exactly `schema`,
 `version`, `nodes`, `root`, and `metadata`. Metadata rows select exact authenticated
@@ -745,7 +926,7 @@ before publication. POSIX publication syncs the parent directory; the Windows
 adapter syncs regular files and atomic replacement without claiming unsupported
 directory-descriptor fsync. Unsupported, malformed, incomplete, unreadable, or
 pending control authority fails reconciliation rather than becoming a fabricated
-status. Old authority is preserved unchanged; there is no compatibility reader or
-automatic conversion. See [Managed Operations](managed_operations.md) for start,
+status. Incompatible authority is preserved unchanged; only the explicitly listed
+wire representations are readable, without automatic conversion. See [Managed Operations](managed_operations.md) for start,
 checkpoint, retention and result semantics, and [verification evidence](object_state_lifecycle_verification.md)
 for measured qualification and pending coordinator gates.

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 import sys
 from typing import Literal
 
 import numpy as np
 
-from dryml.core.backend import Backend, backend_testers
-from dryml.core.tensor_spec import BatchMode, Dynamic, SpecTree, TensorSpec, is_spec_tree
+from dryml.core.backend import Backend, _native_backend, backend_testers
+from dryml.core.dtype import DType
+from dryml.core.tensor_spec import (
+    BatchMode, Dynamic, Layout, SpecTree, TensorSpec, _python_object_batch_size,
+    _python_object_spec, is_spec_tree, iter_specs,
+)
 
 from .errors import MethodError
 
@@ -148,12 +152,13 @@ def spec_nodes(
 
 
 def runtime_node(value: object) -> MethodCallNode:
-    """Normalize one supported runtime value without inferring a batch axis.
+    """Normalize one runtime value without retaining opaque content or guessing batching.
 
     Raises:
-        TypeError: If a value is not a registered lightweight tensor value or a
-            recursively supported container. This function never imports an
-            optional framework to recognize a value.
+        TypeError: For unsupported native tensor adapters/dtypes or container
+            keys. Unrecognized Python leaves use the same object/Python-layout
+            vocabulary as retained inputs and outputs. This function never
+            imports an optional framework to recognize a value.
     """
 
     if isinstance(value, TensorSpec):
@@ -185,8 +190,6 @@ def runtime_node(value: object) -> MethodCallNode:
     # explicitly registered itself. Looking in sys.modules avoids importing a
     # framework merely to inspect an ordinary Method call.
     for backend, tester in tuple(backend_testers.items()):
-        if backend is Backend.numpy:
-            continue
         try:
             recognized = tester(value)
         except Exception as error:
@@ -197,8 +200,10 @@ def runtime_node(value: object) -> MethodCallNode:
         converter = None if module is None else vars(module).get("as_tensor_spec")
         if callable(converter):
             return spec_node(converter(value))
-        break
-    raise TypeError("Method call signatures require supported tensor-like values.")
+        raise TypeError("Method call signatures require a registered native tensor spec adapter.")
+    if _native_backend(value) is not None:
+        raise TypeError("Method call signatures require a registered native tensor spec adapter.")
+    return MethodCallNode("tensor", _python_object_spec())
 
 
 def runtime_node_for_constraint(value: object, constraint: MethodCallNode) -> MethodCallNode:
@@ -206,12 +211,157 @@ def runtime_node_for_constraint(value: object, constraint: MethodCallNode) -> Me
 
     A retained batched TensorSpec makes the first physical runtime axis observable
     without guessing from a dense value during ordinary eager selection.
+    Python object leaves use only the declared outer batch boundary, retaining no
+    content, class, shape attributes or array-conversion evidence. Trees are
+    traversed by their spec so object-valued containers remain opaque leaves.
+    Native values inherit logical sample-axis labels from the retained declaration;
+    explicit TensorSpec values retain their own labels and must satisfy them.
+
+    Args:
+        value: Runtime native tensor, opaque value, or declared structural tree.
+        constraint: Immutable MethodCallNode carrying the retained logical spec.
+
+    Returns:
+        An immutable node with observed tensor metadata and declared logical axis
+        interpretation, without retaining opaque values or their classes.
 
     Raises:
         TypeError: If ``value`` cannot be normalized by the supported adapters.
+
+    Side Effects:
+        Reads native metadata through registered adapters; executes no Method.
     """
 
-    return _apply_retained_batch(runtime_node(value), constraint)
+    return _runtime_node_with_schema(value, constraint, retain_batch=True)
+
+
+_DENSE_NUMPY_DTYPE_NAMES = frozenset({
+    "bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+    "float16", "float32", "float64", "complex64", "complex128",
+})
+
+
+def _compile_numpy_constraint(
+    constraint: MethodCallNode,
+) -> Callable[[object], bool | None] | None:
+    """Compile a pure exact-ndarray predicate; None delegates to generic validation.
+
+    Only ordinary dense numerical constraints are compiled. Each invocation reads
+    the actual dtype and physical shape anew, without retaining values or caching
+    results. NumPy dtype names erase byte order just as normalize_dtype does;
+    fields, subarrays, metadata and unrecognized names require the generic path
+    so its normalization errors and interpretation remain authoritative.
+    Activation of declared backends remains the invocation boundary's job.
+    """
+    if type(constraint) is not MethodCallNode or constraint.kind != "tensor":
+        return None
+    expected = constraint.value
+    if (type(expected) is not TensorSpec or expected.layout is not Layout.DENSE
+            or (expected.backend is not None and expected.backend is not Backend.numpy)
+            or type(expected.dtype) is not DType
+            or type(expected.dtype.kind) is not str
+            or (expected.dtype.bits is not None and type(expected.dtype.bits) is not int)
+            or expected.dtype.name not in _DENSE_NUMPY_DTYPE_NAMES
+            or any(field is not None for field in (
+                expected.ragged_rank, expected.row_splits_dtype, expected.sparse_format,
+            ))
+            or (expected.batch is None and expected.batch_axis_name is not None)):
+        return None
+    if ((expected.batch_axis_name is not None and type(expected.batch_axis_name) is not str)
+            or any(name is not None and type(name) is not str for name in expected.axis_names or ())
+            or any(size is not Dynamic and type(size) is not int for size in expected.shape or ())
+            or (expected.batch is not None and expected.batch is not Dynamic and type(expected.batch) is not int)):
+        return None
+
+    dtype_name = expected.dtype.name
+    batched = expected.batch is not None
+    full_shape = expected.full_shape
+    rank = None if full_shape is None else len(full_shape)
+    fixed_axes = tuple((axis, size) for axis, size in enumerate(full_shape or ()) if size is not Dynamic)
+    # Unknown sample rank still has an observable fixed/dynamic leading batch.
+    if full_shape is None and batched and expected.batch is not Dynamic:
+        fixed_axes = ((0, expected.batch),)
+
+    def matches(value: object) -> bool | None:
+        if type(value) is not np.ndarray:
+            return None
+        dtype = value.dtype
+        if dtype.fields is not None or dtype.subdtype is not None or dtype.metadata is not None:
+            return None
+        actual_name = dtype.name
+        if actual_name not in _DENSE_NUMPY_DTYPE_NAMES:
+            return None
+        if actual_name != dtype_name:
+            return False
+        shape = value.shape
+        if (batched and not shape) or (rank is not None and len(shape) != rank):
+            return False
+        return all(size == shape[axis] for axis, size in fixed_axes)
+
+    return matches
+
+
+def _runtime_node_with_schema(value, constraint, *, retain_batch):
+    """Use opaque leaf boundaries without changing exact physical tensor signatures."""
+    if constraint.kind == "tensor":
+        expected = constraint.value
+        if expected.is_python_object:
+            size = _python_object_batch_size(value) if expected.batched else None
+            observed = replace(expected, shape=(), batch=size)
+            return MethodCallNode("tensor", observed)
+        observed = runtime_node(value)
+        if not retain_batch:
+            return observed
+        observed = _apply_retained_batch(observed, constraint)
+        if (not isinstance(value, TensorSpec) and observed.kind == "tensor"
+                and expected.axis_names is not None and observed.value.rank == expected.rank):
+            observed = MethodCallNode("tensor", replace(observed.value, axis_names=expected.axis_names))
+        return observed
+    if constraint.kind == "mapping" and isinstance(value, Mapping):
+        expected = dict(constraint.value)
+        if not all(isinstance(key, (str, int)) for key in value):
+            raise TypeError("Method mapping keys must be str or int.")
+        return MethodCallNode("mapping", tuple(
+            (key, _runtime_node_with_schema(item, expected[key], retain_batch=retain_batch)
+             if key in expected else runtime_node(item))
+            for key, item in value.items()))
+    if constraint.kind in {"tuple", "list"} and isinstance(value, (tuple, list)):
+        children = constraint.value
+        return MethodCallNode("tuple" if isinstance(value, tuple) else "list", tuple(
+            _runtime_node_with_schema(item, children[index], retain_batch=retain_batch)
+            if index < len(children) else runtime_node(item)
+            for index, item in enumerate(value)))
+    return runtime_node(value)
+
+
+def _python_object_inputs(nodes) -> bool:
+    """Report a nonempty first-input tree whose backend is inapplicable, not unknown."""
+    leaves = tuple(_tensor_leaves(nodes[0])) if nodes else ()
+    return bool(leaves) and all(spec.is_python_object for spec in leaves)
+
+
+def _runtime_backends_for_spec(value, spec):
+    """Discover tensor backends without traversing explicitly opaque Python leaves."""
+    from dryml.core.backend import discover_backends
+    if not any(leaf.is_python_object for leaf in iter_specs(spec)):
+        return discover_backends(value, activate_native=True)
+
+    def tensor_values(value, spec):
+        if isinstance(spec, TensorSpec):
+            if not spec.is_python_object:
+                yield value
+        elif isinstance(spec, dict) and isinstance(value, Mapping):
+            for key, child in spec.items():
+                if key in value:
+                    yield from tensor_values(value[key], child)
+        elif isinstance(spec, (tuple, list)) and isinstance(value, (tuple, list)):
+            for item, child in zip(value, spec):
+                yield from tensor_values(item, child)
+        else:
+            raise TypeError("Runtime input structure differs from its declared spec.")
+
+    tensors = tuple(tensor_values(value, spec))
+    return discover_backends(*tensors, activate_native=True) if tensors else set()
 
 
 def complete_backend_constraint(
@@ -238,7 +388,7 @@ def complete_backend_constraint(
         return constraint
     if constraint.kind == "tensor":
         spec = constraint.value  # type: ignore[assignment]
-        if spec.backend is None:
+        if spec.backend is None and not spec.is_python_object:
             spec = replace(spec, backend=backend)
         return MethodCallNode("tensor", spec)
     if constraint.kind == "mapping":
@@ -278,6 +428,10 @@ def spec_from_runtime_node(
         physical tensor shape.
     """
 
+    if (batch_mode is BatchMode.batched and node.kind in {"list", "tuple"}
+            and node.value and all(
+                child.kind == "tensor" and child.value.is_python_object for child in node.value)):
+        return _python_object_spec(batch=len(node.value))
     if node.kind == "tensor":
         spec = node.value  # type: ignore[assignment]
         if batch_mode is BatchMode.batched and spec.batch is None:
@@ -300,28 +454,57 @@ def spec_from_runtime_node(
     }
 
 
-def call_signature(args: tuple[object, ...], kwargs: Mapping[str, object]) -> MethodCallSignature:
+def call_signature(
+    args: tuple[object, ...], kwargs: Mapping[str, object], *,
+    expected: MethodCallSignature | None = None,
+) -> MethodCallSignature:
     """Normalize a complete logical call into an exact immutable signature.
+
+    Args:
+        args: Positional values in call order.
+        kwargs: Named values, normalized in sorted keyword order.
+        expected: Optional retained signature defining opaque leaf/batch
+            boundaries. Numerical fields still use exact physical signatures.
+
+    Returns:
+        Immutable call metadata without retaining opaque values or their classes.
 
     Raises:
         TypeError: If a positional/keyword value or keyword name cannot be
             represented by the supported tensor/spec adapter vocabulary.
+        ValueError: For conflicting observed backend or batch facts.
+
+    An existing signature supplies opaque leaf/batch boundaries, so their content
+    is never reclassified as a tensor or structural container during cached calls.
+    Physical numerical signatures and positional/keyword layout remain exact.
+    Registered lightweight detectors/adapters may run, but no target is invoked
+    and no optional framework is imported merely to classify an opaque value.
     """
 
     if not all(isinstance(name, str) for name in kwargs):
         raise TypeError("Method keyword names must be strings.")
-    arg_nodes = tuple(runtime_node(value) for value in args)
-    kw_nodes = tuple((name, runtime_node(kwargs[name])) for name in sorted(kwargs))
+    constraints = () if expected is None else expected.args
+    named = {} if expected is None else dict(expected.kwargs)
+    arg_nodes = tuple(_runtime_node_with_schema(value, constraints[index], retain_batch=False)
+                      if index < len(constraints) else runtime_node(value) for index, value in enumerate(args))
+    kw_nodes = tuple((name, _runtime_node_with_schema(kwargs[name], named[name], retain_batch=False)
+                     if name in named else runtime_node(kwargs[name])) for name in sorted(kwargs))
     backend, _ = node_facts((*arg_nodes, *(node for _, node in kw_nodes)))
-    _, batch_mode = runtime_facts(args, kwargs)
+    if expected is None:
+        _, batch_mode = runtime_facts(args, kwargs)
+    else:
+        facts = [fact for index, value in enumerate(args)
+                 for fact in _runtime_fact_leaves(value, constraints[index] if index < len(constraints) else None)]
+        facts.extend(fact for name, value in kwargs.items() for fact in _runtime_fact_leaves(value, named.get(name)))
+        _, batch_mode = _facts_from_leaves(facts)
     return MethodCallSignature(arg_nodes, kw_nodes, backend, batch_mode)
 
 
 def runtime_facts(args: tuple[object, ...], kwargs: Mapping[str, object]) -> tuple[Backend | None, BatchMode | None]:
     """Return only unambiguous registered runtime backend and batch facts.
 
-    Unsupported opaque leaves contribute no facts so ordinary eager direct calls
-    can still reach genuinely generic implementations. Conflicting observed
+    Opaque leaves contribute no tensor backend or unobserved batch facts so
+    ordinary eager calls can reach genuinely generic implementations. Conflicting observed
     backend or batch facts raise ``ValueError`` before target invocation.
     """
 
@@ -331,6 +514,11 @@ def runtime_facts(args: tuple[object, ...], kwargs: Mapping[str, object]) -> tup
             leaves.extend(_runtime_fact_leaves(value))
         except TypeError:
             continue
+    return _facts_from_leaves(leaves)
+
+
+def _facts_from_leaves(leaves):
+    """Reduce already-admitted leaf facts without observing source values again."""
     backends = {spec.backend for spec, _ in leaves if spec.backend is not None}
     if len(backends) > 1:
         raise ValueError("Method call contains conflicting backend facts.")
@@ -413,16 +601,21 @@ def _tensor_leaves(nodes: object):
             yield from _tensor_leaves(node)
 
 
-def _runtime_fact_leaves(value: object) -> tuple[tuple[TensorSpec, BatchMode | None], ...]:
+def _runtime_fact_leaves(value: object, constraint=None) -> tuple[tuple[TensorSpec, BatchMode | None], ...]:
     """Return runtime tensor leaves and only explicitly observable batch facts."""
 
+    if constraint is not None and constraint.kind == "tensor" and constraint.value.is_python_object:
+        return ((_runtime_node_with_schema(value, constraint, retain_batch=False).value, None),)
     if isinstance(value, TensorSpec):
         batch_mode = BatchMode.batched if value.batched else BatchMode.element
         return ((value, batch_mode),)
     if isinstance(value, (tuple, list)):
-        return tuple(leaf for item in value for leaf in _runtime_fact_leaves(item))
+        children = constraint.value if constraint is not None and constraint.kind in {"tuple", "list"} else ()
+        return tuple(leaf for index, item in enumerate(value)
+                     for leaf in _runtime_fact_leaves(item, children[index] if index < len(children) else None))
     if isinstance(value, Mapping):
-        return tuple(leaf for item in value.values() for leaf in _runtime_fact_leaves(item))
+        named = dict(constraint.value) if constraint is not None and constraint.kind == "mapping" else {}
+        return tuple(leaf for key, item in value.items() for leaf in _runtime_fact_leaves(item, named.get(key)))
     node = runtime_node(value)
     return tuple((spec, None) for spec in _tensor_leaves(node))
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, Callable
@@ -43,6 +45,18 @@ class _IndexedDatasetCursor(DatasetCursor):
         self._position += 1
         return value
 
+    _native_read = _read
+    _native_next = DatasetCursor.__next__
+    _native_call = staticmethod(DatasetCursor._call)
+
+    def _matches_native_reader(self, item_at):
+        """Certify that grouped access would bypass no substituted read behavior."""
+        return (type(self) is _IndexedDatasetCursor and self._item_at is item_at
+                and getattr(self._read, "__func__", None) is _IndexedDatasetCursor._native_read
+                and type(self).__next__ is _IndexedDatasetCursor._native_next
+                and self._call is _IndexedDatasetCursor._native_call
+                and not self._closed and not self.observed_eof)
+
     def _skip(self, n: int) -> None:
         """Advance the index without reads, leaving cleanup to the shared boundary."""
 
@@ -54,6 +68,9 @@ class _IndexedDatasetCursor(DatasetCursor):
 
 def _tree_index(x: Any, i: int) -> Any:
     return map_leaves(x, lambda leaf: leaf[i])
+
+
+_NATIVE_TREE_INDEX = _tree_index
 
 
 def _fresh_iterable(factory: Callable[..., Any], *args, **kwargs) -> Iterable[Any]:
@@ -75,9 +92,16 @@ class _GeneratorCursor(DatasetCursor):
         self._dataset = dataset
         self._epoch = epoch
         self._values = None
+        self._initial_binding = dataset
+        self._restore = None
+        self._strategy = None
+        self._effective_seed = (_epoch_seed(dataset.seed, epoch, dataset.epoch_seed_version)
+                                if dataset.seed_aware else None)
         self._observed_examples = 0
         declaration = dataset._declared_example_count
-        self._validate_observed = declaration is not None and not declaration.is_unknown
+        self._validate_observed = (
+            dataset._spec is not None and declaration is not None and not declaration.is_unknown
+        )
 
     def _validate_end(self):
         if self._validate_observed:
@@ -85,14 +109,50 @@ class _GeneratorCursor(DatasetCursor):
             if observed != self._dataset._declared_example_count:
                 raise ValueError("GeneratorDataset observed example count conflicts with its declaration.")
 
-    def _read(self):
+    def _acquire(self):
         dataset = self._dataset
         if self._values is None:
             kwargs = dict(dataset.factory_kwargs)
             if dataset.seed_aware:
-                kwargs["seed"] = self._call(_epoch_seed, dataset.seed, self._epoch, dataset.epoch_seed_version)
-            values = self._own(self._call(_fresh_iterable, dataset.gen_factory, *dataset.factory_args, **kwargs))
+                kwargs["seed"] = self._effective_seed
+            if self._restore is not None:
+                from .recovery import _restore_initial
+                args, kwargs = self._call(_restore_initial, self._restore["initial"], self._initial_binding)
+            else:
+                args = dataset.factory_args
+            values = self._own(self._call(_fresh_iterable, dataset.gen_factory, *args, **kwargs))
             self._values = self._own(self._call(iter, values))
+            from .recovery import RecoverableGenerator, _declared_direct, _symbol
+            from .errors import UnsupportedContinuationError, ContinuationMismatchError
+            direct = isinstance(self._values, RecoverableGenerator)
+            if direct and (self._call(iter, self._values) is not self._values
+                           or not callable(getattr(self._values, "capture_state", None))
+                           or not callable(getattr(self._values, "restore_state", None))):
+                raise UnsupportedContinuationError("Direct producer must be its actual stateful iterator.")
+            if _declared_direct(dataset.gen_factory) and not direct:
+                raise UnsupportedContinuationError("Declared direct class returned an incompatible iterator.")
+            self._strategy = "direct" if direct else "replay"
+            if self._restore is not None:
+                saved, self._restore = self._restore, None
+                if saved["strategy"] != self._strategy:
+                    raise ContinuationMismatchError("Saved source strategy no longer matches actual iterator.")
+                if direct:
+                    if _symbol(type(self._values)) != saved["producer"]:
+                        raise ContinuationMismatchError("Saved direct producer definition differs.")
+                    self._call(self._values.restore_state, saved["state"])
+                else:
+                    for _ in range(saved["fetched"]):
+                        try:
+                            self._pull(self._values)
+                        except StopIteration as error:
+                            raise ContinuationMismatchError("Replay source ended before its saved prefix.") from error
+                self._position = saved["fetched"]
+                self._observed_examples = saved["examples"]
+                self._validate_observed = saved["validate_examples"]
+
+    def _read(self):
+        dataset = self._dataset
+        self._acquire()
         if dataset.cardinality.is_finite and self._position >= int(dataset.cardinality):
             self._call(self._validate_end)
             raise StopIteration
@@ -119,7 +179,12 @@ class GeneratorDataset(SourceDataset):
         *factory_args: Positional arguments retained for ``gen_factory``.
         cardinality: Declared yield cardinality.
         example_count: Optional explicit total for opaque or dynamic batches.
-        spec: Optional yielded-element specification or inference hint.
+        spec: Optional yielded-element SpecTree or SpecHint (also accepted as a
+            dict, string or sample count). A hint samples the source immediately,
+            inferring numerical and class-agnostic opaque Python leaves, then
+            closes the sampling cursor. Example totals are validated on normal
+            traversals once a countable spec exists. An explicit SpecTree opens
+            no factory during construction.
         seed: Base seed for the supported seed-aware source protocol.
         seed_aware: Enable the versioned per-epoch seed protocol.
         epoch_seed_version: Version of the stable epoch seed derivation protocol.
@@ -129,6 +194,8 @@ class GeneratorDataset(SourceDataset):
     ordinary iteration is epoch zero. Factories are acquired on first advancement;
     cursors own and close the actual factory iterator on early close, failure,
     finite cutoff, or natural EOF. Explicit example totals are metadata only.
+    Invalid declarations raise TypeError or ValueError; inference also propagates
+    factory/adapter errors and rejects insufficient or incompatible samples.
     """
 
     def __init__(
@@ -137,7 +204,7 @@ class GeneratorDataset(SourceDataset):
         *factory_args,
         cardinality: Cardinality = Cardinality.UNKNOWN,
         example_count: int | Cardinality | None = None,
-        spec: SpecTree|str|int|dict[str,str|int]|None=None,
+        spec: SpecTree|SpecHint|str|int|dict[str,str|int]|None=None,
         seed: int | None = None,
         seed_aware: bool = False,
         epoch_seed_version: int = 1,
@@ -169,13 +236,34 @@ class GeneratorDataset(SourceDataset):
         if spec is None:
             self._spec = None
         elif isinstance(spec, SpecHint):
-            self._spec = detect_spec_tree(iter(self), spec)
+            self._spec = self._infer_spec(spec)
         else:
             leaf = first_leaf(spec)
             if isinstance(leaf, TensorSpec):
                 self._spec = spec
             else:
-                self._spec = detect_spec_tree(iter(self), SpecHint.build(spec))
+                self._spec = self._infer_spec(SpecHint.build(spec))
+
+    def _infer_spec(self, hint: SpecHint) -> SpecTree:
+        """Own the bounded sampling traversal before an element spec is available."""
+        with self.iterator() as cursor:
+            return detect_spec_tree(cursor, hint)
+
+    @classmethod
+    def __dryml_normalize_definition_arguments__(cls, args, kwargs):
+        """Keep explicit SpecHints inert and definition-compatible until initialization.
+
+        Return constructor positional/keyword forms with a SpecHint represented
+        by its ordinary batch_mode/samples mapping. This normalizes only metadata;
+        it never opens a factory, infers sample content, or imports a backend.
+        Other values, including declared SpecTrees and existing dict hints, retain
+        their normal interpretation. Binding errors raise TypeError.
+        """
+        bound = inspect.signature(cls.__init__).bind_partial(None, *args, **kwargs)
+        hint = bound.arguments.get("spec")
+        if isinstance(hint, SpecHint):
+            bound.arguments["spec"] = {"batch_mode": hint.batch_mode.value, "samples": hint.samples}
+        return bound.args[1:], dict(bound.kwargs)
 
 
     def __iter__(self) -> Iterator[Any]:
@@ -220,11 +308,36 @@ class GeneratorDataset(SourceDataset):
         return self.cardinality
 
     def example_cardinality(self) -> Cardinality:
-        """Return an explicit opaque-source total or ordinary spec-derived facts."""
+        """Return the explicit example total or ordinary spec-derived cardinality.
 
-        derived = super().example_cardinality()
+        Returns:
+            Finite, infinite, or unknown metadata. Explicit example_count also
+            proves a whole-source yield range used by preserving Map and other
+            structural nodes; it does not prove arbitrary dynamic-batch subsets.
+
+        Raises:
+            TypeError: For malformed countable spec metadata.
+            ValueError: If declared example_count conflicts with the spec and
+                yield cardinality, or if fixed batch declarations disagree.
+
+        Side Effects:
+            None. No source factory, cursor or optional backend is opened.
+        """
+        return self._range_example_cardinality(0)
+
+    def _range_example_cardinality(
+        self, start: int, stop: int | None = None,
+    ) -> Cardinality:
+        """Use the declared total only when a yield range covers the whole source."""
+        derived = super()._range_example_cardinality(start, stop)
         declared = self._declared_example_count
         if declared is None or declared.is_unknown:
+            return derived
+        yields = self.yield_cardinality()
+        whole_source = start == 0 and (
+            stop is None or (yields.is_finite and stop >= yields.require_finite())
+        )
+        if not whole_source:
             return derived
         if not derived.is_unknown and derived != declared:
             raise ValueError(

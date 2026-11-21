@@ -45,6 +45,17 @@ class ShortDataset(TrackingDataset):
         return DatasetCursor(self.resource)
 
 
+class LegacySkip(Dataset):
+    """Opaque custom wrapper retaining ordinary eager fallback after Skip qualifies."""
+
+    def __init__(self, src):
+        self.src = src
+        super().__init__(spec=src.spec)
+
+    def __iter__(self):
+        return iter(Skip(self.src, 1))
+
+
 def _batches():
     source = TrackingDataset((
         (np.asarray([0.0], dtype=np.float32), np.asarray([0.0], dtype=np.float32)),
@@ -61,6 +72,77 @@ def _seeded_pairs(*, seed):
     for _ in range(2):
         value = np.asarray([rng.integers(1000)], dtype=np.float32)
         yield value, value
+
+
+def _paired_values(values):
+    """Reopen the small paired fixture without capturing a closure."""
+    return iter(values)
+
+
+def test_borrowed_delivery_converts_before_acceptance_without_public_carriers(monkeypatch):
+    """Conversion rejects reentrant mutations before token-free delivery accepts."""
+    import dryml.data.traversal as traversal_module
+    from dryml.data import ArrayDataset, TraversalOwnershipError
+    from dryml.data.source import _IndexedDatasetCursor
+
+    prepared = Batch(ArrayDataset((np.arange(4), np.arange(4) + 10)), 2).prepare()
+    calls = []
+    source_yields = 0
+    position_allocations = 0
+    source_read = _IndexedDatasetCursor._read
+    position_init = traversal_module.TraversalPosition.__init__
+
+    def counted_read(self):
+        nonlocal source_yields
+        value = source_read(self)
+        source_yields += 1
+        return value
+
+    def counted_position(self, *args, **kwargs):
+        nonlocal position_allocations
+        position_allocations += 1
+        position_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(_IndexedDatasetCursor, "_read", counted_read)
+
+    class Handoff:
+        def prepare(self, x, y):
+            position = owner.position
+            assert (position.start, position.sequence) == (len(calls), len(calls))
+            calls.append((position.start, position.sequence))
+            yielded = source_yields
+            assert yielded == 2 * len(calls)
+            assert owner.replay_recovery_policy == "disabled"
+            for operation in (
+                lambda: next(view),
+                owner.close,
+                owner.capture_state,
+                owner.enable_replay_recovery,
+            ):
+                with pytest.raises(TraversalOwnershipError):
+                    operation()
+                assert owner.position == position
+                assert source_yields == yielded
+                assert owner.replay_recovery_policy == "disabled"
+            return x + 1, y + 1
+
+    with prepared.open() as owner:
+        view = owner.next_epoch()
+        with view.training_batches(Handoff()) as cursor:
+            def forbidden(*args, **kwargs):
+                pytest.fail("default native delivery allocated a public reservation")
+
+            monkeypatch.setattr(traversal_module.PendingElement, "__init__", forbidden)
+            monkeypatch.setattr(traversal_module.TraversalPosition, "__init__", counted_position)
+            batches = list(cursor)
+            assert cursor.observed_eof
+            # Only the five explicit position-property reads per callback allocate.
+            assert position_allocations == 2 * 5
+            assert source_yields == 4
+        assert [x.tolist() for x, _ in batches] == [[1, 2], [3, 4]]
+        assert [y.tolist() for _, y in batches] == [[11, 12], [13, 14]]
+        assert calls == [(0, 0), (1, 1)]
+        assert owner.position.epoch == 1 and owner.position.sequence == 2
 
 
 def test_prepared_dataset_plans_once_reopens_independent_closeable_cursors():
@@ -118,29 +200,39 @@ def test_mapped_supervised_native_inputs_use_captured_outputs_before_source_acqu
 
 
 @pytest.mark.parametrize("fallback", (False, True))
-def test_native_inputs_reject_unresolved_maps_with_known_output_declarations(fallback):
+def test_native_inputs_reject_unresolved_maps_with_known_output_declarations(fallback, monkeypatch):
     """Known native outputs cannot conceal first-cursor input-backend discovery."""
+    import builtins
+
+    original_import = builtins.__import__
+
+    def without_optional_frameworks(name, *args, **kwargs):
+        if name.split(".")[0] in {"torch", "tensorflow", "jax"}:
+            raise ModuleNotFoundError(f"No module named '{name}'", name=name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_optional_frameworks)
     from dryml.data import Map, Pipe, Project, Select
     from dryml.methods import Method, traits
     from dryml.models.torch import Training
     from dryml.models.utils import TrainingPreparation
 
     class DeclaredNative(Method):
-        @traits(backend="torch")
-        def torch(self, value):
+        @traits(backend="numpy")
+        def numpy(self, value):
             return value
 
         def infer_output_spec(self, spec):
-            return TensorSpec(spec.dtype, shape=spec.shape, batch=spec.batch, backend="torch")
+            return TensorSpec(spec.dtype, shape=spec.shape, batch=spec.batch, backend="numpy")
 
     source, _ = _batches()
     source._spec = tuple(TensorSpec("float32", shape=(1,), backend=None) for _ in range(2))
     mapped = Map(source, Project(Pipe(Select(0), DeclaredNative()), Pipe(Select(1), DeclaredNative())))
     dataset = Batch(mapped, 1)
     if fallback:
-        dataset = Skip(dataset, 0)
+        dataset = LegacySkip(dataset)
     prepared = dataset.prepare()
-    assert all(spec.backend.value == "torch" for spec in prepared.spec)
+    assert all(spec.backend.value == "numpy" for spec in prepared.spec)
     preparation = TrainingPreparation.from_specs(Training(verbose=0), *prepared.spec, "torch")
     with pytest.raises(TypeError, match="declared"):
         prepared.training_batches(preparation)
@@ -209,7 +301,7 @@ def test_prepared_dataset_retains_eager_fallback_for_unqualified_operator():
     from dryml.data.native import PreparedDataset
 
     source, dataset = _batches()
-    prepared = PreparedDataset(Skip(dataset, 1))
+    prepared = PreparedDataset(LegacySkip(dataset))
 
     assert prepared.execution_level == "eager"
     cursor = prepared.iterator()
@@ -235,6 +327,169 @@ def test_native_training_cursor_closes_on_preparation_failure_without_progress_s
 
     assert source.closes == [0]
     assert cursor.observed_eof is False
+
+
+@pytest.mark.parametrize("backend", ("torch", "tf", "jax"))
+def test_dataset_continuation_native_borrowed_tokens_and_epoch_control(backend):
+    """Converted/raw candidates alias authority and exhausted views retain execution."""
+    import importlib
+    from dryml.data import ArrayDataset, Epoch, TraversalOwnershipError
+    adapter = importlib.import_module(f"dryml.{backend}.training_data")
+    values = np.arange(4, dtype=np.float32).reshape(-1, 1)
+    prepared = Epoch(Batch(ArrayDataset((values, values)), 1), len=2).prepare()
+    class Preparation:
+        def prepare(self, x, y):
+            return x + 10, y
+    with prepared.open(acceptance="explicit") as owner:
+        view = owner.next_epoch()
+        for epoch in (1, -1, False, True):
+            with pytest.raises(ValueError, match="epoch"):
+                adapter.iter_training_batches(view, Preparation(), epoch=epoch)
+        with adapter.iter_training_batches(view, Preparation()) as cursor:
+            candidate = cursor.reserve()
+            assert candidate.value[0].item() == 10
+            raw = owner._pending[0]
+            assert raw.value[0].item() == 0
+            assert candidate._token is raw._token
+            owner.accept(candidate)
+            with pytest.raises(TraversalOwnershipError):
+                owner.accept(raw)
+            owner.accept(cursor.reserve())
+            with pytest.raises(StopIteration):
+                cursor.reserve()
+        with adapter.iter_training_batches(owner.next_epoch(), Preparation()) as cursor:
+            assert cursor.reserve().value[0].item() == 12
+
+
+def test_dataset_continuation_capability_admission_is_inert(tmp_path, monkeypatch):
+    """Data's narrow declaration seam excludes unsupported native/custom sources."""
+    from dryml.data import ArrayDataset, NpyFileDataset
+    from dryml.data import UnsupportedContinuationError
+    array = ArrayDataset(np.arange(3))
+    prepared = array.prepare()
+    monkeypatch.setattr(np, "copy", lambda *a, **k: pytest.fail("admission copied array"))
+    prepared._require_continuation_capability()
+    source, _ = _batches()
+    for data in (source, NpyFileDataset(str(tmp_path), spec=TensorSpec("float32", shape=()))):
+        with pytest.raises(UnsupportedContinuationError):
+            data.prepare()._require_continuation_capability()
+    assert source.opens == 0
+
+
+def test_dataset_continuation_borrowed_delivery_conversion_failure_is_unaccepted():
+    """Even delivery-mode native conversion must succeed before accepting a raw value."""
+    source, dataset = _batches()
+    class Preparation:
+        def prepare(self, x, y):
+            raise ValueError("borrowed conversion")
+    with pytest.raises(ValueError, match="borrowed conversion"):
+        with dataset.open() as owner:
+            cursor = owner.next_epoch().training_batches(Preparation())
+            next(cursor)
+    assert owner.position.sequence == owner.position.start == 0
+    assert cursor._yielded == 0
+    assert source.closes == [0]
+
+
+@pytest.mark.parametrize("acceptance", ("delivery", "explicit"))
+def test_borrowed_native_finite_resumed_suffix_counts_successful_conversions(acceptance):
+    """A resumed exact suffix validates its own count, not the full source total."""
+    class Preparation:
+        def prepare(self, x, y):
+            return x, y
+
+    pairs = _batches()[0]
+    dataset = GeneratorDataset(_paired_values, pairs.values, cardinality=3, spec=pairs.spec)
+    with dataset.open(start=1, acceptance=acceptance) as owner:
+        cursor = owner.next_epoch().training_batches(Preparation())
+        assert cursor._expected == 2
+        for index in (1, 2):
+            if acceptance == "explicit":
+                candidate = cursor.reserve()
+                assert candidate.value[0].item() == index
+                owner.accept(candidate)
+            else:
+                assert next(cursor)[0].item() == index
+        assert cursor._yielded == 2
+        assert (owner.position.epoch, owner.position.start) == (1, 0)
+        with pytest.raises(StopIteration):
+            cursor.reserve() if acceptance == "explicit" else next(cursor)
+        assert cursor.observed_eof
+
+
+@pytest.mark.parametrize("acceptance", ("delivery", "explicit"))
+@pytest.mark.parametrize("start", (0, 1))
+def test_borrowed_native_shortfall_counts_only_converted_opening_suffix(acceptance, start):
+    """A finite borrowed suffix cannot certify EOF after too few conversions."""
+    from dryml.data import DatasetExhaustedError
+
+    class DeclaredPairs(TrackingDataset):
+        def __len__(self):
+            return Cardinality.finite(3)
+
+        def iterator(self):
+            from dryml.data import DatasetCursor
+            source = self
+            class Resource:
+                def __init__(self):
+                    self.values = iter(source.values)
+                def __next__(self):
+                    return next(self.values)
+                def close(self):
+                    source.closes.append(0)
+                    raise RuntimeError("borrowed cleanup failed")
+            return DatasetCursor(Resource())
+
+    class Preparation:
+        def prepare(self, x, y):
+            return x + 10, y
+
+    source = DeclaredPairs(_batches()[0].values[:2])
+    owner = source.open(start=start, acceptance=acceptance)
+    cursor = owner.next_epoch().training_batches(Preparation())
+    try:
+        for index in range(start, 2):
+            if acceptance == "explicit":
+                candidate = cursor.reserve()
+                assert candidate.value[0].item() == index + 10
+                owner.accept(candidate)
+            else:
+                assert next(cursor)[0].item() == index + 10
+        with pytest.raises(DatasetExhaustedError) as caught:
+            cursor.reserve() if acceptance == "explicit" else next(cursor)
+        assert (caught.value.requested, caught.value.yielded) == (3 - start, 2 - start)
+        assert any("borrowed cleanup failed" in note for note in caught.value.__notes__)
+        assert cursor._yielded == 2 - start
+        assert not cursor.observed_eof
+        assert source.closes == [0]
+    finally:
+        owner.close()
+
+
+@pytest.mark.parametrize("acceptance", ("delivery", "explicit"))
+@pytest.mark.parametrize("sectioned", (False, True))
+def test_borrowed_native_unknown_and_upper_bound_are_not_strict(acceptance, sectioned):
+    """UNKNOWN membership may end below its independent max_elements bound."""
+    from dryml.data import Epoch
+
+    class Preparation:
+        def prepare(self, x, y):
+            return x, y
+
+    values = _batches()[0].values[:2]
+    source = GeneratorDataset(_paired_values, values, spec=_batches()[0].spec)
+    dataset = Epoch(source, len=3) if sectioned else source
+    with dataset.open(acceptance=acceptance) as owner:
+        view = owner.next_epoch()
+        assert view.cardinality.is_unknown
+        assert view.max_elements == (3 if sectioned else None)
+        cursor = view.training_batches(Preparation())
+        for _ in range(2):
+            owner.accept(cursor.reserve()) if acceptance == "explicit" else next(cursor)
+        with pytest.raises(StopIteration):
+            cursor.reserve() if acceptance == "explicit" else next(cursor)
+        assert cursor._yielded == 2
+        assert cursor.observed_eof
 
 
 @pytest.mark.parametrize("expected", (0, 1))

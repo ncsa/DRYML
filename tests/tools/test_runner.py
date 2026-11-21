@@ -541,8 +541,125 @@ def test_real_profile_is_stable_and_filters_cannot_resample_matrix(tmp_path):
     assert filtered.returncode == pytest.ExitCode.NO_TESTS_COLLECTED
 
 
+def test_good_enough_collects_prepared_numpy_validation_regressions(tmp_path):
+    """Real routine collection retains old representatives and bounded validation proofs."""
+    owner = "tests/methods/test_preparation.py"
+    selected_files = test_buckets.select_profile_files(
+        test_buckets.load_baseline(test_buckets.DEFAULT_BASELINE),
+        {"smoke", "medium"},
+        test_buckets.load_baseline(test_buckets.DEFAULT_PROFILES)["profiles"]["good-enough"],
+    )
+    assert f"./{owner}" in selected_files
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("tests.sh integration requires Bash")
+    env = os.environ.copy()
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("DRYML_TEST_BOOTSTRAP_CONTEXTS", None)
+    result = subprocess.run(
+        [
+            bash, "./tests.sh", owner, "--collect-only", "-q", "--no-cov",
+            "--dryml-runner-tiers=smoke,medium", "--dryml-test-profile=good-enough",
+            "-o", f"cache_dir={tmp_path / 'cache'}",
+        ],
+        cwd=ROOT, env=env, text=True, capture_output=True, check=False, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = {
+        f"{owner}::{function}" for function in (
+            "test_known_spec_learning_selects_without_a_body_and_validates_dynamic_batches",
+            "test_failed_direct_reprepare_clears_old_plan_without_partial_publication",
+            "test_learning_conversion_failure_keeps_published_signature",
+            "test_prepared_numpy_rereads_mutated_metadata_and_keeps_no_values_or_receiver",
+            "test_compiled_numpy_preserves_activation_order_and_fallback_errors",
+            "test_prepared_map_batch_eliminates_per_row_input_reconstruction",
+        )
+    }
+    expected.update(
+        f"{owner}::test_compiled_numpy_validation_matches_generic_oracle[{group}]"
+        for group in ("dtypes", "shapes", "layouts", "fallbacks", "structures")
+    )
+    expected.update(
+        f"{owner}::test_prepared_numpy_validation_work_counts_and_failure_boundaries[{case}]"
+        for case in ("valid", "shape", "dtype", "empty", "batch", "nested", "subclass", "metadata", "raw")
+    )
+    selected = {line for line in result.stdout.splitlines() if line.startswith(f"{owner}::")}
+    assert selected == expected, result.stdout
+
+
+def test_framework_manifest_collects_tf_retained_selection_without_eager_imports(tmp_path):
+    """Focused @manifest collection selects retained TF cases and scalar proof lazily."""
+    owner = "tests/models/test_dataset_training_integration.py"
+    function = "test_tf_training_retains_raw_selection_signature_and_native_sgd"
+    selection = f"{owner}::{function}"
+    scalar_function = "test_tf_dataset_continuation_scalar_loss_values_gradients_and_fallback"
+    scalar_selection = f"{owner}::{scalar_function}"
+    control = f"{owner}::test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache"
+    manifest = tmp_path / "framework-subset.txt"
+    manifest.write_text("\n".join(
+        line for line in (ROOT / "tests/framework_tests.txt").read_text().splitlines()
+        if line.split("[", 1)[0] in {selection, scalar_selection, control}
+    ) + "\n")
+    report_path = tmp_path / "framework-collection.json"
+    (tmp_path / "framework_manifest_guard.py").write_text(r'''
+import importlib.abc
+import json
+import os
+from pathlib import Path
+import sys
+
+frameworks = {
+    "tensorflow", "tensorflow_datasets", "keras", "torch", "jax", "jaxlib",
+    "flax", "optax", "ray",
+}
+attempts = []
+
+class RejectFrameworkImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] in frameworks:
+            attempts.append(fullname)
+            raise AssertionError("eager framework collection import: " + fullname)
+
+sys.meta_path.insert(0, RejectFrameworkImports())
+
+def pytest_sessionfinish(session, exitstatus):
+    Path(os.environ["DRYML_FRAMEWORK_COLLECTION_REPORT"]).write_text(json.dumps({
+        "nodeids": [item.nodeid for item in session.items],
+        "framework_import_attempts": attempts,
+        "framework_modules": sorted(
+            name for name in sys.modules if name.split(".", 1)[0] in frameworks
+        ),
+    }))
+''')
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("tests.sh integration requires Bash")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(ROOT), env.get("PYTHONPATH", "")))
+    env["DRYML_FRAMEWORK_COLLECTION_REPORT"] = str(report_path)
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("DRYML_TEST_BOOTSTRAP_CONTEXTS", None)
+    result = subprocess.run(
+        [
+            bash, "./tests.sh", f"@{manifest}", "--collect-only", "-q", "--no-cov",
+            "-k", f"{function} or {scalar_function}", "-p", "framework_manifest_guard",
+            "-o", f"cache_dir={tmp_path / 'cache'}",
+        ],
+        cwd=ROOT, env=env, text=True, capture_output=True, check=False, timeout=120,
+    )
+    assert report_path.exists(), result.stdout + result.stderr
+    report = json.loads(report_path.read_text())
+    assert report["nodeids"] == [
+        *(f"{selection}[{kind}]" for kind in ("model", "sequential")),
+        scalar_selection,
+    ], result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert report["framework_import_attempts"] == []
+    assert report["framework_modules"] == []
+
+
 def test_good_enough_collects_native_regressions_without_eager_framework_imports(tmp_path):
-    """Fresh routine collection retains exact native cases without backend activation."""
+    """Routine collection retains native and transaction cases without backend activation."""
     report_path = tmp_path / "native-collection.json"
     script = r'''
 import importlib.abc
@@ -570,6 +687,9 @@ owners = {
     "./tests/models/test_dataset_training_integration.py",
     "./tests/models/test_tf_training.py",
     "./tests/models/test_torch_training.py",
+    "./tests/models/test_training_transaction.py",
+    "./tests/models/test_jax_candidate_work.py",
+    "./tests/models/test_jax_training.py",
 }
 selected_files = [
     path for path in test_buckets.select_profile_files(
@@ -613,21 +733,67 @@ sys.exit(pytest.main([
     assert result.returncode == 0, result.stdout + result.stderr
     report = json.loads(report_path.read_text())
     assert report["exitstatus"] == 0
-    assert report["selected_files"] == ["./tests/models/test_dataset_training_integration.py"]
+    assert report["selected_files"] == [
+        "./tests/models/test_dataset_training_integration.py",
+        "./tests/models/test_jax_candidate_work.py",
+        "./tests/models/test_jax_training.py",
+        "./tests/models/test_training_transaction.py",
+    ]
     owner = "tests/models/test_dataset_training_integration.py"
     expected = {
         f"{owner}::{function}" for function in (
             "test_native_trainers_consume_authored_dataset_batches[torch]",
             "test_native_trainers_consume_authored_dataset_batches[tf]",
+            "test_dataset_continuation_native_sections_share_one_source[torch]",
+            "test_dataset_continuation_native_sections_share_one_source[tf]",
+            "test_dataset_continuation_native_sections_share_one_source[jax]",
+            "test_dataset_continuation_native_sections_share_one_source[keras]",
+            "test_dataset_continuation_native_direct_hooks_only_at_final_capture[torch]",
+            "test_dataset_continuation_native_direct_hooks_only_at_final_capture[tf]",
             "test_jax_trainer_consumes_authored_dataset_batches",
             "test_jax_qualification_model_runs_on_authored_dataset_batches[W1]",
             "test_jax_qualification_model_runs_on_authored_dataset_batches[W3]",
             "test_jax_managed_local_publishes_exact_history_and_independent_owner_state",
             "test_torch_update_failure_survives_source_cleanup_with_accepted_prefix",
+            "test_tf_training_retains_raw_selection_signature_and_native_sgd[model]",
+            "test_tf_training_retains_raw_selection_signature_and_native_sgd[sequential]",
+            "test_tf_dataset_continuation_scalar_loss_values_gradients_and_fallback",
             "test_tf_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
             "test_torch_selected_element_and_batched_calls_preserve_batch_boundaries_and_cache",
         )
     }
+    owner = "tests/models/test_training_transaction.py"
+    expected.update(
+        f"{owner}::{function}" for function in (
+            "test_positive_completion_captures_once_without_per_update_capture",
+            "test_fresh_zero_work_is_source_inert_and_value_encoding_is_v3",
+            "test_exception_without_current_capture_rejects_retry_before_prepare",
+            "test_provider_retirement_survives_replaced_train_state_binding",
+            "test_positional_lane_keeps_weaker_retry_and_has_no_record",
+            "test_update_validates_retained_plan_only_before_native_and_at_acceptance[False]",
+            "test_update_validates_retained_plan_only_before_native_and_at_acceptance[True]",
+            "test_acceptance_rechecks_owner_binding_after_native_work",
+            "test_boundary_hook_requires_fresh_validation_before_reservation",
+        )
+    )
+    owner = "tests/models/test_jax_candidate_work.py"
+    expected.update(
+        f"{owner}::{function}" for function in (
+            "test_native_placement_is_local_preserves_aliases_and_skips_committed_arrays",
+            "test_native_placement_failure_precedes_pure_computation",
+            "test_native_placement_requires_committed_anchor[uncommitted]",
+            "test_native_placement_requires_committed_anchor[no_sharding]",
+            "test_native_placement_keeps_mixed_and_multidevice_inference[devices0]",
+            "test_native_placement_keeps_mixed_and_multidevice_inference[devices1]",
+        )
+    )
+    owner = "tests/models/test_jax_training.py"
+    expected.update(
+        f"{owner}::{function}" for function in (
+            "test_jax_training_updates_first_class_flax_nnx_model",
+            "test_jax_native_transition_reuses_equal_batch_signature",
+        )
+    )
     assert len(report["nodeids"]) == len(expected)
     assert set(report["nodeids"]) == expected
     assert report["tiers"] == {nodeid: ["medium"] for nodeid in expected}

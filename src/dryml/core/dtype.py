@@ -1,3 +1,5 @@
+"""Canonical numerical, string and object dtype names with backend conversions."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -55,6 +57,7 @@ class DType:
         Returns:
             The NumPy scalar type, including :class:`numpy.str_` for the
             canonical semantic ``"string"`` dtype.
+            The canonical ``"object"`` dtype maps to :class:`numpy.object_`.
 
         Raises:
             TypeError: If NumPy has no equivalent for this dtype.
@@ -78,6 +81,7 @@ class DType:
             "complex64": np.complex64,
             "complex128": np.complex128,
             "string": np.str_,
+            "object": np.object_,
         }
 
         if self.name == "bfloat16":

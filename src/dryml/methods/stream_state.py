@@ -1,0 +1,173 @@
+"""Dependency-light execution and explicit state-transfer contracts.
+
+These structural protocols describe local kernel capabilities, not Dataset
+policy, a persistence format, or a serialization API. Native executors may
+report one signal for an entire native batch. Ordinary iterator pulls need not
+construct signals, event wrappers, or exported state at internal edges.
+"""
+
+from enum import IntEnum
+from collections.abc import Iterator
+from typing import Any, Protocol
+
+
+def _retain_numpy_buffer(value):
+    """Retain an ndarray only when its backing chain establishes stable storage.
+
+    Readonly NumPy-owned storage and immutable bytes may be shared, including
+    through readonly ndarray/memoryview chains. Callers must not re-enable writes
+    to those NumPy owners. Writable or unknown foreign owners require a copy;
+    a readonly memoryview only constrains that view, not its underlying owner.
+    Allocation failures propagate. No source-wide snapshot or device work occurs.
+    """
+    import numpy as np
+
+    owner = value
+    while True:
+        if type(owner) is np.ndarray:
+            if owner.flags.writeable:
+                break
+            if owner.base is None:
+                if owner.flags.owndata:
+                    return value
+                break
+            owner = owner.base
+        elif type(owner) is memoryview:
+            if not owner.readonly:
+                break
+            owner = owner.obj
+        elif type(owner) is bytes:
+            return value
+        else:
+            break
+    return value.copy()
+
+
+def _retain_buffer(value):
+    """Own mutable host leaves kept across producer or consumer mutation.
+
+    This is operator buffering ownership, independent of recovery. Immutable/native
+    functional leaves are retained without conversion or device synchronization.
+    """
+    import numpy as np
+    if type(value) is np.ndarray:
+        return _retain_numpy_buffer(value)
+    if type(value).__module__.split(".")[0] == "torch" and callable(getattr(value, "clone", None)):
+        return value.clone()
+    if type(value) is dict:
+        return {key: _retain_buffer(v) for key, v in value.items()}
+    if type(value) is tuple:
+        retained = tuple(_retain_buffer(v) for v in value)
+        return value if all(a is b for a, b in zip(value, retained)) else retained
+    if type(value) is list:
+        return [_retain_buffer(v) for v in value]
+    return value
+
+
+class PullKind(IntEnum):
+    """Distinguish delivery, a pending section handoff, and root completion.
+
+    DELIVERY exposes one authored output (possibly a native batch); SECTION_END
+    leaves execution alive until an explicit handoff; ROOT_END is terminal.
+    Values are process-local execution facts, not versioned wire-format tags.
+    """
+
+    DELIVERY = 0
+    SECTION_END = 1
+    ROOT_END = 2
+
+
+class SourceBinding(Protocol):
+    """Inert, domain-supplied acquisition over frozen source configuration.
+
+    Domain adapters define binding ownership and availability checks. Retaining a
+    binding does not acquire a producer, snapshot payload bytes, or imply recovery.
+    """
+
+    def open(self, epoch: int) -> Iterator[Any]:
+        """Create an independent owned iterator for a nonnegative logical epoch.
+
+        Acquisition may remain lazy until its first read. Source access errors
+        propagate to the owning execution's lifecycle boundary.
+        """
+        ...
+
+
+class StreamExecution(Protocol):
+    """Structural, out-of-band pull interface for an owned local execution.
+
+    Implementations own their lifecycle and report errors rather than successful
+    completion on failure. This protocol does not require state export support.
+    """
+
+    @property
+    def value(self) -> Any:
+        """Return the last delivered value, valid only after DELIVERY.
+
+        The value is borrowed from this execution; ownership and native placement
+        are unchanged. Reading before delivery may raise RuntimeError.
+        """
+        ...
+
+    def pull(self) -> PullKind:
+        """Advance once and return a delivery/boundary/root fact without encoding.
+
+        SECTION_END must remain pending until handoff. Acquisition, execution,
+        and cleanup failures propagate; they must not become ROOT_END.
+        """
+        ...
+
+    def close(self) -> None:
+        """Release owned resources once; explicit close does not prove root EOF.
+
+        Cleanup failures propagate subject to the executor's primary-error policy.
+        """
+        ...
+
+
+class BoundaryHandoff(Protocol):
+    """Optional section-transition capability, separate from physical EOF."""
+
+    def handoff(self) -> None:
+        """Accept a pending section boundary and permit subsequent execution.
+
+        Raises RuntimeError without a pending boundary or after closure. Policy
+        owners decide when to call this operation; it may acquire the next pass
+        only after the preceding section's postlude has had its opportunity.
+        """
+        ...
+
+
+class StateExport(Protocol):
+    """Optional capture-on-request capability; ordinary pulls never require it."""
+
+    def capture_state(self) -> object:
+        """Return detached execution state at a caller-established coherent cut.
+
+        Implementations freeze required mutable buffers only on this request and
+        propagate unsupported-state or extraction errors. The domain owner defines
+        validation, versioning, and persistence; this operation performs no IO.
+        """
+        ...
+
+
+class StateRestore(Protocol):
+    """Optional explicit restoration capability for validated local state."""
+
+    def restore_state(self, state: object) -> None:
+        """Install domain-validated state before advancing execution.
+
+        Args:
+            state: Detached state in this executor's supported domain schema.
+
+        Raises:
+            TypeError, ValueError: For unsupported or incompatible state.
+            RuntimeError: If the executor cannot restore at its current lifecycle.
+
+        No producer acquisition is implied; domain adapters specify any lazy
+        source restoration and must propagate restoration failure explicitly.
+        """
+        ...
+
+
+__all__ = ["BoundaryHandoff", "PullKind", "SourceBinding", "StateExport", "StateRestore", "StreamExecution"]

@@ -9,11 +9,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dryml.context import check_context, NoContextError, \
     WrongContextError, ContextIncompatibilityError
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from dryml.core.tensor_spec import iter_specs
 from dryml.core.utils.recurse import iter_leaves
 from dryml.models.train_spec import TrainState
+
+if TYPE_CHECKING:
+    from dryml.data import PendingElement
 
 expected_context_errors = (NoContextError, WrongContextError, ContextIncompatibilityError)
 
@@ -393,6 +396,7 @@ def record_train_update(
     examples: int | None = None,
     complete_epoch: bool = False,
     epoch_metrics: dict[str, float] | None = None,
+    input_candidate: PendingElement[Any] | None = None,
 ) -> None:
     """Retain one successful update before invoking process-local safe points.
 
@@ -408,6 +412,10 @@ def record_train_update(
             epoch and must normalize state before safe-point callbacks.
         epoch_metrics: Finite completed-epoch metrics to retain before callbacks
             when ``complete_epoch`` is true.
+        input_candidate: Optional outstanding PendingElement from the invocation
+            input session. Requires its native update guard; accepts accounting
+            and input before callbacks without capturing a continuation. Omission
+            retains accounting-only positional compatibility.
 
     Raises:
         TypeError: If callbacks are not callable.
@@ -427,11 +435,21 @@ def record_train_update(
             examples = len(first)
         except (StopIteration, TypeError):
             raise ValueError("A batched training update must expose a leading example dimension.") from None
-    exp.state.record_update(examples=examples, loss=float(loss))
-    if complete_epoch:
-        exp.state.finish_epoch(postlude_pending=True, metrics=epoch_metrics)
-    elif epoch_metrics is not None:
-        raise ValueError("epoch_metrics require a completed epoch update.")
+    callbacks = validate_training_callbacks(callbacks)
+    if input_candidate is not None:
+        provider = exp.state._input_provider
+        if provider is None:
+            raise ValueError("Input candidate requires an active training input session.")
+        provider._accept_update(input_candidate, examples=examples, loss=float(loss),
+                                complete_epoch=complete_epoch, epoch_metrics=epoch_metrics)
+    else:
+        if exp.state.input_started and exp.state.input_recovery == "exact":
+            raise ValueError("Exact training requires its input candidate.")
+        if epoch_metrics is not None and not complete_epoch:
+            raise ValueError("epoch_metrics require a completed epoch update.")
+        exp.state.record_update(examples=examples, loss=float(loss))
+        if complete_epoch:
+            exp.state.finish_epoch(postlude_pending=True, metrics=epoch_metrics)
     for callback in callbacks:
         callback()
 

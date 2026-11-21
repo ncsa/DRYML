@@ -1,4 +1,4 @@
-"""Managed area2/current3/pending2 and nested Node/history/intent admission."""
+"""Managed area2/current4/pending2 and nested Node/history/intent admission."""
 
 from dataclasses import replace
 import json
@@ -10,7 +10,7 @@ import pytest
 from dryml.core import Definition
 from dryml.core.utils.graph.path import Key, Parameter
 from dryml.core.store.retention import RetentionResource
-from dryml.managed.control import ControlHistory, ControlIntent, ControlSnapshot, StartPreparation, _PendingIntent
+from dryml.managed.control import ControlHistory, ControlIntent, ControlSnapshot, StartPreparation, _PendingIntent, _data
 from dryml.managed.errors import ManagedControlError
 from dryml.managed.results import ResultReference
 from tests.managed.test_u14_authority import Dataset, adapter, facts, receiver, running
@@ -168,7 +168,7 @@ def test_nested_unordered_wire_witness_is_lossless_and_replacement_discards_it(t
             decoded = ControlSnapshot.from_bytes(payload)
             independent.append(decoded)
             assert decoded.to_bytes() == payload
-            assert decoded.to_data() == json.loads(payload)
+            assert decoded.to_data() == _data(payload)
             assert decoded == snapshot and decoded.history == snapshot.history and decoded.intents == snapshot.intents
             detached = decoded.to_data()
             detached["generation"] = 99
@@ -178,8 +178,8 @@ def test_nested_unordered_wire_witness_is_lossless_and_replacement_discards_it(t
             assert ControlSnapshot.from_bytes(encoded_copy) == snapshot
             changed = replace(decoded, generation=2, checkpoint=None)
             assert changed._source_bytes is None
-            assert json.loads(changed.to_bytes())["generation"] == 2
-            assert json.loads(changed.to_bytes())["checkpoint"] is None
+            assert _data(changed.to_bytes())["generation"] == 2
+            assert _data(changed.to_bytes())["checkpoint"] is None
             external = decoded.receiver.parameters["dataset"]["external"]
             assert external.state.key.codec_hash == "Test-" + "b" * 64
             assert external.construction_view.state.key.codec_hash == "Test-" + "a" * 64
@@ -219,7 +219,7 @@ def test_start_preparation_preserves_nested_source_and_resets_only_own_witness(t
             assert ready._source_bytes is None
             assert ready.previous.to_bytes() == previous_bytes
             assert json.loads(ready.to_bytes())["phase"] == "ready"
-            assert ready.to_data()["previous"] == json.loads(previous_bytes)
+            assert ready.to_data()["previous"] == _data(previous_bytes)
 
 
 @pytest.mark.parametrize("difference", ["state", "identity", "alias", "quotation"])
