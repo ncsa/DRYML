@@ -200,20 +200,30 @@ def test_mapped_supervised_native_inputs_use_captured_outputs_before_source_acqu
 
 
 @pytest.mark.parametrize("fallback", (False, True))
-def test_native_inputs_reject_unresolved_maps_with_known_output_declarations(fallback):
+def test_native_inputs_reject_unresolved_maps_with_known_output_declarations(fallback, monkeypatch):
     """Known native outputs cannot conceal first-cursor input-backend discovery."""
+    import builtins
+
+    original_import = builtins.__import__
+
+    def without_optional_frameworks(name, *args, **kwargs):
+        if name.split(".")[0] in {"torch", "tensorflow", "jax"}:
+            raise ModuleNotFoundError(f"No module named '{name}'", name=name)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_optional_frameworks)
     from dryml.data import Map, Pipe, Project, Select
     from dryml.methods import Method, traits
     from dryml.models.torch import Training
     from dryml.models.utils import TrainingPreparation
 
     class DeclaredNative(Method):
-        @traits(backend="torch")
-        def torch(self, value):
+        @traits(backend="numpy")
+        def numpy(self, value):
             return value
 
         def infer_output_spec(self, spec):
-            return TensorSpec(spec.dtype, shape=spec.shape, batch=spec.batch, backend="torch")
+            return TensorSpec(spec.dtype, shape=spec.shape, batch=spec.batch, backend="numpy")
 
     source, _ = _batches()
     source._spec = tuple(TensorSpec("float32", shape=(1,), backend=None) for _ in range(2))
@@ -222,7 +232,7 @@ def test_native_inputs_reject_unresolved_maps_with_known_output_declarations(fal
     if fallback:
         dataset = LegacySkip(dataset)
     prepared = dataset.prepare()
-    assert all(spec.backend.value == "torch" for spec in prepared.spec)
+    assert all(spec.backend.value == "numpy" for spec in prepared.spec)
     preparation = TrainingPreparation.from_specs(Training(verbose=0), *prepared.spec, "torch")
     with pytest.raises(TypeError, match="declared"):
         prepared.training_batches(preparation)
