@@ -1,8 +1,8 @@
-from dryml.dry_repo import DryRepo
+from dryml.dry_repo import repo
 import matplotlib.pyplot as plt
 
 
-def box_and_whisker(repo: DryRepo, func, func_args=None, func_kwargs=None,
+def box_and_whisker(repo: repo, func, func_args=None, func_kwargs=None,
                     selector_dict={}, fig_kwargs=None, **kwargs):
     if fig_kwargs is None:
         fig_kwargs = {}
